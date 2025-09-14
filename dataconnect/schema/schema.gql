@@ -1,0 +1,62 @@
+type User @table {
+  email: String!
+  displayName: String!
+  userType: String!
+  createdAt: Timestamp!
+  phoneNumber: String
+  companyName: String
+  photoUrl: String
+}
+
+type Service @table {
+  name: String!
+  description: String!
+  createdAt: Timestamp!
+  pricingDetails: String # Assuming JSON string for pricing options
+  imageUrl: String
+}
+
+type Package @table {
+  service: Service
+  name: String!
+  price: Float!
+  description: String!
+  createdAt: Timestamp!
+  features: [String]
+  discount: Float
+}
+
+type Project @table {
+  client: User!
+  assignedTeamMember: User
+  name: String!
+  status: String!
+  startDate: Date!
+  createdAt: Timestamp!
+  description: String
+  endDate: Date
+  budget: Float
+  deliverables: [String]
+}
+
+type Asset @table {
+  project: Project!
+  uploader: User!
+  fileName: String!
+  fileUrl: String!
+  assetType: String!
+  uploadedAt: Timestamp!
+  description: String
+}
+
+type Invoice @table {
+  project: Project!
+  client: User!
+  invoiceNumber: String!
+  amountDue: Float!
+  dueDate: Date!
+  status: String!
+  createdAt: Timestamp!
+  paymentDate: Date
+  notes: String
+}

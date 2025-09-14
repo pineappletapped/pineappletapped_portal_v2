@@ -1,0 +1,56 @@
+{
+  "functions": [
+    {
+      "codebase": "default",
+      "source": "functions"
+    },
+    {
+      "source": "ptfbportal",
+      "codebase": "ptfbportal",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ]
+    }
+  ],
+  "firestore": {
+    "database": "(default)",
+    "location": "europe-west2",
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "emulators": {
+    "functions": {
+      "port": 5001
+    },
+    "firestore": {
+      "port": 8080
+    },
+    "hosting": {
+      "port": 5000
+    },
+    "ui": {
+      "enabled": true
+    },
+    "dataconnect": {
+      "dataDir": "dataconnect/.dataconnect/pgliteData"
+    }
+  },
+  "dataconnect": {
+    "source": "dataconnect"
+  },
+  "apphosting": {
+    "backendId": "ptfbportalbackend",
+    "rootDir": "/",
+    "ignore": [
+      "node_modules",
+      ".git",
+      "firebase-debug.log",
+      "firebase-debug.*.log",
+      "functions"
+    ]
+  }
+}

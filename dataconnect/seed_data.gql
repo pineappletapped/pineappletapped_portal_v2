@@ -1,0 +1,111 @@
+mutation SeedData @auth(level: USER) {
+  user_upsertMany(data: [
+    {
+      id: "550e8400-e29b-41d4-a716-446655440000",
+      displayName: "Bob User",
+      email: "bob@example.com",
+      userType: "admin",
+      createdAt: "2024-01-01T00:00:00Z"
+    },
+    {
+      id: "660e8400-e29b-41d4-a716-446655440001",
+      displayName: "Jane Client",
+      email: "jane@example.com",
+      userType: "client",
+      createdAt: "2024-01-05T00:00:00Z"
+    }
+  ])
+  service_upsertMany(data: [
+    {
+      id: "770e8400-e29b-41d4-a716-446655440002",
+      name: "Web Design",
+      description: "Professional web design services",
+      createdAt: "2024-01-10T00:00:00Z"
+    },
+    {
+      id: "880e8400-e29b-41d4-a716-446655440003",
+      name: "Mobile App Development",
+      description: "Custom mobile app development for iOS and Android",
+      createdAt: "2024-01-15T00:00:00Z"
+    }
+  ])
+  project_upsertMany(data: [
+    {
+      id: "990e8400-e29b-41d4-a716-446655440004",
+      name: "Project A",
+      clientId: "660e8400-e29b-41d4-a716-446655440001",
+      startDate: "2024-02-01",
+      status: "active",
+      createdAt: "2024-01-20T00:00:00Z"
+    },
+    {
+      id: "aa0e8400-e29b-41d4-a716-446655440005",
+      name: "Project B",
+      clientId: "660e8400-e29b-41d4-a716-446655440001",
+      startDate: "2024-02-15",
+      status: "pending",
+      createdAt: "2024-01-25T00:00:00Z"
+    }
+  ])
+  package_upsertMany(data: [
+    {
+      id: "bb0e8400-e29b-41d4-a716-446655440006",
+      name: "Basic Web Design Package",
+      serviceId: "770e8400-e29b-41d4-a716-446655440002",
+      price: 500.00,
+      description: "Basic web design package description",
+      createdAt: "2024-02-01T00:00:00Z"
+    },
+    {
+      id: "cc0e8400-e29b-41d4-a716-446655440007",
+      name: "Advanced Mobile App Development Package",
+      serviceId: "880e8400-e29b-41d4-a716-446655440003",
+      price: 2000.00,
+      description: "Advanced mobile app development package description",
+      createdAt: "2024-02-05T00:00:00Z"
+    }
+  ])
+  invoice_upsertMany(data: [
+    {
+      id: "dd0e8400-e29b-41d4-a716-446655440008",
+      clientId: "660e8400-e29b-41d4-a716-446655440001",
+      projectId: "990e8400-e29b-41d4-a716-446655440004",
+      amountDue: 500.00,
+      invoiceNumber: "INV-2024-001",
+      status: "unpaid",
+      dueDate: "2024-03-01",
+      createdAt: "2024-02-10T00:00:00Z"
+    },
+    {
+      id: "ee0e8400-e29b-41d4-a716-446655440009",
+      clientId: "660e8400-e29b-41d4-a716-446655440001",
+      projectId: "aa0e8400-e29b-41d4-a716-446655440005",
+      amountDue: 2000.00,
+      invoiceNumber: "INV-2024-002",
+      status: "pending",
+      dueDate: "2024-03-15",
+      createdAt: "2024-02-15T00:00:00Z"
+    }
+  ])
+   asset_upsertMany(data: [
+    {
+      id: "ff0e8400-e29b-41d4-a716-446655440010",
+      projectId: "990e8400-e29b-41d4-a716-446655440004",
+      uploaderId: "550e8400-e29b-41d4-a716-446655440000",
+      fileName: "design.psd",
+      fileUrl: "https://example.com/design.psd",
+      assetType: "design",
+      uploadedAt: "2024-02-20T00:00:00Z"
+    },
+    {
+      id: "gg0e8400-e29b-41d4-a716-446655440011",
+      projectId: "aa0e8400-e29b-41d4-a716-446655440005",
+      uploaderId: "550e8400-e29b-41d4-a716-446655440000",
+      fileName: "app.apk",
+      fileUrl: "https://example.com/app.apk",
+      assetType: "application",
+      description: "The is a demo version of the app apk",
+      uploadedAt: "2024-02-25T00:00:00Z"
+    }
+  ])
+}

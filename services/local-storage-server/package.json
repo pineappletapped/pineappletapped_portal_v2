@@ -1,0 +1,14 @@
+{
+  "name": "pineapple-local-storage-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "jsonwebtoken": "^9.0.2",
+    "cors": "^2.8.5"
+  }
+}

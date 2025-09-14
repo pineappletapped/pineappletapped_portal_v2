@@ -1,0 +1,35 @@
+mutation CreateProject @auth(level: USER) {
+  project_insert(data: {
+    name: "New Project",
+    description: "A brand new project",
+    clientId_expr: "auth.uid",
+    startDate: "2024-01-01",
+    status: "Planning"
+  })
+}
+
+query GetMyProjects @auth(level: USER) {
+  projects(where: {clientId: {eq_expr: "auth.uid"}}) {
+    id
+    name
+    description
+    startDate
+    status
+  }
+}
+
+mutation UpdateProject($id: UUID!, $status: String) @auth(level: USER) {
+  project_update(key: {id: $id}, data: {
+    status: $status
+  })
+}
+
+query ListAllServices @auth(level: PUBLIC) {
+  services {
+    id
+    name
+    description
+    pricingDetails
+    imageUrl
+  }
+}
