@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 80" role="img" aria-label="Pineapple Tapped logo">
+  <title>Pineapple Tapped</title>
+  <style>
+    .orange { fill: #E8793B; }
+    .blue { fill: #215696; }
+    .grid { stroke: #215696; stroke-width:2; fill:none; }
+    text { font-family: 'Poppins', sans-serif; font-weight:600; font-size:32px; }
+  </style>
+  <!-- Pineapple icon -->
+  <g transform="translate(0,0)">
+    <!-- leaves -->
+    <path class="blue" d="M40 0l-8 16 8-8 8 8zM24 8l8 8H20zM56 8l-8 8h12z"/>
+    <!-- body -->
+    <ellipse class="orange" cx="40" cy="44" rx="22" ry="28"/>
+    <!-- crosshatch -->
+    <path class="grid" d="M25 27l30 34M25 39l30 34M25 51l30 34M55 27l-30 34M55 39l-30 34M55 51l-30 34"/>
+    <!-- play button -->
+    <polygon class="blue" points="36,35 36,53 52,44"/>
+  </g>
+  <!-- Text -->
+  <text x="80" y="55" class="orange">Pineapple</text>
+  <text x="200" y="55" class="blue">Tapped</text>
+</svg>

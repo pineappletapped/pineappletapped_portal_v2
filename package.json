@@ -1,0 +1,16 @@
+{
+  "name": "pineapple-portal-root",
+  "private": true,
+  "scripts": {
+    "build": "cd apps/web && npm install && npm run build",
+    "start": "cd apps/web && npm run start -- -p $PORT",
+    "test": "npm --prefix apps/web run lint",
+    "deploy": "npm --prefix functions run build && firebase deploy --only firestore:rules,functions"
+  },
+  "engines": {
+    "node": "^18"
+  },
+  "dependencies": {
+    "@dataconnect/generated": "file:apps/web/src/dataconnect-generated"
+  }
+}

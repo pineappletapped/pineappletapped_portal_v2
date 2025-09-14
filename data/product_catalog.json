@@ -1,0 +1,65 @@
+[
+  {
+    "id": "TLQUINBJIT2RC56SP6CEEPFG",
+    "handle": "#bid-video-packages-starter-1-shoot-day-4-videos-",
+    "name": "BID Video Packages",
+    "variation": "Starter (1 shoot day | 4 videos)",
+    "price": 850.0,
+    "description": "Help your town shine with high-impact, ready-to-share video content. Our BID Video Packages are designed to support local businesses and celebrate your community — ideal for summer campaigns, Christmas promotions, and year-round initiatives like \"Meet Your High Street.\"Each shoot day includes:3x Local Business Videos1x Community Spotlight\xa0(charity, café, park, or cultural landmark)Fully filmed, edited & branded for\xa0social media\xa0(Reels, TikTok, YouTube Shorts)Popular Uses☀️\xa0Summer in [Your Town]🎄\xa0Support Local at Christmas🛍️\xa0Meet Your High Street\xa0(evergreen content for any time of year)\ufeff",
+    "categories": [
+      "Industry Focused Packages"
+    ],
+    "modifiers": [
+      "Add on a BTS (Behind the Scenes) Video",
+      "Filming Location / Address",
+      "Preferred Video Format",
+      "Production Date (Ideal)"
+    ],
+    "image": "/assets/images/bid-video-packages-starter-1-shoot-day-4-videos-.jpg"
+  },
+  {
+    "id": "VMMX4UV6OFRR66JCVVHM6GNX",
+    "handle": "#bid-video-packages-momentum-2-shoot-days-8-videos-",
+    "name": "BID Video Packages",
+    "variation": "Momentum (2 shoot days | 8 videos)",
+    "price": 1650.0,
+    "description": "Help your town shine with high-impact, ready-to-share video content. Our BID Video Packages are designed to support local businesses and celebrate your community — ideal for summer campaigns, Christmas promotions, and year-round initiatives like \"Meet Your High Street.\"Each shoot day includes:3x Local Business Videos1x Community Spotlight\xa0(charity, café, park, or cultural landmark)Fully filmed, edited & branded for\xa0social media\xa0(Reels, TikTok, YouTube Shorts)Popular Uses☀️\xa0Summer in [Your Town]🎄\xa0Support Local at Christmas🛍️\xa0Meet Your High Street\xa0(evergreen content for any time of year)\ufeff",
+    "categories": [
+      "Industry Focused Packages"
+    ],
+    "modifiers": [
+      "Add on a BTS (Behind the Scenes) Video",
+      "Filming Location / Address",
+      "Preferred Video Format",
+      "Production Date (Ideal)"
+    ],
+    "image": "/assets/images/bid-video-packages-momentum-2-shoot-days-8-videos-.jpg"
+  },
+  {
+    "id": "I3AELJEKOI6TJJBIZYIEJI26",
+    "handle": "#bid-video-packages-impact-4-shoot-days-16-videos-",
+    "name": "BID Video Packages",
+    "variation": "Impact (4 shoot days | 16 videos)",
+    "price": 2650.0,
+    "description": "Help your town shine with high-impact, ready-to-share video content. Our BID Video Packages are designed to support local businesses and celebrate your community — ideal for summer campaigns, Christmas promotions, and year-round initiatives like \"Meet Your High Street.\"Each shoot day includes:3x Local Business Videos1x Community Spotlight\xa0(charity, café, park, or cultural landmark)Fully filmed, edited & branded for\xa0social media\xa0(Reels, TikTok, YouTube Shorts)Popular Uses☀️\xa0Summer in [Your Town]🎄\xa0Support Local at Christmas🛍️\xa0Meet Your High Street\xa0(evergreen content for any time of year)\ufeff",
+    "categories": [
+      "Industry Focused Packages"
+    ],
+    "modifiers": [
+      "Add on a BTS (Behind the Scenes) Video",
+      "Filming Location / Address",
+      "Preferred Video Format",
+      "Production Date (Ideal)"
+    ],
+    "image": "/assets/images/bid-video-packages-impact-4-shoot-days-16-videos-.jpg"
+  }
+  /*
+   * NOTE:
+   * This file contains only a small sample of the full product catalog. The complete
+   * catalog, including all products and their modifiers, was generated from the
+   * provided Excel spreadsheet and stored in the shared directory at runtime. To
+   * avoid bloating the Git repository with hundreds of lines of product data,
+   * you should replace this sample with the complete generated `product_catalog.json`
+   * when seeding your database. See the `scripts/importProducts.js` for details.
+   */
+]

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" role="img" aria-label="Pineapple icon white">
+  <title>Pineapple Tapped icon white</title>
+  <style>
+    .white { fill: #FFFFFF; }
+    .white-stroke { stroke: #FFFFFF; stroke-width:2; fill:none; }
+  </style>
+  <g transform="translate(0,0)">
+    <path class="white" d="M40 0l-8 16 8-8 8 8zM24 8l8 8H20zM56 8l-8 8h12z"/>
+    <ellipse class="white" cx="40" cy="44" rx="22" ry="28"/>
+    <path class="white-stroke" d="M25 27l30 34M25 39l30 34M25 51l30 34M55 27l-30 34M55 39l-30 34M55 51l-30 34"/>
+    <polygon class="white" points="36,35 36,53 52,44"/>
+  </g>
+</svg>

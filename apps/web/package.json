@@ -1,0 +1,35 @@
+{
+  "name": "pineapple-web",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@react-pdf/renderer": "^3.4.4",
+    "@stripe/stripe-js": "^7.9.0",
+    "clsx": "^2.1.0",
+    "firebase": "^10.12.5",
+    "next": "14.2.5",
+    "papaparse": "^5.4.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-icons": "^4.12.0",
+    "react-quill": "^2.0.0",
+    "@hello-pangea/dnd": "^18.0.1",
+    "zod": "^3.23.8",
+    "react-calendar": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/papaparse": "^5.3.7",
+    "@types/react": "18.3.24",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "14.2.5",
+    "postcss": "^8.4.41",
+    "tailwindcss": "^3.4.10",
+    "typescript": "^5.5.4"
+  }
+}

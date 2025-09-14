@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 150" role="img" aria-label="Pineapple Tapped vertical logo">
+  <title>Pineapple Tapped</title>
+  <style>
+    .orange { fill: #E8793B; }
+    .blue { fill: #215696; }
+    .grid { stroke: #215696; stroke-width:2; fill:none; }
+    text { font-family: 'Poppins', sans-serif; font-weight:600; font-size:20px; text-anchor:middle; }
+  </style>
+  <!-- Icon -->
+  <g transform="translate(20,0)">
+    <path class="blue" d="M40 0l-8 16 8-8 8 8zM24 8l8 8H20zM56 8l-8 8h12z"/>
+    <ellipse class="orange" cx="40" cy="44" rx="22" ry="28"/>
+    <path class="grid" d="M25 27l30 34M25 39l30 34M25 51l30 34M55 27l-30 34M55 39l-30 34M55 51l-30 34"/>
+    <polygon class="blue" points="36,35 36,53 52,44"/>
+  </g>
+  <text x="60" y="120" class="orange">Pineapple</text>
+  <text x="60" y="145" class="blue">Tapped</text>
+</svg>
