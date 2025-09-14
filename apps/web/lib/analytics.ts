@@ -1,6 +1,8 @@
 import { auth } from './firebase';
 
-const ANALYTICS_ENDPOINT = `https://us-central1-${process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID}.cloudfunctions.net/analytics_track`;
+const projectId =
+  process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'ptfbportalbackend';
+const ANALYTICS_ENDPOINT = `https://us-central1-${projectId}.cloudfunctions.net/analytics_track`;
 
 let visitorId: string | null = null;
 function getVisitorId() {
