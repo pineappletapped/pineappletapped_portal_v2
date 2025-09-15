@@ -59,7 +59,8 @@ async function removeBackground(buffer) {
 // Create user profile on first login
 export const onAuthUserCreate = functions.auth.user().onCreate(async (user) => {
     const isStaff = user.uid === 'WK6WCuSueLN5M3Zq6D7WBbHyGPo1' ||
-        user.email === 'ryan@pineappletapped.com';
+        user.email === 'ryan@pineappletapped.com' ||
+        user.email === 'ryanadmin@pineappletapped.com';
     // Merge with any pre-existing prospect/outreach record for this email
     let data = {
         email: user.email || null,
