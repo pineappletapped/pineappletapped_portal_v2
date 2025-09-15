@@ -19,17 +19,14 @@ function setCors(res: Response, origin?: string) {
   const allowAny = ALLOWED_ORIGINS.has("*");
   const ok = allowAny || (origin && ALLOWED_ORIGINS.has(origin));
   if (ok) {
-    res.setHeader("Access-Control-Allow-Origin", allowAny ? "*" : origin!);
-    // res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.set("Access-Control-Allow-Origin", allowAny ? "*" : origin!);
+    // res.set("Access-Control-Allow-Credentials", "true");
     // (only if using cookies)
   }
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization",
-  );
-  res.setHeader("Access-Control-Max-Age", "3600");
+  res.set("Vary", "Origin");
+  res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.set("Access-Control-Max-Age", "3600");
 }
 
 // eslint-disable-next-line camelcase
