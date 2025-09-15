@@ -2,10 +2,12 @@ import {onRequest} from "firebase-functions/v2/https";
 import * as logger from "firebase-functions/logger";
 import type {Request, Response} from "express";
 
+const isDev = process.env.NODE_ENV !== "production";
 const ALLOWED_ORIGINS = new Set<string>([
   "https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app",
   "https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app",
   "http://localhost:3000",
+  ...(isDev ? ["*"] : []),
 ]);
 
 /**
@@ -22,11 +24,12 @@ function setCors(res: Response, origin?: string) {
     // (only if using cookies)
   }
   res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization",
   );
+  res.setHeader("Access-Control-Max-Age", "3600");
 }
 
 // eslint-disable-next-line camelcase
