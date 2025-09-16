@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { auth, db, storage, functions } from "@/lib/firebase";
@@ -22,6 +22,7 @@ import type {
   ProductSEO,
   ProductVariation,
 } from "@/lib/products";
+import type { Venue } from "@/lib/venues";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -95,6 +96,7 @@ export default function EditProductPage() {
   const [cats, setCats] = useState<Category[]>([]);
   const [allModifiers, setAllModifiers] = useState<ModifierGroup[]>([]);
   const [workflows, setWorkflows] = useState<{ id: string; name: string }[]>([]);
+  const [venues, setVenues] = useState<Venue[]>([]);
 
   const [tab, setTab] = useState<
     "info" | "variations" | "deliverables" | "kit" | "tasks" | "seo" | "modifiers"
@@ -122,6 +124,7 @@ export default function EditProductPage() {
   const [category, setCategory] = useState("");
   const [workflowId, setWorkflowId] = useState("");
   const [eventDate, setEventDate] = useState("");
+  const [venueId, setVenueId] = useState("");
   const [venue, setVenue] = useState("");
   const [hidden, setHidden] = useState(false);
   const [tasks, setTasks] = useState<ProductTask[]>([]);
@@ -132,6 +135,10 @@ export default function EditProductPage() {
   const [equipmentList, setEquipmentList] = useState<{ id: string; name: string }[]>([]);
   const [labourCost, setLabourCost] = useState("0");
   const [defaultKitCost, setDefaultKitCost] = useState("0");
+  const selectedVenue = useMemo(
+    () => venues.find((v) => v.id === venueId) || null,
+    [venues, venueId]
+  );
 
   useEffect(() => {
     (async () => {
@@ -145,6 +152,8 @@ export default function EditProductPage() {
       const me = meSnap.data() as any;
       const staff = me?.isStaff === true;
       setIsStaff(staff);
+      let initialVenueId = "";
+      let initialVenueName = "";
       if (staff) {
         const prodSnap = await getDoc(doc(db, "products", id));
         if (prodSnap.exists()) {
@@ -176,17 +185,21 @@ export default function EditProductPage() {
           setSeo(p.seo || {});
           setCategory(p.category || "");
           setEventDate(p.eventDate || "");
-          setVenue(p.venue || "");
+          initialVenueId = (p as any).venueId || "";
+          initialVenueName = p.venue || "";
+          setVenueId(initialVenueId);
+          setVenue(initialVenueName);
           setHidden(p.hidden || false);
           setTasks(p.defaultTasks || []);
           setWorkflowId((p as any).workflowId || "");
           setKitGroups((p as any).requiredKit || []);
         }
-        const [catSnap, modSnap, wfSnap, eqSnap] = await Promise.all([
+        const [catSnap, modSnap, wfSnap, eqSnap, venueSnap] = await Promise.all([
           getDocs(collection(db, "categories")),
           getDocs(collection(db, "modifiers")),
           getDocs(collection(db, "workflows")),
           getDocs(collection(db, "equipment")),
+          getDocs(collection(db, "venues")),
         ]);
         setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setAllModifiers(
@@ -196,6 +209,14 @@ export default function EditProductPage() {
         setEquipmentList(
           eqSnap.docs.map((d) => ({ id: d.id, name: (d.data() as any).name || d.id }))
         );
+        const venueList = venueSnap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setVenues(venueList);
+        if (!initialVenueName && initialVenueId) {
+          const match = venueList.find((v) => v.id === initialVenueId);
+          if (match) setVenue(match.name);
+        }
       }
       setLoading(false);
     })();
@@ -249,6 +270,7 @@ export default function EditProductPage() {
         seoImageFile
       );
 
+    const venueLabel = venue || selectedVenue?.name || null;
     await updateDoc(doc(db, "products", id), {
       name,
       description,
@@ -268,7 +290,8 @@ export default function EditProductPage() {
       })),
       category: category || null,
       eventDate: eventDate || null,
-      venue: venue || null,
+      venue: venueLabel,
+      venueId: venueId || null,
       hidden,
       requiredKit: kitGroups,
       defaultTasks: tasks,
@@ -514,12 +537,67 @@ export default function EditProductPage() {
                 value={eventDate}
                 onChange={(e) => setEventDate(e.target.value)}
               />
-              <label className="text-sm font-medium">Venue</label>
+              <label className="text-sm font-medium">Linked Venue</label>
+              <select
+                className="input"
+                value={venueId}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setVenueId(value);
+                  if (value) {
+                    const match = venues.find((v) => v.id === value);
+                    setVenue(match?.name || "");
+                  }
+                }}
+              >
+                <option value="">Custom / not listed</option>
+                {venues.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+              {selectedVenue && (
+                <div className="rounded bg-slate-100 p-2 text-xs text-gray-600 grid gap-1">
+                  {selectedVenue.mileageFromWellingborough !== null &&
+                    selectedVenue.mileageFromWellingborough !== undefined && (
+                      <div>
+                        Mileage: {selectedVenue.mileageFromWellingborough} miles
+                      </div>
+                    )}
+                  {selectedVenue.parkingRate !== null &&
+                    selectedVenue.parkingRate !== undefined && (
+                      <div>
+                        Parking Rate: £{Number(selectedVenue.parkingRate).toFixed(2)}
+                      </div>
+                    )}
+                  {selectedVenue.parkingTips && (
+                    <div className="truncate">
+                      <span className="font-medium">Parking:</span> {selectedVenue.parkingTips}
+                    </div>
+                  )}
+                  {selectedVenue.accessInfo && (
+                    <div className="truncate">
+                      <span className="font-medium">Access:</span> {selectedVenue.accessInfo}
+                    </div>
+                  )}
+                  {selectedVenue.internetInfo && (
+                    <div className="truncate">
+                      <span className="font-medium">Internet:</span> {selectedVenue.internetInfo}
+                    </div>
+                  )}
+                </div>
+              )}
+              <label className="text-sm font-medium">Venue Label</label>
               <input
                 className="input"
                 value={venue}
                 onChange={(e) => setVenue(e.target.value)}
+                placeholder="Shown on the product page"
               />
+              <p className="text-xs text-gray-500 -mt-1">
+                This text appears on the customer-facing product pages.
+              </p>
             </>
           )}
           <label className="flex items-center gap-2">

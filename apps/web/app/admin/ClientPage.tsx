@@ -128,6 +128,7 @@ export default function AdminPage() {
                 { href: '/admin/categories', label: 'Manage Categories' },
                 { href: '/admin/products', label: 'Product Management' },
                 { href: '/admin/modifiers', label: 'Manage Modifiers' },
+                { href: '/admin/venues', label: 'Venue Library' },
               ],
             },
             {

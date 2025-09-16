@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { auth, db, storage, functions } from "@/lib/firebase";
@@ -21,6 +21,7 @@ import type {
   ProductSEO,
   ProductVariation,
 } from "@/lib/products";
+import type { Venue } from "@/lib/venues";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -91,6 +92,7 @@ export default function NewProductPage() {
   const [cats, setCats] = useState<Category[]>([]);
   const [allModifiers, setAllModifiers] = useState<ModifierGroup[]>([]);
   const [workflows, setWorkflows] = useState<{ id: string; name: string }[]>([]);
+  const [venues, setVenues] = useState<Venue[]>([]);
 
   const [tab, setTab] = useState<
     "info" | "variations" | "deliverables" | "tasks" | "seo" | "modifiers"
@@ -117,8 +119,13 @@ export default function NewProductPage() {
   const [category, setCategory] = useState("");
   const [workflowId, setWorkflowId] = useState("");
   const [eventDate, setEventDate] = useState("");
+  const [venueId, setVenueId] = useState("");
   const [venue, setVenue] = useState("");
   const [hidden, setHidden] = useState(false);
+  const selectedVenue = useMemo(
+    () => venues.find((v) => v.id === venueId) || null,
+    [venues, venueId]
+  );
   const [tasks, setTasks] = useState<ProductTask[]>([]);
   const [taskTitle, setTaskTitle] = useState("");
   const [taskForCustomer, setTaskForCustomer] = useState(false);
@@ -137,16 +144,22 @@ export default function NewProductPage() {
       const staff = me?.isStaff === true;
       setIsStaff(staff);
       if (staff) {
-        const [catSnap, modSnap, wfSnap] = await Promise.all([
+        const [catSnap, modSnap, wfSnap, venueSnap] = await Promise.all([
           getDocs(collection(db, "categories")),
           getDocs(collection(db, "modifiers")),
           getDocs(collection(db, "workflows")),
+          getDocs(collection(db, "venues")),
         ]);
         setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setAllModifiers(
           modSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as any
         );
         setWorkflows(wfSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+        setVenues(
+          venueSnap.docs
+            .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
+            .sort((a, b) => a.name.localeCompare(b.name))
+        );
       }
       setLoading(false);
     })();
@@ -168,6 +181,7 @@ export default function NewProductPage() {
         ? v.featuresText.split("\n").map((f) => f.trim()).filter(Boolean)
         : [],
     }));
+    const venueLabel = venue || selectedVenue?.name || null;
     const docRef = await addDoc(collection(db, "products"), {
       name,
       description,
@@ -177,7 +191,8 @@ export default function NewProductPage() {
       deliveryTime: deliveryOptions[deliveryIndex],
       category: category || null,
       eventDate: eventDate || null,
-      venue: venue || null,
+      venue: venueLabel,
+      venueId: venueId || null,
       hidden,
       defaultTasks: tasks,
       variations: variationData,
@@ -394,12 +409,67 @@ export default function NewProductPage() {
                 value={eventDate}
                 onChange={(e) => setEventDate(e.target.value)}
               />
-              <label className="text-sm font-medium">Venue</label>
+              <label className="text-sm font-medium">Linked Venue</label>
+              <select
+                className="input"
+                value={venueId}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setVenueId(value);
+                  if (value) {
+                    const match = venues.find((v) => v.id === value);
+                    setVenue(match?.name || "");
+                  }
+                }}
+              >
+                <option value="">Custom / not listed</option>
+                {venues.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+              {selectedVenue && (
+                <div className="rounded bg-slate-100 p-2 text-xs text-gray-600 grid gap-1">
+                  {selectedVenue.mileageFromWellingborough !== null &&
+                    selectedVenue.mileageFromWellingborough !== undefined && (
+                      <div>
+                        Mileage: {selectedVenue.mileageFromWellingborough} miles
+                      </div>
+                    )}
+                  {selectedVenue.parkingRate !== null &&
+                    selectedVenue.parkingRate !== undefined && (
+                      <div>
+                        Parking Rate: £{Number(selectedVenue.parkingRate).toFixed(2)}
+                      </div>
+                    )}
+                  {selectedVenue.parkingTips && (
+                    <div className="truncate">
+                      <span className="font-medium">Parking:</span> {selectedVenue.parkingTips}
+                    </div>
+                  )}
+                  {selectedVenue.accessInfo && (
+                    <div className="truncate">
+                      <span className="font-medium">Access:</span> {selectedVenue.accessInfo}
+                    </div>
+                  )}
+                  {selectedVenue.internetInfo && (
+                    <div className="truncate">
+                      <span className="font-medium">Internet:</span> {selectedVenue.internetInfo}
+                    </div>
+                  )}
+                </div>
+              )}
+              <label className="text-sm font-medium">Venue Label</label>
               <input
                 className="input"
                 value={venue}
                 onChange={(e) => setVenue(e.target.value)}
+                placeholder="Shown on the product page"
               />
+              <p className="text-xs text-gray-500 -mt-1">
+                This text appears on the customer-facing product pages.
+              </p>
             </>
           )}
           <label className="flex items-center gap-2">

@@ -1,6 +1,7 @@
 "use client";
 
 import { Product, DeliverableType } from "@/lib/products";
+import type { Venue } from "@/lib/venues";
 import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
@@ -32,7 +33,13 @@ const deliverableIcons: Record<DeliverableType, IconType> = {
 import AddToCartWizard from "./AddToCartWizard";
 import ProductModifierSummary from "./ProductModifierSummary";
 
-export default function ProductDetail({ product }: { product: Product }) {
+export default function ProductDetail({
+  product,
+  venue,
+}: {
+  product: Product;
+  venue?: Venue | null;
+}) {
   const [basePrice, setBasePrice] = useState(product.price);
   const [variation, setVariation] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -50,6 +57,13 @@ export default function ProductDetail({ product }: { product: Product }) {
     if (variationRequired && !variation) return;
     setWizardOpen(true);
   };
+
+  const venueName = venue?.name || product.venue || "";
+  const hasMileage =
+    venue?.mileageFromWellingborough !== undefined &&
+    venue?.mileageFromWellingborough !== null;
+  const hasParkingRate =
+    venue?.parkingRate !== undefined && venue?.parkingRate !== null;
 
   return (
     <div className="space-y-12">
@@ -93,8 +107,8 @@ export default function ProductDetail({ product }: { product: Product }) {
               Event Date: {new Date(product.eventDate).toLocaleDateString()}
             </p>
           )}
-          {product.category === "exhibition-videography" && product.venue && (
-            <p className="text-sm text-gray-700">Venue: {product.venue}</p>
+          {product.category === "exhibition-videography" && venueName && (
+            <p className="text-sm text-gray-700">Venue: {venueName}</p>
           )}
           {product.variations && product.variations.length > 0 && (
             <div className="grid gap-2">
@@ -150,6 +164,51 @@ export default function ProductDetail({ product }: { product: Product }) {
             className="prose max-w-none"
             dangerouslySetInnerHTML={{ __html: product.description }}
           />
+        </section>
+      )}
+
+      {venue && (
+        <section>
+          <h2 className="text-xl font-semibold mb-2">Venue Information</h2>
+          <div className="grid gap-2 text-sm text-gray-700">
+            {venue.address && (
+              <p>
+                <span className="font-medium">Address:</span> {venue.address}
+              </p>
+            )}
+            {hasMileage && (
+              <p>
+                <span className="font-medium">Distance from Wellingborough:</span>{" "}
+                {venue.mileageFromWellingborough} miles
+              </p>
+            )}
+            {hasParkingRate && (
+              <p>
+                <span className="font-medium">Fixed Parking Rate:</span> £
+                {Number(venue.parkingRate).toFixed(2)}
+              </p>
+            )}
+            {venue.parkingTips && (
+              <p className="whitespace-pre-line">
+                <span className="font-medium">Parking Tips:</span> {venue.parkingTips}
+              </p>
+            )}
+            {venue.accessInfo && (
+              <p className="whitespace-pre-line">
+                <span className="font-medium">Access Information:</span> {venue.accessInfo}
+              </p>
+            )}
+            {venue.internetInfo && (
+              <p className="whitespace-pre-line">
+                <span className="font-medium">Internet Details:</span> {venue.internetInfo}
+              </p>
+            )}
+            {venue.notes && (
+              <p className="whitespace-pre-line">
+                <span className="font-medium">Notes:</span> {venue.notes}
+              </p>
+            )}
+          </div>
         </section>
       )}
 

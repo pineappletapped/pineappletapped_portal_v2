@@ -134,6 +134,8 @@ export interface Product {
   eventDate?: string;
   /** Venue name used for Exhibition Videography filtering */
   venue?: string;
+  /** Linked venue reference for pulling travel details */
+  venueId?: string;
   hidden?: boolean;
   requiredKit?: { groupId: string; items: string[] }[];
   defaultTasks?: ProductTask[];
