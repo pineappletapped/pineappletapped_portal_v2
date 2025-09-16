@@ -4,6 +4,8 @@ import { getClientFirebaseAuth } from '@/lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { setPersistence, browserLocalPersistence, type UserCredential } from 'firebase/auth';
 
+const TEMP_ADMIN_PASSWORD = 'DDp42km9TT!!Campion02';
+
 export default function Login() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -16,6 +18,11 @@ export default function Login() {
     const normalizedUsername = trimmedUsername.toLowerCase();
     const isTempAdmin =
       normalizedUsername === 'ryanadmin' || normalizedUsername === 'ryanadmin@pineappletapped.com';
+    if (isTempAdmin && password !== TEMP_ADMIN_PASSWORD) {
+      setError('Invalid admin password');
+      return;
+    }
+
     const email = isTempAdmin
       ? 'ryanadmin@pineappletapped.com'
       : trimmedUsername.includes('@')
