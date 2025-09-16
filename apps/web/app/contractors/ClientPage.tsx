@@ -19,6 +19,7 @@ import {
 } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import ContractorProfileForm from "@/components/ContractorProfileForm";
+import ContractorKitManager from "@/components/ContractorKitManager";
 
 export default function ContractorPortal() {
   const [tasks, setTasks] = useState<any[]>([]);
@@ -26,7 +27,9 @@ export default function ContractorPortal() {
   const [bookings, setBookings] = useState<any[]>([]);
   const [availableBookings, setAvailableBookings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"bookings" | "projects" | "profile" | "notices">("bookings");
+  const [activeTab, setActiveTab] = useState<
+    "bookings" | "projects" | "profile" | "kit" | "notices"
+  >("bookings");
   const [bookingTab, setBookingTab] = useState<"current" | "past" | "available">("current");
   const [notices, setNotices] = useState<any[]>([]);
   const [isStaff, setIsStaff] = useState(false);
@@ -166,6 +169,12 @@ export default function ContractorPortal() {
           onClick={() => setActiveTab("profile")}
         >
           Profile
+        </button>
+        <button
+          className={`${activeTab === "kit" ? "btn" : "btn-outline"}`}
+          onClick={() => setActiveTab("kit")}
+        >
+          Kit
         </button>
         <button
           className={`${activeTab === "notices" ? "btn" : "btn-outline"}`}
@@ -315,6 +324,8 @@ export default function ContractorPortal() {
           <ContractorProfileForm />
         </div>
       )}
+
+      {activeTab === "kit" && <ContractorKitManager />}
 
       {activeTab === "notices" && (
         <div>

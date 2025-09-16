@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { auth, db } from "@/lib/firebase";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { deleteField, doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
 
 interface ProfileForm {
   name: string;
@@ -10,7 +10,6 @@ interface ProfileForm {
   skills: string;
   bio: string;
   location: string;
-  kit: string;
   emergencyContact: string;
   medicalIssues: string;
 }
@@ -22,7 +21,6 @@ export default function ContractorProfileForm() {
     skills: "",
     bio: "",
     location: "",
-    kit: "",
     emergencyContact: "",
     medicalIssues: "",
   });
@@ -47,7 +45,6 @@ export default function ContractorProfileForm() {
           skills: info.skills || "",
           bio: info.bio || "",
           location: info.location || "",
-          kit: info.kit || "",
           emergencyContact: info.emergencyContact || "",
           medicalIssues: info.medicalIssues || "",
         });
@@ -71,8 +68,9 @@ export default function ContractorProfileForm() {
     if (!user) return alert("You must be signed in");
     setSaving(true);
     try {
+      const ref = doc(db, "users", user.uid);
       await setDoc(
-        doc(db, "users", user.uid),
+        ref,
         {
           contractorInfo: {
             ...form,
@@ -81,6 +79,10 @@ export default function ContractorProfileForm() {
         },
         { merge: true }
       );
+      // Remove legacy free-text kit field now that kit management lives in its own tab.
+      await updateDoc(ref, {
+        "contractorInfo.kit": deleteField(),
+      });
       setSaved(true);
     } catch (err: any) {
       console.error(err);
@@ -128,13 +130,10 @@ export default function ContractorProfileForm() {
         value={form.location}
         onChange={handleChange}
       />
-      <input
-        className="input"
-        name="kit"
-        placeholder="What kit do you have?"
-        value={form.kit}
-        onChange={handleChange}
-      />
+      <p className="text-sm text-gray-600">
+        Manage your equipment from the Kit tab to add items, pricing and
+        availability for the team to view.
+      </p>
       <input
         className="input"
         name="emergencyContact"
