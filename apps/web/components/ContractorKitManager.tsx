@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { User } from "firebase/auth";
 import type { Equipment } from "@/lib/equipment";
 import { auth, db } from "@/lib/firebase";
 import {
@@ -67,7 +68,7 @@ export default function ContractorKitManager() {
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
-    const stopAuth = auth.onAuthStateChanged((user) => {
+    const stopAuth = auth.onAuthStateChanged((user: User | null) => {
       unsubscribe?.();
       if (!user) {
         setItems([]);
