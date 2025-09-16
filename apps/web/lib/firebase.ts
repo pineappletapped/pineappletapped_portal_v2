@@ -70,7 +70,10 @@ async function initFirebase() {
 
 async function ensureFirebase() {
   if (!initPromise) {
-    initPromise = initFirebase().catch(() => {});
+    initPromise = initFirebase().catch((error) => {
+      console.error('Failed to initialise Firebase', error);
+      throw error;
+    });
   }
   await initPromise;
   return { app, auth, db, storage, functions };
@@ -109,7 +112,9 @@ if (
   config.apiKey &&
   !config.apiKey.startsWith('REPLACE_WITH')
 ) {
-  ensureFirebase();
+  ensureFirebase().catch((error) => {
+    console.error('Eager Firebase initialisation failed', error);
+  });
 }
 
 export {
