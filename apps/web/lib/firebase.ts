@@ -108,5 +108,4 @@ export {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   ensureFirebase,
-  getClientFirebaseAuth,
 };
