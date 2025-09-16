@@ -1,9 +1,8 @@
 'use client';
 import { useState } from 'react';
-import { auth, db, signInWithEmailAndPassword } from '@/lib/firebase';
+import { getClientFirebaseAuth } from '@/lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { createUserWithEmailAndPassword, type UserCredential } from 'firebase/auth';
-import { setPersistence, browserLocalPersistence } from 'firebase/auth';
+import { setPersistence, browserLocalPersistence, type UserCredential } from 'firebase/auth';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -23,6 +22,8 @@ export default function Login() {
         ? trimmedUsername
         : `${trimmedUsername}@pineappletapped.com`;
     try {
+      const { auth, db, signInWithEmailAndPassword, createUserWithEmailAndPassword } =
+        await getClientFirebaseAuth();
       await setPersistence(auth, browserLocalPersistence);
       let credential: UserCredential;
       try {
@@ -53,6 +54,7 @@ export default function Login() {
       document.cookie = `isStaff=${isStaff ? '1' : '0'}; path=/`;
       window.location.href = isStaff ? '/admin' : '/dashboard';
     } catch (err) {
+      console.error('Failed to sign in with Firebase', err);
       setError('Invalid credentials');
     }
   };

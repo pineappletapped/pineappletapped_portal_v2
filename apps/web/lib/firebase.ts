@@ -64,6 +64,29 @@ export async function getDb() {
   return db;
 }
 
+export async function getClientFirebaseAuth() {
+  await ensureFirebase();
+
+  if (!db) {
+    throw new Error('Firestore has not been initialised.');
+  }
+
+  if (typeof signInWithEmailAndPassword !== 'function') {
+    throw new Error('Firebase auth helpers are unavailable.');
+  }
+
+  if (!auth || typeof auth.signOut !== 'function') {
+    throw new Error('Firebase auth has not been initialised.');
+  }
+
+  return {
+    auth,
+    db,
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+  };
+}
+
 if (
   typeof window !== 'undefined' &&
   config.apiKey &&
@@ -85,4 +108,5 @@ export {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   ensureFirebase,
+  getClientFirebaseAuth,
 };
