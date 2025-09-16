@@ -115,6 +115,15 @@ export interface ProductSEO {
   socialImageUrl?: string;
 }
 
+export interface ProductBudget {
+  labour?: number;
+  kit?: number;
+  travelMiles?: number;
+  travelRate?: number;
+  travelCost?: number;
+  parking?: number;
+}
+
 export interface Product {
   id: string;
   name: string;
@@ -143,6 +152,7 @@ export interface Product {
   workflowId?: string;
   labourCost?: number;
   defaultKitCost?: number;
+  budget?: ProductBudget;
 }
 
 // Fallback sample products if Firestore is unavailable

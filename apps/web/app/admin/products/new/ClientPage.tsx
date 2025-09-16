@@ -122,10 +122,23 @@ export default function NewProductPage() {
   const [venueId, setVenueId] = useState("");
   const [venue, setVenue] = useState("");
   const [hidden, setHidden] = useState(false);
+  const [labourCost, setLabourCost] = useState("0");
+  const [defaultKitCost, setDefaultKitCost] = useState("0");
+  const [travelMiles, setTravelMiles] = useState("100");
+  const [travelRate, setTravelRate] = useState("0.3");
+  const [parkingCost, setParkingCost] = useState("0");
+  const [travelMilesTouched, setTravelMilesTouched] = useState(false);
+  const [parkingTouched, setParkingTouched] = useState(false);
   const selectedVenue = useMemo(
     () => venues.find((v) => v.id === venueId) || null,
     [venues, venueId]
   );
+  const parseMoney = (value: string, fallback = 0) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : fallback;
+  };
+  const formatCurrency = (value: number) =>
+    `£${(Number.isFinite(value) ? value : 0).toFixed(2)}`;
   const [tasks, setTasks] = useState<ProductTask[]>([]);
   const [taskTitle, setTaskTitle] = useState("");
   const [taskForCustomer, setTaskForCustomer] = useState(false);
@@ -165,6 +178,28 @@ export default function NewProductPage() {
     })();
   }, []);
 
+  useEffect(() => {
+    if (selectedVenue) {
+      if (
+        !travelMilesTouched &&
+        selectedVenue.mileageFromWellingborough !== undefined &&
+        selectedVenue.mileageFromWellingborough !== null
+      ) {
+        setTravelMiles(String(selectedVenue.mileageFromWellingborough));
+      }
+      if (
+        !parkingTouched &&
+        selectedVenue.parkingRate !== undefined &&
+        selectedVenue.parkingRate !== null
+      ) {
+        setParkingCost(String(selectedVenue.parkingRate));
+      }
+    } else {
+      if (!travelMilesTouched) setTravelMiles("100");
+      if (!parkingTouched) setParkingCost("0");
+    }
+  }, [selectedVenue, travelMilesTouched, parkingTouched]);
+
   const upload = async (path: string, file: File) => {
     const r = ref(storage, path);
     await uploadBytes(r, file);
@@ -182,11 +217,29 @@ export default function NewProductPage() {
         : [],
     }));
     const venueLabel = venue || selectedVenue?.name || null;
+    const labourValue = parseMoney(labourCost);
+    const kitValue = parseMoney(defaultKitCost);
+    const travelMilesValue = parseMoney(travelMiles, 100);
+    const travelRateValue = parseMoney(travelRate, 0.3);
+    const travelCostValue = Number.isFinite(travelMilesValue * travelRateValue)
+      ? travelMilesValue * travelRateValue
+      : 0;
+    const parkingValue = parseMoney(parkingCost);
     const docRef = await addDoc(collection(db, "products"), {
       name,
       description,
       tagline: tagline || null,
       price: Number(price) || 0,
+      labourCost: labourValue,
+      defaultKitCost: kitValue,
+      budget: {
+        labour: labourValue,
+        kit: kitValue,
+        travelMiles: travelMilesValue,
+        travelRate: travelRateValue,
+        travelCost: Number.isFinite(travelCostValue) ? travelCostValue : 0,
+        parking: parkingValue,
+      },
       requirements: requirements || null,
       deliveryTime: deliveryOptions[deliveryIndex],
       category: category || null,
@@ -347,6 +400,18 @@ export default function NewProductPage() {
   if (loading) return <p>Loading…</p>;
   if (!isStaff) return <p>You do not have permission to create products.</p>;
 
+  const labourValue = parseMoney(labourCost);
+  const kitValue = parseMoney(defaultKitCost);
+  const travelMilesValue = parseMoney(travelMiles, 100);
+  const travelRateValue = parseMoney(travelRate, 0.3);
+  const travelCostValue = Number.isFinite(travelMilesValue * travelRateValue)
+    ? travelMilesValue * travelRateValue
+    : 0;
+  const parkingValue = parseMoney(parkingCost);
+  const priceValue = parseMoney(price);
+  const budgetTotal = labourValue + kitValue + travelCostValue + parkingValue;
+  const profitValue = priceValue - budgetTotal;
+
   return (
     <form onSubmit={save} className="grid gap-6 max-w-2xl">
       <h1 className="text-xl font-semibold">Create Product</h1>
@@ -380,6 +445,92 @@ export default function NewProductPage() {
         <ReactQuill theme="snow" value={description} onChange={setDescription} />
           <label className="text-sm font-medium">Price (GBP)</label>
           <input type="number" className="input" value={price} onChange={(e) => setPrice(e.target.value)} />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Labour Cost</label>
+              <input
+                type="number"
+                className="input"
+                value={labourCost}
+                onChange={(e) => setLabourCost(e.target.value)}
+              />
+              <label className="text-sm font-medium">Default Kit Cost</label>
+              <input
+                type="number"
+                className="input"
+                value={defaultKitCost}
+                onChange={(e) => setDefaultKitCost(e.target.value)}
+              />
+              <label className="text-sm font-medium">Travel Miles (estimate)</label>
+              <input
+                type="number"
+                className="input"
+                value={travelMiles}
+                onChange={(e) => {
+                  setTravelMilesTouched(true);
+                  setTravelMiles(e.target.value);
+                }}
+              />
+              <label className="text-sm font-medium">Travel Rate (per mile)</label>
+              <input
+                type="number"
+                step="0.01"
+                className="input"
+                value={travelRate}
+                onChange={(e) => setTravelRate(e.target.value)}
+              />
+              <label className="text-sm font-medium">Parking Budget</label>
+              <input
+                type="number"
+                step="0.01"
+                className="input"
+                value={parkingCost}
+                onChange={(e) => {
+                  setParkingTouched(true);
+                  setParkingCost(e.target.value);
+                }}
+              />
+            </div>
+            <div className="border rounded p-3 text-sm space-y-2">
+              <div className="flex justify-between">
+                <span>Price</span>
+                <span>{formatCurrency(priceValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Labour</span>
+                <span>{formatCurrency(labourValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Kit</span>
+                <span>{formatCurrency(kitValue)}</span>
+              </div>
+              <div>
+                <div className="flex justify-between">
+                  <span>Travel</span>
+                  <span>{formatCurrency(travelCostValue)}</span>
+                </div>
+                <div className="text-xs text-gray-500 text-right">
+                  {travelMilesValue} miles @ £{travelRateValue.toFixed(2)}
+                </div>
+              </div>
+              <div className="flex justify-between">
+                <span>Parking</span>
+                <span>{formatCurrency(parkingValue)}</span>
+              </div>
+              <div className="flex justify-between font-medium border-t pt-1">
+                <span>Budget Total</span>
+                <span>{formatCurrency(budgetTotal)}</span>
+              </div>
+              <div
+                className={`flex justify-between font-semibold ${
+                  profitValue < 0 ? "text-red-600" : ""
+                }`}
+              >
+                <span>Estimated Profit</span>
+                <span>{formatCurrency(profitValue)}</span>
+              </div>
+            </div>
+          </div>
           <label className="text-sm font-medium">Image</label>
           <input type="file" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
           <label className="text-sm font-medium">Category</label>

@@ -105,6 +105,20 @@ export const onOrderCreated = functions.firestore
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     await snap.ref.set({ projectId: projRef.id }, { merge: true });
+    const projectBudgetData = {};
+    if (order.budgetTotals)
+        projectBudgetData.budgetTotals = order.budgetTotals;
+    const budgetItems = (order.items || []).map((item) => ({
+        id: item.id,
+        name: item.name,
+        quantity: item.quantity,
+        budget: item.budget || null,
+    }));
+    if (budgetItems.length > 0)
+        projectBudgetData.budgetItems = budgetItems;
+    if (Object.keys(projectBudgetData).length > 0) {
+        await projRef.set(projectBudgetData, { merge: true });
+    }
     // Populate workflow/default tasks from the ordered product
     if (order.serviceId) {
         try {
@@ -1242,6 +1256,12 @@ export const esign_request = functions.https.onCall(async (data, context) => {
  * the created order ID.
  */
 export const createOrder = functions.https.onCall(async (data, context) => {
+    const toNumber = (value, fallback = 0) => {
+        const num = Number(value);
+        return Number.isFinite(num) ? num : fallback;
+    };
+    const DEFAULT_TRAVEL_MILES = 100;
+    const DEFAULT_TRAVEL_RATE = 0.3;
     const { items, userEmail, customerName, companyName, location, projectName, voucher, kitItems = [], rentalSubtotal = 0, } = data;
     if (!items || !Array.isArray(items) || items.length === 0) {
         throw new functions.https.HttpsError('invalid-argument', 'items are required');
@@ -1251,6 +1271,9 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     const orderItems = [];
     let productSubtotal = 0;
     let labourSubtotal = 0;
+    let kitSubtotal = 0;
+    let travelSubtotal = 0;
+    let parkingSubtotal = 0;
     productSnaps.forEach((snap, idx) => {
         if (!snap.exists)
             return;
@@ -1262,6 +1285,14 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         const modifiers = Array.isArray(items[idx].modifiers)
             ? items[idx].modifiers
             : [];
+        const budget = prod.budget || {};
+        const labour = toNumber(budget.labour ?? prod.labourCost);
+        const kit = toNumber(budget.kit ?? prod.defaultKitCost);
+        const travelMilesValue = toNumber(budget.travelMiles, DEFAULT_TRAVEL_MILES);
+        const travelRateValue = toNumber(budget.travelRate, DEFAULT_TRAVEL_RATE);
+        const travelCost = toNumber(budget.travelCost, toNumber(travelMilesValue * travelRateValue));
+        const parking = toNumber(budget.parking);
+        const perUnitBudgetTotal = labour + kit + travelCost + parking;
         orderItems.push({
             id: snap.id,
             name: prod.name,
@@ -1270,9 +1301,30 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             category,
             rentalTotal: rental,
             modifiers,
+            budget: {
+                perUnit: {
+                    labour,
+                    kit,
+                    travelMiles: travelMilesValue,
+                    travelRate: travelRateValue,
+                    travelCost,
+                    parking,
+                    totalCost: perUnitBudgetTotal,
+                },
+                total: {
+                    labour: labour * qty,
+                    kit: kit * qty,
+                    travel: travelCost * qty,
+                    parking: parking * qty,
+                    totalCost: perUnitBudgetTotal * qty,
+                },
+            },
         });
         productSubtotal += price * qty;
-        labourSubtotal += (prod.labourCost || 0) * qty;
+        labourSubtotal += labour * qty;
+        kitSubtotal += kit * qty;
+        travelSubtotal += travelCost * qty;
+        parkingSubtotal += parking * qty;
     });
     // Apply voucher discount if provided
     let voucherDiscount = 0;
@@ -1320,7 +1372,19 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     const finalTotal = subtotalAfterVoucher - discountAmount + rentalSubtotal;
     const vat = finalTotal * VAT_RATE;
     const price = finalTotal + vat;
-    const profit = finalTotal - (labourSubtotal + rentalSubtotal);
+    const budgetSubtotal = labourSubtotal + kitSubtotal + travelSubtotal + parkingSubtotal;
+    const profit = finalTotal - (budgetSubtotal + rentalSubtotal);
+    const budgetTotals = {
+        labour: labourSubtotal,
+        kit: kitSubtotal,
+        travel: travelSubtotal,
+        parking: parkingSubtotal,
+        rental: rentalSubtotal,
+        totalCost: budgetSubtotal + rentalSubtotal,
+        netRevenue: finalTotal,
+        grossRevenue: price,
+        profit,
+    };
     const orderRef = await db.collection('orders').add({
         userId: context.auth?.uid || null,
         userEmail: context.auth?.token.email || userEmail || null,
@@ -1332,6 +1396,12 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         items: orderItems,
         subtotal: productSubtotal,
         rentalSubtotal,
+        labourSubtotal,
+        kitSubtotal,
+        travelSubtotal,
+        parkingSubtotal,
+        budgetSubtotal,
+        budgetTotals,
         kitItems,
         voucherDiscount,
         discountPct,

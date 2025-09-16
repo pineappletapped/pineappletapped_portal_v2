@@ -25,6 +25,11 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
 
   // Signature request
   const [pendingSignature, setPendingSignature] = useState<any | null>(null);
+  const safeNumber = (value: any) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : 0;
+  };
+  const formatCurrency = (value: any) => `£${safeNumber(value).toFixed(2)}`;
 
   // Helper to load messages in order
   const loadMessages = useCallback(async () => {
@@ -197,6 +202,10 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   const editingVenue = venueSelection
     ? venues.find((v) => v.id === venueSelection) || null
     : null;
+  const budgetTotals = project?.budgetTotals || null;
+  const budgetItems = Array.isArray(project?.budgetItems)
+    ? (project.budgetItems as any[])
+    : [];
 
   return (
     <PortalContainer>
@@ -321,6 +330,73 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
           </form>
         )}
       </div>
+      {budgetTotals ? (
+        <div className="card p-4">
+          <h2 className="font-semibold mb-2">Budget</h2>
+          <div className="space-y-1 text-sm">
+            <div className="flex justify-between">
+              <span>Net Revenue</span>
+              <span>{formatCurrency(budgetTotals.netRevenue)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Gross Revenue</span>
+              <span>{formatCurrency(budgetTotals.grossRevenue)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Labour</span>
+              <span>{formatCurrency(budgetTotals.labour)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Kit</span>
+              <span>{formatCurrency(budgetTotals.kit)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Travel</span>
+              <span>{formatCurrency(budgetTotals.travel)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Parking</span>
+              <span>{formatCurrency(budgetTotals.parking)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Rental</span>
+              <span>{formatCurrency(budgetTotals.rental)}</span>
+            </div>
+            <div className="flex justify-between font-medium border-t pt-1">
+              <span>Total Cost</span>
+              <span>{formatCurrency(budgetTotals.totalCost)}</span>
+            </div>
+            <div
+              className={`flex justify-between font-semibold ${
+                safeNumber(budgetTotals.profit) < 0 ? 'text-red-600' : ''
+              }`}
+            >
+              <span>Estimated Profit</span>
+              <span>{formatCurrency(budgetTotals.profit)}</span>
+            </div>
+          </div>
+          {budgetItems.length ? (
+            <div className="mt-3">
+              <h3 className="font-medium text-sm mb-1">Per Product</h3>
+              <ul className="divide-y">
+                {budgetItems.map((item: any) => (
+                  <li key={item.id} className="py-2 text-sm">
+                    <div className="flex justify-between">
+                      <span>
+                        {item.name || item.id} × {item.quantity || 1}
+                      </span>
+                      <span>{formatCurrency(item.budget?.total?.totalCost)}</span>
+                    </div>
+                    <div className="text-xs text-gray-600 text-right">
+                      Labour {formatCurrency(item.budget?.total?.labour)} · Kit {formatCurrency(item.budget?.total?.kit)} · Travel {formatCurrency(item.budget?.total?.travel)} · Parking {formatCurrency(item.budget?.total?.parking)}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div className="card">
         <h2 className="font-semibold mb-2">Assets</h2>
         <div className="grid gap-2">
