@@ -39,6 +39,7 @@ let isSignInWithEmailLink: any;
 let signInWithEmailLink: any;
 let signInWithEmailAndPassword: any;
 let createUserWithEmailAndPassword: any;
+let sendPasswordResetEmail: any;
 
 let initPromise: Promise<void> | null = null;
 async function initFirebase() {
@@ -64,6 +65,7 @@ async function initFirebase() {
       signInWithEmailLink,
       signInWithEmailAndPassword,
       createUserWithEmailAndPassword,
+      sendPasswordResetEmail,
     } = authMod);
   }
 }
@@ -99,11 +101,16 @@ export async function getClientFirebaseAuth() {
     throw new Error('Firebase auth has not been initialised.');
   }
 
+  if (typeof sendPasswordResetEmail !== 'function') {
+    throw new Error('Firebase password reset helper is unavailable.');
+  }
+
   return {
     auth,
     db,
     signInWithEmailAndPassword,
     createUserWithEmailAndPassword,
+    sendPasswordResetEmail,
   };
 }
 
@@ -129,5 +136,6 @@ export {
   signInWithEmailLink,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
   ensureFirebase,
 };

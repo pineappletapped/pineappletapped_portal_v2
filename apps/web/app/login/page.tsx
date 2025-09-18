@@ -1,4 +1,6 @@
 'use client';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { getClientFirebaseAuth } from '@/lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
@@ -10,10 +12,13 @@ export default function Login() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [resetEmail, setResetEmail] = useState<string | null>(null);
+  const router = useRouter();
 
   const login = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setResetEmail(null);
     const trimmedUsername = username.trim();
     const normalizedUsername = trimmedUsername.toLowerCase();
     const isTempAdmin =
@@ -66,6 +71,55 @@ export default function Login() {
     } catch (err) {
       console.error('Failed to sign in with Firebase', err);
       setError('Invalid credentials');
+      setResetEmail(null);
+    }
+  };
+
+  const handlePasswordReset = async () => {
+    setError('');
+    setResetEmail(null);
+
+    const defaultIdentifier = username.trim();
+    const defaultEmail = defaultIdentifier
+      ? defaultIdentifier.includes('@')
+        ? defaultIdentifier
+        : `${defaultIdentifier}@pineappletapped.com`
+      : '';
+
+    const input =
+      typeof window === 'undefined'
+        ? ''
+        : window.prompt('Enter the email address for your account', defaultEmail);
+
+    if (!input) {
+      return;
+    }
+
+    const trimmedInput = input.trim();
+    if (!trimmedInput) {
+      setError('Please enter an email address to reset your password.');
+      return;
+    }
+
+    const email = trimmedInput.includes('@')
+      ? trimmedInput
+      : `${trimmedInput}@pineappletapped.com`;
+
+    try {
+      const { auth, sendPasswordResetEmail } = await getClientFirebaseAuth();
+      await sendPasswordResetEmail(auth, email);
+      setResetEmail(email);
+      router.prefetch(`/auth/reset?email=${encodeURIComponent(email)}`);
+    } catch (err: any) {
+      console.error('Failed to send password reset email', err);
+      if (err?.code === 'auth/invalid-email') {
+        setError('That email address is not valid.');
+      } else if (err?.code === 'auth/user-not-found') {
+        setError('No account found with that email address.');
+      } else {
+        setError('Unable to send a password reset email right now. Please try again later.');
+      }
+      setResetEmail(null);
     }
   };
 
@@ -74,6 +128,18 @@ export default function Login() {
       <h1 className="text-xl font-semibold">Sign in</h1>
       <form onSubmit={login} className="grid gap-3">
         {error && <p className="text-sm text-red-600">{error}</p>}
+        {resetEmail && (
+          <p className="text-sm text-green-600">
+            Password reset email sent to <span className="font-medium">{resetEmail}</span>.{' '}
+            <Link
+              href={`/auth/reset?email=${encodeURIComponent(resetEmail)}`}
+              className="underline"
+            >
+              View next steps
+            </Link>
+            .
+          </p>
+        )}
         <input
           className="input"
           type="text"
@@ -94,6 +160,13 @@ export default function Login() {
         />
         <button type="submit" className="btn">
           Login
+        </button>
+        <button
+          type="button"
+          className="btn btn-link justify-start px-0"
+          onClick={handlePasswordReset}
+        >
+          Forgot password?
         </button>
       </form>
     </div>
