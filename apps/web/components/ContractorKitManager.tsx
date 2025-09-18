@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import type { Auth, User } from "firebase/auth";
 import type { Equipment } from "@/lib/equipment";
 import { ensureFirebase } from "@/lib/firebase";
 import {
   collection,
+  getDocs,
   deleteDoc,
   doc,
   onSnapshot,
@@ -13,6 +14,7 @@ import {
   setDoc,
   updateDoc,
   where,
+  Timestamp,
   type Firestore,
 } from "firebase/firestore";
 import {
@@ -65,6 +67,70 @@ const toNumber = (value: string) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+interface BookingEntry {
+  id: string;
+  start: Date;
+  end: Date;
+  projectId?: string;
+  status?: string;
+  notes?: string;
+}
+
+interface BookingState {
+  bookings: BookingEntry[];
+  hasConflicts: boolean;
+  conflictIds: string[];
+  error?: string;
+}
+
+const toDateSafe = (value: any): Date | null => {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value.toDate === "function") return value.toDate();
+  if (typeof value.seconds === "number") return new Date(value.seconds * 1000);
+  const maybeDate = new Date(value);
+  return Number.isNaN(maybeDate.getTime()) ? null : maybeDate;
+};
+
+const formatDate = (date: Date) =>
+  date.toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+
+const formatDateRange = (start: Date, end: Date) => {
+  const sameDay = start.toDateString() === end.toDateString();
+  if (sameDay) {
+    return formatDate(start);
+  }
+  return `${formatDate(start)} → ${formatDate(end)}`;
+};
+
+const detectConflicts = (bookings: BookingEntry[]) => {
+  const sorted = [...bookings].sort(
+    (a, b) => a.start.getTime() - b.start.getTime()
+  );
+  const conflictIds: string[] = [];
+  for (let i = 0; i < sorted.length; i += 1) {
+    const current = sorted[i];
+    for (let j = i + 1; j < sorted.length; j += 1) {
+      const comparison = sorted[j];
+      if (comparison.start.getTime() <= current.end.getTime()) {
+        if (!conflictIds.includes(current.id)) {
+          conflictIds.push(current.id);
+        }
+        if (!conflictIds.includes(comparison.id)) {
+          conflictIds.push(comparison.id);
+        }
+      } else {
+        break;
+      }
+    }
+  }
+  return conflictIds;
+};
+
 export default function ContractorKitManager() {
   const [items, setItems] = useState<Equipment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -84,6 +150,10 @@ export default function ContractorKitManager() {
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [documentFiles, setDocumentFiles] = useState<File[]>([]);
   const [fileInputsKey, setFileInputsKey] = useState(0);
+  const [bookingsState, setBookingsState] = useState<Record<string, BookingState>>({});
+  const [bookingsLoading, setBookingsLoading] = useState(false);
+  const [bookingsError, setBookingsError] = useState<string | null>(null);
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -176,6 +246,119 @@ export default function ContractorKitManager() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!firestore) {
+      setBookingsState({});
+      setBookingsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const loadBookings = async () => {
+      if (!items.length) {
+        setBookingsState({});
+        setBookingsError(null);
+        setBookingsLoading(false);
+        return;
+      }
+
+      setBookingsLoading(true);
+      setBookingsError(null);
+
+      try {
+        const now = Timestamp.fromDate(new Date());
+        const results = await Promise.all(
+          items.map(async (item) => {
+            if (!item.id) {
+              return ["", { bookings: [], hasConflicts: false, conflictIds: [] }] as [
+                string,
+                BookingState,
+              ];
+            }
+            try {
+              const bookingsRef = collection(
+                doc(firestore, "equipment", item.id),
+                "bookings"
+              );
+              const snap = await getDocs(query(bookingsRef, where("end", ">=", now)));
+              const entries = snap.docs
+                .map((docSnap) => {
+                  const data = docSnap.data() as any;
+                  const start = toDateSafe(data.start);
+                  const end = toDateSafe(data.end);
+                  if (!start || !end) {
+                    return null;
+                  }
+                  return {
+                    id: docSnap.id,
+                    start,
+                    end,
+                    projectId: data.projectId,
+                    status: data.status,
+                    notes: data.notes,
+                  } as BookingEntry;
+                })
+                .filter((entry): entry is BookingEntry => entry !== null)
+                .filter((entry) => entry.end.getTime() >= Date.now())
+                .sort((a, b) => a.start.getTime() - b.start.getTime());
+
+              const conflictIds = detectConflicts(entries);
+
+              return [
+                item.id,
+                {
+                  bookings: entries,
+                  hasConflicts: conflictIds.length > 0,
+                  conflictIds,
+                } as BookingState,
+              ];
+            } catch (err) {
+              console.error(
+                `Failed to load bookings for equipment ${item.id}`,
+                err
+              );
+              return [
+                item.id,
+                {
+                  bookings: [],
+                  hasConflicts: false,
+                  conflictIds: [],
+                  error: "We couldn't load this schedule. Please try again.",
+                } as BookingState,
+              ];
+            }
+          })
+        );
+
+        if (cancelled) return;
+
+        const nextState: Record<string, BookingState> = {};
+        results.forEach(([id, state]) => {
+          if (!id) return;
+          nextState[id] = state;
+        });
+        setBookingsState(nextState);
+      } catch (err) {
+        console.error("Failed to load kit booking schedules", err);
+        if (!cancelled) {
+          setBookingsError(
+            "We couldn't load booking schedules. Please refresh the page."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setBookingsLoading(false);
+        }
+      }
+    };
+
+    loadBookings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [firestore, items]);
+
   const suggestedRental = useMemo(() => {
     const purchase = toNumber(form.newValue);
     if (!purchase) return 0;
@@ -229,6 +412,19 @@ export default function ContractorKitManager() {
   const cancelForm = () => {
     resetForm();
     setShowForm(false);
+  };
+
+  const toggleSchedule = (id?: string) => {
+    if (!id) return;
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   };
 
   const handleFieldChange = (name: keyof FormState, value: string | boolean) => {
@@ -422,6 +618,14 @@ export default function ContractorKitManager() {
             Equipment listed here appears in the admin equipment register with
             you recorded as the owner.
           </p>
+          {bookingsError && (
+            <p className="mt-1 text-xs text-red-600">{bookingsError}</p>
+          )}
+          {bookingsLoading && (
+            <p className="mt-1 text-xs text-gray-500">
+              Refreshing booking schedules…
+            </p>
+          )}
         </div>
         <button className="btn self-start" onClick={startNew}>
           Add Kit Item
@@ -661,63 +865,207 @@ export default function ContractorKitManager() {
                 <th className="p-2">Rental £</th>
                 <th className="p-2">Documents</th>
                 <th className="p-2">Available</th>
+                <th className="p-2">Schedule</th>
                 <th className="p-2">Actions</th>
               </tr>
             </thead>
             <tbody>
               {items.map((item) => (
-                <tr key={item.id} className="border-t">
-                  <td className="p-2 align-top">
-                    {item.photo ? (
-                      <img
-                        src={item.photo}
-                        alt={`${item.name || "Kit"} thumbnail`}
-                        className="h-12 w-12 rounded object-cover"
-                      />
-                    ) : (
-                      <span className="text-xs text-gray-500">No photo</span>
-                    )}
-                  </td>
-                  <td className="p-2 font-medium align-top">{item.name}</td>
-                  <td className="p-2 align-top">{item.category}</td>
-                  <td className="p-2 align-top">£{(item.newValue || 0).toFixed(2)}</td>
-                  <td className="p-2 align-top">£{(item.rentalPrice || 0).toFixed(2)}</td>
-                  <td className="p-2 align-top">
-                    {Array.isArray(item.documents) && item.documents.length > 0 ? (
-                      <ul className="space-y-1 text-xs">
-                        {item.documents.map((url, index) => (
-                          <li key={`${item.id}-doc-${index}`}>
-                            <a
-                              href={url}
-                              target="_blank"
-                              rel="noreferrer noopener"
-                              className="text-blue-600 hover:underline"
-                            >
-                              Document {index + 1}
-                            </a>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <span className="text-xs text-gray-500">None</span>
-                    )}
-                  </td>
-                  <td className="p-2 align-top">{item.available === false ? "No" : "Yes"}</td>
-                  <td className="p-2 space-x-2 align-top">
-                    <button
-                      className="btn btn-xs btn-outline"
-                      onClick={() => startEdit(item)}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      className="btn btn-xs btn-outline text-red-600 border-red-200"
-                      onClick={() => remove(item.id)}
-                    >
-                      Delete
-                    </button>
-                  </td>
-                </tr>
+                <Fragment key={item.id}>
+                  <tr className="border-t">
+                    <td className="p-2 align-top">
+                      {item.photo ? (
+                        <img
+                          src={item.photo}
+                          alt={`${item.name || "Kit"} thumbnail`}
+                          className="h-12 w-12 rounded object-cover"
+                        />
+                      ) : (
+                        <span className="text-xs text-gray-500">No photo</span>
+                      )}
+                    </td>
+                    <td className="p-2 font-medium align-top">{item.name}</td>
+                    <td className="p-2 align-top">{item.category}</td>
+                    <td className="p-2 align-top">£{(item.newValue || 0).toFixed(2)}</td>
+                    <td className="p-2 align-top">£{(item.rentalPrice || 0).toFixed(2)}</td>
+                    <td className="p-2 align-top">
+                      {Array.isArray(item.documents) && item.documents.length > 0 ? (
+                        <ul className="space-y-1 text-xs">
+                          {item.documents.map((url, index) => (
+                            <li key={`${item.id}-doc-${index}`}>
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                                className="text-blue-600 hover:underline"
+                              >
+                                Document {index + 1}
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="text-xs text-gray-500">None</span>
+                      )}
+                    </td>
+                    <td className="p-2 align-top">
+                      {item.available === false ? "No" : "Yes"}
+                    </td>
+                    <td className="p-2 align-top">
+                      <div className="flex flex-col gap-1">
+                        <button
+                          className="btn btn-xs btn-outline"
+                          onClick={() => toggleSchedule(item.id)}
+                          disabled={bookingsLoading && !bookingsState[item.id ?? ""]}
+                        >
+                          {item.id && expandedRows.has(item.id)
+                            ? "Hide schedule"
+                            : "View schedule"}
+                        </button>
+                        {item.id && bookingsState[item.id]?.hasConflicts && (
+                          <span className="text-xs font-medium text-red-600">
+                            Conflicts detected
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="p-2 space-x-2 align-top">
+                      <button
+                        className="btn btn-xs btn-outline"
+                        onClick={() => startEdit(item)}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="btn btn-xs btn-outline text-red-600 border-red-200"
+                        onClick={() => remove(item.id)}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                  {item.id && expandedRows.has(item.id) && (
+                    <tr className="bg-gray-50">
+                      <td className="p-3" colSpan={9}>
+                        {(() => {
+                          const schedule = bookingsState[item.id ?? ""];
+                          if (bookingsLoading && !schedule) {
+                            return <p className="text-sm">Loading schedule…</p>;
+                          }
+
+                          if (!schedule) {
+                            return (
+                              <p className="text-sm text-gray-600">
+                                We don&apos;t have any schedule information for this kit
+                                yet.
+                              </p>
+                            );
+                          }
+
+                          if (schedule.error) {
+                            return (
+                              <p className="text-sm text-red-600">{schedule.error}</p>
+                            );
+                          }
+
+                          if (schedule.bookings.length === 0) {
+                            return (
+                              <div className="space-y-2 text-sm text-gray-600">
+                                <p>
+                                  No upcoming bookings. This kit is currently free for
+                                  new reservations.
+                                </p>
+                                <p className="text-xs text-gray-500">
+                                  Need to pencil something in? Reach out to the
+                                  operations team so we can coordinate availability.
+                                </p>
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <div className="space-y-4">
+                              <p className="text-sm text-gray-700">
+                                Upcoming reservations are shown below. Dates are listed
+                                in your local timezone.
+                              </p>
+                              <ol className="border-l-2 border-gray-200 pl-4 space-y-3">
+                                {schedule.bookings.map((booking) => {
+                                  const isConflict = schedule.conflictIds.includes(
+                                    booking.id
+                                  );
+                                  const duration = Math.max(
+                                    1,
+                                    Math.round(
+                                      (booking.end.getTime() -
+                                        booking.start.getTime()) /
+                                        (1000 * 60 * 60 * 24)
+                                    )
+                                  );
+                                  return (
+                                    <li key={booking.id} className="relative pl-4">
+                                      <span
+                                        className={`absolute left-[-11px] top-3 h-2.5 w-2.5 rounded-full ${
+                                          isConflict
+                                            ? "bg-red-500"
+                                            : "bg-green-500"
+                                        }`}
+                                      />
+                                      <div
+                                        className={`rounded-md border p-3 text-sm ${
+                                          isConflict
+                                            ? "border-red-200 bg-red-50 text-red-700"
+                                            : "border-gray-200 bg-white"
+                                        }`}
+                                      >
+                                        <p className="font-medium">
+                                          {formatDateRange(booking.start, booking.end)}
+                                          <span className="ml-2 text-xs font-normal text-gray-500">
+                                            {duration} day{duration === 1 ? "" : "s"}
+                                          </span>
+                                        </p>
+                                        {booking.projectId && (
+                                          <p className="text-xs text-gray-600">
+                                            Project: {booking.projectId}
+                                          </p>
+                                        )}
+                                        {booking.status && (
+                                          <p className="text-xs text-gray-600">
+                                            Status: {booking.status}
+                                          </p>
+                                        )}
+                                        {booking.notes && (
+                                          <p className="text-xs text-gray-600">
+                                            Notes: {booking.notes}
+                                          </p>
+                                        )}
+                                      </div>
+                                    </li>
+                                  );
+                                })}
+                              </ol>
+                              {schedule.hasConflicts ? (
+                                <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                                  <p className="font-medium">Booking overlap detected</p>
+                                  <p>
+                                    Some reservations overlap. Please contact the Pineapple
+                                    Tapped operations team so we can adjust the schedule or
+                                    arrange alternative kit.
+                                  </p>
+                                </div>
+                              ) : (
+                                <p className="text-xs text-gray-500">
+                                  No clashes spotted. Let us know if you need to block out
+                                  additional dates.
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
