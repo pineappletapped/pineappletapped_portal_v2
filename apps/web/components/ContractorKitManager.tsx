@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { User } from "firebase/auth";
+import type { Auth, User } from "firebase/auth";
 import type { Equipment } from "@/lib/equipment";
-import { auth, db } from "@/lib/firebase";
+import { ensureFirebase } from "@/lib/firebase";
 import {
   addDoc,
   collection,
@@ -13,6 +13,7 @@ import {
   query,
   updateDoc,
   where,
+  type Firestore,
 } from "firebase/firestore";
 
 interface FormState {
@@ -65,39 +66,95 @@ export default function ContractorKitManager() {
   const [error, setError] = useState<string | null>(null);
   const [rentalTouched, setRentalTouched] = useState(false);
   const [currentTouched, setCurrentTouched] = useState(false);
+  const [authInstance, setAuthInstance] = useState<Auth | null>(null);
+  const [firestore, setFirestore] = useState<Firestore | null>(null);
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
-    const stopAuth = auth.onAuthStateChanged((user: User | null) => {
-      unsubscribe?.();
-      if (!user) {
-        setItems([]);
-        setLoading(false);
-        setAuthReady(true);
-        return;
-      }
+    let stopAuth: (() => void) | undefined;
+    let cancelled = false;
+
+    const markUnavailable = (
+      message: string,
+      userMessage = "Authentication is currently unavailable. Please refresh the page."
+    ) => {
+      if (cancelled) return;
+      console.error(message);
+      setError(userMessage);
+      setItems([]);
       setAuthReady(true);
-      setLoading(true);
-      const q = query(collection(db, "equipment"), where("ownerId", "==", user.uid));
-      unsubscribe = onSnapshot(
-        q,
-        (snapshot) => {
-          const list = snapshot.docs
-            .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as any) }))
-            .sort((a, b) => (a.name || "").localeCompare(b.name || "")) as Equipment[];
-          setItems(list);
-          setLoading(false);
-        },
-        (err) => {
-          console.error("Failed to load kit", err);
-          setError("Failed to load kit. Please try again.");
-          setLoading(false);
+      setLoading(false);
+    };
+
+    (async () => {
+      try {
+        const { auth, db } = await ensureFirebase();
+        if (cancelled) {
+          return;
         }
-      );
-    });
+
+        if (!auth || typeof auth.onAuthStateChanged !== "function") {
+          markUnavailable("Firebase auth is unavailable or missing onAuthStateChanged");
+          return;
+        }
+
+        if (!db) {
+          markUnavailable(
+            "Firestore is unavailable after Firebase initialisation",
+            "Equipment data is currently unavailable. Please refresh the page."
+          );
+          return;
+        }
+
+        setAuthInstance(auth);
+        setFirestore(db);
+
+        stopAuth = auth.onAuthStateChanged((user: User | null) => {
+          unsubscribe?.();
+          if (!user) {
+            setItems([]);
+            setLoading(false);
+            setAuthReady(true);
+            return;
+          }
+
+          setError(null);
+          setAuthReady(true);
+          setLoading(true);
+
+          const equipmentQuery = query(
+            collection(db, "equipment"),
+            where("ownerId", "==", user.uid)
+          );
+
+          unsubscribe = onSnapshot(
+            equipmentQuery,
+            (snapshot) => {
+              const list = snapshot.docs
+                .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as any) }))
+                .sort((a, b) => (a.name || "").localeCompare(b.name || "")) as Equipment[];
+              setItems(list);
+              setLoading(false);
+            },
+            (err) => {
+              console.error("Failed to load kit", err);
+              setError("Failed to load kit. Please try again.");
+              setLoading(false);
+            }
+          );
+        });
+      } catch (err) {
+        console.error("Failed to initialise Firebase for ContractorKitManager", err);
+        markUnavailable(
+          "Failed to initialise Firebase for ContractorKitManager",
+          "We couldn't connect to the equipment service. Please refresh the page."
+        );
+      }
+    })();
 
     return () => {
-      stopAuth();
+      cancelled = true;
+      stopAuth?.();
       unsubscribe?.();
     };
   }, []);
@@ -200,9 +257,14 @@ export default function ContractorKitManager() {
   };
 
   const submit = async () => {
-    const user = auth.currentUser;
+    const user = authInstance?.currentUser;
     if (!user) {
       setError("You must be signed in to manage kit.");
+      return;
+    }
+
+    if (!firestore) {
+      setError("The equipment database is unavailable. Please refresh and try again.");
       return;
     }
 
@@ -235,9 +297,9 @@ export default function ContractorKitManager() {
 
       if (!editingId) {
         payload.createdAt = new Date();
-        await addDoc(collection(db, "equipment"), payload);
+        await addDoc(collection(firestore, "equipment"), payload);
       } else {
-        await updateDoc(doc(db, "equipment", editingId), payload);
+        await updateDoc(doc(firestore, "equipment", editingId), payload);
       }
       resetForm();
       setShowForm(false);
@@ -251,8 +313,12 @@ export default function ContractorKitManager() {
   const remove = async (id?: string) => {
     if (!id) return;
     if (!confirm("Remove this kit item?")) return;
+    if (!firestore) {
+      setError("The equipment database is unavailable. Please refresh and try again.");
+      return;
+    }
     try {
-      await deleteDoc(doc(db, "equipment", id));
+      await deleteDoc(doc(firestore, "equipment", id));
     } catch (err) {
       console.error("Failed to delete kit item", err);
       setError("Failed to delete kit item. Please try again.");
