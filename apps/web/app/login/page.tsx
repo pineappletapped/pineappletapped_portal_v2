@@ -56,9 +56,12 @@ export default function Login() {
         isStaff = userDoc.exists() && !!userDoc.data()?.isStaff;
       }
       const token = await credential.user.getIdToken();
-      document.cookie = `token=${token}; path=/`;
-      document.cookie = `uid=${credential.user.uid}; path=/`;
-      document.cookie = `isStaff=${isStaff ? '1' : '0'}; path=/`;
+      const maxAge = 60 * 60 * 24 * 7; // 7 days
+      const secureAttr = typeof window !== 'undefined' && window.location.protocol === 'https:' ? '; Secure' : '';
+      const baseAttrs = `Path=/; Max-Age=${maxAge}; SameSite=Strict${secureAttr}`;
+      document.cookie = `token=${encodeURIComponent(token)}; ${baseAttrs}`;
+      document.cookie = `uid=${encodeURIComponent(credential.user.uid)}; ${baseAttrs}`;
+      document.cookie = `isStaff=${isStaff ? '1' : '0'}; ${baseAttrs}`;
       window.location.href = isStaff ? '/admin' : '/dashboard';
     } catch (err) {
       console.error('Failed to sign in with Firebase', err);
