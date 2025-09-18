@@ -5,16 +5,22 @@ import type { Auth, User } from "firebase/auth";
 import type { Equipment } from "@/lib/equipment";
 import { ensureFirebase } from "@/lib/firebase";
 import {
-  addDoc,
   collection,
   deleteDoc,
   doc,
   onSnapshot,
   query,
+  setDoc,
   updateDoc,
   where,
   type Firestore,
 } from "firebase/firestore";
+import {
+  getDownloadURL,
+  ref,
+  uploadBytes,
+  type FirebaseStorage,
+} from "firebase/storage";
 
 interface FormState {
   name: string;
@@ -30,6 +36,8 @@ interface FormState {
   weightKg: string;
   damage: string;
   available: boolean;
+  photoUrl: string;
+  documents: string[];
 }
 
 const EMPTY_FORM: FormState = {
@@ -46,6 +54,8 @@ const EMPTY_FORM: FormState = {
   weightKg: "",
   damage: "",
   available: true,
+  photoUrl: "",
+  documents: [],
 };
 
 const RENTAL_PERCENTAGE = 0.025;
@@ -68,6 +78,12 @@ export default function ContractorKitManager() {
   const [currentTouched, setCurrentTouched] = useState(false);
   const [authInstance, setAuthInstance] = useState<Auth | null>(null);
   const [firestore, setFirestore] = useState<Firestore | null>(null);
+  const [storageInstance, setStorageInstance] = useState<FirebaseStorage | null>(
+    null
+  );
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [documentFiles, setDocumentFiles] = useState<File[]>([]);
+  const [fileInputsKey, setFileInputsKey] = useState(0);
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -88,7 +104,7 @@ export default function ContractorKitManager() {
 
     (async () => {
       try {
-        const { auth, db } = await ensureFirebase();
+        const { auth, db, storage } = await ensureFirebase();
         if (cancelled) {
           return;
         }
@@ -108,6 +124,7 @@ export default function ContractorKitManager() {
 
         setAuthInstance(auth);
         setFirestore(db);
+        setStorageInstance(storage ?? null);
 
         stopAuth = auth.onAuthStateChanged((user: User | null) => {
           unsubscribe?.();
@@ -171,6 +188,9 @@ export default function ContractorKitManager() {
     setRentalTouched(false);
     setCurrentTouched(false);
     setError(null);
+    setPhotoFile(null);
+    setDocumentFiles([]);
+    setFileInputsKey((key) => key + 1);
   };
 
   const startNew = () => {
@@ -195,10 +215,15 @@ export default function ContractorKitManager() {
       weightKg: item.weightKg != null ? String(item.weightKg) : "",
       damage: item.damage || "",
       available: item.available !== false,
+      photoUrl: item.photo || "",
+      documents: Array.isArray(item.documents) ? [...item.documents] : [],
     });
     setRentalTouched(true);
     setCurrentTouched(true);
     setError(null);
+    setPhotoFile(null);
+    setDocumentFiles([]);
+    setFileInputsKey((key) => key + 1);
   };
 
   const cancelForm = () => {
@@ -236,6 +261,19 @@ export default function ContractorKitManager() {
     }
 
     setForm((prev) => ({ ...prev, [name]: strValue } as FormState));
+  };
+
+  const clearExistingPhoto = () => {
+    setForm((prev) => ({ ...prev, photoUrl: "" } as FormState));
+    setPhotoFile(null);
+  };
+
+  const removeExistingDocument = (index: number) => {
+    setForm((prev) => {
+      const nextDocs = [...prev.documents];
+      nextDocs.splice(index, 1);
+      return { ...prev, documents: nextDocs } as FormState;
+    });
   };
 
   const applySuggestion = () => {
@@ -277,6 +315,50 @@ export default function ContractorKitManager() {
     setSaving(true);
     setError(null);
     try {
+      if ((photoFile || documentFiles.length) && !storageInstance) {
+        setError(
+          "File storage is unavailable right now. Please refresh the page and try again."
+        );
+        return;
+      }
+
+      const equipmentCollection = collection(firestore, "equipment");
+      const targetDoc = editingId
+        ? doc(firestore, "equipment", editingId)
+        : doc(equipmentCollection);
+
+      const kitId = targetDoc.id;
+      const storageBasePath = `equipment/${user.uid}/${kitId}`;
+      let photoUrl = form.photoUrl.trim();
+      let documentUrls = form.documents.filter((doc) => !!doc?.trim());
+
+      if (photoFile && storageInstance) {
+        const photoRef = ref(
+          storageInstance,
+          `${storageBasePath}/primary-${Date.now()}-${photoFile.name}`
+        );
+        await uploadBytes(photoRef, photoFile);
+        photoUrl = await getDownloadURL(photoRef);
+      }
+
+      if (documentFiles.length && storageInstance) {
+        const now = Date.now();
+        const uploadedDocs = await Promise.all(
+          documentFiles.map(async (file, index) => {
+            const docRefStorage = ref(
+              storageInstance,
+              `${storageBasePath}/docs/${now}-${index}-${file.name}`
+            );
+            await uploadBytes(docRefStorage, file);
+            return getDownloadURL(docRefStorage);
+          })
+        );
+        documentUrls = [...documentUrls, ...uploadedDocs];
+      }
+
+      documentUrls = Array.from(new Set(documentUrls.map((url) => url.trim())));
+
+      const timestamp = new Date();
       const payload: any = {
         name: form.name.trim(),
         serialNumber: form.serialNumber.trim(),
@@ -292,22 +374,24 @@ export default function ContractorKitManager() {
         weightKg: toNumber(form.weightKg),
         damage: form.damage.trim(),
         available: form.available,
-        updatedAt: new Date(),
+        photo: photoUrl,
+        documents: documentUrls,
+        updatedAt: timestamp,
       };
 
       if (!editingId) {
-        payload.createdAt = new Date();
-        await addDoc(collection(firestore, "equipment"), payload);
+        await setDoc(targetDoc, { ...payload, createdAt: timestamp });
       } else {
-        await updateDoc(doc(firestore, "equipment", editingId), payload);
+        await updateDoc(targetDoc, payload);
       }
       resetForm();
       setShowForm(false);
     } catch (err: any) {
       console.error("Failed to save kit", err);
       setError(err?.message || "Failed to save kit item.");
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const remove = async (id?: string) => {
@@ -471,6 +555,79 @@ export default function ContractorKitManager() {
               onChange={(e) => handleFieldChange("weightKg", e.target.value)}
             />
           </div>
+          <div className="space-y-2">
+            <span className="block text-sm font-medium">Primary photo</span>
+            {form.photoUrl && (
+              <div className="flex items-center gap-3">
+                <img
+                  src={form.photoUrl}
+                  alt={`${form.name || "Kit"} photo`}
+                  className="h-16 w-16 rounded object-cover"
+                />
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-xs text-red-600"
+                  onClick={clearExistingPhoto}
+                >
+                  Remove photo
+                </button>
+              </div>
+            )}
+            <input
+              key={`photo-${fileInputsKey}`}
+              type="file"
+              accept="image/*"
+              onChange={(e) => setPhotoFile(e.target.files?.[0] ?? null)}
+            />
+            {photoFile && (
+              <p className="text-xs text-gray-600">Selected: {photoFile.name}</p>
+            )}
+            <p className="text-xs text-gray-500">
+              Upload a clear image to help the team identify the kit.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <span className="block text-sm font-medium">Supporting documents</span>
+            {form.documents.length > 0 && (
+              <ul className="space-y-1 text-xs text-gray-600">
+                {form.documents.map((url, index) => (
+                  <li key={`${url}-${index}`} className="flex items-center gap-2">
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="text-blue-600 hover:underline"
+                    >
+                      Document {index + 1}
+                    </a>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-xs text-red-600"
+                      onClick={() => removeExistingDocument(index)}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <input
+              key={`docs-${fileInputsKey}`}
+              type="file"
+              multiple
+              onChange={(e) => setDocumentFiles(Array.from(e.target.files ?? []))}
+            />
+            {documentFiles.length > 0 && (
+              <ul className="list-disc pl-5 text-xs text-gray-600">
+                {documentFiles.map((file, index) => (
+                  <li key={`${file.name}-${index}`}>{file.name}</li>
+                ))}
+              </ul>
+            )}
+            <p className="text-xs text-gray-500">
+              Add manuals, certificates, or proof of purchase (PDFs or images).
+            </p>
+          </div>
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -494,13 +651,15 @@ export default function ContractorKitManager() {
         </p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] text-sm border">
+          <table className="w-full min-w-[880px] text-sm border">
             <thead>
               <tr className="bg-gray-100 text-left">
+                <th className="p-2">Photo</th>
                 <th className="p-2">Name</th>
                 <th className="p-2">Category</th>
                 <th className="p-2">Purchase £</th>
                 <th className="p-2">Rental £</th>
+                <th className="p-2">Documents</th>
                 <th className="p-2">Available</th>
                 <th className="p-2">Actions</th>
               </tr>
@@ -508,12 +667,43 @@ export default function ContractorKitManager() {
             <tbody>
               {items.map((item) => (
                 <tr key={item.id} className="border-t">
-                  <td className="p-2 font-medium">{item.name}</td>
-                  <td className="p-2">{item.category}</td>
-                  <td className="p-2">£{(item.newValue || 0).toFixed(2)}</td>
-                  <td className="p-2">£{(item.rentalPrice || 0).toFixed(2)}</td>
-                  <td className="p-2">{item.available === false ? "No" : "Yes"}</td>
-                  <td className="p-2 space-x-2">
+                  <td className="p-2 align-top">
+                    {item.photo ? (
+                      <img
+                        src={item.photo}
+                        alt={`${item.name || "Kit"} thumbnail`}
+                        className="h-12 w-12 rounded object-cover"
+                      />
+                    ) : (
+                      <span className="text-xs text-gray-500">No photo</span>
+                    )}
+                  </td>
+                  <td className="p-2 font-medium align-top">{item.name}</td>
+                  <td className="p-2 align-top">{item.category}</td>
+                  <td className="p-2 align-top">£{(item.newValue || 0).toFixed(2)}</td>
+                  <td className="p-2 align-top">£{(item.rentalPrice || 0).toFixed(2)}</td>
+                  <td className="p-2 align-top">
+                    {Array.isArray(item.documents) && item.documents.length > 0 ? (
+                      <ul className="space-y-1 text-xs">
+                        {item.documents.map((url, index) => (
+                          <li key={`${item.id}-doc-${index}`}>
+                            <a
+                              href={url}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="text-blue-600 hover:underline"
+                            >
+                              Document {index + 1}
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <span className="text-xs text-gray-500">None</span>
+                    )}
+                  </td>
+                  <td className="p-2 align-top">{item.available === false ? "No" : "Yes"}</td>
+                  <td className="p-2 space-x-2 align-top">
                     <button
                       className="btn btn-xs btn-outline"
                       onClick={() => startEdit(item)}

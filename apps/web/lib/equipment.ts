@@ -23,6 +23,7 @@ export interface Equipment {
   weightKg?: number;
   length?: string;
   photo?: string;
+  documents?: string[];
   config?: {
     username?: string;
     password?: string;
