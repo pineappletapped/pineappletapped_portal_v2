@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { auth, db, storage } from "@/lib/firebase";
@@ -134,7 +135,15 @@ export default function EquipmentDetailPage() {
       <input className="input input-bordered" placeholder="IP Address" value={form.config?.ip || ''} onChange={e=>setForm({...form,config:{...form.config,ip:e.target.value}})} />
       <input className="input input-bordered" placeholder="Firmware Version" value={form.config?.firmware || ''} onChange={e=>setForm({...form,config:{...form.config,firmware:e.target.value}})} />
       <input className="input input-bordered" placeholder="Last Serviced" value={form.config?.lastServiced || ''} onChange={e=>setForm({...form,config:{...form.config,lastServiced:e.target.value}})} />
-      {form.photo && <img src={form.photo} alt="equipment" className="max-h-40" />}
+      {form.photo && (
+        <Image
+          src={form.photo}
+          alt={form.name ? `${form.name} photo` : 'Equipment photo'}
+          width={400}
+          height={400}
+          className="h-auto max-h-40 w-auto object-contain"
+        />
+      )}
       <input type="file" onChange={e=>setPhotoFile(e.target.files?.[0] || null)} />
       <div className="flex gap-2">
         <button onClick={save} className="btn" disabled={saving}>{saving ? 'Saving...' : 'Save'}</button>

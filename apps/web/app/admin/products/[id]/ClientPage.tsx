@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
@@ -637,7 +638,15 @@ export default function EditProductPage() {
           </div>
           <label className="text-sm font-medium">Image</label>
           <input type="file" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
-          {imageUrl && <img src={imageUrl} alt="preview" className="w-32" />}
+          {imageUrl && (
+            <Image
+              src={imageUrl}
+              alt={`${name} preview`}
+              width={256}
+              height={256}
+              className="h-auto w-32 object-cover"
+            />
+          )}
           <label className="text-sm font-medium">Category</label>
           <select className="input" value={category} onChange={(e) => setCategory(e.target.value)}>
             <option value="">None</option>
@@ -836,7 +845,15 @@ export default function EditProductPage() {
                 type="file"
                 onChange={(e) => updateDeliverable(i, { file: e.target.files?.[0] || undefined })}
               />
-              {d.thumbnailUrl && <img src={d.thumbnailUrl} alt="thumb" className="w-24" />}
+              {d.thumbnailUrl && (
+                <Image
+                  src={d.thumbnailUrl}
+                  alt={`${d.title || 'Deliverable'} thumbnail`}
+                  width={192}
+                  height={192}
+                  className="h-auto w-24 object-cover"
+                />
+              )}
               <button type="button" className="btn btn-sm w-fit" onClick={() => removeDeliverable(i)}>
                 Remove
               </button>
@@ -1047,7 +1064,15 @@ export default function EditProductPage() {
           />
           <label className="text-sm font-medium">Social Card</label>
           <input type="file" onChange={(e) => setSeoImageFile(e.target.files?.[0] || null)} />
-          {seo.socialImageUrl && <img src={seo.socialImageUrl} alt="social" className="w-32" />}
+          {seo.socialImageUrl && (
+            <Image
+              src={seo.socialImageUrl}
+              alt={`${name} social card`}
+              width={256}
+              height={256}
+              className="h-auto w-32 object-cover"
+            />
+          )}
         </div>
       )}
 

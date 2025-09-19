@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
 import { auth, db } from "@/lib/firebase";
@@ -187,10 +188,12 @@ export default function AdminProductsPage() {
             >
               <div className="flex items-center gap-4">
                 {p.imageUrl && (
-                  <img
+                  <Image
                     src={p.imageUrl}
                     alt={p.name}
-                    className="w-16 h-16 object-cover rounded"
+                    width={64}
+                    height={64}
+                    className="h-16 w-16 rounded object-cover"
                   />
                 )}
                 <div>

@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import type { Auth, User } from "firebase/auth";
 import type { Equipment } from "@/lib/equipment";
@@ -763,9 +764,11 @@ export default function ContractorKitManager() {
             <span className="block text-sm font-medium">Primary photo</span>
             {form.photoUrl && (
               <div className="flex items-center gap-3">
-                <img
+                <Image
                   src={form.photoUrl}
                   alt={`${form.name || "Kit"} photo`}
+                  width={64}
+                  height={64}
                   className="h-16 w-16 rounded object-cover"
                 />
                 <button
@@ -875,9 +878,11 @@ export default function ContractorKitManager() {
                   <tr className="border-t">
                     <td className="p-2 align-top">
                       {item.photo ? (
-                        <img
+                        <Image
                           src={item.photo}
                           alt={`${item.name || "Kit"} thumbnail`}
+                          width={48}
+                          height={48}
                           className="h-12 w-12 rounded object-cover"
                         />
                       ) : (

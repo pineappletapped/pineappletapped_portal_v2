@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useState } from "react";
 import { auth, db, storage } from "@/lib/firebase";
 import { collection, addDoc, getDocs, getDoc, doc, deleteDoc, updateDoc } from "firebase/firestore";
@@ -94,7 +95,15 @@ export default function AdminClientLogosPage() {
           }}
           required
         />
-        {preview && <img src={preview} alt="Preview" className="h-16 object-contain" />}
+        {preview && (
+          <Image
+            src={preview}
+            alt={`Preview of ${name}`}
+            width={128}
+            height={64}
+            className="h-16 w-auto object-contain"
+          />
+        )}
         <button className="btn" disabled={!file}>
           Add Logo
         </button>
@@ -104,7 +113,13 @@ export default function AdminClientLogosPage() {
         {logos.map((l) => (
           <li key={l.id} className="border rounded p-4 flex flex-col items-center gap-2">
             {l.imageUrl && (
-              <img src={l.imageUrl} alt={l.name} className="h-16 object-contain" />
+              <Image
+                src={l.imageUrl}
+                alt={l.name}
+                width={128}
+                height={64}
+                className="h-16 w-auto object-contain"
+              />
             )}
             <p className="text-sm">{l.name}</p>
             <button

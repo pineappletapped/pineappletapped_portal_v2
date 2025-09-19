@@ -1,4 +1,5 @@
 "use client";
+import Image from 'next/image';
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
@@ -34,7 +35,15 @@ export default function BrandPacksListPage() {
         <div className="grid gap-2">
           {packs.length === 0 ? <p>No brand packs yet.</p> : packs.map((b) => (
             <div key={b.id} className="card flex items-center gap-3">
-              {b.logoUrl && <img src={b.logoUrl} alt="logo" className="h-6 w-6 rounded" />}
+              {b.logoUrl && (
+                <Image
+                  src={b.logoUrl}
+                  alt={`${b.name} logo`}
+                  width={24}
+                  height={24}
+                  className="h-6 w-6 rounded object-contain"
+                />
+              )}
               <div className="font-medium flex-1">{b.name}</div>
               <div className="flex gap-2">
                 {b.primaryColor && <span className="inline-block h-3 w-3 rounded-full" style={{ background: b.primaryColor }} />}

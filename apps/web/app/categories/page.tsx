@@ -1,3 +1,4 @@
+import Image from 'next/image';
 import Link from 'next/link';
 import { getCategories } from '@/lib/categories';
 
@@ -19,11 +20,15 @@ export default async function CategoriesPage() {
             className="border rounded-md overflow-hidden bg-white hover:shadow-md transition-shadow"
           >
             {cat.headerImage && (
-              <img
-                src={cat.headerImage}
-                alt={cat.name}
-                className="w-full h-40 object-cover"
-              />
+              <div className="relative h-40 w-full">
+                <Image
+                  src={cat.headerImage}
+                  alt={cat.name}
+                  fill
+                  sizes="(min-width: 768px) 33vw, (min-width: 640px) 50vw, 100vw"
+                  className="object-cover"
+                />
+              </div>
             )}
             <div className="p-4">
               <h2 className="text-lg font-medium">{cat.name}</h2>

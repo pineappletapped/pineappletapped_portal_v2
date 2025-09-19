@@ -1,4 +1,5 @@
 "use client";
+import Image from 'next/image';
 import { useEffect, useState } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, addDoc, orderBy, query, getDocs, serverTimestamp } from 'firebase/firestore';
@@ -55,7 +56,15 @@ export default function JoinTeamPage() {
       <h1 className="text-xl font-semibold">Join Our Team</h1>
       <div className="card p-4 grid gap-4">
         <h2 className="text-lg font-semibold">{step.title}</h2>
-        {step.mediaUrl && <img src={step.mediaUrl} alt="" className="max-h-48 object-cover rounded" />}
+        {step.mediaUrl && (
+          <Image
+            src={step.mediaUrl}
+            alt={step.title}
+            width={640}
+            height={360}
+            className="h-auto w-full max-h-48 rounded object-cover"
+          />
+        )}
         <p>{step.description}</p>
         {step.fields?.map(f => (
           f.type === 'textarea' ? (

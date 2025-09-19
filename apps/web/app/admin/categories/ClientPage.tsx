@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useState } from "react";
 import { auth, db, storage } from "@/lib/firebase";
 import {
@@ -197,10 +198,12 @@ export default function AdminCategoriesPage() {
                   }}
                 />
                 {(editHeaderImagePreview || editHeaderImage) && (
-                  <img
+                  <Image
                     src={editHeaderImagePreview || editHeaderImage}
                     alt="Header preview"
-                    className="max-h-32 object-cover"
+                    width={512}
+                    height={256}
+                    className="h-auto max-h-32 w-full object-cover"
                   />
                 )}
                 <select
@@ -315,10 +318,12 @@ export default function AdminCategoriesPage() {
             }}
           />
           {headerImagePreview && (
-            <img
+            <Image
               src={headerImagePreview}
               alt="Header preview"
-              className="max-h-32 object-cover"
+              width={512}
+              height={256}
+              className="h-auto max-h-32 w-full object-cover"
             />
           )}
           <select

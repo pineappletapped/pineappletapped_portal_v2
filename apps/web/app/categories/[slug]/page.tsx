@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import { getCategoryBySlug } from "@/lib/categories";
 import { getProductsByCategory } from "@/lib/products";
 import ProductCard from "@/components/ProductCard";
@@ -60,11 +61,15 @@ export default async function CategoryPage({ params }: { params: { slug: string 
       />
       <header className="grid gap-2">
         {category.headerImage && (
-          <img
-            src={category.headerImage}
-            alt={category.name}
-            className="w-full h-48 object-cover rounded"
-          />
+          <div className="relative h-48 w-full">
+            <Image
+              src={category.headerImage}
+              alt={category.name}
+              fill
+              sizes="(min-width: 768px) 50vw, 100vw"
+              className="rounded object-cover"
+            />
+          </div>
         )}
         <h1 className="text-3xl font-semibold">{category.name}</h1>
         {category.description && <p>{category.description}</p>}
