@@ -269,12 +269,12 @@ export default function ContractorKitManager() {
       try {
         const now = Timestamp.fromDate(new Date());
         const results = await Promise.all(
-          items.map(async (item) => {
+          items.map(async (item): Promise<{ id: string; state: BookingState }> => {
             if (!item.id) {
-              return ["", { bookings: [], hasConflicts: false, conflictIds: [] }] as [
-                string,
-                BookingState,
-              ];
+              return {
+                id: "",
+                state: { bookings: [], hasConflicts: false, conflictIds: [] },
+              };
             }
             try {
               const bookingsRef = collection(
@@ -305,28 +305,28 @@ export default function ContractorKitManager() {
 
               const conflictIds = detectConflicts(entries);
 
-              return [
-                item.id,
-                {
+              return {
+                id: item.id,
+                state: {
                   bookings: entries,
                   hasConflicts: conflictIds.length > 0,
                   conflictIds,
                 } as BookingState,
-              ];
+              };
             } catch (err) {
               console.error(
                 `Failed to load bookings for equipment ${item.id}`,
                 err
               );
-              return [
-                item.id,
-                {
+              return {
+                id: item.id ?? "",
+                state: {
                   bookings: [],
                   hasConflicts: false,
                   conflictIds: [],
                   error: "We couldn't load this schedule. Please try again.",
                 } as BookingState,
-              ];
+              };
             }
           })
         );
@@ -334,7 +334,7 @@ export default function ContractorKitManager() {
         if (cancelled) return;
 
         const nextState: Record<string, BookingState> = {};
-        results.forEach(([id, state]) => {
+        results.forEach(({ id, state }) => {
           if (!id) return;
           nextState[id] = state;
         });
