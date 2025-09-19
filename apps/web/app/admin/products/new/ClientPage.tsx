@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { auth, db, storage, functions } from "@/lib/firebase";
@@ -21,6 +21,7 @@ import type {
   ProductSEO,
   ProductVariation,
 } from "@/lib/products";
+import type { Venue } from "@/lib/venues";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -33,6 +34,7 @@ import {
   FiFileText,
 } from "react-icons/fi";
 import type { Category } from "@/lib/categories";
+import VenueMap from "@/components/VenueMap";
 
 const ReactQuill = dynamic(() => import("react-quill"), { ssr: false });
 import "react-quill/dist/quill.snow.css";
@@ -91,6 +93,7 @@ export default function NewProductPage() {
   const [cats, setCats] = useState<Category[]>([]);
   const [allModifiers, setAllModifiers] = useState<ModifierGroup[]>([]);
   const [workflows, setWorkflows] = useState<{ id: string; name: string }[]>([]);
+  const [venues, setVenues] = useState<Venue[]>([]);
 
   const [tab, setTab] = useState<
     "info" | "variations" | "deliverables" | "tasks" | "seo" | "modifiers"
@@ -117,8 +120,26 @@ export default function NewProductPage() {
   const [category, setCategory] = useState("");
   const [workflowId, setWorkflowId] = useState("");
   const [eventDate, setEventDate] = useState("");
+  const [venueId, setVenueId] = useState("");
   const [venue, setVenue] = useState("");
   const [hidden, setHidden] = useState(false);
+  const [labourCost, setLabourCost] = useState("0");
+  const [defaultKitCost, setDefaultKitCost] = useState("0");
+  const [travelMiles, setTravelMiles] = useState("100");
+  const [travelRate, setTravelRate] = useState("0.3");
+  const [parkingCost, setParkingCost] = useState("0");
+  const [travelMilesTouched, setTravelMilesTouched] = useState(false);
+  const [parkingTouched, setParkingTouched] = useState(false);
+  const selectedVenue = useMemo(
+    () => venues.find((v) => v.id === venueId) || null,
+    [venues, venueId]
+  );
+  const parseMoney = (value: string, fallback = 0) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : fallback;
+  };
+  const formatCurrency = (value: number) =>
+    `£${(Number.isFinite(value) ? value : 0).toFixed(2)}`;
   const [tasks, setTasks] = useState<ProductTask[]>([]);
   const [taskTitle, setTaskTitle] = useState("");
   const [taskForCustomer, setTaskForCustomer] = useState(false);
@@ -137,20 +158,48 @@ export default function NewProductPage() {
       const staff = me?.isStaff === true;
       setIsStaff(staff);
       if (staff) {
-        const [catSnap, modSnap, wfSnap] = await Promise.all([
+        const [catSnap, modSnap, wfSnap, venueSnap] = await Promise.all([
           getDocs(collection(db, "categories")),
           getDocs(collection(db, "modifiers")),
           getDocs(collection(db, "workflows")),
+          getDocs(collection(db, "venues")),
         ]);
         setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setAllModifiers(
           modSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as any
         );
         setWorkflows(wfSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+        setVenues(
+          venueSnap.docs
+            .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
+            .sort((a, b) => a.name.localeCompare(b.name))
+        );
       }
       setLoading(false);
     })();
   }, []);
+
+  useEffect(() => {
+    if (selectedVenue) {
+      if (
+        !travelMilesTouched &&
+        selectedVenue.mileageFromWellingborough !== undefined &&
+        selectedVenue.mileageFromWellingborough !== null
+      ) {
+        setTravelMiles(String(selectedVenue.mileageFromWellingborough));
+      }
+      if (
+        !parkingTouched &&
+        selectedVenue.parkingRate !== undefined &&
+        selectedVenue.parkingRate !== null
+      ) {
+        setParkingCost(String(selectedVenue.parkingRate));
+      }
+    } else {
+      if (!travelMilesTouched) setTravelMiles("100");
+      if (!parkingTouched) setParkingCost("0");
+    }
+  }, [selectedVenue, travelMilesTouched, parkingTouched]);
 
   const upload = async (path: string, file: File) => {
     const r = ref(storage, path);
@@ -168,16 +217,36 @@ export default function NewProductPage() {
         ? v.featuresText.split("\n").map((f) => f.trim()).filter(Boolean)
         : [],
     }));
+    const venueLabel = venue || selectedVenue?.name || null;
+    const labourValue = parseMoney(labourCost);
+    const kitValue = parseMoney(defaultKitCost);
+    const travelMilesValue = parseMoney(travelMiles, 100);
+    const travelRateValue = parseMoney(travelRate, 0.3);
+    const travelCostValue = Number.isFinite(travelMilesValue * travelRateValue)
+      ? travelMilesValue * travelRateValue
+      : 0;
+    const parkingValue = parseMoney(parkingCost);
     const docRef = await addDoc(collection(db, "products"), {
       name,
       description,
       tagline: tagline || null,
       price: Number(price) || 0,
+      labourCost: labourValue,
+      defaultKitCost: kitValue,
+      budget: {
+        labour: labourValue,
+        kit: kitValue,
+        travelMiles: travelMilesValue,
+        travelRate: travelRateValue,
+        travelCost: Number.isFinite(travelCostValue) ? travelCostValue : 0,
+        parking: parkingValue,
+      },
       requirements: requirements || null,
       deliveryTime: deliveryOptions[deliveryIndex],
       category: category || null,
       eventDate: eventDate || null,
-      venue: venue || null,
+      venue: venueLabel,
+      venueId: venueId || null,
       hidden,
       defaultTasks: tasks,
       variations: variationData,
@@ -332,6 +401,18 @@ export default function NewProductPage() {
   if (loading) return <p>Loading…</p>;
   if (!isStaff) return <p>You do not have permission to create products.</p>;
 
+  const labourValue = parseMoney(labourCost);
+  const kitValue = parseMoney(defaultKitCost);
+  const travelMilesValue = parseMoney(travelMiles, 100);
+  const travelRateValue = parseMoney(travelRate, 0.3);
+  const travelCostValue = Number.isFinite(travelMilesValue * travelRateValue)
+    ? travelMilesValue * travelRateValue
+    : 0;
+  const parkingValue = parseMoney(parkingCost);
+  const priceValue = parseMoney(price);
+  const budgetTotal = labourValue + kitValue + travelCostValue + parkingValue;
+  const profitValue = priceValue - budgetTotal;
+
   return (
     <form onSubmit={save} className="grid gap-6 max-w-2xl">
       <h1 className="text-xl font-semibold">Create Product</h1>
@@ -365,6 +446,92 @@ export default function NewProductPage() {
         <ReactQuill theme="snow" value={description} onChange={setDescription} />
           <label className="text-sm font-medium">Price (GBP)</label>
           <input type="number" className="input" value={price} onChange={(e) => setPrice(e.target.value)} />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Labour Cost</label>
+              <input
+                type="number"
+                className="input"
+                value={labourCost}
+                onChange={(e) => setLabourCost(e.target.value)}
+              />
+              <label className="text-sm font-medium">Default Kit Cost</label>
+              <input
+                type="number"
+                className="input"
+                value={defaultKitCost}
+                onChange={(e) => setDefaultKitCost(e.target.value)}
+              />
+              <label className="text-sm font-medium">Travel Miles (estimate)</label>
+              <input
+                type="number"
+                className="input"
+                value={travelMiles}
+                onChange={(e) => {
+                  setTravelMilesTouched(true);
+                  setTravelMiles(e.target.value);
+                }}
+              />
+              <label className="text-sm font-medium">Travel Rate (per mile)</label>
+              <input
+                type="number"
+                step="0.01"
+                className="input"
+                value={travelRate}
+                onChange={(e) => setTravelRate(e.target.value)}
+              />
+              <label className="text-sm font-medium">Parking Budget</label>
+              <input
+                type="number"
+                step="0.01"
+                className="input"
+                value={parkingCost}
+                onChange={(e) => {
+                  setParkingTouched(true);
+                  setParkingCost(e.target.value);
+                }}
+              />
+            </div>
+            <div className="border rounded p-3 text-sm space-y-2">
+              <div className="flex justify-between">
+                <span>Price</span>
+                <span>{formatCurrency(priceValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Labour</span>
+                <span>{formatCurrency(labourValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Kit</span>
+                <span>{formatCurrency(kitValue)}</span>
+              </div>
+              <div>
+                <div className="flex justify-between">
+                  <span>Travel</span>
+                  <span>{formatCurrency(travelCostValue)}</span>
+                </div>
+                <div className="text-xs text-gray-500 text-right">
+                  {travelMilesValue} miles @ £{travelRateValue.toFixed(2)}
+                </div>
+              </div>
+              <div className="flex justify-between">
+                <span>Parking</span>
+                <span>{formatCurrency(parkingValue)}</span>
+              </div>
+              <div className="flex justify-between font-medium border-t pt-1">
+                <span>Budget Total</span>
+                <span>{formatCurrency(budgetTotal)}</span>
+              </div>
+              <div
+                className={`flex justify-between font-semibold ${
+                  profitValue < 0 ? "text-red-600" : ""
+                }`}
+              >
+                <span>Estimated Profit</span>
+                <span>{formatCurrency(profitValue)}</span>
+              </div>
+            </div>
+          </div>
           <label className="text-sm font-medium">Image</label>
           <input type="file" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
           <label className="text-sm font-medium">Category</label>
@@ -394,12 +561,68 @@ export default function NewProductPage() {
                 value={eventDate}
                 onChange={(e) => setEventDate(e.target.value)}
               />
-              <label className="text-sm font-medium">Venue</label>
+              <label className="text-sm font-medium">Linked Venue</label>
+              <select
+                className="input"
+                value={venueId}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setVenueId(value);
+                  if (value) {
+                    const match = venues.find((v) => v.id === value);
+                    setVenue(match?.name || "");
+                  }
+                }}
+              >
+                <option value="">Custom / not listed</option>
+                {venues.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+              {selectedVenue && (
+                <div className="rounded bg-slate-100 p-2 text-xs text-gray-600 grid gap-1">
+                  {selectedVenue.mileageFromWellingborough !== null &&
+                    selectedVenue.mileageFromWellingborough !== undefined && (
+                      <div>
+                        Mileage: {selectedVenue.mileageFromWellingborough} miles
+                      </div>
+                    )}
+                  {selectedVenue.parkingRate !== null &&
+                    selectedVenue.parkingRate !== undefined && (
+                      <div>
+                        Parking Rate: £{Number(selectedVenue.parkingRate).toFixed(2)}
+                      </div>
+                    )}
+                  {selectedVenue.parkingTips && (
+                    <div className="truncate">
+                      <span className="font-medium">Parking:</span> {selectedVenue.parkingTips}
+                    </div>
+                  )}
+                  {selectedVenue.accessInfo && (
+                    <div className="truncate">
+                      <span className="font-medium">Access:</span> {selectedVenue.accessInfo}
+                    </div>
+                  )}
+                {selectedVenue.internetInfo && (
+                  <div className="truncate">
+                    <span className="font-medium">Internet:</span> {selectedVenue.internetInfo}
+                  </div>
+                )}
+                <VenueMap venue={selectedVenue} className="mt-1" height={200} />
+              </div>
+            )}
+              <label className="text-sm font-medium">Venue Label</label>
               <input
                 className="input"
                 value={venue}
                 onChange={(e) => setVenue(e.target.value)}
+                placeholder="Shown on the product page"
               />
+              <p className="text-xs text-gray-500 -mt-1">
+                This text appears on the customer-facing product pages.
+              </p>
             </>
           )}
           <label className="flex items-center gap-2">

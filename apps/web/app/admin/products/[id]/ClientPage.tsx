@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import Image from "next/image";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { auth, db, storage, functions } from "@/lib/firebase";
@@ -22,6 +23,7 @@ import type {
   ProductSEO,
   ProductVariation,
 } from "@/lib/products";
+import type { Venue } from "@/lib/venues";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -34,6 +36,7 @@ import {
   FiFileText,
 } from "react-icons/fi";
 import type { Category } from "@/lib/categories";
+import VenueMap from "@/components/VenueMap";
 
 const ReactQuill = dynamic(() => import("react-quill"), { ssr: false });
 import "react-quill/dist/quill.snow.css";
@@ -95,6 +98,7 @@ export default function EditProductPage() {
   const [cats, setCats] = useState<Category[]>([]);
   const [allModifiers, setAllModifiers] = useState<ModifierGroup[]>([]);
   const [workflows, setWorkflows] = useState<{ id: string; name: string }[]>([]);
+  const [venues, setVenues] = useState<Venue[]>([]);
 
   const [tab, setTab] = useState<
     "info" | "variations" | "deliverables" | "kit" | "tasks" | "seo" | "modifiers"
@@ -122,6 +126,7 @@ export default function EditProductPage() {
   const [category, setCategory] = useState("");
   const [workflowId, setWorkflowId] = useState("");
   const [eventDate, setEventDate] = useState("");
+  const [venueId, setVenueId] = useState("");
   const [venue, setVenue] = useState("");
   const [hidden, setHidden] = useState(false);
   const [tasks, setTasks] = useState<ProductTask[]>([]);
@@ -132,6 +137,21 @@ export default function EditProductPage() {
   const [equipmentList, setEquipmentList] = useState<{ id: string; name: string }[]>([]);
   const [labourCost, setLabourCost] = useState("0");
   const [defaultKitCost, setDefaultKitCost] = useState("0");
+  const [travelMiles, setTravelMiles] = useState("100");
+  const [travelRate, setTravelRate] = useState("0.3");
+  const [parkingCost, setParkingCost] = useState("0");
+  const [travelMilesTouched, setTravelMilesTouched] = useState(false);
+  const [parkingTouched, setParkingTouched] = useState(false);
+  const selectedVenue = useMemo(
+    () => venues.find((v) => v.id === venueId) || null,
+    [venues, venueId]
+  );
+  const parseMoney = (value: string, fallback = 0) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : fallback;
+  };
+  const formatCurrency = (value: number) =>
+    `£${(Number.isFinite(value) ? value : 0).toFixed(2)}`;
 
   useEffect(() => {
     (async () => {
@@ -145,6 +165,8 @@ export default function EditProductPage() {
       const me = meSnap.data() as any;
       const staff = me?.isStaff === true;
       setIsStaff(staff);
+      let initialVenueId = "";
+      let initialVenueName = "";
       if (staff) {
         const prodSnap = await getDoc(doc(db, "products", id));
         if (prodSnap.exists()) {
@@ -155,6 +177,12 @@ export default function EditProductPage() {
           setPrice(String(p.price));
           setLabourCost(String((p as any).labourCost || 0));
           setDefaultKitCost(String((p as any).defaultKitCost || 0));
+          const budget = (p as any).budget || {};
+          setTravelMiles(String(budget.travelMiles ?? 100));
+          setTravelRate(String(budget.travelRate ?? 0.3));
+          setParkingCost(String(budget.parking ?? 0));
+          setTravelMilesTouched(budget.travelMiles !== undefined && budget.travelMiles !== null);
+          setParkingTouched(budget.parking !== undefined && budget.parking !== null);
           setImageUrl(p.imageUrl || "");
           setRequirements(p.requirements || "");
           const idx = deliveryOptions.indexOf(p.deliveryTime || "");
@@ -176,17 +204,21 @@ export default function EditProductPage() {
           setSeo(p.seo || {});
           setCategory(p.category || "");
           setEventDate(p.eventDate || "");
-          setVenue(p.venue || "");
+          initialVenueId = (p as any).venueId || "";
+          initialVenueName = p.venue || "";
+          setVenueId(initialVenueId);
+          setVenue(initialVenueName);
           setHidden(p.hidden || false);
           setTasks(p.defaultTasks || []);
           setWorkflowId((p as any).workflowId || "");
           setKitGroups((p as any).requiredKit || []);
         }
-        const [catSnap, modSnap, wfSnap, eqSnap] = await Promise.all([
+        const [catSnap, modSnap, wfSnap, eqSnap, venueSnap] = await Promise.all([
           getDocs(collection(db, "categories")),
           getDocs(collection(db, "modifiers")),
           getDocs(collection(db, "workflows")),
           getDocs(collection(db, "equipment")),
+          getDocs(collection(db, "venues")),
         ]);
         setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setAllModifiers(
@@ -196,10 +228,40 @@ export default function EditProductPage() {
         setEquipmentList(
           eqSnap.docs.map((d) => ({ id: d.id, name: (d.data() as any).name || d.id }))
         );
+        const venueList = venueSnap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setVenues(venueList);
+        if (!initialVenueName && initialVenueId) {
+          const match = venueList.find((v) => v.id === initialVenueId);
+          if (match) setVenue(match.name);
+        }
       }
       setLoading(false);
     })();
   }, [id]);
+
+  useEffect(() => {
+    if (selectedVenue) {
+      if (
+        !travelMilesTouched &&
+        selectedVenue.mileageFromWellingborough !== undefined &&
+        selectedVenue.mileageFromWellingborough !== null
+      ) {
+        setTravelMiles(String(selectedVenue.mileageFromWellingborough));
+      }
+      if (
+        !parkingTouched &&
+        selectedVenue.parkingRate !== undefined &&
+        selectedVenue.parkingRate !== null
+      ) {
+        setParkingCost(String(selectedVenue.parkingRate));
+      }
+    } else {
+      if (!travelMilesTouched) setTravelMiles("100");
+      if (!parkingTouched) setParkingCost("0");
+    }
+  }, [selectedVenue, travelMilesTouched, parkingTouched]);
 
   const upload = async (path: string, file: File) => {
     const r = ref(storage, path);
@@ -249,13 +311,30 @@ export default function EditProductPage() {
         seoImageFile
       );
 
+    const venueLabel = venue || selectedVenue?.name || null;
+    const labourValue = parseMoney(labourCost);
+    const kitValue = parseMoney(defaultKitCost);
+    const travelMilesValue = parseMoney(travelMiles, 100);
+    const travelRateValue = parseMoney(travelRate, 0.3);
+    const travelCostValue = Number.isFinite(travelMilesValue * travelRateValue)
+      ? travelMilesValue * travelRateValue
+      : 0;
+    const parkingValue = parseMoney(parkingCost);
     await updateDoc(doc(db, "products", id), {
       name,
       description,
       tagline: tagline || null,
       price: Number(price) || 0,
-      labourCost: Number(labourCost) || 0,
-      defaultKitCost: Number(defaultKitCost) || 0,
+      labourCost: labourValue,
+      defaultKitCost: kitValue,
+      budget: {
+        labour: labourValue,
+        kit: kitValue,
+        travelMiles: travelMilesValue,
+        travelRate: travelRateValue,
+        travelCost: Number.isFinite(travelCostValue) ? travelCostValue : 0,
+        parking: parkingValue,
+      },
       imageUrl: img || null,
       requirements: requirements || null,
       deliveryTime: deliveryOptions[deliveryIndex],
@@ -268,7 +347,8 @@ export default function EditProductPage() {
       })),
       category: category || null,
       eventDate: eventDate || null,
-      venue: venue || null,
+      venue: venueLabel,
+      venueId: venueId || null,
       hidden,
       requiredKit: kitGroups,
       defaultTasks: tasks,
@@ -424,6 +504,18 @@ export default function EditProductPage() {
   if (loading) return <p>Loading…</p>;
   if (!isStaff) return <p>You do not have permission to edit products.</p>;
 
+  const labourValue = parseMoney(labourCost);
+  const kitValue = parseMoney(defaultKitCost);
+  const travelMilesValue = parseMoney(travelMiles, 100);
+  const travelRateValue = parseMoney(travelRate, 0.3);
+  const travelCostValue = Number.isFinite(travelMilesValue * travelRateValue)
+    ? travelMilesValue * travelRateValue
+    : 0;
+  const parkingValue = parseMoney(parkingCost);
+  const priceValue = parseMoney(price);
+  const budgetTotal = labourValue + kitValue + travelCostValue + parkingValue;
+  const profitValue = priceValue - budgetTotal;
+
   return (
     <form onSubmit={save} className="grid gap-6 max-w-2xl">
       <h1 className="text-xl font-semibold">Edit Product</h1>
@@ -458,7 +550,7 @@ export default function EditProductPage() {
         <ReactQuill theme="snow" value={description} onChange={setDescription} />
           <label className="text-sm font-medium">Price (GBP)</label>
           <input type="number" className="input" value={price} onChange={(e) => setPrice(e.target.value)} />
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="grid gap-2">
               <label className="text-sm font-medium">Labour Cost</label>
               <input
@@ -474,19 +566,87 @@ export default function EditProductPage() {
                 value={defaultKitCost}
                 onChange={(e) => setDefaultKitCost(e.target.value)}
               />
+              <label className="text-sm font-medium">Travel Miles (estimate)</label>
+              <input
+                type="number"
+                className="input"
+                value={travelMiles}
+                onChange={(e) => {
+                  setTravelMilesTouched(true);
+                  setTravelMiles(e.target.value);
+                }}
+              />
+              <label className="text-sm font-medium">Travel Rate (per mile)</label>
+              <input
+                type="number"
+                step="0.01"
+                className="input"
+                value={travelRate}
+                onChange={(e) => setTravelRate(e.target.value)}
+              />
+              <label className="text-sm font-medium">Parking Budget</label>
+              <input
+                type="number"
+                step="0.01"
+                className="input"
+                value={parkingCost}
+                onChange={(e) => {
+                  setParkingTouched(true);
+                  setParkingCost(e.target.value);
+                }}
+              />
             </div>
-            <div className="border rounded p-2 text-sm space-y-1">
-              <div>Price: £{Number(price) || 0}</div>
-              <div>Labour: £{Number(labourCost) || 0}</div>
-              <div>Kit: £{Number(defaultKitCost) || 0}</div>
-              <div className="font-semibold">
-                Profit: £{Number(price) - (Number(labourCost) || 0) - (Number(defaultKitCost) || 0)}
+            <div className="border rounded p-3 text-sm space-y-2">
+              <div className="flex justify-between">
+                <span>Price</span>
+                <span>{formatCurrency(priceValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Labour</span>
+                <span>{formatCurrency(labourValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Kit</span>
+                <span>{formatCurrency(kitValue)}</span>
+              </div>
+              <div>
+                <div className="flex justify-between">
+                  <span>Travel</span>
+                  <span>{formatCurrency(travelCostValue)}</span>
+                </div>
+                <div className="text-xs text-gray-500 text-right">
+                  {travelMilesValue} miles @ £{travelRateValue.toFixed(2)}
+                </div>
+              </div>
+              <div className="flex justify-between">
+                <span>Parking</span>
+                <span>{formatCurrency(parkingValue)}</span>
+              </div>
+              <div className="flex justify-between font-medium border-t pt-1">
+                <span>Budget Total</span>
+                <span>{formatCurrency(budgetTotal)}</span>
+              </div>
+              <div
+                className={`flex justify-between font-semibold ${
+                  profitValue < 0 ? "text-red-600" : ""
+                }`}
+              >
+                <span>Estimated Profit</span>
+                <span>{formatCurrency(profitValue)}</span>
               </div>
             </div>
           </div>
           <label className="text-sm font-medium">Image</label>
           <input type="file" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
-          {imageUrl && <img src={imageUrl} alt="preview" className="w-32" />}
+          {imageUrl && (
+            <Image
+              src={imageUrl}
+              alt={`${name} preview`}
+              width={256}
+              height={256}
+              className="h-auto w-32 object-cover"
+            />
+          )}
           <label className="text-sm font-medium">Category</label>
           <select className="input" value={category} onChange={(e) => setCategory(e.target.value)}>
             <option value="">None</option>
@@ -514,12 +674,68 @@ export default function EditProductPage() {
                 value={eventDate}
                 onChange={(e) => setEventDate(e.target.value)}
               />
-              <label className="text-sm font-medium">Venue</label>
+              <label className="text-sm font-medium">Linked Venue</label>
+              <select
+                className="input"
+                value={venueId}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setVenueId(value);
+                  if (value) {
+                    const match = venues.find((v) => v.id === value);
+                    setVenue(match?.name || "");
+                  }
+                }}
+              >
+                <option value="">Custom / not listed</option>
+                {venues.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+              {selectedVenue && (
+                <div className="rounded bg-slate-100 p-2 text-xs text-gray-600 grid gap-1">
+                  {selectedVenue.mileageFromWellingborough !== null &&
+                    selectedVenue.mileageFromWellingborough !== undefined && (
+                      <div>
+                        Mileage: {selectedVenue.mileageFromWellingborough} miles
+                      </div>
+                    )}
+                  {selectedVenue.parkingRate !== null &&
+                    selectedVenue.parkingRate !== undefined && (
+                      <div>
+                        Parking Rate: £{Number(selectedVenue.parkingRate).toFixed(2)}
+                      </div>
+                    )}
+                  {selectedVenue.parkingTips && (
+                    <div className="truncate">
+                      <span className="font-medium">Parking:</span> {selectedVenue.parkingTips}
+                    </div>
+                  )}
+                  {selectedVenue.accessInfo && (
+                    <div className="truncate">
+                      <span className="font-medium">Access:</span> {selectedVenue.accessInfo}
+                    </div>
+                  )}
+                {selectedVenue.internetInfo && (
+                  <div className="truncate">
+                    <span className="font-medium">Internet:</span> {selectedVenue.internetInfo}
+                  </div>
+                )}
+                <VenueMap venue={selectedVenue} className="mt-1" height={200} />
+              </div>
+            )}
+              <label className="text-sm font-medium">Venue Label</label>
               <input
                 className="input"
                 value={venue}
                 onChange={(e) => setVenue(e.target.value)}
+                placeholder="Shown on the product page"
               />
+              <p className="text-xs text-gray-500 -mt-1">
+                This text appears on the customer-facing product pages.
+              </p>
             </>
           )}
           <label className="flex items-center gap-2">
@@ -629,7 +845,15 @@ export default function EditProductPage() {
                 type="file"
                 onChange={(e) => updateDeliverable(i, { file: e.target.files?.[0] || undefined })}
               />
-              {d.thumbnailUrl && <img src={d.thumbnailUrl} alt="thumb" className="w-24" />}
+              {d.thumbnailUrl && (
+                <Image
+                  src={d.thumbnailUrl}
+                  alt={`${d.title || 'Deliverable'} thumbnail`}
+                  width={192}
+                  height={192}
+                  className="h-auto w-24 object-cover"
+                />
+              )}
               <button type="button" className="btn btn-sm w-fit" onClick={() => removeDeliverable(i)}>
                 Remove
               </button>
@@ -840,7 +1064,15 @@ export default function EditProductPage() {
           />
           <label className="text-sm font-medium">Social Card</label>
           <input type="file" onChange={(e) => setSeoImageFile(e.target.files?.[0] || null)} />
-          {seo.socialImageUrl && <img src={seo.socialImageUrl} alt="social" className="w-32" />}
+          {seo.socialImageUrl && (
+            <Image
+              src={seo.socialImageUrl}
+              alt={`${name} social card`}
+              width={256}
+              height={256}
+              className="h-auto w-32 object-cover"
+            />
+          )}
         </div>
       )}
 

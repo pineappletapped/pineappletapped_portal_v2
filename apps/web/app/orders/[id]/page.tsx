@@ -25,6 +25,11 @@ export default function OrderDetailPage() {
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState('');
   const [modifierGroups, setModifierGroups] = useState<Record<string, any>>({});
+  const safeNumber = (value: any) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : 0;
+  };
+  const formatCurrency = (value: any) => `£${safeNumber(value).toFixed(2)}`;
 
   const saveName = async () => {
     if (!order) return;
@@ -104,6 +109,8 @@ export default function OrderDetailPage() {
   }, [order]);
 
   if (loading || !order) return <p>Loading…</p>;
+  const totals = order.budgetTotals || null;
+  const budgetItems = Array.isArray(order.items) ? order.items : [];
   return (
     <PortalContainer>
       <div className="grid gap-6">
@@ -144,11 +151,11 @@ export default function OrderDetailPage() {
           <p className="mb-4">Balance: £{order.balanceAmount?.toFixed(2)}</p>
         </div>
 
-        {order.items?.length ? (
+        {budgetItems.length ? (
           <div className="card p-4">
             <h2 className="font-semibold mb-2">Items</h2>
             <ul className="divide-y">
-              {order.items.map((item: any) => (
+              {budgetItems.map((item: any) => (
                 <li key={item.id} className="py-2 flex justify-between">
                   <div>
                     <Link
@@ -180,6 +187,74 @@ export default function OrderDetailPage() {
                 </li>
               ))}
             </ul>
+          </div>
+        ) : null}
+
+        {totals ? (
+          <div className="card p-4">
+            <h2 className="font-semibold mb-2">Budget</h2>
+            <div className="space-y-1 text-sm">
+              <div className="flex justify-between">
+                <span>Net Revenue</span>
+                <span>{formatCurrency(totals.netRevenue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Gross Revenue</span>
+                <span>{formatCurrency(totals.grossRevenue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Labour</span>
+                <span>{formatCurrency(totals.labour)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Kit</span>
+                <span>{formatCurrency(totals.kit)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Travel</span>
+                <span>{formatCurrency(totals.travel)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Parking</span>
+                <span>{formatCurrency(totals.parking)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Rental</span>
+                <span>{formatCurrency(totals.rental)}</span>
+              </div>
+              <div className="flex justify-between font-medium border-t pt-1">
+                <span>Total Cost</span>
+                <span>{formatCurrency(totals.totalCost)}</span>
+              </div>
+              <div
+                className={`flex justify-between font-semibold ${
+                  safeNumber(totals.profit) < 0 ? 'text-red-600' : ''
+                }`}
+              >
+                <span>Estimated Profit</span>
+                <span>{formatCurrency(totals.profit)}</span>
+              </div>
+            </div>
+            {budgetItems.length ? (
+              <div className="mt-3">
+                <h3 className="font-medium text-sm mb-1">Per Product</h3>
+                <ul className="divide-y">
+                  {budgetItems.map((item: any) => (
+                    <li key={item.id} className="py-2 text-sm">
+                      <div className="flex justify-between">
+                        <span>
+                          {item.name} × {item.quantity}
+                        </span>
+                        <span>{formatCurrency(item.budget?.total?.totalCost)}</span>
+                      </div>
+                      <div className="text-xs text-gray-600 text-right">
+                        Labour {formatCurrency(item.budget?.total?.labour)} · Kit {formatCurrency(item.budget?.total?.kit)} · Travel {formatCurrency(item.budget?.total?.travel)} · Parking {formatCurrency(item.budget?.total?.parking)}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         ) : null}
 

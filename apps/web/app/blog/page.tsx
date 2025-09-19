@@ -1,3 +1,4 @@
+import Image from 'next/image';
 import Link from 'next/link';
 import { getPosts } from '@/lib/blog';
 
@@ -11,7 +12,15 @@ export default async function BlogPage() {
         {posts.map((p) => (
           <article key={p.id} className="border rounded-md overflow-hidden">
             {p.imageUrl && (
-              <img src={p.imageUrl} alt="" className="h-48 w-full object-cover" />
+              <div className="relative h-48 w-full">
+                <Image
+                  src={p.imageUrl}
+                  alt={p.title}
+                  fill
+                  sizes="(min-width: 768px) 50vw, 100vw"
+                  className="object-cover"
+                />
+              </div>
             )}
             <div className="p-4">
               <h2 className="text-xl font-semibold mb-2">{p.title}</h2>

@@ -2,13 +2,14 @@
 
 import Link from 'next/link';
 import Image from 'next/image';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import type { FocusEvent, KeyboardEvent } from 'react';
 import { FiSearch, FiShoppingCart, FiMenu, FiX } from 'react-icons/fi';
 import SearchBar from '@/components/SearchBar';
 import { useCart } from '@/lib/cart';
 import type { Category } from '@/lib/categories';
 import type { Product } from '@/lib/products';
-import { db, getDb } from '@/lib/firebase';
+import { getDb } from '@/lib/firebase';
 
 export default function SiteHeader({
   categories,
@@ -24,6 +25,47 @@ export default function SiteHeader({
   const [openCat, setOpenCat] = useState<string | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [logoUrl, setLogoUrl] = useState('/logo-rectangle.svg');
+  const flyoutRef = useRef<HTMLDivElement | null>(null);
+  const flyoutId = 'site-header-category-flyout';
+
+  const makeTriggerId = (catId: string) => `site-header-cat-${catId}`;
+
+  const handleTriggerBlur = (catId: string) =>
+    (event: FocusEvent<HTMLAnchorElement>) => {
+      const next = event.relatedTarget as HTMLElement | null;
+      if (next && flyoutRef.current?.contains(next)) {
+        return;
+      }
+      setOpenCat((current) => (current === catId ? null : current));
+    };
+
+  const handleTriggerKeyDown = (event: KeyboardEvent<HTMLAnchorElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setOpenCat(null);
+      event.currentTarget.blur();
+    }
+  };
+
+  const handleFlyoutKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      const current = openCat;
+      setOpenCat(null);
+      if (current) {
+        const trigger = document.getElementById(makeTriggerId(current));
+        trigger?.focus();
+      }
+    }
+  };
+
+  const handleFlyoutBlur = (event: FocusEvent<HTMLDivElement>) => {
+    const next = event.relatedTarget as HTMLElement | null;
+    if (next && flyoutRef.current?.contains(next)) {
+      return;
+    }
+    setOpenCat(null);
+  };
 
   useEffect(() => {
     (async () => {
@@ -78,10 +120,17 @@ export default function SiteHeader({
           {topCats.map((cat) => (
             <div key={cat.id} onMouseEnter={() => setOpenCat(cat.id)}>
               <Link
+                id={makeTriggerId(cat.id)}
                 href={`/categories/${cat.slug}`}
                 className={`hover:underline pb-1 ${
                   openCat === cat.id ? 'text-orange border-b-2 border-orange' : ''
                 }`}
+                onFocus={() => setOpenCat(cat.id)}
+                onBlur={handleTriggerBlur(cat.id)}
+                onKeyDown={handleTriggerKeyDown}
+                aria-expanded={openCat === cat.id}
+                aria-controls={flyoutId}
+                aria-haspopup="true"
               >
                 {cat.name}
               </Link>
@@ -92,6 +141,10 @@ export default function SiteHeader({
         {openCat && (
           <div
             onMouseLeave={() => setOpenCat(null)}
+            onKeyDown={handleFlyoutKeyDown}
+            onBlur={handleFlyoutBlur}
+            id={flyoutId}
+            ref={flyoutRef}
             className="hidden md:block fixed left-0 right-0 top-16 z-20 bg-white shadow-lg border-b"
           >
             <div className="mx-auto max-w-6xl p-6 grid grid-cols-3 gap-6">

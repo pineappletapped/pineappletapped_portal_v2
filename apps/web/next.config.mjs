@@ -19,6 +19,7 @@ const nextConfig = {
         hostname: 'firebasestorage.googleapis.com',
       },
     ],
+    unoptimized: true,
   },
   webpack: (config) => {
     config.resolve.alias['@'] = path.resolve(__dirname);

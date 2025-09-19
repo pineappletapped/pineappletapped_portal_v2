@@ -1,4 +1,5 @@
 "use client";
+import Image from 'next/image';
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
@@ -181,7 +182,15 @@ export default function OrgDetailPage() {
         <div className="grid gap-2">
           {brandPacks.length === 0 ? <p>No brand packs.</p> : brandPacks.map((b) => (
             <div key={b.id} className="flex items-center gap-3">
-              {b.logoUrl && <img src={b.logoUrl} alt="logo" className="h-6 w-6 rounded" />}
+              {b.logoUrl && (
+                <Image
+                  src={b.logoUrl}
+                  alt={`${b.name} logo`}
+                  width={24}
+                  height={24}
+                  className="h-6 w-6 rounded object-contain"
+                />
+              )}
               <div className="font-medium">{b.name}</div>
               <div className="flex gap-2">
                 {b.primaryColor && <span className="inline-block h-3 w-3 rounded-full" style={{ background: b.primaryColor }} />}

@@ -3,6 +3,7 @@ import { getProduct } from "@/lib/products";
 import { getCategory } from "@/lib/categories";
 import ProductDetail from "@/components/ProductDetail";
 import Breadcrumbs from "@/components/Breadcrumbs";
+import { getVenue } from "@/lib/venues";
 
 export async function generateMetadata({
   params,
@@ -45,6 +46,7 @@ export default async function ProductPage({ params }: { params: { id: string } }
   const category = product.category
     ? await getCategory(product.category)
     : null;
+  const venue = product.venueId ? await getVenue(product.venueId) : null;
   return (
     <div className="max-w-6xl mx-auto p-4 grid gap-4">
       {category && (
@@ -59,7 +61,7 @@ export default async function ProductPage({ params }: { params: { id: string } }
           ]}
         />
       )}
-      <ProductDetail product={product} />
+      <ProductDetail product={product} venue={venue} />
     </div>
   );
 }

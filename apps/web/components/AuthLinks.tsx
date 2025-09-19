@@ -17,7 +17,11 @@ export default function AuthLinks() {
       if (u) {
         const snap = await getDoc(doc(db, 'users', u.uid));
         let staff = snap.exists() && !!snap.data()?.isStaff;
-        if (u.uid === 'WK6WCuSueLN5M3Zq6D7WBbHyGPo1' || u.email === 'ryan@pineappletapped.com') {
+        if (
+          u.uid === 'WK6WCuSueLN5M3Zq6D7WBbHyGPo1' ||
+          u.email === 'ryan@pineappletapped.com' ||
+          u.email === 'ryanadmin@pineappletapped.com'
+        ) {
           staff = true;
         }
         setIsStaff(staff);

@@ -6,6 +6,8 @@ import { doc, getDoc, collection, query, where, getDocs, addDoc, serverTimestamp
 import Link from 'next/link';
 import StatusBadge from '@/components/StatusBadge';
 import PortalContainer from '@/components/PortalContainer';
+import VenueMap from '@/components/VenueMap';
+import type { Venue } from '@/lib/venues';
 
 export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [project, setProject] = useState<any>(null);
@@ -18,9 +20,17 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [internalMessages, setInternalMessages] = useState<any[]>([]);
   const [newInternalMessage, setNewInternalMessage] = useState('');
   const [isStaffUser, setIsStaffUser] = useState(false);
+  const [venues, setVenues] = useState<Venue[]>([]);
+  const [venueSelection, setVenueSelection] = useState('');
+  const [savingVenue, setSavingVenue] = useState(false);
 
   // Signature request
   const [pendingSignature, setPendingSignature] = useState<any | null>(null);
+  const safeNumber = (value: any) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : 0;
+  };
+  const formatCurrency = (value: any) => `£${safeNumber(value).toFixed(2)}`;
 
   // Helper to load messages in order
   const loadMessages = useCallback(async () => {
@@ -48,21 +58,66 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
     setInternalMessages(items);
   }, [params.id]);
 
+  const handleVenueSave = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!project) return;
+    setSavingVenue(true);
+    try {
+      const selected = venueSelection
+        ? venues.find((v) => v.id === venueSelection) || null
+        : null;
+      await updateDoc(doc(db, 'projects', project.id), {
+        venueId: venueSelection || null,
+        venueName: selected?.name || null,
+      });
+      setProject((prev: any) =>
+        prev
+          ? {
+              ...prev,
+              venueId: venueSelection || null,
+              venueName: selected?.name || null,
+            }
+          : prev
+      );
+    } catch (err) {
+      console.error('update venue failed', err);
+      alert('Failed to update the venue. Please try again.');
+    } finally {
+      setSavingVenue(false);
+    }
+  };
+
   useEffect(()=>{
     (async()=>{
       const pd = await getDoc(doc(db, 'projects', params.id));
-      setProject({ id: pd.id, ...pd.data() });
+      if (!pd.exists()) {
+        setProject(null);
+        return;
+      }
+      const data = pd.data();
+      setProject({ id: pd.id, ...data });
+      setVenueSelection(((data as any)?.venueId as string) || '');
       const aq = query(collection(db,'assets'), where('projectId','==', params.id));
       const ad = await getDocs(aq);
       setAssets(ad.docs.map(d=>({id:d.id, ...d.data()})));
       await loadMessages();
       await loadInternalMessages();
       // Load available brand packs for this project's organisation
-      const data = pd.data();
       if (data?.orgId) {
         const bq = query(collection(db,'brandPacks'), where('orgId','==', data.orgId));
         const bds = await getDocs(bq);
         setBrandPacks(bds.docs.map((d) => ({ id: d.id, ...d.data() })));
+      }
+      const venueSnap = await getDocs(collection(db,'venues'));
+      const venueList = venueSnap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      setVenues(venueList);
+      if (!(data as any)?.venueName && (data as any)?.venueId) {
+        const match = venueList.find((v) => v.id === (data as any).venueId);
+        if (match) {
+          setProject((prev: any) => (prev ? { ...prev, venueName: match.name } : prev));
+        }
       }
       // Determine if current user is staff
       const user = auth.currentUser;
@@ -140,6 +195,18 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   };
 
   if (!project) return <div>Loading…</div>;
+  const projectVenueId = project?.venueId || '';
+  const savedVenue = projectVenueId
+    ? venues.find((v) => v.id === projectVenueId) || null
+    : null;
+  const currentVenueName = savedVenue?.name || project?.venueName || '';
+  const editingVenue = venueSelection
+    ? venues.find((v) => v.id === venueSelection) || null
+    : null;
+  const budgetTotals = project?.budgetTotals || null;
+  const budgetItems = Array.isArray(project?.budgetItems)
+    ? (project.budgetItems as any[])
+    : [];
 
   return (
     <PortalContainer>
@@ -151,6 +218,188 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
         </div>
         <Link href={`/projects/${project.id}/upload`} className="btn">Upload Asset</Link>
       </div>
+      <div className="card">
+        <h2 className="font-semibold mb-2">Venue</h2>
+        {currentVenueName ? (
+          <div className="grid gap-2 text-sm text-gray-700">
+            <p>
+              <span className="font-medium">Current Venue:</span> {currentVenueName}
+            </p>
+            {savedVenue?.address && (
+              <p>
+                <span className="font-medium">Address:</span> {savedVenue.address}
+              </p>
+            )}
+            {savedVenue?.mileageFromWellingborough !== null &&
+              savedVenue?.mileageFromWellingborough !== undefined && (
+                <p>
+                  <span className="font-medium">Distance from Wellingborough:</span>{' '}
+                  {savedVenue.mileageFromWellingborough} miles
+                </p>
+              )}
+            {savedVenue?.parkingRate !== null && savedVenue?.parkingRate !== undefined && (
+              <p>
+                <span className="font-medium">Fixed Parking Rate:</span> £
+                {Number(savedVenue.parkingRate).toFixed(2)}
+              </p>
+            )}
+            {savedVenue?.parkingTips && (
+              <p className="whitespace-pre-line">
+                <span className="font-medium">Parking Tips:</span> {savedVenue.parkingTips}
+              </p>
+            )}
+            {savedVenue?.accessInfo && (
+              <p className="whitespace-pre-line">
+                <span className="font-medium">Access Information:</span> {savedVenue.accessInfo}
+              </p>
+            )}
+            {savedVenue?.internetInfo && (
+              <p className="whitespace-pre-line">
+                <span className="font-medium">Internet Details:</span> {savedVenue.internetInfo}
+              </p>
+            )}
+            {savedVenue?.notes && (
+              <p className="whitespace-pre-line">
+                <span className="font-medium">Notes:</span> {savedVenue.notes}
+              </p>
+            )}
+            <VenueMap venue={savedVenue} className="mt-2" />
+          </div>
+        ) : (
+          <p className="text-sm text-gray-600">No venue linked to this project.</p>
+        )}
+        {isStaffUser && (
+          <form onSubmit={handleVenueSave} className="mt-4 grid gap-2">
+            <label className="text-sm font-medium">Update Venue</label>
+            <select
+              className="input"
+              value={venueSelection}
+              onChange={(e) => setVenueSelection(e.target.value)}
+            >
+              <option value="">Custom / none</option>
+              {venues.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500">
+              Choose &ldquo;Custom / none&rdquo; to remove the linked venue from this project.
+            </p>
+            {editingVenue && (
+              <div className="rounded bg-slate-100 p-2 text-xs text-gray-600 grid gap-1">
+                {editingVenue.mileageFromWellingborough !== null &&
+                  editingVenue.mileageFromWellingborough !== undefined && (
+                    <div>
+                      Mileage: {editingVenue.mileageFromWellingborough} miles
+                    </div>
+                  )}
+                {editingVenue.parkingRate !== null && editingVenue.parkingRate !== undefined && (
+                  <div>
+                    Parking Rate: £{Number(editingVenue.parkingRate).toFixed(2)}
+                  </div>
+                )}
+                {editingVenue.parkingTips && (
+                  <div className="truncate">
+                    <span className="font-medium">Parking:</span> {editingVenue.parkingTips}
+                  </div>
+                )}
+                {editingVenue.accessInfo && (
+                  <div className="truncate">
+                    <span className="font-medium">Access:</span> {editingVenue.accessInfo}
+                  </div>
+                )}
+                {editingVenue.internetInfo && (
+                  <div className="truncate">
+                    <span className="font-medium">Internet:</span> {editingVenue.internetInfo}
+                  </div>
+                )}
+                <VenueMap venue={editingVenue} className="mt-1" height={200} />
+              </div>
+            )}
+            <div className="flex gap-2">
+              <button type="submit" className="btn btn-sm w-fit" disabled={savingVenue}>
+                {savingVenue ? 'Saving…' : 'Save Venue'}
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline"
+                onClick={() => setVenueSelection(projectVenueId || '')}
+                disabled={savingVenue}
+              >
+                Reset
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+      {budgetTotals ? (
+        <div className="card p-4">
+          <h2 className="font-semibold mb-2">Budget</h2>
+          <div className="space-y-1 text-sm">
+            <div className="flex justify-between">
+              <span>Net Revenue</span>
+              <span>{formatCurrency(budgetTotals.netRevenue)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Gross Revenue</span>
+              <span>{formatCurrency(budgetTotals.grossRevenue)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Labour</span>
+              <span>{formatCurrency(budgetTotals.labour)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Kit</span>
+              <span>{formatCurrency(budgetTotals.kit)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Travel</span>
+              <span>{formatCurrency(budgetTotals.travel)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Parking</span>
+              <span>{formatCurrency(budgetTotals.parking)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Rental</span>
+              <span>{formatCurrency(budgetTotals.rental)}</span>
+            </div>
+            <div className="flex justify-between font-medium border-t pt-1">
+              <span>Total Cost</span>
+              <span>{formatCurrency(budgetTotals.totalCost)}</span>
+            </div>
+            <div
+              className={`flex justify-between font-semibold ${
+                safeNumber(budgetTotals.profit) < 0 ? 'text-red-600' : ''
+              }`}
+            >
+              <span>Estimated Profit</span>
+              <span>{formatCurrency(budgetTotals.profit)}</span>
+            </div>
+          </div>
+          {budgetItems.length ? (
+            <div className="mt-3">
+              <h3 className="font-medium text-sm mb-1">Per Product</h3>
+              <ul className="divide-y">
+                {budgetItems.map((item: any) => (
+                  <li key={item.id} className="py-2 text-sm">
+                    <div className="flex justify-between">
+                      <span>
+                        {item.name || item.id} × {item.quantity || 1}
+                      </span>
+                      <span>{formatCurrency(item.budget?.total?.totalCost)}</span>
+                    </div>
+                    <div className="text-xs text-gray-600 text-right">
+                      Labour {formatCurrency(item.budget?.total?.labour)} · Kit {formatCurrency(item.budget?.total?.kit)} · Travel {formatCurrency(item.budget?.total?.travel)} · Parking {formatCurrency(item.budget?.total?.parking)}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div className="card">
         <h2 className="font-semibold mb-2">Assets</h2>
         <div className="grid gap-2">

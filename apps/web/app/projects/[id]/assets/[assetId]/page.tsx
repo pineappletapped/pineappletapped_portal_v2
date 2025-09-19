@@ -1,5 +1,6 @@
 
 'use client';
+import Image from 'next/image';
 import { useEffect, useRef, useState } from 'react';
 import { db } from '@/lib/firebase';
 import { doc, getDoc, addDoc, collection, serverTimestamp, query, where, getDocs, updateDoc } from 'firebase/firestore';
@@ -193,7 +194,13 @@ export default function AssetView({ params }: { params: { id: string, assetId: s
           </>
         ) : (
           thumbUrl ? (
-            <img src={thumbUrl} alt="thumbnail" className="w-full max-w-md rounded-lg border" />
+            <Image
+              src={thumbUrl}
+              alt="Asset thumbnail"
+              width={640}
+              height={360}
+              className="w-full max-w-md rounded-lg border object-cover"
+            />
           ) : (
             <a href={asset.url} className="text-orange underline">Open file</a>
           )
