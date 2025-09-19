@@ -13,6 +13,7 @@ import {
   updateDoc,
 } from "firebase/firestore";
 import type { Venue } from "@/lib/venues";
+import VenueMap from "@/components/VenueMap";
 
 interface FormState {
   name: string;
@@ -22,6 +23,9 @@ interface FormState {
   internetInfo: string;
   parkingRate: string;
   mileage: string;
+  latitude: string;
+  longitude: string;
+  mapUrl: string;
   notes: string;
 }
 
@@ -33,6 +37,9 @@ const emptyForm: FormState = {
   internetInfo: "",
   parkingRate: "",
   mileage: "",
+  latitude: "",
+  longitude: "",
+  mapUrl: "",
   notes: "",
 };
 
@@ -40,6 +47,37 @@ function parseNumber(value: string): number | null {
   if (!value.trim()) return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+function parseCoordinate(
+  value: string,
+  min: number,
+  max: number,
+  label: string
+): { value: number | null; error?: string } {
+  if (!value.trim()) return { value: null };
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return { value: null, error: `${label} must be a valid number.` };
+  }
+  if (num < min || num > max) {
+    return {
+      value: null,
+      error: `${label} must be between ${min} and ${max}.`,
+    };
+  }
+  return { value: num };
+}
+
+function normaliseUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
+function formatNumberField(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
 }
 
 function VenueForm({
@@ -102,6 +140,47 @@ function VenueForm({
           />
         </label>
       </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="grid gap-1">
+          <span className="text-sm font-medium">Latitude</span>
+          <input
+            type="number"
+            step="0.000001"
+            min={-90}
+            max={90}
+            className="input"
+            value={state.latitude}
+            onChange={(e) => onChange("latitude", e.target.value)}
+            placeholder="e.g. 52.30210"
+          />
+        </label>
+        <label className="grid gap-1">
+          <span className="text-sm font-medium">Longitude</span>
+          <input
+            type="number"
+            step="0.000001"
+            min={-180}
+            max={180}
+            className="input"
+            value={state.longitude}
+            onChange={(e) => onChange("longitude", e.target.value)}
+            placeholder="e.g. -0.69342"
+          />
+        </label>
+      </div>
+      <label className="grid gap-1">
+        <span className="text-sm font-medium">Map Link</span>
+        <input
+          className="input"
+          value={state.mapUrl}
+          onChange={(e) => onChange("mapUrl", e.target.value)}
+          placeholder="Optional Google Maps or venue URL"
+        />
+        <span className="text-xs text-gray-500">
+          Provide both latitude and longitude to unlock the embedded map preview
+          and include a link to directions if available.
+        </span>
+      </label>
       <label className="grid gap-1">
         <span className="text-sm font-medium">Parking Tips</span>
         <textarea
@@ -212,6 +291,26 @@ export default function AdminVenuesPage() {
   const handleCreate = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!createForm.name.trim()) return;
+    const latResult = parseCoordinate(createForm.latitude, -90, 90, "Latitude");
+    if (latResult.error) {
+      alert(latResult.error);
+      return;
+    }
+    const lngResult = parseCoordinate(
+      createForm.longitude,
+      -180,
+      180,
+      "Longitude"
+    );
+    if (lngResult.error) {
+      alert(lngResult.error);
+      return;
+    }
+    if ((latResult.value !== null) !== (lngResult.value !== null)) {
+      alert("Please provide both latitude and longitude to plot the venue on the map.");
+      return;
+    }
+    const mapUrl = normaliseUrl(createForm.mapUrl);
     setCreating(true);
     try {
       await addDoc(collection(db, "venues"), {
@@ -223,6 +322,9 @@ export default function AdminVenuesPage() {
         notes: createForm.notes.trim() || null,
         parkingRate: parseNumber(createForm.parkingRate),
         mileageFromWellingborough: parseNumber(createForm.mileage),
+        latitude: latResult.value,
+        longitude: lngResult.value,
+        mapUrl,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -240,6 +342,21 @@ export default function AdminVenuesPage() {
     event.preventDefault();
     if (!editingId) return;
     if (!editForm.name.trim()) return;
+    const latResult = parseCoordinate(editForm.latitude, -90, 90, "Latitude");
+    if (latResult.error) {
+      alert(latResult.error);
+      return;
+    }
+    const lngResult = parseCoordinate(editForm.longitude, -180, 180, "Longitude");
+    if (lngResult.error) {
+      alert(lngResult.error);
+      return;
+    }
+    if ((latResult.value !== null) !== (lngResult.value !== null)) {
+      alert("Please provide both latitude and longitude to plot the venue on the map.");
+      return;
+    }
+    const mapUrl = normaliseUrl(editForm.mapUrl);
     setSavingEdit(true);
     try {
       await updateDoc(doc(db, "venues", editingId), {
@@ -251,6 +368,9 @@ export default function AdminVenuesPage() {
         notes: editForm.notes.trim() || null,
         parkingRate: parseNumber(editForm.parkingRate),
         mileageFromWellingborough: parseNumber(editForm.mileage),
+        latitude: latResult.value,
+        longitude: lngResult.value,
+        mapUrl,
         updatedAt: serverTimestamp(),
       });
       setEditingId(null);
@@ -272,14 +392,11 @@ export default function AdminVenuesPage() {
       parkingTips: venue.parkingTips || "",
       accessInfo: venue.accessInfo || "",
       internetInfo: venue.internetInfo || "",
-      parkingRate:
-        venue.parkingRate === 0 || venue.parkingRate
-          ? String(venue.parkingRate)
-          : "",
-      mileage:
-        venue.mileageFromWellingborough === 0 || venue.mileageFromWellingborough
-          ? String(venue.mileageFromWellingborough)
-          : "",
+      parkingRate: formatNumberField(venue.parkingRate),
+      mileage: formatNumberField(venue.mileageFromWellingborough),
+      latitude: formatNumberField(venue.latitude),
+      longitude: formatNumberField(venue.longitude),
+      mapUrl: venue.mapUrl || "",
       notes: venue.notes || "",
     });
   };
@@ -315,6 +432,10 @@ export default function AdminVenuesPage() {
         venue.notes,
         venue.parkingTips,
         venue.accessInfo,
+        venue.internetInfo,
+        venue.mapUrl,
+        typeof venue.latitude === "number" ? String(venue.latitude) : null,
+        typeof venue.longitude === "number" ? String(venue.longitude) : null,
       ]
         .filter(Boolean)
         .join(" ")
@@ -374,6 +495,11 @@ export default function AdminVenuesPage() {
               const rate = hasRate
                 ? `£${Number(venue.parkingRate).toFixed(2)}`
                 : null;
+              const hasCoords =
+                typeof venue.latitude === "number" &&
+                Number.isFinite(venue.latitude) &&
+                typeof venue.longitude === "number" &&
+                Number.isFinite(venue.longitude);
               return (
                 <div key={venue.id} className="border rounded-md p-4 grid gap-3">
                   {isEditing ? (
@@ -435,6 +561,9 @@ export default function AdminVenuesPage() {
                           <p className="whitespace-pre-line">
                             <span className="font-medium">Notes:</span> {venue.notes}
                           </p>
+                        )}
+                        {(venue.mapUrl || hasCoords) && (
+                          <VenueMap venue={venue} className="mt-1" />
                         )}
                       </div>
                     </>

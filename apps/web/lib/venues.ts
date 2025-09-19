@@ -51,6 +51,9 @@ export interface Venue {
   internetInfo?: string | null;
   parkingRate?: number | null;
   mileageFromWellingborough?: number | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  mapUrl?: string | null;
   notes?: string | null;
   createdAt?: any;
   updatedAt?: any;

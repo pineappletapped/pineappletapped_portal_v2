@@ -34,6 +34,7 @@ import {
   FiFileText,
 } from "react-icons/fi";
 import type { Category } from "@/lib/categories";
+import VenueMap from "@/components/VenueMap";
 
 const ReactQuill = dynamic(() => import("react-quill"), { ssr: false });
 import "react-quill/dist/quill.snow.css";
@@ -604,13 +605,14 @@ export default function NewProductPage() {
                       <span className="font-medium">Access:</span> {selectedVenue.accessInfo}
                     </div>
                   )}
-                  {selectedVenue.internetInfo && (
-                    <div className="truncate">
-                      <span className="font-medium">Internet:</span> {selectedVenue.internetInfo}
-                    </div>
-                  )}
-                </div>
-              )}
+                {selectedVenue.internetInfo && (
+                  <div className="truncate">
+                    <span className="font-medium">Internet:</span> {selectedVenue.internetInfo}
+                  </div>
+                )}
+                <VenueMap venue={selectedVenue} className="mt-1" height={200} />
+              </div>
+            )}
               <label className="text-sm font-medium">Venue Label</label>
               <input
                 className="input"

@@ -32,6 +32,7 @@ const deliverableIcons: Record<DeliverableType, IconType> = {
 };
 import AddToCartWizard from "./AddToCartWizard";
 import ProductModifierSummary from "./ProductModifierSummary";
+import VenueMap from "./VenueMap";
 
 export default function ProductDetail({
   product,
@@ -208,6 +209,7 @@ export default function ProductDetail({
                 <span className="font-medium">Notes:</span> {venue.notes}
               </p>
             )}
+            <VenueMap venue={venue} className="mt-2" />
           </div>
         </section>
       )}

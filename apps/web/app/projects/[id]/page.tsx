@@ -6,6 +6,7 @@ import { doc, getDoc, collection, query, where, getDocs, addDoc, serverTimestamp
 import Link from 'next/link';
 import StatusBadge from '@/components/StatusBadge';
 import PortalContainer from '@/components/PortalContainer';
+import VenueMap from '@/components/VenueMap';
 import type { Venue } from '@/lib/venues';
 
 export default function ProjectDetail({ params }: { params: { id: string } }) {
@@ -262,6 +263,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
                 <span className="font-medium">Notes:</span> {savedVenue.notes}
               </p>
             )}
+            <VenueMap venue={savedVenue} className="mt-2" />
           </div>
         ) : (
           <p className="text-sm text-gray-600">No venue linked to this project.</p>
@@ -312,6 +314,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
                     <span className="font-medium">Internet:</span> {editingVenue.internetInfo}
                   </div>
                 )}
+                <VenueMap venue={editingVenue} className="mt-1" height={200} />
               </div>
             )}
             <div className="flex gap-2">
