@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import { getCategoryBySlug } from "@/lib/categories";
 import { getProductsByCategory } from "@/lib/products";
-import ProductCard from "@/components/ProductCard";
+import CategoryProductFilters from "@/components/CategoryProductFilters";
 import ExhibitionProductList from "@/components/ExhibitionProductList";
 import Breadcrumbs from "@/components/Breadcrumbs";
 
@@ -90,17 +90,10 @@ export default async function CategoryPage({ params }: { params: { slug: string 
           {category.slug === "exhibition-videography" ? (
             <ExhibitionProductList products={validProducts} />
           ) : (
-            <div
-              className={
-                category.layout === "list"
-                  ? "grid gap-4"
-                  : "grid sm:grid-cols-2 md:grid-cols-3 gap-4"
-              }
-            >
-              {validProducts.map((p) => (
-                <ProductCard key={p.id} product={p} />
-              ))}
-            </div>
+            <CategoryProductFilters
+              products={validProducts}
+              layout={category.layout}
+            />
           )}
         </section>
       )}
