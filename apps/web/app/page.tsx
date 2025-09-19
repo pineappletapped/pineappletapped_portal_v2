@@ -111,7 +111,7 @@ export default async function Home() {
               {p.imageUrl && (
                 <Image
                   src={p.imageUrl}
-                  alt=""
+                  alt={p.title}
                   width={800}
                   height={320}
                   className="h-40 w-full object-cover"

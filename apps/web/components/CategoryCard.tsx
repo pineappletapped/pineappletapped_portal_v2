@@ -20,7 +20,7 @@ export default function CategoryCard({ category }: { category: Category }) {
       {category.headerImage ? (
         <Image
           src={category.headerImage}
-          alt=""
+          alt={category.name}
           width={80}
           height={80}
           className="w-20 h-20 object-cover rounded-full"
