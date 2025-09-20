@@ -95,11 +95,11 @@ export default async function CategoryPage({ params }: { params: { slug: string 
             <ExhibitionProductList products={validProducts} />
           ) : isListLayout ? (
             <CategoryProductFilters products={validProducts}>
-              <CategoryProductList />
+              <CategoryProductList products={validProducts} />
             </CategoryProductFilters>
           ) : (
             <CategoryProductFilters products={validProducts}>
-              <CategoryProductGrid />
+              <CategoryProductGrid products={validProducts} />
             </CategoryProductFilters>
           )}
         </section>
