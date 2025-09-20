@@ -22,11 +22,19 @@ export default function ProductModifierSummary({ product }: { product: Product }
 
   useEffect(() => {
     async function load() {
-      if (!product.modifiers || product.modifiers.length === 0) {
+      const configuredModifiers = Array.isArray(product.modifiers)
+        ? product.modifiers
+        : [];
+      const groupIds = (product.modifierGroups?.length
+        ? product.modifierGroups
+        : Array.from(new Set(configuredModifiers.map((m) => m.groupId))))
+        .filter((id) =>
+          configuredModifiers.some((modifier) => modifier.groupId === id)
+        );
+      if (groupIds.length === 0) {
         setGroups([]);
         return;
       }
-      const groupIds = Array.from(new Set(product.modifiers.map((m) => m.groupId)));
       const snaps = await Promise.all(
         groupIds.map((id) => getDoc(doc(db, "modifiers", id)))
       );
@@ -37,10 +45,12 @@ export default function ProductModifierSummary({ product }: { product: Product }
         .map((g) => {
           const opts = g.options
             .filter((o: any) =>
-              product.modifiers?.some((m) => m.groupId === g.id && m.optionId === o.id)
+              configuredModifiers.some(
+                (m) => m.groupId === g.id && m.optionId === o.id
+              )
             )
             .map((o: any) => {
-              const override = product.modifiers?.find(
+              const override = configuredModifiers.find(
                 (m) => m.groupId === g.id && m.optionId === o.id
               );
               return { id: o.id, name: o.name, price: override?.price ?? o.price };

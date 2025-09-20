@@ -128,6 +128,7 @@ export default function EditProductPage() {
   const [modifiers, setModifiers] = useState<
     { groupId: string; optionId: string; price: string }[]
   >([]);
+  const [enabledModifierGroups, setEnabledModifierGroups] = useState<string[]>([]);
   const [seo, setSeo] = useState<ProductSEO>({});
   const [seoImageFile, setSeoImageFile] = useState<File | null>(null);
   const [category, setCategory] = useState("");
@@ -225,6 +226,20 @@ export default function EditProductPage() {
               price: m.price ? String(m.price) : "",
             }))
           );
+          const initialGroups =
+            Array.isArray((p as any).modifierGroups) &&
+            (p as any).modifierGroups.length
+              ? (p as any).modifierGroups.filter(
+                  (id: unknown): id is string => typeof id === "string"
+                )
+              : Array.from(
+                  new Set(
+                    ((p.modifiers || []) as any[])
+                      .map((m) => m.groupId)
+                      .filter((id: unknown): id is string => typeof id === "string")
+                  )
+                );
+          setEnabledModifierGroups(initialGroups);
           setSeo(p.seo || {});
           setCategory(p.category || "");
           setEventDate(p.eventDate || "");
@@ -368,6 +383,15 @@ export default function EditProductPage() {
       ? travelMilesValue * travelRateValue
       : 0;
     const parkingValue = parseMoney(parkingCost);
+    const enabledGroups = enabledModifierGroups.filter((id) => typeof id === "string");
+    const enabledSet = new Set(enabledGroups);
+    const modifierData = modifiers
+      .filter((m) => enabledSet.has(m.groupId))
+      .map((m) => ({
+        groupId: m.groupId,
+        optionId: m.optionId,
+        ...(m.price ? { price: Number(m.price) } : {}),
+      }));
     await updateDoc(doc(db, "products", id), {
       name,
       description,
@@ -393,11 +417,8 @@ export default function EditProductPage() {
       deliveryTime: deliveryOptions[deliveryIndex],
       deliverables: deliverableData,
       variations: variationData,
-      modifiers: modifiers.map((m) => ({
-        groupId: m.groupId,
-        optionId: m.optionId,
-        ...(m.price ? { price: Number(m.price) } : {}),
-      })),
+      modifierGroups: enabledGroups,
+      modifiers: modifierData,
       category: category || null,
       eventDate: eventDate || null,
       venue: venueLabel,
@@ -459,6 +480,11 @@ export default function EditProductPage() {
     optionId: string,
     checked: boolean
   ) => {
+    if (checked) {
+      setEnabledModifierGroups((prev) =>
+        prev.includes(groupId) ? prev : [...prev, groupId]
+      );
+    }
     setModifiers((prev) => {
       if (checked) {
         const group = allModifiers.find((g) => g.id === groupId);
@@ -479,10 +505,17 @@ export default function EditProductPage() {
     });
   };
 
-  const selectedPrice = (groupId: string, optionId: string) =>
-    modifiers.find(
-      (m) => m.groupId === groupId && m.optionId === optionId
-    )?.price || "";
+  const toggleModifierGroup = (groupId: string, enabled: boolean) => {
+    setEnabledModifierGroups((prev) => {
+      if (enabled) {
+        return prev.includes(groupId) ? prev : [...prev, groupId];
+      }
+      return prev.filter((id) => id !== groupId);
+    });
+    if (!enabled) {
+      setModifiers((prev) => prev.filter((m) => m.groupId !== groupId));
+    }
+  };
 
   const togglePreset = (task: ProductTask) => {
     setTasks((prev) => {
@@ -1361,46 +1394,85 @@ export default function EditProductPage() {
 
       {tab === "modifiers" && (
         <div className="grid gap-4">
-          {allModifiers.map((g) => (
-            <div key={g.id} className="border p-4 rounded grid gap-2">
-              <p className="font-medium">{g.name}</p>
-              {g.options.map((o) => {
-                const selected = modifiers.find(
-                  (m) => m.groupId === g.id && m.optionId === o.id
-                );
-                return (
-                  <div key={o.id} className="flex items-center gap-2">
-                    <input
-                      type={g.multiple ? "checkbox" : "radio"}
-                      name={`mod-${g.id}`}
-                      checked={!!selected}
-                      onChange={(e) =>
-                        handleSelectModifier(g.id, o.id, e.target.checked)
-                      }
-                    />
-                    <span>{o.name}</span>
-                    {selected && (
-                      <input
-                        type="number"
-                        className="input w-24"
-                        value={selected.price}
-                        onChange={(e) =>
-                          setModifiers((prev) =>
-                            prev.map((m) =>
-                              m.groupId === g.id && m.optionId === o.id
-                                ? { ...m, price: e.target.value }
-                                : m
-                            )
-                          )
-                        }
-                        placeholder={`£${o.price}`}
-                      />
-                    )}
+          {allModifiers.map((g) => {
+            const enabled = enabledModifierGroups.includes(g.id);
+            return (
+              <div key={g.id} className="border p-4 rounded grid gap-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="font-medium">{g.name}</p>
+                    <p className="text-xs text-gray-500">
+                      {g.multiple
+                        ? "Customers can select multiple options."
+                        : "Customers select a single option."}
+                    </p>
                   </div>
-                );
-              })}
-            </div>
-          ))}
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      onChange={(e) => toggleModifierGroup(g.id, e.target.checked)}
+                    />
+                    <span>Enabled</span>
+                  </label>
+                </div>
+                <div
+                  className={`grid gap-2 rounded border p-2 ${enabled ? "" : "opacity-50"}`}
+                >
+                  {g.options.map((o) => {
+                    const selected = modifiers.find(
+                      (m) => m.groupId === g.id && m.optionId === o.id
+                    );
+                    return (
+                      <div
+                        key={o.id}
+                        className="flex flex-wrap items-center gap-2 text-sm"
+                      >
+                        <input
+                          type={g.multiple ? "checkbox" : "radio"}
+                          name={`mod-${g.id}`}
+                          checked={!!selected}
+                          disabled={!enabled}
+                          onChange={(e) =>
+                            handleSelectModifier(g.id, o.id, e.target.checked)
+                          }
+                        />
+                        <span className="flex-1 min-w-[120px]">{o.name}</span>
+                        {selected && (
+                          <input
+                            type="number"
+                            className="input w-24"
+                            value={selected.price}
+                            disabled={!enabled}
+                            onChange={(e) =>
+                              setModifiers((prev) =>
+                                prev.map((m) =>
+                                  m.groupId === g.id && m.optionId === o.id
+                                    ? { ...m, price: e.target.value }
+                                    : m
+                                )
+                              )
+                            }
+                            placeholder={`£${o.price}`}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
+                  {g.options.length === 0 && (
+                    <p className="text-sm text-gray-500">
+                      This group does not have any options yet.
+                    </p>
+                  )}
+                  {!enabled && (
+                    <p className="text-xs text-gray-500">
+                      Enable the group to select which options apply to this product.
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 

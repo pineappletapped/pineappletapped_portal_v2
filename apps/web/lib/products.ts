@@ -140,6 +140,8 @@ export interface Product {
   deliveryTime?: string;
   deliverables?: ProductDeliverable[];
   modifiers?: ProductModifierSelection[];
+  /** Modifier group IDs enabled for this product. */
+  modifierGroups?: string[];
   variations?: ProductVariation[];
   storyboardImages?: string[];
   exampleWorkUrl?: string;
