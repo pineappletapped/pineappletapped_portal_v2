@@ -55,22 +55,72 @@ type DeliverableBadge = {
   key: string;
 };
 
-export function getDeliverableSummary(product: Product) {
-  const deliverables: DeliverableBadge[] =
-    product.deliverables?.flatMap((deliverable, index) => {
-      const title =
-        typeof deliverable?.title === "string"
-          ? deliverable.title.trim()
-          : "";
+function normaliseDeliverables(
+  rawDeliverables: unknown
+): { title: string; type?: DeliverableType }[] {
+  if (!rawDeliverables) return [];
+
+  const entries = Array.isArray(rawDeliverables)
+    ? rawDeliverables
+    : typeof rawDeliverables === "object"
+      ? Object.values(rawDeliverables)
+      : [];
+
+  return entries.flatMap((entry) => {
+    if (!entry) return [];
+
+    if (Array.isArray(entry)) {
+      return normaliseDeliverables(entry);
+    }
+
+    if (typeof entry === "string") {
+      const label = entry.trim();
+      return label ? [{ title: label }] : [];
+    }
+
+    if (typeof entry === "object") {
+      const candidate = entry as Partial<{
+        title?: unknown;
+        name?: unknown;
+        type?: unknown;
+      }>;
+      const rawTitle =
+        typeof candidate.title === "string"
+          ? candidate.title
+          : typeof candidate.name === "string"
+            ? candidate.name
+            : "";
+      const title = rawTitle.trim();
       if (!title) return [];
+      const type =
+        typeof candidate.type === "string"
+          ? (candidate.type as DeliverableType)
+          : undefined;
       return [
         {
-          label: title,
-          type: deliverable?.type ?? null,
-          key: `${title}-${deliverable?.type ?? index}`,
+          title,
+          type,
         },
       ];
-    }) ?? [];
+    }
+
+    return [];
+  });
+}
+
+export function getDeliverableSummary(product: Product) {
+  const deliverableEntries = normaliseDeliverables(product.deliverables);
+
+  const deliverables: DeliverableBadge[] = deliverableEntries.map(
+    (deliverable, index) => {
+      const title = deliverable.title.trim();
+      return {
+        label: title,
+        type: deliverable.type ?? null,
+        key: `${title}-${deliverable.type ?? index}`,
+      } as DeliverableBadge;
+    }
+  );
 
   const visibleDeliverables = deliverables.slice(0, 3);
   const remainingDeliverableCount =
