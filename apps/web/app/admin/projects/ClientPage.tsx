@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { auth, db } from '@/lib/firebase';
-import { collection, doc, getDoc, getDocs, updateDoc } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
+import { collection, doc, getDocs, updateDoc } from 'firebase/firestore';
+import { useRoleGate } from '@/hooks/useRoleGate';
 
 export default function AdminProjectsPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(['admin', 'projects']);
   const [projects, setProjects] = useState<any[]>([]);
   const [view, setView] = useState<'kanban' | 'list'>('kanban');
   const [filter, setFilter] = useState('');
@@ -14,26 +15,20 @@ export default function AdminProjectsPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) { setIsStaff(false); return; }
-      const uSnap = await getDoc(doc(db, 'users', user.uid));
-      const me = uSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        const snap = await getDocs(collection(db, 'projects'));
-        setProjects(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
-      }
+      if (guardLoading) return;
+      if (!allowed) return;
+      const snap = await getDocs(collection(db, 'projects'));
+      setProjects(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const updateStatus = async (id: string, status: string) => {
     await updateDoc(doc(db, 'projects', id), { status });
     setProjects(projects.map(p => p.id === id ? { ...p, status } : p));
   };
 
-  if (isStaff === null) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to view projects.</p>;
+  if (guardLoading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to view projects.</p>;
 
   const statuses = ['intake','in_progress','review','completed'];
   const filtered = projects.filter(p => {

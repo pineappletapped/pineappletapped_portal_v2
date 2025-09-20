@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { auth, db, functions } from '@/lib/firebase';
+import { db, functions } from '@/lib/firebase';
 import { httpsCallable } from 'firebase/functions';
-import { doc, getDoc, collection, getDocs } from 'firebase/firestore';
+import { doc, collection, getDocs } from 'firebase/firestore';
+import { useRoleGate } from '@/hooks/useRoleGate';
 
 /**
  * Admin Workflows Management
@@ -22,7 +23,7 @@ interface Task {
 }
 
 export default function AdminWorkflowsPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(['admin', 'operations']);
   const [workflows, setWorkflows] = useState<any[]>([]);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -34,17 +35,12 @@ export default function AdminWorkflowsPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) { setIsStaff(false); setLoading(false); return; }
-      const uSnap = await getDoc(doc(db, 'users', user.uid));
-      const me = uSnap.data() as any;
-      setIsStaff(me?.isStaff === true);
-      if (me?.isStaff) {
-        await loadWorkflows();
-      }
+      if (guardLoading) return;
+      if (!allowed) { setLoading(false); return; }
+      await loadWorkflows();
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const loadWorkflows = async () => {
     const snap = await getDocs(collection(db, 'workflows'));
@@ -106,8 +102,8 @@ export default function AdminWorkflowsPage() {
     }
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage workflows.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to manage workflows.</p>;
   return (
     <div className="grid gap-6">
       <h1 className="text-xl font-semibold">Manage Workflows</h1>

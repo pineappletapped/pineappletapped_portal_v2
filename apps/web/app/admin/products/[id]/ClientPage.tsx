@@ -4,7 +4,7 @@ import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import { auth, db, storage, functions } from "@/lib/firebase";
+import { db, storage, functions } from "@/lib/firebase";
 import {
   doc,
   getDoc,
@@ -37,6 +37,7 @@ import {
 } from "react-icons/fi";
 import type { Category } from "@/lib/categories";
 import VenueMap from "@/components/VenueMap";
+import { useRoleGate } from "@/hooks/useRoleGate";
 
 const ReactQuill = dynamic(() => import("react-quill"), { ssr: false });
 import "react-quill/dist/quill.snow.css";
@@ -93,7 +94,7 @@ export default function EditProductPage() {
   const router = useRouter();
   const { id } = params;
 
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [loading, setLoading] = useState(true);
   const [cats, setCats] = useState<Category[]>([]);
   const [allModifiers, setAllModifiers] = useState<ModifierGroup[]>([]);
@@ -169,19 +170,14 @@ export default function EditProductPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setIsStaff(false);
+      if (guardLoading) return;
+      if (!allowed) {
         setLoading(false);
         return;
       }
-      const meSnap = await getDoc(doc(db, "users", user.uid));
-      const me = meSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
       let initialVenueId = "";
       let initialVenueName = "";
-      if (staff) {
+      try {
         const prodSnap = await getDoc(doc(db, "products", id));
         if (prodSnap.exists()) {
           const p = prodSnap.data() as Product;
@@ -206,8 +202,12 @@ export default function EditProductPage() {
           setTravelMiles(String(budget.travelMiles ?? 100));
           setTravelRate(String(budget.travelRate ?? 0.3));
           setParkingCost(String(budget.parking ?? 0));
-          setTravelMilesTouched(budget.travelMiles !== undefined && budget.travelMiles !== null);
-          setParkingTouched(budget.parking !== undefined && budget.parking !== null);
+          setTravelMilesTouched(
+            budget.travelMiles !== undefined && budget.travelMiles !== null
+          );
+          setParkingTouched(
+            budget.parking !== undefined && budget.parking !== null
+          );
           setImageUrl(p.imageUrl || "");
           setRequirements(p.requirements || "");
           const idx = deliveryOptions.indexOf(p.deliveryTime || "");
@@ -230,13 +230,13 @@ export default function EditProductPage() {
             Array.isArray((p as any).modifierGroups) &&
             (p as any).modifierGroups.length
               ? (p as any).modifierGroups.filter(
-                  (id: unknown): id is string => typeof id === "string"
+                  (value: unknown): value is string => typeof value === "string"
                 )
               : Array.from(
                   new Set(
                     ((p.modifiers || []) as any[])
                       .map((m) => m.groupId)
-                      .filter((id: unknown): id is string => typeof id === "string")
+                      .filter((value: unknown): value is string => typeof value === "string")
                   )
                 );
           setEnabledModifierGroups(initialGroups);
@@ -286,10 +286,13 @@ export default function EditProductPage() {
           const match = venueList.find((v) => v.id === initialVenueId);
           if (match) setVenue(match.name);
         }
+      } catch (error) {
+        console.error("Failed to load product data", error);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     })();
-  }, [id]);
+  }, [allowed, guardLoading, id]);
 
   useEffect(() => {
     if (selectedVenue) {
@@ -654,8 +657,8 @@ export default function EditProductPage() {
     });
   }, [equipmentList, equipmentSearch]);
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to edit products.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to edit products.</p>;
 
   return (
     <form onSubmit={save} className="grid gap-6 max-w-2xl">

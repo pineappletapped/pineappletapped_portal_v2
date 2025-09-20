@@ -8,11 +8,12 @@ import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { PDFDownloadLink } from "@react-pdf/renderer";
 import ProposalPDF from "@/components/ProposalPDF";
+import { extractUserRoles, hasRole } from "@/lib/roles";
 
 interface ProposalItem { type: "product" | "custom"; productId?: string; name: string; price: number; }
 
 export default function ProposalTemplatesPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const [canManage, setCanManage] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [templates, setTemplates] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
@@ -26,12 +27,13 @@ export default function ProposalTemplatesPage() {
   useEffect(() => {
     (async () => {
       const user = auth.currentUser;
-      if (!user) { setIsStaff(false); setLoading(false); return; }
+      if (!user) { setCanManage(false); setLoading(false); return; }
       const uSnap = await getDoc(doc(db, "users", user.uid));
       const me = uSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
+      const roles = extractUserRoles(me);
+      const allowed = hasRole(roles, ["admin", "sales"]);
+      setCanManage(allowed);
+      if (allowed) {
         const [tplSnap, prodSnap, agrSnap] = await Promise.all([
           getDocs(collection(db, "proposalTemplates")),
           getDocs(collection(db, "products")),
@@ -84,7 +86,7 @@ export default function ProposalTemplatesPage() {
   };
 
   if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage templates.</p>;
+  if (!canManage) return <p>You do not have permission to manage templates.</p>;
 
   return (
     <div className="grid gap-6 max-w-3xl">

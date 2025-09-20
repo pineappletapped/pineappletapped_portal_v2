@@ -2,19 +2,17 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { auth, db } from '@/lib/firebase';
+import { db } from '@/lib/firebase';
 import {
   collection,
-  collectionGroup,
-  doc,
   getCountFromServer,
-  getDoc,
   getDocs,
   limit,
   orderBy,
   query,
   where,
 } from 'firebase/firestore';
+import { useRoleGate } from '@/hooks/useRoleGate';
 
 /**
  * Admin Dashboard
@@ -22,7 +20,7 @@ import {
  * Presents links to various admin management pages. Only staff users should see this.
  */
 export default function AdminPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate('admin');
   const [stats, setStats] = useState({
     orders: 0,
     projects: 0,
@@ -34,11 +32,7 @@ export default function AdminPage() {
   const [tasks, setTasks] = useState<any[]>([]);
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) { setIsStaff(false); return; }
-      const uSnap = await getDoc(doc(db, 'users', user.uid));
-      const me = uSnap.data() as any;
-      setIsStaff(me?.isStaff === true);
+      if (guardLoading || !allowed) return;
 
       // Load counts for quick metrics
       const [ordersSnap, projectsSnap, usersSnap, productsSnap, quotesSnap, proposalsSnap] = await Promise.all([
@@ -76,9 +70,9 @@ export default function AdminPage() {
       });
       setTasks(taskResults.slice(0, 5));
     })();
-  }, []);
-  if (isStaff === null) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to view the admin dashboard.</p>;
+  }, [allowed, guardLoading]);
+  if (guardLoading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to view the admin dashboard.</p>;
   return (
     <div className="grid gap-6">
       <h1 className="text-xl font-semibold">Admin Dashboard</h1>

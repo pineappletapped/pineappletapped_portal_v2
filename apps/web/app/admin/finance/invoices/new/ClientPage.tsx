@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { auth, db } from '@/lib/firebase';
+import { db } from '@/lib/firebase';
 import { collection, getDocs, query, where, addDoc } from 'firebase/firestore';
 import { getProducts } from '@/lib/products';
+import { useRoleGate } from '@/hooks/useRoleGate';
 
 interface LineItem {
   description: string;
@@ -14,7 +15,6 @@ interface LineItem {
 
 export default function NewInvoicePage() {
   const [loading, setLoading] = useState(true);
-  const [isStaff, setIsStaff] = useState(false);
   const [orgs, setOrgs] = useState<any[]>([]);
   const [projects, setProjects] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
@@ -24,32 +24,26 @@ export default function NewInvoicePage() {
     dueDate: '',
     items: [{ description: '', amount: '', productId: '' }] as LineItem[],
   });
+  const { allowed, loading: guardLoading } = useRoleGate(['admin', 'finance']);
 
   useEffect(() => {
+    if (guardLoading) return;
+    if (!allowed) {
+      setLoading(false);
+      return;
+    }
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setLoading(false);
-        return;
-      }
-      const uSnap = await getDocs(
-        query(collection(db, 'users'), where('__name__', '==', user.uid))
-      );
-      const me = uSnap.docs[0]?.data();
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        const orgSnap = await getDocs(collection(db, 'orgs'));
-        setOrgs(orgSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-        const prodList = await getProducts();
-        setProducts(prodList);
-      }
+      const orgSnap = await getDocs(collection(db, 'orgs'));
+      setOrgs(orgSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      const prodList = await getProducts();
+      setProducts(prodList);
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   useEffect(() => {
     (async () => {
+      if (!allowed) return;
       if (!form.orgId) {
         setProjects([]);
         return;
@@ -59,7 +53,7 @@ export default function NewInvoicePage() {
       );
       setProjects(pSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
     })();
-  }, [form.orgId]);
+  }, [allowed, form.orgId]);
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
@@ -132,8 +126,8 @@ export default function NewInvoicePage() {
     }
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have access to this page.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have access to this page.</p>;
 
   return (
     <div className="p-4 grid gap-4 max-w-2xl">

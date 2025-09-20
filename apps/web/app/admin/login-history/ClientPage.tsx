@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { auth, db } from '@/lib/firebase';
+import { db } from '@/lib/firebase';
 import { collection, getDocs, query, orderBy, getDoc, doc, where } from 'firebase/firestore';
+import { useRoleGate } from '@/hooks/useRoleGate';
 
 /**
  * Admin Login History
@@ -12,31 +13,20 @@ import { collection, getDocs, query, orderBy, getDoc, doc, where } from 'firebas
  * own login history. Each entry shows the user's email and the timestamp.
  */
 export default function AdminLoginHistoryPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate('admin');
   const [logs, setLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (guardLoading) return;
+    if (!allowed) {
+      setLoading(false);
+      return;
+    }
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setIsStaff(false);
-        setLoading(false);
-        return;
-      }
-      const meSnap = await getDoc(doc(db, 'users', user.uid));
-      const me = meSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      // Build query: staff see all, others see own
-      const q = staff
-        ? query(collection(db, 'loginHistory'), orderBy('timestamp', 'desc'))
-        : query(
-            collection(db, 'loginHistory'),
-            where('uid', '==', user.uid),
-            orderBy('timestamp', 'desc')
-          );
-      const logSnap = await getDocs(q);
+      const logSnap = await getDocs(
+        query(collection(db, 'loginHistory'), orderBy('timestamp', 'desc'))
+      );
       const entries: any[] = [];
       for (const docSnap of logSnap.docs) {
         const data = docSnap.data() as any;
@@ -52,10 +42,10 @@ export default function AdminLoginHistoryPage() {
       setLogs(entries);
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
-  if (loading) return <p>Loading…</p>;
-  if (isStaff === false) {
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) {
     return <p>You do not have permission to view login history.</p>;
   }
   return (

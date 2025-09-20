@@ -2,12 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { auth, db } from '@/lib/firebase';
-import { collection, getDocs, query, where, addDoc } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
+import { collection, getDocs, addDoc } from 'firebase/firestore';
+import { useRoleGate } from '@/hooks/useRoleGate';
 
 export default function NewExpensePage() {
   const [loading, setLoading] = useState(true);
-  const [isStaff, setIsStaff] = useState(false);
   const [projects, setProjects] = useState<any[]>([]);
   const [form, setForm] = useState({
     projectId: '',
@@ -16,27 +16,20 @@ export default function NewExpensePage() {
     date: '',
     paymentMethod: '',
   });
+  const { allowed, loading: guardLoading } = useRoleGate(['admin', 'finance']);
 
   useEffect(() => {
+    if (guardLoading) return;
+    if (!allowed) {
+      setLoading(false);
+      return;
+    }
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setLoading(false);
-        return;
-      }
-      const uSnap = await getDocs(
-        query(collection(db, 'users'), where('__name__', '==', user.uid))
-      );
-      const me = uSnap.docs[0]?.data();
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        const projSnap = await getDocs(collection(db, 'projects'));
-        setProjects(projSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      }
+      const projSnap = await getDocs(collection(db, 'projects'));
+      setProjects(projSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>
@@ -64,8 +57,8 @@ export default function NewExpensePage() {
     }
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have access to this page.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have access to this page.</p>;
 
   return (
     <div className="p-4 grid gap-4 max-w-xl">

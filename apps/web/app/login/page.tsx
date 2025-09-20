@@ -5,6 +5,14 @@ import { useState } from 'react';
 import { getClientFirebaseAuth } from '@/lib/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { setPersistence, browserLocalPersistence, type UserCredential } from 'firebase/auth';
+import {
+  ROLE_KEYS,
+  encodeRolesCookie,
+  extractUserRoles,
+  getDefaultAdminRoute,
+  hasRole,
+  UserRoles,
+} from '@/lib/roles';
 
 const TEMP_ADMIN_PASSWORD = 'DDp42km9TT!!Campion02';
 
@@ -48,26 +56,40 @@ export default function Login() {
         }
       }
       const userRef = doc(db, 'users', credential.user.uid);
-      let isStaff = false;
-      if (
+      const userDoc = await getDoc(userRef);
+      const adminOverride =
         credential.user.uid === 'WK6WCuSueLN5M3Zq6D7WBbHyGPo1' ||
         credential.user.email === 'ryan@pineappletapped.com' ||
-        credential.user.email === 'ryanadmin@pineappletapped.com'
-      ) {
-        await setDoc(userRef, { isStaff: true }, { merge: true });
-        isStaff = true;
+        credential.user.email === 'ryanadmin@pineappletapped.com';
+
+      let roles: UserRoles = {};
+      if (adminOverride) {
+        roles = { admin: true };
+        await setDoc(userRef, { email, roles }, { merge: true });
+      } else if (userDoc.exists()) {
+        roles = extractUserRoles(userDoc.data());
+        if (userDoc.data()?.isStaff === true && !roles.admin) {
+          roles = { ...roles, admin: true };
+          await setDoc(userRef, { roles }, { merge: true });
+        }
+        if (!userDoc.data()?.email) {
+          await setDoc(userRef, { email }, { merge: true });
+        }
       } else {
-        const userDoc = await getDoc(userRef);
-        isStaff = userDoc.exists() && !!userDoc.data()?.isStaff;
+        await setDoc(userRef, { email }, { merge: true });
       }
+
+      const hasBackofficeAccess = hasRole(roles, ROLE_KEYS);
       const token = await credential.user.getIdToken();
       const maxAge = 60 * 60 * 24 * 7; // 7 days
       const secureAttr = typeof window !== 'undefined' && window.location.protocol === 'https:' ? '; Secure' : '';
       const baseAttrs = `Path=/; Max-Age=${maxAge}; SameSite=Strict${secureAttr}`;
       document.cookie = `token=${encodeURIComponent(token)}; ${baseAttrs}`;
       document.cookie = `uid=${encodeURIComponent(credential.user.uid)}; ${baseAttrs}`;
-      document.cookie = `isStaff=${isStaff ? '1' : '0'}; ${baseAttrs}`;
-      window.location.href = isStaff ? '/admin' : '/dashboard';
+      document.cookie = `roles=${encodeURIComponent(encodeRolesCookie(roles))}; ${baseAttrs}`;
+      document.cookie = `isStaff=${hasBackofficeAccess ? '1' : '0'}; ${baseAttrs}`;
+      const destination = hasBackofficeAccess ? getDefaultAdminRoute(roles) : '/dashboard';
+      window.location.href = destination;
     } catch (err) {
       console.error('Failed to sign in with Firebase', err);
       setError('Invalid credentials');

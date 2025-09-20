@@ -3,12 +3,12 @@
 import Image from "next/image";
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
-import { auth, db } from "@/lib/firebase";
+import { db } from "@/lib/firebase";
+import { useRoleGate } from "@/hooks/useRoleGate";
 import {
   collection,
   getDocs,
   doc,
-  getDoc,
   updateDoc,
   deleteDoc,
   addDoc,
@@ -19,7 +19,7 @@ import type { Product } from "@/lib/products";
 import type { Category } from "@/lib/categories";
 
 export default function AdminProductsPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [products, setProducts] = useState<Product[]>([]);
   const [cats, setCats] = useState<Category[]>([]);
   const [search, setSearch] = useState("");
@@ -29,25 +29,18 @@ export default function AdminProductsPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setIsStaff(false);
+      if (guardLoading) return;
+      if (!allowed) {
         setLoading(false);
         return;
       }
-      const snap = await getDoc(doc(db, "users", user.uid));
-      const me = snap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        const prodSnap = await getDocs(collection(db, "products"));
-        setProducts(prodSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
-        const catSnap = await getDocs(collection(db, "categories"));
-        setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
-      }
+      const prodSnap = await getDocs(collection(db, "products"));
+      setProducts(prodSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+      const catSnap = await getDocs(collection(db, "categories"));
+      setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const toggleHidden = async (id: string, hidden: boolean | undefined) => {
     await updateDoc(doc(db, "products", id), { hidden: !hidden });
@@ -130,8 +123,8 @@ export default function AdminProductsPage() {
     });
   }, [products, search, catFilter, venueFilter]);
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage products.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to manage products.</p>;
 
   return (
     <div className="grid gap-6">

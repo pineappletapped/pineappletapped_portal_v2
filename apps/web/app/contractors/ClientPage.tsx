@@ -20,6 +20,7 @@ import {
 import { httpsCallable } from "firebase/functions";
 import ContractorProfileForm from "@/components/ContractorProfileForm";
 import ContractorKitManager from "@/components/ContractorKitManager";
+import { extractUserRoles, hasRole } from "@/lib/roles";
 
 export default function ContractorPortal() {
   const [tasks, setTasks] = useState<any[]>([]);
@@ -46,7 +47,8 @@ export default function ContractorPortal() {
       try {
         const uSnap = await getDoc(doc(db, "users", user.uid));
         const me = uSnap.data() as any;
-        setIsStaff(me?.isStaff === true);
+        const roles = extractUserRoles(me);
+        setIsStaff(hasRole(roles, ["admin", "operations", "projects"]));
 
         const tq = query(collection(db, "contractorTasks"), where("uid", "==", user.uid));
         const tSnap = await getDocs(tq);

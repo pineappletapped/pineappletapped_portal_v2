@@ -3,15 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import { auth, db, storage, functions } from "@/lib/firebase";
-import {
-  collection,
-  addDoc,
-  getDocs,
-  doc,
-  getDoc,
-  updateDoc,
-} from "firebase/firestore";
+import { db, storage, functions } from "@/lib/firebase";
+import { collection, addDoc, getDocs, updateDoc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import type {
@@ -35,6 +28,7 @@ import {
 } from "react-icons/fi";
 import type { Category } from "@/lib/categories";
 import VenueMap from "@/components/VenueMap";
+import { useRoleGate } from "@/hooks/useRoleGate";
 
 const ReactQuill = dynamic(() => import("react-quill"), { ssr: false });
 import "react-quill/dist/quill.snow.css";
@@ -88,7 +82,7 @@ const deliverableIcons: Record<DeliverableType, IconType> = {
 
 export default function NewProductPage() {
   const router = useRouter();
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [loading, setLoading] = useState(true);
   const [cats, setCats] = useState<Category[]>([]);
   const [allModifiers, setAllModifiers] = useState<ModifierGroup[]>([]);
@@ -156,37 +150,30 @@ export default function NewProductPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setIsStaff(false);
+      if (guardLoading) return;
+      if (!allowed) {
         setLoading(false);
         return;
       }
-      const meSnap = await getDoc(doc(db, "users", user.uid));
-      const me = meSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        const [catSnap, modSnap, wfSnap, venueSnap] = await Promise.all([
-          getDocs(collection(db, "categories")),
-          getDocs(collection(db, "modifiers")),
-          getDocs(collection(db, "workflows")),
-          getDocs(collection(db, "venues")),
-        ]);
-        setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
-        setAllModifiers(
-          modSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as any
-        );
-        setWorkflows(wfSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
-        setVenues(
-          venueSnap.docs
-            .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
-            .sort((a, b) => a.name.localeCompare(b.name))
-        );
-      }
+      const [catSnap, modSnap, wfSnap, venueSnap] = await Promise.all([
+        getDocs(collection(db, "categories")),
+        getDocs(collection(db, "modifiers")),
+        getDocs(collection(db, "workflows")),
+        getDocs(collection(db, "venues")),
+      ]);
+      setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+      setAllModifiers(
+        modSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as any
+      );
+      setWorkflows(wfSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+      setVenues(
+        venueSnap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
+          .sort((a, b) => a.name.localeCompare(b.name))
+      );
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   useEffect(() => {
     if (selectedVenue) {
@@ -434,8 +421,8 @@ export default function NewProductPage() {
     setTaskSubtasks("");
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to create products.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to create products.</p>;
 
   const kitGuidanceValue = 0;
   const labourFilmingValue = parseMoney(labourFilmingRate);

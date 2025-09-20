@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { auth, db } from '@/lib/firebase';
 import { collection, query, where, orderBy, getDocs, doc, getDoc } from 'firebase/firestore';
+import { extractUserRoles, hasRole } from '@/lib/roles';
 
 /**
  * Project Task History
@@ -30,8 +31,9 @@ export default function ProjectHistoryPage({ params }: { params: { id: string } 
       // Check user membership or staff
       const uSnap = await getDoc(doc(db, 'users', user.uid));
       const me = uSnap.data() as any;
-      const isStaff = me?.isStaff === true;
-      if (!isStaff) {
+      const roles = extractUserRoles(me);
+      const isPrivileged = hasRole(roles, ['admin', 'projects']);
+      if (!isPrivileged) {
         // Ensure user is member of project org
         const projSnap = await getDoc(doc(db, 'projects', projectId));
         if (!projSnap.exists) {

@@ -1,11 +1,19 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { auth, db, functions } from '@/lib/firebase';
+import { functions } from '@/lib/firebase';
 import { httpsCallable } from 'firebase/functions';
 import { adminListUsers, adminUpdateUser } from '@/lib/admin';
-import { doc, getDoc } from 'firebase/firestore';
+import {
+  ROLE_DEFINITIONS,
+  ROLE_KEYS,
+  ROLE_LABELS,
+  extractUserRoles,
+  RoleKey,
+  UserRoles,
+} from '@/lib/roles';
+import { useRoleGate } from '@/hooks/useRoleGate';
 import CRMRecordForm from '@/components/CRMRecordForm';
 
 /**
@@ -14,36 +22,47 @@ import CRMRecordForm from '@/components/CRMRecordForm';
  * This page allows super administrators to view all user accounts and perform
  * management actions such as toggling staff status and sending password resets.
  */
+interface AdminUser {
+  id: string;
+  email: string;
+  fullName?: string;
+  crmStatus?: string;
+  discount?: number;
+  roles?: UserRoles;
+  [key: string]: any;
+}
+
 export default function AdminUsersPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
-  const [users, setUsers] = useState<any[]>([]);
+  const { allowed, roles, loading: guardLoading } = useRoleGate(['admin', 'sales']);
+  const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'client' | 'prospect' | 'outreach'>('client');
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const canEditRoles = useMemo(() => !!roles?.admin, [roles]);
 
   useEffect(() => {
     (async () => {
-      const current = auth.currentUser;
-      if (!current) {
-        setIsStaff(false);
+      if (guardLoading) return;
+      if (!allowed) {
+        setLoading(false);
         return;
       }
-      const uSnap = await getDoc(doc(db, 'users', current.uid));
-      const me = uSnap.data() as any;
-      setIsStaff(me?.isStaff === true);
-      if (me?.isStaff) {
-        try {
-          const result: any = await adminListUsers();
-          setUsers(result.users || []);
-        } catch (err: any) {
-          console.error(err);
-          setError(err.message || 'Error loading users');
-        }
+      try {
+        const result: any = await adminListUsers();
+        const hydrated = (result.users || []).map((user: AdminUser) => ({
+          ...user,
+          roles: extractUserRoles(user),
+        }));
+        setUsers(hydrated);
+      } catch (err: any) {
+        console.error(err);
+        setError(err.message || 'Error loading users');
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const changeStatus = async (user: any, status: string) => {
     try {
@@ -55,12 +74,18 @@ export default function AdminUsersPage() {
     }
   };
 
-  const toggleStaff = async (user: any) => {
-    const ok = confirm(`Toggle staff for ${user.email}?`);
-    if (!ok) return;
+  const updateRole = async (user: AdminUser, role: RoleKey, enabled: boolean) => {
+    if (!canEditRoles) return;
     try {
-      await adminUpdateUser({ userId: user.id, updates: { isStaff: !user.isStaff } });
-      setUsers(users.map(u => u.id === user.id ? { ...u, isStaff: !u.isStaff } : u));
+      const currentRoles = extractUserRoles(user);
+      const updatedRoles = { ...currentRoles } as UserRoles;
+      if (enabled) {
+        updatedRoles[role] = true;
+      } else {
+        delete updatedRoles[role];
+      }
+      await adminUpdateUser({ userId: user.id, updates: { roles: updatedRoles } });
+      setUsers(users.map(u => u.id === user.id ? { ...u, roles: updatedRoles } : u));
     } catch (err: any) {
       console.error(err);
       alert(err.message || 'Error updating user');
@@ -108,7 +133,53 @@ export default function AdminUsersPage() {
     }
   };
 
-  const renderTable = (list: any[]) => (
+  const renderRoleBadges = (user: AdminUser) => {
+    const activeRoles = ROLE_KEYS.filter((role) => user.roles?.[role]);
+    if (activeRoles.length === 0) {
+      return <span>-</span>;
+    }
+    return (
+      <div className="flex flex-wrap gap-1">
+        {activeRoles.map((role) => (
+          <span key={role} className="badge badge-outline text-xs">
+            {ROLE_LABELS[role]}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
+  const renderRoleEditor = (user: AdminUser) => {
+    if (!canEditRoles) {
+      return renderRoleBadges(user);
+    }
+
+    return (
+      <div className="grid gap-2">
+        {renderRoleBadges(user)}
+        <details className="text-xs">
+          <summary className="cursor-pointer text-blue-600">Manage roles</summary>
+          <div className="mt-2 grid gap-1">
+            {ROLE_DEFINITIONS.map((role) => (
+              <label key={role.key} className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={!!user.roles?.[role.key]}
+                  onChange={(e) => updateRole(user, role.key, e.target.checked)}
+                />
+                <span>
+                  <span className="font-medium">{role.label}</span>
+                  <span className="block text-[0.7rem] text-gray-500">{role.description}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </details>
+      </div>
+    );
+  };
+
+  const renderTable = (list: AdminUser[]) => (
     list.length === 0 ? (
       <p>No records.</p>
     ) : (
@@ -118,7 +189,7 @@ export default function AdminUsersPage() {
             <th className="p-2">Email</th>
             <th className="p-2">Name</th>
             <th className="p-2">Stage</th>
-            <th className="p-2">Staff</th>
+            <th className="p-2">Roles</th>
             <th className="p-2">Discount%</th>
             <th className="p-2">Actions</th>
           </tr>
@@ -139,7 +210,9 @@ export default function AdminUsersPage() {
                   <option value="outreach">Outreach</option>
                 </select>
               </td>
-              <td className="p-2">{user.isStaff ? 'Yes' : 'No'}</td>
+              <td className="p-2">
+                {canEditRoles ? renderRoleEditor(user) : renderRoleBadges(user)}
+              </td>
               <td className="p-2">
                 <input
                   type="number"
@@ -150,9 +223,6 @@ export default function AdminUsersPage() {
               </td>
               <td className="p-2 flex gap-2">
                 <Link className="btn-sm" href={`/admin/users/${user.id}`}>View</Link>
-                <button className="btn-sm" onClick={() => toggleStaff(user)}>
-                  {user.isStaff ? 'Revoke Staff' : 'Make Staff'}
-                </button>
                 {user.email && (
                   <button className="btn-sm" onClick={() => sendReset(user)}>Reset</button>
                 )}
@@ -165,8 +235,8 @@ export default function AdminUsersPage() {
     )
   );
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to view this page.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to view this page.</p>;
 
   const clients = users.filter(u => (u.crmStatus || 'client') === 'client');
   const prospects = users.filter(u => u.crmStatus === 'prospect');

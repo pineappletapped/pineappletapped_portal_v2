@@ -2,17 +2,17 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { auth, db } from '@/lib/firebase';
+import { db } from '@/lib/firebase';
 import {
   collection,
   getDocs,
   doc,
   updateDoc,
   query,
-  where,
   orderBy,
   limit,
 } from 'firebase/firestore';
+import { useRoleGate } from '@/hooks/useRoleGate';
 
 /**
  * Admin Finance Dashboard
@@ -22,49 +22,41 @@ import {
  */
 export default function AdminFinancePage() {
   const [loading, setLoading] = useState(true);
-  const [isStaff, setIsStaff] = useState(false);
   const [contractorInvoices, setContractorInvoices] = useState<any[]>([]);
   const [clientInvoices, setClientInvoices] = useState<any[]>([]);
   const [expenses, setExpenses] = useState<any[]>([]);
   const [projects, setProjects] = useState<any[]>([]);
+  const { allowed, loading: guardLoading } = useRoleGate(['admin', 'finance']);
 
   useEffect(() => {
+    if (guardLoading) return;
+    if (!allowed) {
+      setLoading(false);
+      return;
+    }
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setLoading(false);
-        return;
-      }
-      const uSnap = await getDocs(
-        query(collection(db, 'users'), where('__name__', '==', user.uid))
+      const [contrSnap, clientSnap, expSnap, projSnap] = await Promise.all([
+        getDocs(collection(db, 'invoices')),
+        getDocs(collection(db, 'clientInvoices')),
+        getDocs(collection(db, 'expenses')),
+        getDocs(
+          query(
+            collection(db, 'projects'),
+            orderBy('createdAt', 'desc'),
+            limit(5)
+          )
+        ),
+      ]);
+      setContractorInvoices(
+        contrSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
       );
-      const me = uSnap.docs[0]?.data();
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        const [contrSnap, clientSnap, expSnap, projSnap] = await Promise.all([
-          getDocs(collection(db, 'invoices')),
-          getDocs(collection(db, 'clientInvoices')),
-          getDocs(collection(db, 'expenses')),
-          getDocs(
-            query(
-              collection(db, 'projects'),
-              orderBy('createdAt', 'desc'),
-              limit(5)
-            )
-          ),
-        ]);
-        setContractorInvoices(
-          contrSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
-        );
-        setClientInvoices(clientSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-        const exps = expSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-        setExpenses(exps);
-        setProjects(projSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      }
+      setClientInvoices(clientSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      const exps = expSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setExpenses(exps);
+      setProjects(projSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const updateInvoiceStatus = async (invoiceId: string, status: string) => {
     try {
@@ -78,8 +70,8 @@ export default function AdminFinancePage() {
     }
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have access to this page.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have access to this page.</p>;
 
   const moneyIn = clientInvoices.reduce(
     (sum, inv) => sum + (inv.total || inv.amount || 0),

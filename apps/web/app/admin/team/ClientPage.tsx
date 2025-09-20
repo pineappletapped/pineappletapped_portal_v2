@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { auth, db, functions } from '@/lib/firebase';
+import { db, functions } from '@/lib/firebase';
 import { httpsCallable } from 'firebase/functions';
 import { doc, getDoc, collection, getDocs, updateDoc } from 'firebase/firestore';
 import { adminListUsers, adminUpdateUser } from '@/lib/admin';
+import { useRoleGate } from '@/hooks/useRoleGate';
+import { extractUserRoles, type UserRoles } from '@/lib/roles';
 
 interface User {
   id: string;
@@ -13,10 +15,11 @@ interface User {
   isStaff?: boolean;
   contractor?: boolean;
   disabled?: boolean;
+  roles?: UserRoles;
 }
 
 export default function AdminTeamPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, roles, loading: guardLoading } = useRoleGate('admin');
   const [users, setUsers] = useState<User[]>([]);
   const [apps, setApps] = useState<any[]>([]);
   const [activeTab, setActiveTab] = useState<'staff' | 'contractor' | 'applications'>('staff');
@@ -25,25 +28,26 @@ export default function AdminTeamPage() {
 
   useEffect(() => {
     (async () => {
-      const current = auth.currentUser;
-      if (!current) { setIsStaff(false); return; }
-      const snap = await getDoc(doc(db, 'users', current.uid));
-      const me = snap.data() as any;
-      if (!me?.isStaff) { setIsStaff(false); return; }
-      setIsStaff(true);
+      if (guardLoading) return;
+      if (!allowed) return;
       try {
         const res: any = await adminListUsers();
-        setUsers(res.users || []);
+        const hydrated = (res.users || []).map((user: User) => ({
+          ...user,
+          roles: extractUserRoles(user),
+          isStaff: extractUserRoles(user).admin ?? user.isStaff,
+        }));
+        setUsers(hydrated);
         const appSnap = await getDocs(collection(db, 'contractorApplications'));
         setApps(appSnap.docs.map(d => ({ id: d.id, ...d.data() })));
       } catch (err) {
         console.error(err);
       }
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
-  if (isStaff === null) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to view this page.</p>;
+  if (guardLoading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to view this page.</p>;
 
   const sendReset = async (user: User) => {
     const fn = httpsCallable(functions, 'admin_sendPasswordReset');
@@ -57,8 +61,15 @@ export default function AdminTeamPage() {
   };
 
   const toggleStaff = async (user: User) => {
-    await adminUpdateUser({ userId: user.id, updates: { isStaff: !user.isStaff } });
-    setUsers(users.map(u => u.id === user.id ? { ...u, isStaff: !u.isStaff } : u));
+    const next = !(user.roles?.admin);
+    const updatedRoles: UserRoles = { ...(user.roles || {}) };
+    if (next) {
+      updatedRoles.admin = true;
+    } else {
+      delete updatedRoles.admin;
+    }
+    await adminUpdateUser({ userId: user.id, updates: { roles: updatedRoles } });
+    setUsers(users.map(u => u.id === user.id ? { ...u, roles: updatedRoles, isStaff: next } : u));
   };
 
   const toggleContractor = async (user: User) => {
@@ -75,8 +86,24 @@ export default function AdminTeamPage() {
 
   const createUser = async () => {
     const fn = httpsCallable(functions, 'admin_createUser');
-    const res: any = await fn(newUser);
-    setUsers([...users, { id: res.data.uid, email: newUser.email, fullName: newUser.fullName, isStaff: newUser.isStaff, contractor: newUser.contractor, disabled: false }]);
+    const payload = {
+      ...newUser,
+      roles: newUser.isStaff ? { admin: true } : {},
+    };
+    const res: any = await fn(payload);
+    const roleData: UserRoles = newUser.isStaff ? { admin: true } : {};
+    setUsers([
+      ...users,
+      {
+        id: res.data.uid,
+        email: newUser.email,
+        fullName: newUser.fullName,
+        isStaff: newUser.isStaff,
+        contractor: newUser.contractor,
+        disabled: false,
+        roles: roleData,
+      },
+    ]);
     setShowCreate(false);
     setNewUser({ email: '', password: '', fullName: '', isStaff: false, contractor: false });
   };
@@ -95,7 +122,7 @@ export default function AdminTeamPage() {
     setApps(apps.filter(a => a.id !== app.id));
   };
 
-  const staffUsers = users.filter(u => u.isStaff);
+  const staffUsers = users.filter(u => u.roles?.admin);
   const contractorUsers = users.filter(u => u.contractor);
 
   const renderList = (list: User[], showStaff: boolean, showContractor: boolean) => (

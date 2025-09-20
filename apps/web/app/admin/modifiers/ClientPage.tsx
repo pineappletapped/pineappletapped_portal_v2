@@ -1,16 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { auth, db } from "@/lib/firebase";
+import { db } from "@/lib/firebase";
 import {
   collection,
   addDoc,
   getDocs,
   doc,
-  getDoc,
   updateDoc,
   deleteDoc,
 } from "firebase/firestore";
+import { useRoleGate } from "@/hooks/useRoleGate";
 
 interface ModifierOption {
   id: string;
@@ -26,7 +26,7 @@ interface ModifierGroup {
 }
 
 export default function ModifiersPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [loading, setLoading] = useState(true);
   const [groups, setGroups] = useState<ModifierGroup[]>([]);
   const [newName, setNewName] = useState("");
@@ -34,25 +34,18 @@ export default function ModifiersPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setIsStaff(false);
+      if (guardLoading) return;
+      if (!allowed) {
         setLoading(false);
         return;
       }
-      const meSnap = await getDoc(doc(db, "users", user.uid));
-      const me = meSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        const snap = await getDocs(collection(db, "modifiers"));
-        setGroups(
-          snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as any
-        );
-      }
+      const snap = await getDocs(collection(db, "modifiers"));
+      setGroups(
+        snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as any
+      );
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const addGroup = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -151,8 +144,8 @@ export default function ModifiersPage() {
     );
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage modifiers.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to manage modifiers.</p>;
 
   return (
     <div className="grid gap-6 max-w-2xl">

@@ -32,6 +32,40 @@ const db = admin.firestore();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' });
 const VAT_RATE = 0.2;
 
+type RoleKey = 'admin' | 'operations' | 'finance' | 'projects' | 'sales' | 'marketing';
+
+const ROLE_KEYS: RoleKey[] = ['admin', 'operations', 'finance', 'projects', 'sales', 'marketing'];
+
+function extractRoleSet(data: admin.firestore.DocumentData | undefined): Set<RoleKey> {
+  const roles = new Set<RoleKey>();
+  if (!data) return roles;
+  const rawRoles = (data as any)?.roles;
+  if (Array.isArray(rawRoles)) {
+    for (const value of rawRoles) {
+      if (ROLE_KEYS.includes(value as RoleKey)) {
+        roles.add(value as RoleKey);
+      }
+    }
+  } else if (rawRoles && typeof rawRoles === 'object') {
+    for (const [key, value] of Object.entries(rawRoles as Record<string, unknown>)) {
+      if (value === true && ROLE_KEYS.includes(key as RoleKey)) {
+        roles.add(key as RoleKey);
+      }
+    }
+  }
+  if ((data as any)?.isStaff === true) {
+    roles.add('admin');
+  }
+  return roles;
+}
+
+function hasRequiredRole(roles: Set<RoleKey>, required?: RoleKey | RoleKey[]): boolean {
+  if (roles.has('admin')) return true;
+  if (!required) return roles.size > 0;
+  const requiredList = Array.isArray(required) ? required : [required];
+  return requiredList.some((role) => roles.has(role));
+}
+
 
 // Set ffmpeg path for fluent-ffmpeg
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
@@ -2295,20 +2329,29 @@ export const recordLogin = functions.https.onCall(async (data, context) => {
  */
 
 // Utility to assert that the caller is staff
-async function assertStaff(context: functions.https.CallableContext) {
+async function assertStaff(
+  context: functions.https.CallableContext,
+  requiredRoles?: RoleKey | RoleKey[]
+): Promise<Set<RoleKey>> {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
   }
   const snap = await db.collection('users').doc(context.auth.uid).get();
-  if (!snap.exists || snap.data()?.isStaff !== true) {
+  if (!snap.exists) {
     throw new functions.https.HttpsError('permission-denied', 'Staff only');
   }
+  const roles = extractRoleSet(snap.data());
+  if (!hasRequiredRole(roles, requiredRoles)) {
+    throw new functions.https.HttpsError('permission-denied', 'Staff only');
+  }
+  return roles;
 }
 
 async function assertStaffRequest(
   req: functions.Request,
-  res: functions.Response
-) {
+  res: functions.Response,
+  requiredRoles?: RoleKey | RoleKey[]
+): Promise<{ uid: string; roles: Set<RoleKey> } | null> {
   const authHeader = req.headers.authorization || '';
   if (!authHeader.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Unauthorized' });
@@ -2318,11 +2361,16 @@ async function assertStaffRequest(
     const token = authHeader.split('Bearer ')[1];
     const decoded = await admin.auth().verifyIdToken(token);
     const snap = await db.collection('users').doc(decoded.uid).get();
-    if (!snap.exists || snap.data()?.isStaff !== true) {
+    if (!snap.exists) {
       res.status(403).json({ error: 'Staff only' });
       return null;
     }
-    return decoded.uid;
+    const roles = extractRoleSet(snap.data());
+    if (!hasRequiredRole(roles, requiredRoles)) {
+      res.status(403).json({ error: 'Staff only' });
+      return null;
+    }
+    return { uid: decoded.uid, roles };
   } catch (err) {
     res.status(401).json({ error: 'Unauthorized' });
     return null;
@@ -2338,7 +2386,8 @@ export const admin_listUsers = functions.https.onRequest((req, res) => {
       res.status(405).end();
       return;
     }
-    if (!(await assertStaffRequest(req, res))) return;
+    const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
+    if (!requester) return;
     try {
       const snap = await db.collection('users').get();
       const users = snap.docs.map((doc) => {
@@ -2365,10 +2414,19 @@ export const admin_updateUser = functions.https.onRequest((req, res) => {
       res.status(405).end();
       return;
     }
-    if (!(await assertStaffRequest(req, res))) return;
+    const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
+    if (!requester) return;
     const { userId, updates } = req.body || {};
     if (!userId || !updates) {
       res.status(400).json({ error: 'userId and updates required' });
+      return;
+    }
+    if (updates.roles && !requester.roles.has('admin')) {
+      res.status(403).json({ error: 'Only administrators can modify roles' });
+      return;
+    }
+    if (updates.isStaff !== undefined && !requester.roles.has('admin')) {
+      res.status(403).json({ error: 'Only administrators can promote staff' });
       return;
     }
     const { password, disabled, ...rest } = updates;
@@ -2387,7 +2445,7 @@ export const admin_updateUser = functions.https.onRequest((req, res) => {
  * Create a new user account. Expects { email, password, fullName?, isStaff?, contractor? }
  */
 export const admin_createUser = functions.https.onCall(async (data, context) => {
-  await assertStaff(context);
+  await assertStaff(context, 'admin');
   const { email, password, fullName = '', isStaff = false, contractor = false } = data;
   if (!email || !password) throw new functions.https.HttpsError('invalid-argument', 'email and password required');
   const user = await admin.auth().createUser({ email, password, displayName: fullName });
@@ -2399,7 +2457,7 @@ export const admin_createUser = functions.https.onCall(async (data, context) => 
  * Delete a user account and associated profile. Expects { userId }
  */
 export const admin_deleteUser = functions.https.onCall(async (data, context) => {
-  await assertStaff(context);
+  await assertStaff(context, 'admin');
   const { userId } = data;
   if (!userId) throw new functions.https.HttpsError('invalid-argument', 'userId required');
   await Promise.all([
@@ -2413,7 +2471,7 @@ export const admin_deleteUser = functions.https.onCall(async (data, context) => 
  * Send a password reset email to a user. Expects { email }. Only staff can call.
  */
 export const admin_sendPasswordReset = functions.https.onCall(async (data, context) => {
-  await assertStaff(context);
+  await assertStaff(context, 'admin');
   const { email } = data;
   if (!email) throw new functions.https.HttpsError('invalid-argument', 'Email required');
   try {
@@ -2431,7 +2489,7 @@ export const admin_sendPasswordReset = functions.https.onCall(async (data, conte
  * Merge two user records, moving data from sourceId into targetId and deleting the source.
  */
 export const admin_mergeUsers = functions.https.onCall(async (data, context) => {
-  await assertStaff(context);
+  await assertStaff(context, 'admin');
   const { sourceId, targetId } = data;
   if (!sourceId || !targetId) {
     throw new functions.https.HttpsError('invalid-argument', 'sourceId and targetId required');
@@ -2452,7 +2510,7 @@ export const admin_mergeUsers = functions.https.onCall(async (data, context) => 
  * Create a new category for products. Expects { name, slug, description, parentId }.
  */
 export const admin_createCategory = functions.https.onCall(async (data, context) => {
-  await assertStaff(context);
+  await assertStaff(context, 'marketing');
   const { name, slug, description, parentId } = data;
   if (!name) throw new functions.https.HttpsError('invalid-argument', 'Name required');
   const ref = await db.collection('categories').add({
@@ -2469,7 +2527,7 @@ export const admin_createCategory = functions.https.onCall(async (data, context)
  * Create a new product. Expects { name, description, price, categoryId, depositPercentage, workflowId }.
 */
 export const admin_createProduct = functions.https.onCall(async (data, context) => {
-  await assertStaff(context);
+  await assertStaff(context, ['admin', 'operations']);
   const { name, description, price, categoryId, depositPercentage, workflowId, seoTitle, seoDescription } = data;
   if (!name) throw new functions.https.HttpsError('invalid-argument', 'Name required');
   const product: any = {
@@ -2491,7 +2549,7 @@ export const admin_createProduct = functions.https.onCall(async (data, context) 
  * Update an existing product. Expects { productId, updates }.
 */
 export const admin_updateProduct = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
-  await assertStaff(context);
+  await assertStaff(context, ['admin', 'operations']);
   const { productId, updates } = data;
   if (!productId || !updates) throw new functions.https.HttpsError('invalid-argument', 'productId and updates required');
   if (updates.requiredKit) {
@@ -2528,7 +2586,7 @@ export const admin_updateProduct = functions.https.onCall(async (data: any, cont
  * Delete a product. Expects { productId }.
 */
 export const admin_deleteProduct = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
-  await assertStaff(context);
+  await assertStaff(context, ['admin', 'operations']);
   const { productId } = data;
   if (!productId) throw new functions.https.HttpsError('invalid-argument', 'productId required');
   await db.collection('products').doc(productId).delete();
@@ -2540,7 +2598,7 @@ export const admin_deleteProduct = functions.https.onCall(async (data: any, cont
  * { title, description, dueDays, fieldType }. FieldType defines how the task collects data: e.g. 'text', 'file', etc.
  */
 export const admin_createWorkflow = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
-  await assertStaff(context);
+  await assertStaff(context, ['admin', 'operations']);
   const { name, description, tasks } = data;
   if (!name) throw new functions.https.HttpsError('invalid-argument', 'Name required');
   const safeTasks = Array.isArray(tasks)
@@ -2566,7 +2624,7 @@ export const admin_createWorkflow = functions.https.onCall(async (data: any, con
  * Update a workflow. Expects { workflowId, updates }.
  */
 export const admin_updateWorkflow = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
-  await assertStaff(context);
+  await assertStaff(context, ['admin', 'operations']);
   const { workflowId, updates } = data;
   if (!workflowId || !updates) throw new functions.https.HttpsError('invalid-argument', 'workflowId and updates required');
   await db.collection('workflows').doc(workflowId).set(updates, { merge: true });
@@ -2574,7 +2632,7 @@ export const admin_updateWorkflow = functions.https.onCall(async (data: any, con
 });
 
 export const admin_deleteWorkflow = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
-  await assertStaff(context);
+  await assertStaff(context, ['admin', 'operations']);
   const { workflowId } = data;
   if (!workflowId) throw new functions.https.HttpsError('invalid-argument', 'workflowId required');
   await db.collection('workflows').doc(workflowId).delete();
@@ -2585,7 +2643,7 @@ export const admin_deleteWorkflow = functions.https.onCall(async (data: any, con
  * Assign a workflow to a product. Expects { productId, workflowId }.
 */
 export const admin_assignWorkflow = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
-  await assertStaff(context);
+  await assertStaff(context, ['admin', 'operations']);
   const { productId, workflowId } = data;
   if (!productId || !workflowId) throw new functions.https.HttpsError('invalid-argument', 'productId and workflowId required');
   await db.collection('products').doc(productId).set({ workflowId }, { merge: true });
@@ -2598,7 +2656,7 @@ export const admin_assignWorkflow = functions.https.onCall(async (data: any, con
  * name, price }. If templateId provided, its items and agreements are merged.
  */
 export const admin_createProposal = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
-  await assertStaff(context);
+  await assertStaff(context, ['admin', 'sales']);
   const { orgId, clientEmail, items = [], agreementIds = [], sectionIds = [], templateId, customText } = data;
   if (!orgId || !clientEmail) {
     throw new functions.https.HttpsError('invalid-argument', 'orgId and clientEmail required');
@@ -2645,7 +2703,7 @@ export const admin_createProposal = functions.https.onCall(async (data: any, con
  * returns the template id.
  */
 export const admin_saveProposalTemplate = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
-  await assertStaff(context);
+  await assertStaff(context, ['admin', 'sales']);
   const { id, name, items = [], agreementIds = [], brandColor, logoUrl } = data;
   if (!name) throw new functions.https.HttpsError('invalid-argument', 'name required');
   const tpl = {
@@ -2671,7 +2729,7 @@ export const admin_saveProposalTemplate = functions.https.onCall(async (data: an
  */
 export const admin_acceptProposal = functions.https.onCall(
   async (data: any, context: functions.https.CallableContext) => {
-    await assertStaff(context);
+    await assertStaff(context, ['admin', 'sales']);
     const { proposalId } = data;
     if (!proposalId) {
       throw new functions.https.HttpsError('invalid-argument', 'proposalId required');

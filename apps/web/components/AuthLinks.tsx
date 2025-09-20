@@ -5,10 +5,18 @@ import { useEffect, useState } from 'react';
 import { auth, db } from '@/lib/firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
+import {
+  ROLE_KEYS,
+  encodeRolesCookie,
+  extractUserRoles,
+  getDefaultAdminRoute,
+  hasRole,
+  UserRoles,
+} from '@/lib/roles';
 
 export default function AuthLinks() {
   const [user, setUser] = useState<any>(null);
-  const [isStaff, setIsStaff] = useState(false);
+  const [roles, setRoles] = useState<UserRoles>({});
   const [checked, setChecked] = useState(false);
 
   useEffect(() => {
@@ -16,21 +24,21 @@ export default function AuthLinks() {
       setUser(u);
       if (u) {
         const snap = await getDoc(doc(db, 'users', u.uid));
-        let staff = snap.exists() && !!snap.data()?.isStaff;
+        let extracted = extractUserRoles(snap.data());
         if (
           u.uid === 'WK6WCuSueLN5M3Zq6D7WBbHyGPo1' ||
           u.email === 'ryan@pineappletapped.com' ||
           u.email === 'ryanadmin@pineappletapped.com'
         ) {
-          staff = true;
+          extracted = { ...extracted, admin: true };
         }
-        setIsStaff(staff);
+        setRoles(extracted);
         const token = await u.getIdToken();
         document.cookie = `token=${token}; path=/`;
         document.cookie = `uid=${u.uid}; path=/`;
-        document.cookie = `isStaff=${staff ? '1' : '0'}; path=/`;
+        document.cookie = `roles=${encodeURIComponent(encodeRolesCookie(extracted))}; path=/`;
       } else {
-        setIsStaff(false);
+        setRoles({});
       }
       setChecked(true);
     });
@@ -40,14 +48,16 @@ export default function AuthLinks() {
   if (!checked) return null;
 
   if (user) {
+    const canAccessAdmin = hasRole(roles, ROLE_KEYS);
+    const adminHref = getDefaultAdminRoute(roles);
     return (
       <div className="flex items-center gap-2">
         <Link href="/dashboard" className="btn btn-sm">
           Client Portal
         </Link>
-        {isStaff && (
+        {canAccessAdmin && (
           <>
-            <Link href="/admin" className="btn btn-sm btn-outline">
+            <Link href={adminHref} className="btn btn-sm btn-outline">
               Admin
             </Link>
             <Link href="/contractors" className="btn btn-sm btn-outline">

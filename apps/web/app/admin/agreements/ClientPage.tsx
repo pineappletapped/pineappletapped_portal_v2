@@ -2,10 +2,11 @@
 
 import { useEffect, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { auth, db, functions } from '@/lib/firebase';
-import { doc, getDoc, collection, getDocs, Timestamp } from 'firebase/firestore';
+import { db, functions } from '@/lib/firebase';
+import { collection, getDocs, Timestamp } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import 'react-quill/dist/quill.snow.css';
+import { useRoleGate } from '@/hooks/useRoleGate';
 
 interface Agreement {
   id?: string;
@@ -29,7 +30,7 @@ const emptyForm: Agreement = {
 };
 
 export default function AdminAgreementsPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(['admin']);
   const [tab, setTab] = useState<'agreements' | 'policies'>('agreements');
   const [agreements, setAgreements] = useState<Agreement[]>([]);
   const [agreementForm, setAgreementForm] = useState<Agreement>(emptyForm);
@@ -71,17 +72,15 @@ export default function AdminAgreementsPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) { setIsStaff(false); setLoading(false); return; }
-      const uSnap = await getDoc(doc(db, 'users', user.uid));
-      const me = uSnap.data() as any;
-      setIsStaff(me?.isStaff === true);
-      if (me?.isStaff) {
-        await Promise.all([loadAgreements(), loadPolicies()]);
+      if (guardLoading) return;
+      if (!allowed) {
+        setLoading(false);
+        return;
       }
+      await Promise.all([loadAgreements(), loadPolicies()]);
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const saveAgreement = async () => {
     if (!agreementForm.title.trim() || !agreementForm.content.trim()) {
@@ -130,8 +129,8 @@ export default function AdminAgreementsPage() {
     }
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage agreements and policies.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to manage agreements and policies.</p>;
 
   return (
     <div className="grid gap-6">
