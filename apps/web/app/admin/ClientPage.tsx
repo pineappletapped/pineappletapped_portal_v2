@@ -158,6 +158,7 @@ export default function AdminPage() {
             {
               title: 'Logs & Comms',
               links: [
+                { href: '/admin/audit-logs', label: 'Audit Logs' },
                 { href: '/admin/login-history', label: 'Login History' },
                 { href: '/admin/messages', label: 'Messages' },
               ],

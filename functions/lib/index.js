@@ -27,6 +27,96 @@ const db = admin.firestore();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' });
 const VAT_RATE = 0.2;
 const ROLE_KEYS = ['admin', 'operations', 'finance', 'projects', 'sales', 'marketing'];
+const AUDIT_LOG_RETENTION_DAYS = 180;
+const AUDIT_LOG_BATCH_SIZE = 500;
+function serializeForAudit(value) {
+    if (value === undefined || value === null) {
+        return null;
+    }
+    if (value instanceof admin.firestore.Timestamp) {
+        return value.toDate().toISOString();
+    }
+    if (value instanceof admin.firestore.GeoPoint) {
+        return { latitude: value.latitude, longitude: value.longitude };
+    }
+    if (value instanceof Date) {
+        return value.toISOString();
+    }
+    if (Array.isArray(value)) {
+        return value.map((item) => serializeForAudit(item));
+    }
+    if (typeof value === 'object') {
+        if (typeof value.toDate === 'function') {
+            try {
+                return value.toDate().toISOString();
+            }
+            catch (err) {
+                // fall through
+            }
+        }
+        const entries = Object.entries(value);
+        if (entries.length === 0) {
+            const method = value?._methodName;
+            const name = method
+                ? `FieldValue:${method}`
+                : value?.constructor?.name || 'Object';
+            return `[${name}]`;
+        }
+        return entries.reduce((acc, [key, v]) => {
+            acc[key] = serializeForAudit(v);
+            return acc;
+        }, {});
+    }
+    return value;
+}
+function serializedEqual(a, b) {
+    return JSON.stringify(a) === JSON.stringify(b);
+}
+function buildChangesFromUpdates(before, updates) {
+    const changes = {};
+    const base = before || {};
+    for (const [key, value] of Object.entries(updates)) {
+        const prev = base[key];
+        const prevSerialized = serializeForAudit(prev);
+        const nextSerialized = serializeForAudit(value);
+        if (!serializedEqual(prevSerialized, nextSerialized)) {
+            changes[key] = { before: prevSerialized, after: nextSerialized };
+        }
+    }
+    return changes;
+}
+function buildChangesFromCreate(data) {
+    const changes = {};
+    for (const [key, value] of Object.entries(data)) {
+        changes[key] = { before: null, after: serializeForAudit(value) };
+    }
+    return changes;
+}
+function buildChangesFromDelete(before) {
+    const changes = {};
+    if (!before)
+        return changes;
+    for (const [key, value] of Object.entries(before)) {
+        changes[key] = { before: serializeForAudit(value), after: null };
+    }
+    return changes;
+}
+async function writeAuditLog(entry) {
+    const payload = {
+        actorUid: entry.actorUid,
+        action: entry.action,
+        entityType: entry.entityType,
+        entityId: entry.entityId ?? null,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    if (entry.changes && Object.keys(entry.changes).length > 0) {
+        payload.changes = entry.changes;
+    }
+    if (entry.metadata && Object.keys(entry.metadata).length > 0) {
+        payload.metadata = serializeForAudit(entry.metadata);
+    }
+    await db.collection('adminAuditLogs').add(payload);
+}
 function extractRoleSet(data) {
     const roles = new Set();
     if (!data)
@@ -2360,15 +2450,42 @@ export const admin_updateUser = functions.https.onRequest((req, res) => {
             return;
         }
         const { password, disabled, ...rest } = updates;
-        await db.collection('users').doc(userId).set(rest, { merge: true });
+        const userRef = db.collection('users').doc(userId);
+        const beforeSnap = await userRef.get();
+        const beforeData = beforeSnap.exists ? beforeSnap.data() : undefined;
+        await userRef.set(rest, { merge: true });
         const authUpdates = {};
-        if (password)
+        const metadata = {};
+        if (password) {
             authUpdates.password = password;
-        if (disabled !== undefined)
+            metadata.passwordReset = true;
+        }
+        let previousDisabled = null;
+        if (disabled !== undefined) {
             authUpdates.disabled = disabled;
+            try {
+                const record = await admin.auth().getUser(userId);
+                previousDisabled = record.disabled ?? null;
+            }
+            catch (err) {
+                previousDisabled = null;
+            }
+        }
         if (Object.keys(authUpdates).length) {
             await admin.auth().updateUser(userId, authUpdates);
         }
+        if (disabled !== undefined) {
+            metadata.disabled = { before: previousDisabled, after: disabled };
+        }
+        const changes = buildChangesFromUpdates(beforeData, rest);
+        await writeAuditLog({
+            actorUid: requester.uid,
+            action: 'admin_update_user',
+            entityType: 'user',
+            entityId: userId,
+            changes: Object.keys(changes).length ? changes : null,
+            metadata: Object.keys(metadata).length ? metadata : null,
+        });
         res.json({ ok: true });
     });
 });
@@ -2381,7 +2498,17 @@ export const admin_createUser = functions.https.onCall(async (data, context) => 
     if (!email || !password)
         throw new functions.https.HttpsError('invalid-argument', 'email and password required');
     const user = await admin.auth().createUser({ email, password, displayName: fullName });
-    await db.collection('users').doc(user.uid).set({ email, fullName, isStaff, contractor, disabled: false });
+    const profile = { email, fullName, isStaff, contractor, disabled: false };
+    await db.collection('users').doc(user.uid).set(profile);
+    if (context.auth?.uid) {
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_create_user',
+            entityType: 'user',
+            entityId: user.uid,
+            changes: buildChangesFromCreate(profile),
+        });
+    }
     return { uid: user.uid };
 });
 /**
@@ -2392,10 +2519,39 @@ export const admin_deleteUser = functions.https.onCall(async (data, context) => 
     const { userId } = data;
     if (!userId)
         throw new functions.https.HttpsError('invalid-argument', 'userId required');
+    const profileRef = db.collection('users').doc(userId);
+    const profileSnap = await profileRef.get();
+    const profileData = profileSnap.exists ? profileSnap.data() : undefined;
+    let authRecord = null;
+    try {
+        authRecord = await admin.auth().getUser(userId);
+    }
+    catch (err) {
+        authRecord = null;
+    }
     await Promise.all([
         admin.auth().deleteUser(userId).catch(() => { }),
-        db.collection('users').doc(userId).delete().catch(() => { })
+        profileRef.delete().catch(() => { })
     ]);
+    if (context.auth?.uid) {
+        const changes = buildChangesFromDelete(profileData);
+        if (authRecord) {
+            changes.authRecord = {
+                before: serializeForAudit({
+                    email: authRecord.email || null,
+                    disabled: authRecord.disabled ?? null,
+                }),
+                after: null,
+            };
+        }
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_delete_user',
+            entityType: 'user',
+            entityId: userId,
+            changes: Object.keys(changes).length ? changes : null,
+        });
+    }
     return { ok: true };
 });
 /**
@@ -2410,6 +2566,23 @@ export const admin_sendPasswordReset = functions.https.onCall(async (data, conte
         const link = await admin.auth().generatePasswordResetLink(email);
         // Optionally store reset link or send via email using external service
         console.log('Generated password reset link for', email);
+        if (context.auth?.uid) {
+            let targetUid = null;
+            try {
+                const record = await admin.auth().getUserByEmail(email);
+                targetUid = record.uid;
+            }
+            catch (err) {
+                targetUid = null;
+            }
+            await writeAuditLog({
+                actorUid: context.auth.uid,
+                action: 'admin_send_password_reset',
+                entityType: 'user',
+                entityId: targetUid ?? email,
+                metadata: { email },
+            });
+        }
         return { link };
     }
     catch (err) {
@@ -2432,9 +2605,25 @@ export const admin_mergeUsers = functions.https.onCall(async (data, context) => 
     if (!sourceSnap.exists || !targetSnap.exists) {
         throw new functions.https.HttpsError('not-found', 'User not found');
     }
-    const merged = { ...sourceSnap.data(), ...targetSnap.data() };
+    const sourceData = sourceSnap.data();
+    const targetData = targetSnap.data();
+    const merged = { ...sourceData, ...targetData };
     await targetRef.set(merged, { merge: true });
     await sourceRef.delete();
+    if (context.auth?.uid) {
+        const changes = buildChangesFromUpdates(targetData, merged);
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_merge_users',
+            entityType: 'user',
+            entityId: targetId,
+            changes: Object.keys(changes).length ? changes : null,
+            metadata: {
+                sourceId,
+                sourceSnapshot: serializeForAudit(sourceData),
+            },
+        });
+    }
     return { ok: true };
 });
 /**
@@ -2445,13 +2634,23 @@ export const admin_createCategory = functions.https.onCall(async (data, context)
     const { name, slug, description, parentId } = data;
     if (!name)
         throw new functions.https.HttpsError('invalid-argument', 'Name required');
-    const ref = await db.collection('categories').add({
+    const category = {
         name,
         slug: slug || '',
         description: description || '',
         parentId: parentId || null,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    };
+    const ref = await db.collection('categories').add(category);
+    if (context.auth?.uid) {
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_create_category',
+            entityType: 'category',
+            entityId: ref.id,
+            changes: buildChangesFromCreate(category),
+        });
+    }
     return { id: ref.id };
 });
 /**
@@ -2476,6 +2675,15 @@ export const admin_createProduct = functions.https.onCall(async (data, context) 
     if (seoDescription)
         product.seoDescription = seoDescription;
     const ref = await db.collection('products').add(product);
+    if (context.auth?.uid) {
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_create_product',
+            entityType: 'product',
+            entityId: ref.id,
+            changes: buildChangesFromCreate(product),
+        });
+    }
     return { id: ref.id };
 });
 /**
@@ -2512,7 +2720,20 @@ export const admin_updateProduct = functions.https.onCall(async (data, context) 
             });
         }
     }
-    await db.collection('products').doc(productId).set(updates, { merge: true });
+    const productRef = db.collection('products').doc(productId);
+    const beforeSnap = await productRef.get();
+    const beforeData = beforeSnap.exists ? beforeSnap.data() : undefined;
+    await productRef.set(updates, { merge: true });
+    if (context.auth?.uid) {
+        const changes = buildChangesFromUpdates(beforeData, updates);
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_update_product',
+            entityType: 'product',
+            entityId: productId,
+            changes: Object.keys(changes).length ? changes : null,
+        });
+    }
     return { ok: true };
 });
 /**
@@ -2523,7 +2744,20 @@ export const admin_deleteProduct = functions.https.onCall(async (data, context) 
     const { productId } = data;
     if (!productId)
         throw new functions.https.HttpsError('invalid-argument', 'productId required');
-    await db.collection('products').doc(productId).delete();
+    const productRef = db.collection('products').doc(productId);
+    const beforeSnap = await productRef.get();
+    const beforeData = beforeSnap.exists ? beforeSnap.data() : undefined;
+    await productRef.delete();
+    if (context.auth?.uid) {
+        const changes = buildChangesFromDelete(beforeData);
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_delete_product',
+            entityType: 'product',
+            entityId: productId,
+            changes: Object.keys(changes).length ? changes : null,
+        });
+    }
     return { ok: true };
 });
 /**
@@ -2551,6 +2785,15 @@ export const admin_createWorkflow = functions.https.onCall(async (data, context)
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
     const ref = await db.collection('workflows').add(workflow);
+    if (context.auth?.uid) {
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_create_workflow',
+            entityType: 'workflow',
+            entityId: ref.id,
+            changes: buildChangesFromCreate(workflow),
+        });
+    }
     return { id: ref.id };
 });
 /**
@@ -2561,7 +2804,20 @@ export const admin_updateWorkflow = functions.https.onCall(async (data, context)
     const { workflowId, updates } = data;
     if (!workflowId || !updates)
         throw new functions.https.HttpsError('invalid-argument', 'workflowId and updates required');
-    await db.collection('workflows').doc(workflowId).set(updates, { merge: true });
+    const workflowRef = db.collection('workflows').doc(workflowId);
+    const beforeSnap = await workflowRef.get();
+    const beforeData = beforeSnap.exists ? beforeSnap.data() : undefined;
+    await workflowRef.set(updates, { merge: true });
+    if (context.auth?.uid) {
+        const changes = buildChangesFromUpdates(beforeData, updates);
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_update_workflow',
+            entityType: 'workflow',
+            entityId: workflowId,
+            changes: Object.keys(changes).length ? changes : null,
+        });
+    }
     return { ok: true };
 });
 export const admin_deleteWorkflow = functions.https.onCall(async (data, context) => {
@@ -2569,7 +2825,20 @@ export const admin_deleteWorkflow = functions.https.onCall(async (data, context)
     const { workflowId } = data;
     if (!workflowId)
         throw new functions.https.HttpsError('invalid-argument', 'workflowId required');
-    await db.collection('workflows').doc(workflowId).delete();
+    const workflowRef = db.collection('workflows').doc(workflowId);
+    const beforeSnap = await workflowRef.get();
+    const beforeData = beforeSnap.exists ? beforeSnap.data() : undefined;
+    await workflowRef.delete();
+    if (context.auth?.uid) {
+        const changes = buildChangesFromDelete(beforeData);
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_delete_workflow',
+            entityType: 'workflow',
+            entityId: workflowId,
+            changes: Object.keys(changes).length ? changes : null,
+        });
+    }
     return { ok: true };
 });
 /**
@@ -2580,7 +2849,20 @@ export const admin_assignWorkflow = functions.https.onCall(async (data, context)
     const { productId, workflowId } = data;
     if (!productId || !workflowId)
         throw new functions.https.HttpsError('invalid-argument', 'productId and workflowId required');
-    await db.collection('products').doc(productId).set({ workflowId }, { merge: true });
+    const productRef = db.collection('products').doc(productId);
+    const beforeSnap = await productRef.get();
+    const beforeData = beforeSnap.exists ? beforeSnap.data() : undefined;
+    await productRef.set({ workflowId }, { merge: true });
+    if (context.auth?.uid) {
+        const changes = buildChangesFromUpdates(beforeData, { workflowId });
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_assign_workflow',
+            entityType: 'product',
+            entityId: productId,
+            changes: Object.keys(changes).length ? changes : null,
+        });
+    }
     return { ok: true };
 });
 /**
@@ -2625,6 +2907,16 @@ export const admin_createProposal = functions.https.onCall(async (data, context)
         createdAt: admin.firestore.FieldValue.serverTimestamp()
     };
     const ref = await db.collection('proposals').add(proposal);
+    if (context.auth?.uid) {
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_create_proposal',
+            entityType: 'proposal',
+            entityId: ref.id,
+            changes: buildChangesFromCreate(proposal),
+            metadata: { orgId, clientEmail },
+        });
+    }
     return { id: ref.id };
 });
 /**
@@ -2645,10 +2937,32 @@ export const admin_saveProposalTemplate = functions.https.onCall(async (data, co
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
     if (id) {
-        await db.collection('proposalTemplates').doc(id).set(tpl, { merge: true });
+        const tplRef = db.collection('proposalTemplates').doc(id);
+        const beforeSnap = await tplRef.get();
+        const beforeData = beforeSnap.exists ? beforeSnap.data() : undefined;
+        await tplRef.set(tpl, { merge: true });
+        if (context.auth?.uid) {
+            const changes = buildChangesFromUpdates(beforeData, tpl);
+            await writeAuditLog({
+                actorUid: context.auth.uid,
+                action: 'admin_update_proposal_template',
+                entityType: 'proposalTemplate',
+                entityId: id,
+                changes: Object.keys(changes).length ? changes : null,
+            });
+        }
         return { id };
     }
     const ref = await db.collection('proposalTemplates').add(tpl);
+    if (context.auth?.uid) {
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_create_proposal_template',
+            entityType: 'proposalTemplate',
+            entityId: ref.id,
+            changes: buildChangesFromCreate(tpl),
+        });
+    }
     return { id: ref.id };
 });
 /**
@@ -2681,7 +2995,47 @@ export const admin_acceptProposal = functions.https.onCall(async (data, context)
     };
     const orderRef = await db.collection('orders').add(order);
     await proposalRef.set({ status: 'accepted', orderId: orderRef.id }, { merge: true });
+    if (context.auth?.uid) {
+        const changes = buildChangesFromUpdates(proposal, { status: 'accepted', orderId: orderRef.id });
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'admin_accept_proposal',
+            entityType: 'proposal',
+            entityId: proposalId,
+            changes: Object.keys(changes).length ? changes : null,
+            metadata: {
+                orderId: orderRef.id,
+                orderSnapshot: serializeForAudit(order),
+            },
+        });
+    }
     return { orderId: orderRef.id };
+});
+export const pruneAdminAuditLogs = functions.pubsub
+    .schedule('every 24 hours')
+    .onRun(async () => {
+    const cutoffDate = new Date(Date.now() - AUDIT_LOG_RETENTION_DAYS * 86400000);
+    const cutoff = admin.firestore.Timestamp.fromDate(cutoffDate);
+    let totalDeleted = 0;
+    while (true) {
+        const snapshot = await db
+            .collection('adminAuditLogs')
+            .where('createdAt', '<', cutoff)
+            .limit(AUDIT_LOG_BATCH_SIZE)
+            .get();
+        if (snapshot.empty) {
+            break;
+        }
+        const batch = db.batch();
+        snapshot.docs.forEach((doc) => batch.delete(doc.ref));
+        await batch.commit();
+        totalDeleted += snapshot.size;
+        if (snapshot.size < AUDIT_LOG_BATCH_SIZE) {
+            break;
+        }
+    }
+    console.log(`Pruned ${totalDeleted} admin audit logs older than ${AUDIT_LOG_RETENTION_DAYS} days.`);
+    return null;
 });
 /**
  * Batch approve multiple assets. Expects { assetIds: string[] }. Only staff or client_admin can approve.
