@@ -2,6 +2,7 @@
 
 import { useId, useMemo, useState } from "react";
 import ProductCard from "./ProductCard";
+import ProductListRow from "./ProductListRow";
 import type { Product } from "@/lib/products";
 
 type SortOption =
@@ -125,10 +126,7 @@ export default function CategoryProductFilters({
     [products, sort]
   );
 
-  const gridClassName =
-    layout === "list"
-      ? "grid gap-4"
-      : "grid gap-4 sm:grid-cols-2 md:grid-cols-3";
+  const isListLayout = layout === "list";
 
   return (
     <div className="grid gap-4">
@@ -149,11 +147,19 @@ export default function CategoryProductFilters({
           ))}
         </select>
       </div>
-      <div className={gridClassName}>
-        {sortedProducts.map((product) => (
-          <ProductCard key={product.id} product={product} />
-        ))}
-      </div>
+      {isListLayout ? (
+        <div className="grid gap-4">
+          {sortedProducts.map((product) => (
+            <ProductListRow key={product.id} product={product} />
+          ))}
+        </div>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">
+          {sortedProducts.map((product) => (
+            <ProductCard key={product.id} product={product} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

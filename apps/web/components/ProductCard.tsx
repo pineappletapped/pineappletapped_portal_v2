@@ -2,42 +2,25 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { Product, type DeliverableType } from "@/lib/products";
-import type { IconType } from "react-icons";
+import { Product } from "@/lib/products";
 import {
   FiCalendar,
   FiMapPin,
   FiClock,
-  FiVideo,
-  FiImage,
-  FiCamera,
-  FiFileText,
-  FiMusic,
   FiCheckCircle,
 } from "react-icons/fi";
-
-const deliverableIconMap: Partial<Record<DeliverableType, IconType>> = {
-  "long-form-video": FiVideo,
-  "short-form-vertical": FiVideo,
-  photo: FiCamera,
-  "photo-set": FiCamera,
-  thumbnail: FiImage,
-  "audio-licence": FiMusic,
-  document: FiFileText,
-};
+import {
+  deliverableIconMap,
+  getDeliverableSummary,
+  getPriceRangeLabel,
+} from "./productListingUtils";
 
 export default function ProductCard({ product }: { product: Product }) {
-  const basePrices = [product.price, ...(product.variations?.map(v => v.price) || [])];
-  const min = Math.min(...basePrices);
-  const max = Math.max(...basePrices);
-  const priceLabel =
-    min === max ? `£${min.toFixed(2)}` : `£${min.toFixed(2)} - £${max.toFixed(2)}`;
+  const priceLabel = getPriceRangeLabel(product) ?? "Pricing on request";
   const img =
     product.imageUrl || "https://placehold.co/600x400?text=No+Image";
-  const deliverables =
-    product.deliverables?.filter((d) => d.title && d.title.trim().length > 0) || [];
-  const visibleDeliverables = deliverables.slice(0, 3);
-  const remainingDeliverableCount = deliverables.length - visibleDeliverables.length;
+  const { visibleDeliverables, remainingDeliverableCount } =
+    getDeliverableSummary(product);
   const showSummary = Boolean(product.deliveryTime || visibleDeliverables.length > 0);
 
   return (
@@ -61,17 +44,16 @@ export default function ProductCard({ product }: { product: Product }) {
               {product.deliveryTime}
             </span>
           )}
-          {visibleDeliverables.map((deliverable, index) => {
+          {visibleDeliverables.map((deliverable) => {
             const Icon =
               (deliverable.type && deliverableIconMap[deliverable.type]) || FiCheckCircle;
-            const label = deliverable.title.trim();
             return (
               <span
-                key={`${label}-${deliverable.type ?? index}`}
+                key={deliverable.key}
                 className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 font-medium"
               >
                 <Icon className="h-3 w-3" aria-hidden />
-                {label}
+                {deliverable.label}
               </span>
             );
           })}
