@@ -1282,6 +1282,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     const num = Number(value);
     return Number.isFinite(num) ? num : fallback;
   };
+  const parseOptional = (value: any) =>
+    value === undefined || value === null ? undefined : toNumber(value);
   const DEFAULT_TRAVEL_MILES = 100;
   const DEFAULT_TRAVEL_RATE = 0.3;
   const {
@@ -1319,8 +1321,23 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       ? items[idx].modifiers
       : [];
     const budget = (prod as any).budget || {};
-    const labour = toNumber(budget.labour ?? prod.labourCost);
-    const kit = toNumber(budget.kit ?? prod.defaultKitCost);
+    const labourFilming = parseOptional(budget.labourFilming);
+    const labourEditing = parseOptional(budget.labourEditing);
+    const labourBase = toNumber(budget.labour ?? prod.labourCost);
+    const labour =
+      labourFilming !== undefined || labourEditing !== undefined
+        ? (labourFilming ?? 0) + (labourEditing ?? 0)
+        : labourBase;
+    const kitManual = parseOptional(budget.kitManual);
+    const kitGuidance = parseOptional(budget.kitGuidance);
+    let kit = toNumber(budget.kit ?? prod.defaultKitCost);
+    if (budget.kitMode === "guided") {
+      kit = kitGuidance ?? kit;
+    } else if (budget.kitMode === "manual") {
+      kit = kitManual ?? kit;
+    } else if (kitManual !== undefined || kitGuidance !== undefined) {
+      kit = kitManual ?? kitGuidance ?? kit;
+    }
     const travelMilesValue = toNumber(
       budget.travelMiles,
       DEFAULT_TRAVEL_MILES,

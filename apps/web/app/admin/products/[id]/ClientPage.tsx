@@ -101,7 +101,14 @@ export default function EditProductPage() {
   const [venues, setVenues] = useState<Venue[]>([]);
 
   const [tab, setTab] = useState<
-    "info" | "variations" | "deliverables" | "kit" | "tasks" | "seo" | "modifiers"
+    | "info"
+    | "pnl"
+    | "variations"
+    | "deliverables"
+    | "kit"
+    | "tasks"
+    | "seo"
+    | "modifiers"
   >("info");
 
   const [name, setName] = useState("");
@@ -134,9 +141,15 @@ export default function EditProductPage() {
   const [taskForCustomer, setTaskForCustomer] = useState(false);
   const [taskSubtasks, setTaskSubtasks] = useState("");
   const [kitGroups, setKitGroups] = useState<{ groupId: string; items: string[] }[]>([]);
-  const [equipmentList, setEquipmentList] = useState<{ id: string; name: string }[]>([]);
-  const [labourCost, setLabourCost] = useState("0");
-  const [defaultKitCost, setDefaultKitCost] = useState("0");
+  const [equipmentList, setEquipmentList] = useState<
+    { id: string; name: string; rentalPrice?: number; category?: string }
+  >([]);
+  const [labourFilmingRate, setLabourFilmingRate] = useState("0");
+  const [labourEditingRate, setLabourEditingRate] = useState("0");
+  const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
+  const [manualKitCost, setManualKitCost] = useState("0");
+  const [equipmentSearch, setEquipmentSearch] = useState("");
+  const [activeKitGroup, setActiveKitGroup] = useState<number | null>(null);
   const [travelMiles, setTravelMiles] = useState("100");
   const [travelRate, setTravelRate] = useState("0.3");
   const [parkingCost, setParkingCost] = useState("0");
@@ -175,9 +188,20 @@ export default function EditProductPage() {
           setDescription(p.description);
           setTagline(p.tagline || "");
           setPrice(String(p.price));
-          setLabourCost(String((p as any).labourCost || 0));
-          setDefaultKitCost(String((p as any).defaultKitCost || 0));
           const budget = (p as any).budget || {};
+          const labourFilming =
+            budget.labourFilming ?? budget.labour ?? (p as any).labourCost ?? 0;
+          const labourEditing = budget.labourEditing ?? 0;
+          const initialKitMode =
+            budget.kitMode === "guided" || budget.kitMode === "manual"
+              ? budget.kitMode
+              : "manual";
+          const manualKit =
+            budget.kitManual ?? budget.kit ?? (p as any).defaultKitCost ?? 0;
+          setLabourFilmingRate(String(labourFilming));
+          setLabourEditingRate(String(labourEditing));
+          setManualKitCost(String(manualKit));
+          setKitCostMode(initialKitMode);
           setTravelMiles(String(budget.travelMiles ?? 100));
           setTravelRate(String(budget.travelRate ?? 0.3));
           setParkingCost(String(budget.parking ?? 0));
@@ -226,7 +250,18 @@ export default function EditProductPage() {
         );
         setWorkflows(wfSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setEquipmentList(
-          eqSnap.docs.map((d) => ({ id: d.id, name: (d.data() as any).name || d.id }))
+          eqSnap.docs.map((d) => {
+            const data = d.data() as any;
+            return {
+              id: d.id,
+              name: data.name || d.id,
+              rentalPrice:
+                typeof data.rentalPrice === "number"
+                  ? data.rentalPrice
+                  : Number(data.rentalPrice) || undefined,
+              category: data.category || undefined,
+            };
+          })
         );
         const venueList = venueSnap.docs
           .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
@@ -262,6 +297,16 @@ export default function EditProductPage() {
       if (!parkingTouched) setParkingCost("0");
     }
   }, [selectedVenue, travelMilesTouched, parkingTouched]);
+
+  useEffect(() => {
+    if (kitGroups.length === 0) {
+      if (activeKitGroup !== null) setActiveKitGroup(null);
+      return;
+    }
+    if (activeKitGroup === null || activeKitGroup >= kitGroups.length) {
+      setActiveKitGroup(0);
+    }
+  }, [kitGroups, activeKitGroup]);
 
   const upload = async (path: string, file: File) => {
     const r = ref(storage, path);
@@ -312,8 +357,11 @@ export default function EditProductPage() {
       );
 
     const venueLabel = venue || selectedVenue?.name || null;
-    const labourValue = parseMoney(labourCost);
-    const kitValue = parseMoney(defaultKitCost);
+    const labourFilmingValue = parseMoney(labourFilmingRate);
+    const labourEditingValue = parseMoney(labourEditingRate);
+    const labourValue = labourFilmingValue + labourEditingValue;
+    const manualKitValue = parseMoney(manualKitCost);
+    const kitValue = kitCostMode === "guided" ? kitGuidanceValue : manualKitValue;
     const travelMilesValue = parseMoney(travelMiles, 100);
     const travelRateValue = parseMoney(travelRate, 0.3);
     const travelCostValue = Number.isFinite(travelMilesValue * travelRateValue)
@@ -328,7 +376,12 @@ export default function EditProductPage() {
       labourCost: labourValue,
       defaultKitCost: kitValue,
       budget: {
+        labourFilming: labourFilmingValue,
+        labourEditing: labourEditingValue,
         labour: labourValue,
+        kitMode: kitCostMode,
+        kitManual: manualKitValue,
+        kitGuidance: kitGuidanceValue,
         kit: kitValue,
         travelMiles: travelMilesValue,
         travelRate: travelRateValue,
@@ -472,7 +525,11 @@ export default function EditProductPage() {
   };
 
   const addKitGroup = () =>
-    setKitGroups((g) => [...g, { groupId: "", items: [] }]);
+    setKitGroups((g) => {
+      const next = [...g, { groupId: "", items: [] }];
+      setActiveKitGroup(next.length - 1);
+      return next;
+    });
   const updateKitGroupId = (index: number, groupId: string) =>
     setKitGroups((prev) =>
       prev.map((g, i) => (i === index ? { ...g, groupId } : g))
@@ -491,8 +548,15 @@ export default function EditProductPage() {
         i === index ? { ...g, items: g.items.filter((id) => id !== eqId) } : g
       )
     );
-  const removeKitGroup = (index: number) =>
+  const removeKitGroup = (index: number) => {
     setKitGroups((prev) => prev.filter((_, i) => i !== index));
+    setActiveKitGroup((prev) => {
+      if (prev === null) return null;
+      if (prev === index) return null;
+      if (prev > index) return prev - 1;
+      return prev;
+    });
+  };
 
   const removeProduct = async () => {
     if (confirm("Delete this product?")) {
@@ -501,11 +565,42 @@ export default function EditProductPage() {
     }
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to edit products.</p>;
+  const equipmentLookup = useMemo(() => {
+    const map = new Map<string, typeof equipmentList[number]>();
+    equipmentList.forEach((item) => map.set(item.id, item));
+    return map;
+  }, [equipmentList]);
 
-  const labourValue = parseMoney(labourCost);
-  const kitValue = parseMoney(defaultKitCost);
+  const kitGuidanceValue = useMemo(() => {
+    let total = 0;
+    for (const group of kitGroups) {
+      for (const id of group.items) {
+        const eq = equipmentLookup.get(id);
+        const price = eq?.rentalPrice;
+        if (typeof price === "number" && Number.isFinite(price)) {
+          total += price;
+        }
+      }
+    }
+    return total;
+  }, [kitGroups, equipmentLookup]);
+  const kitItemsMissingPrices = useMemo(() => {
+    const missing = new Set<string>();
+    for (const group of kitGroups) {
+      for (const id of group.items) {
+        const eq = equipmentLookup.get(id);
+        if (eq && !(typeof eq.rentalPrice === "number" && Number.isFinite(eq.rentalPrice))) {
+          missing.add(eq.name || id);
+        }
+      }
+    }
+    return Array.from(missing);
+  }, [kitGroups, equipmentLookup]);
+  const labourFilmingValue = parseMoney(labourFilmingRate);
+  const labourEditingValue = parseMoney(labourEditingRate);
+  const labourValue = labourFilmingValue + labourEditingValue;
+  const manualKitValue = parseMoney(manualKitCost);
+  const kitValue = kitCostMode === "guided" ? kitGuidanceValue : manualKitValue;
   const travelMilesValue = parseMoney(travelMiles, 100);
   const travelRateValue = parseMoney(travelRate, 0.3);
   const travelCostValue = Number.isFinite(travelMilesValue * travelRateValue)
@@ -515,13 +610,27 @@ export default function EditProductPage() {
   const priceValue = parseMoney(price);
   const budgetTotal = labourValue + kitValue + travelCostValue + parkingValue;
   const profitValue = priceValue - budgetTotal;
+  const filteredEquipment = useMemo(() => {
+    const term = equipmentSearch.trim().toLowerCase();
+    if (!term) return equipmentList.slice(0, 50);
+    return equipmentList.filter((item) => {
+      const nameMatch = item.name.toLowerCase().includes(term);
+      const idMatch = item.id.toLowerCase().includes(term);
+      const categoryMatch = item.category?.toLowerCase().includes(term);
+      return nameMatch || idMatch || categoryMatch;
+    });
+  }, [equipmentList, equipmentSearch]);
+
+  if (loading) return <p>Loading…</p>;
+  if (!isStaff) return <p>You do not have permission to edit products.</p>;
 
   return (
     <form onSubmit={save} className="grid gap-6 max-w-2xl">
       <h1 className="text-xl font-semibold">Edit Product</h1>
       <nav className="flex gap-4 border-b">
-        {[ 
+        {[
           ["info", "Info"],
+          ["pnl", "P&L"],
           ["variations", "Variations"],
           ["deliverables", "Deliverables"],
           ["kit", "Kit"],
@@ -548,94 +657,6 @@ export default function EditProductPage() {
           <input className="input" value={tagline} onChange={(e) => setTagline(e.target.value)} />
           <label className="text-sm font-medium">Description</label>
         <ReactQuill theme="snow" value={description} onChange={setDescription} />
-          <label className="text-sm font-medium">Price (GBP)</label>
-          <input type="number" className="input" value={price} onChange={(e) => setPrice(e.target.value)} />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="grid gap-2">
-              <label className="text-sm font-medium">Labour Cost</label>
-              <input
-                type="number"
-                className="input"
-                value={labourCost}
-                onChange={(e) => setLabourCost(e.target.value)}
-              />
-              <label className="text-sm font-medium">Default Kit Cost</label>
-              <input
-                type="number"
-                className="input"
-                value={defaultKitCost}
-                onChange={(e) => setDefaultKitCost(e.target.value)}
-              />
-              <label className="text-sm font-medium">Travel Miles (estimate)</label>
-              <input
-                type="number"
-                className="input"
-                value={travelMiles}
-                onChange={(e) => {
-                  setTravelMilesTouched(true);
-                  setTravelMiles(e.target.value);
-                }}
-              />
-              <label className="text-sm font-medium">Travel Rate (per mile)</label>
-              <input
-                type="number"
-                step="0.01"
-                className="input"
-                value={travelRate}
-                onChange={(e) => setTravelRate(e.target.value)}
-              />
-              <label className="text-sm font-medium">Parking Budget</label>
-              <input
-                type="number"
-                step="0.01"
-                className="input"
-                value={parkingCost}
-                onChange={(e) => {
-                  setParkingTouched(true);
-                  setParkingCost(e.target.value);
-                }}
-              />
-            </div>
-            <div className="border rounded p-3 text-sm space-y-2">
-              <div className="flex justify-between">
-                <span>Price</span>
-                <span>{formatCurrency(priceValue)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Labour</span>
-                <span>{formatCurrency(labourValue)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Kit</span>
-                <span>{formatCurrency(kitValue)}</span>
-              </div>
-              <div>
-                <div className="flex justify-between">
-                  <span>Travel</span>
-                  <span>{formatCurrency(travelCostValue)}</span>
-                </div>
-                <div className="text-xs text-gray-500 text-right">
-                  {travelMilesValue} miles @ £{travelRateValue.toFixed(2)}
-                </div>
-              </div>
-              <div className="flex justify-between">
-                <span>Parking</span>
-                <span>{formatCurrency(parkingValue)}</span>
-              </div>
-              <div className="flex justify-between font-medium border-t pt-1">
-                <span>Budget Total</span>
-                <span>{formatCurrency(budgetTotal)}</span>
-              </div>
-              <div
-                className={`flex justify-between font-semibold ${
-                  profitValue < 0 ? "text-red-600" : ""
-                }`}
-              >
-                <span>Estimated Profit</span>
-                <span>{formatCurrency(profitValue)}</span>
-              </div>
-            </div>
-          </div>
           <label className="text-sm font-medium">Image</label>
           <input type="file" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
           {imageUrl && (
@@ -744,14 +765,207 @@ export default function EditProductPage() {
           </label>
           <label className="text-sm font-medium">Requirements</label>
           <textarea className="input" value={requirements} onChange={(e) => setRequirements(e.target.value)} />
-          <label className="text-sm font-medium">Delivery Time: {deliveryOptions[deliveryIndex]}</label>
-          <input
-            type="range"
-            min={0}
-            max={deliveryOptions.length - 1}
-            value={deliveryIndex}
-            onChange={(e) => setDeliveryIndex(Number(e.target.value))}
-          />
+      <label className="text-sm font-medium">Delivery Time: {deliveryOptions[deliveryIndex]}</label>
+      <input
+        type="range"
+        min={0}
+        max={deliveryOptions.length - 1}
+        value={deliveryIndex}
+        onChange={(e) => setDeliveryIndex(Number(e.target.value))}
+      />
+    </div>
+  )}
+
+      {tab === "pnl" && (
+        <div className="grid gap-6">
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Price (GBP)</label>
+            <input
+              type="number"
+              className="input"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+            />
+          </div>
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+            <div className="grid gap-6">
+              <div className="grid gap-2">
+                <h3 className="font-medium">Labour rates</h3>
+                <label className="text-sm font-medium">Filming labour rate</label>
+                <input
+                  type="number"
+                  className="input"
+                  value={labourFilmingRate}
+                  onChange={(e) => setLabourFilmingRate(e.target.value)}
+                />
+                <label className="text-sm font-medium">Editing labour rate</label>
+                <input
+                  type="number"
+                  className="input"
+                  value={labourEditingRate}
+                  onChange={(e) => setLabourEditingRate(e.target.value)}
+                />
+                <p className="text-xs text-gray-500">
+                  These rates are stored separately so you can see the split between
+                  filming and post-production costs.
+                </p>
+              </div>
+              <div className="grid gap-2">
+                <h3 className="font-medium">Kit costs</h3>
+                <div className="flex flex-col gap-1 text-sm">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="kit-cost-mode"
+                      value="manual"
+                      checked={kitCostMode === "manual"}
+                      onChange={() => setKitCostMode("manual")}
+                    />
+                    Manual entry
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="kit-cost-mode"
+                      value="guided"
+                      checked={kitCostMode === "guided"}
+                      onChange={() => setKitCostMode("guided")}
+                    />
+                    Guided from selected kit rental prices
+                  </label>
+                </div>
+                {kitCostMode === "manual" ? (
+                  <div className="grid gap-2">
+                    <input
+                      type="number"
+                      step="0.01"
+                      className="input"
+                      value={manualKitCost}
+                      onChange={(e) => setManualKitCost(e.target.value)}
+                    />
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-600">
+                      <span>
+                        Guided estimate from kit tab: {formatCurrency(kitGuidanceValue)}
+                      </span>
+                      {kitGuidanceValue > 0 && (
+                        <button
+                          type="button"
+                          className="btn btn-xs"
+                          onClick={() => setManualKitCost(kitGuidanceValue.toFixed(2))}
+                        >
+                          Use guided value
+                        </button>
+                      )}
+                    </div>
+                    {kitItemsMissingPrices.length > 0 && (
+                      <p className="text-xs text-amber-600">
+                        Missing rental prices for {kitItemsMissingPrices.join(", ")}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded border bg-slate-50 p-3 text-sm">
+                    <div className="flex justify-between font-medium">
+                      <span>Guided kit total</span>
+                      <span>{formatCurrency(kitGuidanceValue)}</span>
+                    </div>
+                    {kitGuidanceValue === 0 && (
+                      <p className="mt-2 text-xs text-gray-600">
+                        Select kit items and make sure rental prices are recorded to
+                        build this estimate.
+                      </p>
+                    )}
+                    {kitItemsMissingPrices.length > 0 && (
+                      <p className="mt-2 text-xs text-amber-600">
+                        Missing rental prices for {kitItemsMissingPrices.join(", ")}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="grid gap-2">
+                <h3 className="font-medium">Travel & parking</h3>
+                <label className="text-sm font-medium">Travel miles (estimate)</label>
+                <input
+                  type="number"
+                  className="input"
+                  value={travelMiles}
+                  onChange={(e) => {
+                    setTravelMilesTouched(true);
+                    setTravelMiles(e.target.value);
+                  }}
+                />
+                <label className="text-sm font-medium">Travel rate (per mile)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="input"
+                  value={travelRate}
+                  onChange={(e) => setTravelRate(e.target.value)}
+                />
+                <label className="text-sm font-medium">Parking budget</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="input"
+                  value={parkingCost}
+                  onChange={(e) => {
+                    setParkingTouched(true);
+                    setParkingCost(e.target.value);
+                  }}
+                />
+              </div>
+            </div>
+            <div className="border rounded p-3 text-sm space-y-2">
+              <div className="flex justify-between">
+                <span>Price</span>
+                <span>{formatCurrency(priceValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Labour (filming)</span>
+                <span>{formatCurrency(labourFilmingValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Labour (editing)</span>
+                <span>{formatCurrency(labourEditingValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Kit {kitCostMode === "guided" ? "(guided)" : "(manual)"}</span>
+                <span>{formatCurrency(kitValue)}</span>
+              </div>
+              {kitCostMode === "manual" && kitGuidanceValue > 0 && (
+                <div className="flex justify-between text-xs text-gray-500">
+                  <span>Guided estimate</span>
+                  <span>{formatCurrency(kitGuidanceValue)}</span>
+                </div>
+              )}
+              <div>
+                <div className="flex justify-between">
+                  <span>Travel</span>
+                  <span>{formatCurrency(travelCostValue)}</span>
+                </div>
+                <div className="text-xs text-gray-500 text-right">
+                  {travelMilesValue} miles @ £{travelRateValue.toFixed(2)}
+                </div>
+              </div>
+              <div className="flex justify-between">
+                <span>Parking</span>
+                <span>{formatCurrency(parkingValue)}</span>
+              </div>
+              <div className="flex justify-between border-t pt-1 font-medium">
+                <span>Budget total</span>
+                <span>{formatCurrency(budgetTotal)}</span>
+              </div>
+              <div
+                className={`flex justify-between font-semibold ${
+                  profitValue < 0 ? "text-red-600" : ""
+                }`}
+              >
+                <span>Estimated profit</span>
+                <span>{formatCurrency(profitValue)}</span>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -867,28 +1081,75 @@ export default function EditProductPage() {
 
       {tab === "kit" && (
         <div className="grid gap-4">
-          <div>
-            <h3 className="font-medium">Equipment</h3>
-            <div className="flex flex-wrap gap-2">
-              {equipmentList.map((eq) => (
-                <div
-                  key={eq.id}
-                  draggable
-                  onDragStart={(e) => e.dataTransfer.setData("text/plain", eq.id)}
-                  className="p-2 border rounded cursor-move"
-                >
-                  {eq.name}
+          <div className="grid gap-2">
+            <h3 className="font-medium">Search kit database</h3>
+            <p className="text-xs text-gray-500">
+              Choose a group below, then search for equipment to add it directly from the
+              register. Drag-and-drop still works if you prefer.
+            </p>
+            <div className="flex flex-col gap-2 md:flex-row">
+              <input
+                className="input md:max-w-sm"
+                placeholder="Search by name, category, or ID"
+                value={equipmentSearch}
+                onChange={(e) => setEquipmentSearch(e.target.value)}
+              />
+              {kitGroups.length > 0 && activeKitGroup !== null && (
+                <div className="rounded border px-3 py-2 text-sm text-gray-600">
+                  Adding to: {kitGroups[activeKitGroup].groupId || `Group ${activeKitGroup + 1}`}
                 </div>
-              ))}
+              )}
+            </div>
+            <div className="max-h-64 overflow-y-auto rounded border divide-y">
+              {filteredEquipment.length === 0 ? (
+                <p className="p-3 text-sm text-gray-500">No equipment matches your search.</p>
+              ) : (
+                filteredEquipment.map((eq) => {
+                  const isAdded =
+                    activeKitGroup !== null &&
+                    kitGroups[activeKitGroup]?.items.includes(eq.id);
+                  return (
+                    <div key={eq.id} className="flex items-center justify-between gap-4 p-3">
+                      <div>
+                        <p className="font-medium">{eq.name}</p>
+                        <p className="text-xs text-gray-500">
+                          {eq.category && <span className="mr-2">{eq.category}</span>}
+                          {typeof eq.rentalPrice === "number"
+                            ? `Rental £${eq.rentalPrice.toFixed(2)}`
+                            : "No rental price"}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-xs"
+                        disabled={activeKitGroup === null || isAdded}
+                        onClick={() => {
+                          if (activeKitGroup === null) return;
+                          addEquipmentToGroup(activeKitGroup, eq.id);
+                        }}
+                      >
+                        {isAdded ? "Added" : "Add to group"}
+                      </button>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
-          <button type="button" className="btn btn-sm w-fit" onClick={addKitGroup}>
-            Add Group
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="btn btn-sm" onClick={addKitGroup}>
+              Add Group
+            </button>
+            {kitGroups.length === 0 && (
+              <span className="text-sm text-gray-600">Create a group to start assigning kit.</span>
+            )}
+          </div>
           {kitGroups.map((g, i) => (
             <div
-              key={i}
-              className="border p-4 rounded grid gap-2"
+              key={`${g.groupId || "group"}-${i}`}
+              className={`border p-4 rounded grid gap-3 ${
+                activeKitGroup === i ? "border-black" : "border-gray-200"
+              }`}
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
                 e.preventDefault();
@@ -896,24 +1157,46 @@ export default function EditProductPage() {
                 if (eqId) addEquipmentToGroup(i, eqId);
               }}
             >
-              <input
-                className="input"
-                placeholder="Group ID"
-                value={g.groupId}
-                onChange={(e) => updateKitGroupId(i, e.target.value)}
-              />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <input
+                  className="input flex-1"
+                  placeholder="Group label (e.g. Camera Ops)"
+                  value={g.groupId}
+                  onChange={(e) => updateKitGroupId(i, e.target.value)}
+                />
+                <button
+                  type="button"
+                  className={`btn btn-xs ${
+                    activeKitGroup === i ? "bg-black text-white hover:bg-black" : ""
+                  }`.trim()}
+                  onClick={() => setActiveKitGroup(i)}
+                >
+                  {activeKitGroup === i ? "Active" : "Set active"}
+                </button>
+              </div>
               <div className="flex flex-wrap gap-2 min-h-[2rem]">
-                {g.items.map((id) => (
-                  <span
-                    key={id}
-                    className="bg-gray-200 px-2 py-1 rounded flex items-center gap-1"
-                  >
-                    {id}
-                    <button type="button" onClick={() => removeEquipmentFromGroup(i, id)}>
-                      ×
-                    </button>
-                  </span>
-                ))}
+                {g.items.map((id) => {
+                  const item = equipmentLookup.get(id);
+                  return (
+                    <span
+                      key={id}
+                      className="bg-gray-200 px-2 py-1 rounded flex items-center gap-2 text-sm"
+                    >
+                      <span>{item?.name || id}</span>
+                      <button
+                        type="button"
+                        className="text-gray-500 hover:text-black"
+                        onClick={() => removeEquipmentFromGroup(i, id)}
+                        aria-label={`Remove ${item?.name || id}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  );
+                })}
+                {g.items.length === 0 && (
+                  <span className="text-xs text-gray-500">No equipment added yet.</span>
+                )}
               </div>
               <button
                 type="button"

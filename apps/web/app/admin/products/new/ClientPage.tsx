@@ -96,7 +96,13 @@ export default function NewProductPage() {
   const [venues, setVenues] = useState<Venue[]>([]);
 
   const [tab, setTab] = useState<
-    "info" | "variations" | "deliverables" | "tasks" | "seo" | "modifiers"
+    | "info"
+    | "pnl"
+    | "variations"
+    | "deliverables"
+    | "tasks"
+    | "seo"
+    | "modifiers"
   >("info");
 
   const [name, setName] = useState("");
@@ -123,8 +129,10 @@ export default function NewProductPage() {
   const [venueId, setVenueId] = useState("");
   const [venue, setVenue] = useState("");
   const [hidden, setHidden] = useState(false);
-  const [labourCost, setLabourCost] = useState("0");
-  const [defaultKitCost, setDefaultKitCost] = useState("0");
+  const [labourFilmingRate, setLabourFilmingRate] = useState("0");
+  const [labourEditingRate, setLabourEditingRate] = useState("0");
+  const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
+  const [manualKitCost, setManualKitCost] = useState("0");
   const [travelMiles, setTravelMiles] = useState("100");
   const [travelRate, setTravelRate] = useState("0.3");
   const [parkingCost, setParkingCost] = useState("0");
@@ -218,8 +226,11 @@ export default function NewProductPage() {
         : [],
     }));
     const venueLabel = venue || selectedVenue?.name || null;
-    const labourValue = parseMoney(labourCost);
-    const kitValue = parseMoney(defaultKitCost);
+    const labourFilmingValue = parseMoney(labourFilmingRate);
+    const labourEditingValue = parseMoney(labourEditingRate);
+    const labourValue = labourFilmingValue + labourEditingValue;
+    const manualKitValue = parseMoney(manualKitCost);
+    const kitValue = kitCostMode === "guided" ? kitGuidanceValue : manualKitValue;
     const travelMilesValue = parseMoney(travelMiles, 100);
     const travelRateValue = parseMoney(travelRate, 0.3);
     const travelCostValue = Number.isFinite(travelMilesValue * travelRateValue)
@@ -234,7 +245,12 @@ export default function NewProductPage() {
       labourCost: labourValue,
       defaultKitCost: kitValue,
       budget: {
+        labourFilming: labourFilmingValue,
+        labourEditing: labourEditingValue,
         labour: labourValue,
+        kitMode: kitCostMode,
+        kitManual: manualKitValue,
+        kitGuidance: kitGuidanceValue,
         kit: kitValue,
         travelMiles: travelMilesValue,
         travelRate: travelRateValue,
@@ -401,8 +417,12 @@ export default function NewProductPage() {
   if (loading) return <p>Loading…</p>;
   if (!isStaff) return <p>You do not have permission to create products.</p>;
 
-  const labourValue = parseMoney(labourCost);
-  const kitValue = parseMoney(defaultKitCost);
+  const kitGuidanceValue = 0;
+  const labourFilmingValue = parseMoney(labourFilmingRate);
+  const labourEditingValue = parseMoney(labourEditingRate);
+  const labourValue = labourFilmingValue + labourEditingValue;
+  const manualKitValue = parseMoney(manualKitCost);
+  const kitValue = kitCostMode === "guided" ? kitGuidanceValue : manualKitValue;
   const travelMilesValue = parseMoney(travelMiles, 100);
   const travelRateValue = parseMoney(travelRate, 0.3);
   const travelCostValue = Number.isFinite(travelMilesValue * travelRateValue)
@@ -419,6 +439,7 @@ export default function NewProductPage() {
       <nav className="flex gap-4 border-b">
         {[
           ["info", "Info"],
+          ["pnl", "P&L"],
           ["variations", "Variations"],
           ["deliverables", "Deliverables"],
           ["tasks", "Default Tasks"],
@@ -444,94 +465,6 @@ export default function NewProductPage() {
           <input className="input" value={tagline} onChange={(e) => setTagline(e.target.value)} />
           <label className="text-sm font-medium">Description</label>
         <ReactQuill theme="snow" value={description} onChange={setDescription} />
-          <label className="text-sm font-medium">Price (GBP)</label>
-          <input type="number" className="input" value={price} onChange={(e) => setPrice(e.target.value)} />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="grid gap-2">
-              <label className="text-sm font-medium">Labour Cost</label>
-              <input
-                type="number"
-                className="input"
-                value={labourCost}
-                onChange={(e) => setLabourCost(e.target.value)}
-              />
-              <label className="text-sm font-medium">Default Kit Cost</label>
-              <input
-                type="number"
-                className="input"
-                value={defaultKitCost}
-                onChange={(e) => setDefaultKitCost(e.target.value)}
-              />
-              <label className="text-sm font-medium">Travel Miles (estimate)</label>
-              <input
-                type="number"
-                className="input"
-                value={travelMiles}
-                onChange={(e) => {
-                  setTravelMilesTouched(true);
-                  setTravelMiles(e.target.value);
-                }}
-              />
-              <label className="text-sm font-medium">Travel Rate (per mile)</label>
-              <input
-                type="number"
-                step="0.01"
-                className="input"
-                value={travelRate}
-                onChange={(e) => setTravelRate(e.target.value)}
-              />
-              <label className="text-sm font-medium">Parking Budget</label>
-              <input
-                type="number"
-                step="0.01"
-                className="input"
-                value={parkingCost}
-                onChange={(e) => {
-                  setParkingTouched(true);
-                  setParkingCost(e.target.value);
-                }}
-              />
-            </div>
-            <div className="border rounded p-3 text-sm space-y-2">
-              <div className="flex justify-between">
-                <span>Price</span>
-                <span>{formatCurrency(priceValue)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Labour</span>
-                <span>{formatCurrency(labourValue)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Kit</span>
-                <span>{formatCurrency(kitValue)}</span>
-              </div>
-              <div>
-                <div className="flex justify-between">
-                  <span>Travel</span>
-                  <span>{formatCurrency(travelCostValue)}</span>
-                </div>
-                <div className="text-xs text-gray-500 text-right">
-                  {travelMilesValue} miles @ £{travelRateValue.toFixed(2)}
-                </div>
-              </div>
-              <div className="flex justify-between">
-                <span>Parking</span>
-                <span>{formatCurrency(parkingValue)}</span>
-              </div>
-              <div className="flex justify-between font-medium border-t pt-1">
-                <span>Budget Total</span>
-                <span>{formatCurrency(budgetTotal)}</span>
-              </div>
-              <div
-                className={`flex justify-between font-semibold ${
-                  profitValue < 0 ? "text-red-600" : ""
-                }`}
-              >
-                <span>Estimated Profit</span>
-                <span>{formatCurrency(profitValue)}</span>
-              </div>
-            </div>
-          </div>
           <label className="text-sm font-medium">Image</label>
           <input type="file" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
           <label className="text-sm font-medium">Category</label>
@@ -631,14 +564,162 @@ export default function NewProductPage() {
           </label>
           <label className="text-sm font-medium">Requirements</label>
           <textarea className="input" value={requirements} onChange={(e) => setRequirements(e.target.value)} />
-          <label className="text-sm font-medium">Delivery Time: {deliveryOptions[deliveryIndex]}</label>
-          <input
-            type="range"
-            min={0}
-            max={deliveryOptions.length - 1}
-            value={deliveryIndex}
-            onChange={(e) => setDeliveryIndex(Number(e.target.value))}
-          />
+      <label className="text-sm font-medium">Delivery Time: {deliveryOptions[deliveryIndex]}</label>
+      <input
+        type="range"
+        min={0}
+        max={deliveryOptions.length - 1}
+        value={deliveryIndex}
+        onChange={(e) => setDeliveryIndex(Number(e.target.value))}
+      />
+    </div>
+  )}
+
+      {tab === "pnl" && (
+        <div className="grid gap-6">
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Price (GBP)</label>
+            <input
+              type="number"
+              className="input"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+            />
+          </div>
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+            <div className="grid gap-6">
+              <div className="grid gap-2">
+                <h3 className="font-medium">Labour rates</h3>
+                <label className="text-sm font-medium">Filming labour rate</label>
+                <input
+                  type="number"
+                  className="input"
+                  value={labourFilmingRate}
+                  onChange={(e) => setLabourFilmingRate(e.target.value)}
+                />
+                <label className="text-sm font-medium">Editing labour rate</label>
+                <input
+                  type="number"
+                  className="input"
+                  value={labourEditingRate}
+                  onChange={(e) => setLabourEditingRate(e.target.value)}
+                />
+              </div>
+              <div className="grid gap-2">
+                <h3 className="font-medium">Kit costs</h3>
+                <div className="flex flex-col gap-1 text-sm">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="kit-cost-mode"
+                      value="manual"
+                      checked={kitCostMode === "manual"}
+                      onChange={() => setKitCostMode("manual")}
+                    />
+                    Manual entry
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="kit-cost-mode"
+                      value="guided"
+                      checked={kitCostMode === "guided"}
+                      onChange={() => setKitCostMode("guided")}
+                    />
+                    Guided from kit selection (after assigning kit)
+                  </label>
+                </div>
+                {kitCostMode === "manual" ? (
+                  <input
+                    type="number"
+                    step="0.01"
+                    className="input"
+                    value={manualKitCost}
+                    onChange={(e) => setManualKitCost(e.target.value)}
+                  />
+                ) : (
+                  <div className="rounded border bg-slate-50 p-3 text-sm text-gray-600">
+                    Guided totals update automatically once kit is assigned to the product.
+                  </div>
+                )}
+              </div>
+              <div className="grid gap-2">
+                <h3 className="font-medium">Travel & parking</h3>
+                <label className="text-sm font-medium">Travel miles (estimate)</label>
+                <input
+                  type="number"
+                  className="input"
+                  value={travelMiles}
+                  onChange={(e) => {
+                    setTravelMilesTouched(true);
+                    setTravelMiles(e.target.value);
+                  }}
+                />
+                <label className="text-sm font-medium">Travel rate (per mile)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="input"
+                  value={travelRate}
+                  onChange={(e) => setTravelRate(e.target.value)}
+                />
+                <label className="text-sm font-medium">Parking budget</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="input"
+                  value={parkingCost}
+                  onChange={(e) => {
+                    setParkingTouched(true);
+                    setParkingCost(e.target.value);
+                  }}
+                />
+              </div>
+            </div>
+            <div className="border rounded p-3 text-sm space-y-2">
+              <div className="flex justify-between">
+                <span>Price</span>
+                <span>{formatCurrency(priceValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Labour (filming)</span>
+                <span>{formatCurrency(labourFilmingValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Labour (editing)</span>
+                <span>{formatCurrency(labourEditingValue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Kit {kitCostMode === "guided" ? "(guided)" : "(manual)"}</span>
+                <span>{formatCurrency(kitValue)}</span>
+              </div>
+              <div>
+                <div className="flex justify-between">
+                  <span>Travel</span>
+                  <span>{formatCurrency(travelCostValue)}</span>
+                </div>
+                <div className="text-xs text-gray-500 text-right">
+                  {travelMilesValue} miles @ £{travelRateValue.toFixed(2)}
+                </div>
+              </div>
+              <div className="flex justify-between">
+                <span>Parking</span>
+                <span>{formatCurrency(parkingValue)}</span>
+              </div>
+              <div className="flex justify-between border-t pt-1 font-medium">
+                <span>Budget total</span>
+                <span>{formatCurrency(budgetTotal)}</span>
+              </div>
+              <div
+                className={`flex justify-between font-semibold ${
+                  profitValue < 0 ? "text-red-600" : ""
+                }`}
+              >
+                <span>Estimated profit</span>
+                <span>{formatCurrency(profitValue)}</span>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

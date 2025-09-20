@@ -116,7 +116,12 @@ export interface ProductSEO {
 }
 
 export interface ProductBudget {
+  labourFilming?: number;
+  labourEditing?: number;
   labour?: number;
+  kitMode?: "manual" | "guided";
+  kitManual?: number;
+  kitGuidance?: number;
   kit?: number;
   travelMiles?: number;
   travelRate?: number;
