@@ -2,7 +2,10 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import { getCategoryBySlug } from "@/lib/categories";
 import { getProductsByCategory } from "@/lib/products";
-import CategoryProductFilters from "@/components/CategoryProductFilters";
+import CategoryProductFilters, {
+  CategoryProductGrid,
+  CategoryProductList,
+} from "@/components/CategoryProductFilters";
 import ExhibitionProductList from "@/components/ExhibitionProductList";
 import Breadcrumbs from "@/components/Breadcrumbs";
 
@@ -47,6 +50,7 @@ export default async function CategoryPage({ params }: { params: { slug: string 
   if (!category) return <div>Category not found</div>;
   const products = await getProductsByCategory(category.id);
   const validProducts = products.filter((p) => !p.hidden);
+  const isListLayout = category.layout === "list";
 
   return (
     <div className="mx-auto max-w-4xl p-4 grid gap-6">
@@ -89,11 +93,14 @@ export default async function CategoryPage({ params }: { params: { slug: string 
           </h2>
           {category.slug === "exhibition-videography" ? (
             <ExhibitionProductList products={validProducts} />
+          ) : isListLayout ? (
+            <CategoryProductFilters products={validProducts}>
+              <CategoryProductList />
+            </CategoryProductFilters>
           ) : (
-            <CategoryProductFilters
-              products={validProducts}
-              layout={category.layout}
-            />
+            <CategoryProductFilters products={validProducts}>
+              <CategoryProductGrid />
+            </CategoryProductFilters>
           )}
         </section>
       )}

@@ -1,6 +1,13 @@
 "use client";
 
-import { useId, useMemo, useState } from "react";
+import {
+  cloneElement,
+  isValidElement,
+  useId,
+  useMemo,
+  useState,
+} from "react";
+import type { ReactElement } from "react";
 import ProductCard from "./ProductCard";
 import ProductListRow from "./ProductListRow";
 import type { Product } from "@/lib/products";
@@ -111,12 +118,12 @@ function sortProducts(products: Product[], sort: SortOption): Product[] {
 
 interface CategoryProductFiltersProps {
   products: Product[];
-  layout?: string | null;
+  children: ReactElement<{ products: Product[] }>;
 }
 
 export default function CategoryProductFilters({
   products,
-  layout,
+  children,
 }: CategoryProductFiltersProps) {
   const [sort, setSort] = useState<SortOption>("default");
   const selectId = useId();
@@ -126,7 +133,14 @@ export default function CategoryProductFilters({
     [products, sort]
   );
 
-  const isListLayout = layout === "list";
+  const renderedChildren = useMemo(() => {
+    if (!isValidElement(children)) {
+      return null;
+    }
+    return cloneElement(children, {
+      products: sortedProducts,
+    });
+  }, [children, sortedProducts]);
 
   return (
     <div className="grid gap-4">
@@ -147,19 +161,35 @@ export default function CategoryProductFilters({
           ))}
         </select>
       </div>
-      {isListLayout ? (
-        <div className="grid gap-4">
-          {sortedProducts.map((product) => (
-            <ProductListRow key={product.id} product={product} />
-          ))}
-        </div>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">
-          {sortedProducts.map((product) => (
-            <ProductCard key={product.id} product={product} />
-          ))}
-        </div>
-      )}
+      {renderedChildren}
+    </div>
+  );
+}
+
+export function CategoryProductGrid({
+  products,
+}: {
+  products: Product[];
+}) {
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">
+      {products.map((product) => (
+        <ProductCard key={product.id} product={product} />
+      ))}
+    </div>
+  );
+}
+
+export function CategoryProductList({
+  products,
+}: {
+  products: Product[];
+}) {
+  return (
+    <div className="grid gap-4">
+      {products.map((product) => (
+        <ProductListRow key={product.id} product={product} />
+      ))}
     </div>
   );
 }
