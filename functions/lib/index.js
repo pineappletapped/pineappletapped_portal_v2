@@ -531,13 +531,19 @@ async function sendEmail(to, subject, body) {
     }
 }
 export const contact_send = functions.https.onCall(async (data) => {
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
     const msg = {
         kind: 'contact',
         fromName: data.name || null,
         fromEmail: data.email || null,
         company: data.company || null,
         body: data.message || '',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'new',
+        assigneeUid: null,
+        resolutionNotes: [],
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        lastStatusAt: timestamp,
     };
     await db.collection('messages').add(msg);
     await sendEmail('info@pineapple.local', `Contact form: ${data.name || 'Message'}`, `From: ${data.name} <${data.email}>\\n\\n${data.message}`);
@@ -562,6 +568,71 @@ export const contact_send = functions.https.onCall(async (data) => {
         console.error('Failed to log contact lead', err);
     }
     return { ok: true };
+});
+export const messages_onWrite = functions.firestore
+    .document('messages/{messageId}')
+    .onWrite(async (change) => {
+    const beforeData = change.before.exists ? change.before.data() : null;
+    const afterData = change.after.exists ? change.after.data() : null;
+    if (!afterData) {
+        return;
+    }
+    if (afterData.kind !== 'contact') {
+        return;
+    }
+    const notifications = [];
+    const statusChanged = beforeData?.status !== afterData.status;
+    const assigneeChanged = beforeData?.assigneeUid !== afterData.assigneeUid;
+    if (assigneeChanged && afterData.assigneeUid) {
+        notifications.push((async () => {
+            try {
+                const staffSnap = await db.collection('users').doc(afterData.assigneeUid).get();
+                const staff = staffSnap.data() || {};
+                const staffEmail = staff.email || staff.contactEmail;
+                if (!staffEmail) {
+                    return;
+                }
+                const staffName = staff.fullName || staff.displayName || staff.name || staffEmail;
+                const sender = afterData.fromName || afterData.fromEmail || 'A visitor';
+                const bodyLines = [
+                    `Hi ${staffName},`,
+                    '',
+                    `A contact message from ${sender} has been assigned to you.`,
+                    '',
+                    `Subject: ${afterData.company || 'General enquiry'}`,
+                    '',
+                    afterData.body || 'No message provided.',
+                    '',
+                    'View the message in the admin portal to reply or add notes.',
+                ];
+                await sendEmail(staffEmail, 'New contact message assigned to you', bodyLines.join('\n'));
+            }
+            catch (err) {
+                console.error('Failed to send assignment notification', err);
+            }
+        })());
+    }
+    if (statusChanged && afterData.status === 'closed' && afterData.fromEmail) {
+        notifications.push((async () => {
+            try {
+                const customerName = afterData.fromName || 'there';
+                const bodyLines = [
+                    `Hi ${customerName},`,
+                    '',
+                    'Thanks for reaching out to Pineapple Tapped. Your enquiry has been marked as resolved.',
+                    'If you have any follow-up questions, just reply to this email and our team will be happy to help.',
+                    '',
+                    'Best regards,',
+                    'The Pineapple Tapped Team',
+                ];
+                await sendEmail(afterData.fromEmail, 'We have resolved your enquiry', bodyLines.join('\n'));
+            }
+            catch (err) {
+                console.error('Failed to send resolution notification', err);
+            }
+        })());
+    }
+    await Promise.all(notifications);
 });
 export const quote_request_public = functions.https.onCall(async (data) => {
     const record = {
