@@ -38,6 +38,7 @@ interface CartContextProps {
   items: CartItem[];
   add: (product: ProductInput) => void;
   remove: (index: number) => void;
+  updateQuantity: (index: number, quantity: number) => void;
   clear: () => void;
 }
 
@@ -136,12 +137,41 @@ export function CartProvider({ children }: { children: ReactNode }) {
     updateItems((prev) => prev.filter((_, i) => i !== index));
   };
 
+  const updateQuantity = (index: number, quantity: number) => {
+    updateItems((prev) => {
+      if (index < 0 || index >= prev.length) {
+        return prev;
+      }
+
+      if (!Number.isFinite(quantity)) {
+        return prev;
+      }
+
+      if (quantity <= 0) {
+        return prev.filter((_, i) => i !== index);
+      }
+
+      const normalized = Math.max(1, Math.round(quantity));
+      const target = prev[index];
+
+      if (target.quantity === normalized) {
+        return prev;
+      }
+
+      return prev.map((item, i) =>
+        i === index ? { ...item, quantity: normalized } : item
+      );
+    });
+  };
+
   const clear = () => {
     updateItems(() => []);
   };
 
   return (
-    <CartContext.Provider value={{ items, add, remove, clear }}>
+    <CartContext.Provider
+      value={{ items, add, remove, updateQuantity, clear }}
+    >
       {children}
     </CartContext.Provider>
   );
