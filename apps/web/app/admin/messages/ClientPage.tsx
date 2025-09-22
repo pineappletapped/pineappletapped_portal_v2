@@ -114,10 +114,13 @@ export default function AdminMessagesPage() {
           q,
           (snapshot) => {
             if (!active) return;
-            const hydrated = snapshot.docs.map((docSnap) => ({
-              id: docSnap.id,
-              ...(docSnap.data() as ContactMessage),
-            }));
+            const hydrated = snapshot.docs.map((docSnap) => {
+              const data = docSnap.data() as Omit<ContactMessage, 'id'>;
+              return {
+                id: docSnap.id,
+                ...data,
+              };
+            });
             setMessages(hydrated);
             setLoading(false);
           },
