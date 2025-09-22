@@ -19,7 +19,7 @@ export default function SiteHeader({
   categories: Category[];
   products: Product[];
 }) {
-  const { items } = useCart();
+  const { items, remove } = useCart();
   const count = items.reduce((sum, i) => sum + i.quantity, 0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [cartOpen, setCartOpen] = useState(false);
@@ -114,6 +114,12 @@ export default function SiteHeader({
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (cartOpen && items.length === 0) {
+      setCartOpen(false);
+    }
+  }, [cartOpen, items.length]);
 
   const topCats = categories
     .filter((c) => !c.parentId)
@@ -261,7 +267,22 @@ export default function SiteHeader({
                           )}
                           {item.date && <span className="block text-xs text-slate-500">{item.date}</span>}
                         </div>
-                        <span className="text-xs font-semibold text-blue">×{item.quantity}</span>
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="text-xs font-semibold text-blue">×{item.quantity}</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              remove(index);
+                              if (items.length === 1) {
+                                setCartOpen(false);
+                              }
+                            }}
+                            className="rounded border border-transparent px-2 py-1 text-xs text-slate-500 transition hover:text-orange focus-visible:border-orange focus-visible:text-orange focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange"
+                            aria-label={`Remove ${item.name} from cart`}
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </li>
                     ))}
                   </ul>
