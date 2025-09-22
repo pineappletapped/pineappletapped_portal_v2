@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { auth, db } from '@/lib/firebase';
+import { ensureFirebase } from '@/lib/firebase';
 import { extractUserRoles, hasRole } from '@/lib/roles';
-import { onAuthStateChanged } from 'firebase/auth';
+import type { User } from 'firebase/auth';
+import type { Firestore } from 'firebase/firestore';
 
 type AnalyticsEventRecord = {
   id: string;
@@ -37,6 +38,7 @@ const parseDateRange = (start: string, end: string) => {
 export default function AnalyticsClientPage() {
   const [canAccess, setCanAccess] = useState<boolean | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [firestore, setFirestore] = useState<Firestore | null>(null);
   const [events, setEvents] = useState<AnalyticsEventRecord[]>([]);
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -50,27 +52,73 @@ export default function AnalyticsClientPage() {
   const [endDate, setEndDate] = useState(() => toDateInputValue(new Date()));
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        setCanAccess(false);
-        setAuthLoading(false);
-        return;
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { auth, db } = await ensureFirebase();
+        if (cancelled) {
+          return;
+        }
+
+        if (!auth || typeof auth.onAuthStateChanged !== 'function' || !db) {
+          throw new Error('Firebase auth or database is unavailable.');
+        }
+
+        setFirestore(db);
+
+        unsubscribe = auth.onAuthStateChanged(async (user: User | null) => {
+          if (cancelled) {
+            return;
+          }
+
+          if (!user) {
+            setCanAccess(false);
+            setAuthLoading(false);
+            return;
+          }
+
+          try {
+            const { doc, getDoc } = await import('firebase/firestore');
+            const me = await getDoc(doc(db, 'users', user.uid));
+            const data = me.data() as Record<string, any> | undefined;
+            const roles = extractUserRoles(data);
+            const allowed = hasRole(roles, ['admin', 'marketing']);
+            setCanAccess(allowed);
+          } catch (error) {
+            console.error('Failed to verify analytics access roles', error);
+            setCanAccess(false);
+          } finally {
+            if (!cancelled) {
+              setAuthLoading(false);
+            }
+          }
+        });
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Failed to initialise Firebase for analytics dashboard', error);
+          setCanAccess(false);
+          setAuthLoading(false);
+        }
       }
-      const { doc, getDoc } = await import('firebase/firestore');
-      const me = await getDoc(doc(db, 'users', user.uid));
-      const data = me.data() as Record<string, any> | undefined;
-      const roles = extractUserRoles(data);
-      const allowed = hasRole(roles, ['admin', 'marketing']);
-      setCanAccess(allowed);
-      setAuthLoading(false);
-    });
-    return () => unsub();
+    })();
+
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
   }, []);
 
   const dateRange = useMemo(() => parseDateRange(startDate, endDate), [startDate, endDate]);
 
   useEffect(() => {
     if (canAccess !== true) {
+      return;
+    }
+    if (!firestore) {
       return;
     }
     if (!dateRange) {
@@ -88,7 +136,7 @@ export default function AnalyticsClientPage() {
         const startTs = Timestamp.fromDate(dateRange.startDate);
         const endTs = Timestamp.fromDate(dateRange.endDate);
         const q = query(
-          collection(db, 'analyticsEvents'),
+          collection(firestore, 'analyticsEvents'),
           where('createdAt', '>=', startTs),
           where('createdAt', '<=', endTs),
           orderBy('createdAt', 'desc'),
@@ -121,7 +169,7 @@ export default function AnalyticsClientPage() {
     return () => {
       active = false;
     };
-  }, [dateRange, canAccess]);
+  }, [dateRange, canAccess, firestore]);
 
   const topPages = useMemo(() => {
     const counts: Record<string, { views: number; visitors: Set<string> }> = {};

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { auth, db } from '@/lib/firebase';
+import { ensureFirebase } from '@/lib/firebase';
 import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 
 /**
@@ -16,23 +16,68 @@ export default function OrgsPage() {
   const [orgs, setOrgs] = useState<{ id: string; name: string; role?: string }[]>([]);
 
   useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged(async (user: any) => {
-      if (!user) return;
-      // Query memberships for this user
-      const memSnap = await getDocs(query(collection(db, 'memberships'), where('userId', '==', user.uid)));
-      const memberships = memSnap.docs.map((d) => ({ id: d.id, ...d.data() })) as any[];
-      // Fetch each organisation document
-      const orgPromises = memberships.map((m) => getDoc(doc(db, 'orgs', m.orgId)));
-      const orgDocs = await Promise.all(orgPromises);
-      const list = orgDocs.map((docSnap) => {
-        const orgId = docSnap.id;
-        const m = memberships.find((mm) => mm.orgId === orgId);
-        return { id: orgId, name: (docSnap.data() as any)?.name || 'Untitled', role: m?.role };
-      });
-      setOrgs(list);
-      setLoading(false);
-    });
-    return () => unsubscribe();
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { auth, db } = await ensureFirebase();
+        if (cancelled) {
+          return;
+        }
+
+        if (!auth || typeof auth.onAuthStateChanged !== 'function' || !db) {
+          throw new Error('Firebase auth or database is unavailable.');
+        }
+
+        unsubscribe = auth.onAuthStateChanged(async (user: any) => {
+          if (cancelled) {
+            return;
+          }
+
+          if (!user) {
+            setOrgs([]);
+            setLoading(false);
+            return;
+          }
+
+          try {
+            const memSnap = await getDocs(
+              query(collection(db, 'memberships'), where('userId', '==', user.uid))
+            );
+            const memberships = memSnap.docs.map((d) => ({ id: d.id, ...d.data() })) as any[];
+            const orgPromises = memberships.map((m) => getDoc(doc(db, 'orgs', m.orgId)));
+            const orgDocs = await Promise.all(orgPromises);
+            const list = orgDocs.map((docSnap) => {
+              const orgId = docSnap.id;
+              const m = memberships.find((mm) => mm.orgId === orgId);
+              return { id: orgId, name: (docSnap.data() as any)?.name || 'Untitled', role: m?.role };
+            });
+            setOrgs(list);
+          } catch (error) {
+            console.error('Failed to load organisations', error);
+            setOrgs([]);
+          } finally {
+            if (!cancelled) {
+              setLoading(false);
+            }
+          }
+        });
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Failed to initialise Firebase for organisations list', error);
+          setOrgs([]);
+          setLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
   }, []);
 
   return (

@@ -1,13 +1,13 @@
 "use client";
 
 import { useCart } from "@/lib/cart";
-import { auth, db, functions } from "@/lib/firebase";
+import { ensureFirebase } from "@/lib/firebase";
 import { VAT_RATE } from "@/lib/vat";
-import { httpsCallable } from "firebase/functions";
+import { httpsCallable, type Functions } from "firebase/functions";
 import { doc, getDoc } from "firebase/firestore";
-import { signInWithEmailAndPassword, User } from "firebase/auth";
+import { signInWithEmailAndPassword, type Auth, type User } from "firebase/auth";
 import { loadStripe } from "@stripe/stripe-js";
-import { useEffect, useState, FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 
 export default function CheckoutPage() {
@@ -33,25 +33,83 @@ export default function CheckoutPage() {
   const [projectName, setProjectName] = useState("");
   const [voucher, setVoucher] = useState("");
   const [loading, setLoading] = useState(false);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const authRef = useRef<Auth | null>(null);
+  const functionsRef = useRef<Functions | null>(null);
 
   useEffect(() => {
-    const unsub = auth.onAuthStateChanged(async (user: User | null) => {
-      if (user) {
-        setEmail(user.email || "");
-        setName(user.displayName || "");
-        const snap = await getDoc(doc(db, "users", user.uid));
-        setDiscount((snap.data()?.discount as number) || 0);
-      } else {
-        setDiscount(0);
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { auth, db, functions } = await ensureFirebase();
+        if (cancelled) {
+          return;
+        }
+
+        if (!auth || typeof auth.onAuthStateChanged !== "function" || !db) {
+          throw new Error("Firebase auth or database is unavailable.");
+        }
+
+        authRef.current = auth;
+        functionsRef.current = functions ?? null;
+
+        unsubscribe = auth.onAuthStateChanged(async (user: User | null) => {
+          if (cancelled) {
+            return;
+          }
+
+          setCurrentUser(user);
+          if (user) {
+            try {
+              setEmail(user.email || "");
+              setName(user.displayName || "");
+              const snap = await getDoc(doc(db, "users", user.uid));
+              setDiscount((snap.data()?.discount as number) || 0);
+            } catch (error) {
+              console.error("Failed to load user discount", error);
+              setDiscount(0);
+            }
+          } else {
+            setDiscount(0);
+          }
+        });
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Failed to initialise Firebase for checkout", error);
+          setCurrentUser(null);
+          setDiscount(0);
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthReady(true);
+        }
       }
-    });
-    return () => unsub();
+    })();
+
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === "function") {
+        unsubscribe();
+      }
+    };
   }, []);
 
   const login = async (e: FormEvent) => {
     e.preventDefault();
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      let instance = authRef.current;
+      if (!instance) {
+        const { auth } = await ensureFirebase();
+        instance = auth ?? null;
+        authRef.current = instance;
+      }
+      if (!instance) {
+        throw new Error("Firebase auth is unavailable.");
+      }
+      await signInWithEmailAndPassword(instance, email, password);
     } catch (err) {
       console.error(err);
       alert("Login failed");
@@ -59,12 +117,18 @@ export default function CheckoutPage() {
   };
 
   const complete = async () => {
-    if (loading || items.length === 0 || !name || (!auth.currentUser && !email)) return;
+    const authInstance = authRef.current;
+    const user = authInstance?.currentUser ?? currentUser;
+    if (loading || items.length === 0 || !name || (!user && !email)) return;
     setLoading(true);
     try {
-      const createOrder = httpsCallable(functions, "createOrder");
+      const functionsInstance = functionsRef.current;
+      if (!functionsInstance) {
+        throw new Error("Firebase functions are unavailable.");
+      }
+      const createOrder = httpsCallable(functionsInstance, "createOrder");
       const orderRes: any = await createOrder({
-        userEmail: auth.currentUser?.email || email,
+        userEmail: user?.email || email,
         customerName: name,
         companyName: company || null,
         location: location || null,
@@ -81,7 +145,7 @@ export default function CheckoutPage() {
       });
       const orderId = orderRes.data?.orderId;
 
-      const createIntent = httpsCallable(functions, "stripe_createPaymentIntent");
+      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
       const res: any = await createIntent({ orderId, type: "deposit" });
       const clientSecret = res.data?.clientSecret;
       const stripe = await loadStripe(
@@ -106,7 +170,7 @@ export default function CheckoutPage() {
   return (
     <div className="max-w-5xl mx-auto grid md:grid-cols-2 gap-8">
       <div className="space-y-6">
-        {!auth.currentUser && (
+        {authReady && !currentUser && (
           <form onSubmit={login} className="space-y-2 border p-4 rounded">
             <h2 className="font-semibold">Login</h2>
             <input
@@ -132,7 +196,7 @@ export default function CheckoutPage() {
 
         <div className="space-y-2">
           <h2 className="font-semibold">Customer Details</h2>
-          {!auth.currentUser && (
+          {!currentUser && (
             <input
               className="input input-bordered w-full"
               type="email"
@@ -230,7 +294,7 @@ export default function CheckoutPage() {
             loading ||
             items.length === 0 ||
             !name ||
-            (!auth.currentUser && !email)
+            (!currentUser && !email)
           }
         >
           {loading ? "Processing..." : "Complete Order"}
