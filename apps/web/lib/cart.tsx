@@ -1,6 +1,14 @@
 "use client";
 
-import { createContext, useContext, useState, ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  ReactNode,
+} from "react";
 import { ProductModifierSelection } from "@/lib/products";
 
 export interface CartItem {
@@ -35,11 +43,78 @@ interface CartContextProps {
 
 const CartContext = createContext<CartContextProps | undefined>(undefined);
 
+const STORAGE_KEY = "pineapple-tapped-cart";
+
+const isBrowser = typeof window !== "undefined";
+
+function loadStoredItems(): CartItem[] {
+  if (!isBrowser) {
+    return [];
+  }
+
+  const stored = window.localStorage.getItem(STORAGE_KEY);
+  if (!stored) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(stored);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((item): item is CartItem =>
+        item && typeof item === "object" && "id" in item && "quantity" in item
+      );
+    }
+  } catch (error) {
+    console.warn("Failed to parse stored cart items", error);
+  }
+
+  window.localStorage.removeItem(STORAGE_KEY);
+  return [];
+}
+
 export function CartProvider({ children }: { children: ReactNode }) {
-  const [items, setItems] = useState<CartItem[]>([]);
+  const [items, setItems] = useState<CartItem[]>(() => loadStoredItems());
+  const persistTimeout = useRef<number | null>(null);
+
+  const persistCart = useCallback((nextItems: CartItem[]) => {
+    if (!isBrowser) {
+      return;
+    }
+
+    if (persistTimeout.current !== null) {
+      window.clearTimeout(persistTimeout.current);
+    }
+
+    persistTimeout.current = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextItems));
+      } catch (error) {
+        console.warn("Failed to persist cart items", error);
+      }
+    }, 150);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (persistTimeout.current !== null) {
+        window.clearTimeout(persistTimeout.current);
+      }
+    };
+  }, []);
+
+  const updateItems = useCallback(
+    (updater: (prev: CartItem[]) => CartItem[]) => {
+      setItems((prev) => {
+        const next = updater(prev);
+        persistCart(next);
+        return next;
+      });
+    },
+    [persistCart]
+  );
 
   const add = (product: ProductInput) => {
-    setItems((prev) => {
+    updateItems((prev) => {
       const existing = prev.find(
         (i) =>
           i.id === product.id &&
@@ -58,10 +133,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
   };
 
   const remove = (index: number) => {
-    setItems((prev) => prev.filter((_, i) => i !== index));
+    updateItems((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const clear = () => setItems([]);
+  const clear = () => {
+    updateItems(() => []);
+  };
 
   return (
     <CartContext.Provider value={{ items, add, remove, clear }}>
