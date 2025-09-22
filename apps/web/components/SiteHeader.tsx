@@ -27,6 +27,7 @@ export default function SiteHeader({
   const [mobileOpen, setMobileOpen] = useState(false);
   const [logoUrl, setLogoUrl] = useState('/logo-rectangle.svg');
   const flyoutRef = useRef<HTMLDivElement | null>(null);
+  const cartSectionRef = useRef<HTMLDivElement | null>(null);
   const flyoutId = 'site-header-category-flyout';
 
   const makeTriggerId = (catId: string) => `site-header-cat-${catId}`;
@@ -66,6 +67,37 @@ export default function SiteHeader({
       return;
     }
     setOpenCat(null);
+  };
+
+  const handleCartBlur = (event: FocusEvent<HTMLElement>) => {
+    const next = event.relatedTarget as HTMLElement | null;
+    if (next && cartSectionRef.current?.contains(next)) {
+      return;
+    }
+    setCartOpen(false);
+  };
+
+  const handleCartKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setCartOpen(false);
+      const trigger = cartSectionRef.current?.querySelector<HTMLAnchorElement>(
+        '[data-cart-trigger="true"]'
+      );
+      trigger?.focus();
+    }
+  };
+
+  const handleCartMouseEnter = () => {
+    setCartOpen(true);
+  };
+
+  const handleCartMouseLeave = () => {
+    const activeElement = document.activeElement as HTMLElement | null;
+    if (activeElement && cartSectionRef.current?.contains(activeElement)) {
+      return;
+    }
+    setCartOpen(false);
   };
 
   useEffect(() => {
@@ -182,19 +214,64 @@ export default function SiteHeader({
               </div>
             )}
           </div>
-          <div className="relative">
-            <button type="button" aria-label="Cart" onClick={() => setCartOpen((o) => !o)} className="relative">
+          <div
+            className="relative"
+            ref={cartSectionRef}
+            onMouseEnter={handleCartMouseEnter}
+            onMouseLeave={handleCartMouseLeave}
+            onFocusCapture={() => setCartOpen(true)}
+            onBlurCapture={handleCartBlur}
+          >
+            <Link
+              href="/cart"
+              data-cart-trigger="true"
+              className="relative flex items-center justify-center rounded-full p-2 text-blue transition-colors hover:text-orange focus-visible:text-orange focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange"
+              aria-label={
+                count > 0
+                  ? `View cart with ${count} item${count === 1 ? '' : 's'}`
+                  : 'View cart'
+              }
+              onClick={() => setCartOpen(false)}
+            >
               <FiShoppingCart className="w-5 h-5" />
               {count > 0 && (
                 <span className="absolute -top-2 -right-2 bg-orange text-white rounded-full text-xs px-1">
                   {count}
                 </span>
               )}
-            </button>
+            </Link>
             {cartOpen && (
-              <div className="absolute right-0 mt-2 z-10 bg-white border rounded shadow p-2 text-sm">
-                <Link href="/cart" className="hover:underline" onClick={() => setCartOpen(false)}>
-                  View Cart ({count})
+              <div
+                className="absolute right-0 mt-2 w-72 z-20 rounded-md border border-slate-200 bg-white p-3 text-sm shadow-lg"
+                onKeyDown={handleCartKeyDown}
+              >
+                {items.length === 0 ? (
+                  <p className="py-4 text-center text-slate-500">Your Cart is Currently Empty</p>
+                ) : (
+                  <ul className="max-h-60 space-y-3 overflow-auto">
+                    {items.map((item, index) => (
+                      <li
+                        key={`${item.id}-${index}`}
+                        className="flex items-start justify-between gap-3 border-b border-slate-100 pb-2 last:border-b-0 last:pb-0"
+                      >
+                        <div className="flex-1 space-y-1">
+                          <span className="block font-medium text-blue">{item.name}</span>
+                          {item.variation && (
+                            <span className="block text-xs text-slate-500">{item.variation}</span>
+                          )}
+                          {item.date && <span className="block text-xs text-slate-500">{item.date}</span>}
+                        </div>
+                        <span className="text-xs font-semibold text-blue">×{item.quantity}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <Link
+                  href="/cart"
+                  className="mt-3 inline-flex w-full items-center justify-center rounded bg-orange px-3 py-2 text-sm font-semibold text-white transition hover:bg-orange/90"
+                  onClick={() => setCartOpen(false)}
+                >
+                  View Cart{count > 0 ? ` (${count})` : ''}
                 </Link>
               </div>
             )}
