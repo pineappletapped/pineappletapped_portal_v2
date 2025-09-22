@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { auth, db } from "@/lib/firebase";
+import { db } from "@/lib/firebase";
 import {
   addDoc,
   collection,
@@ -14,9 +14,10 @@ import {
   serverTimestamp,
   updateDoc,
 } from "firebase/firestore";
+import { useRoleGate } from "@/hooks/useRoleGate";
 
 export default function AdminOrdersPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [orders, setOrders] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState("all");
   const [emailFilter, setEmailFilter] = useState("");
@@ -80,38 +81,31 @@ export default function AdminOrdersPage() {
   };
 
   useEffect(() => {
+    if (guardLoading) return;
+    if (!allowed) {
+      setLoading(false);
+      return;
+    }
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setIsStaff(false);
-        setLoading(false);
-        return;
-      }
-      const snap = await getDoc(doc(db, "users", user.uid));
-      const me = snap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        const orderSnap = await getDocs(
-          query(collection(db, "orders"), orderBy("createdAt", "desc"))
-        );
-        const raw = orderSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-        const ids = Array.from(new Set(raw.map((o) => o.userId).filter(Boolean)));
-        const userMap: Record<string, any> = {};
-        await Promise.all(
-          ids.map(async (uid) => {
-            const uSnap = await getDoc(doc(db, "users", uid));
-            if (uSnap.exists()) userMap[uid] = uSnap.data();
-          })
-        );
-        setOrders(raw.map((o) => ({ ...o, user: userMap[o.userId] })));
-      }
+      const orderSnap = await getDocs(
+        query(collection(db, "orders"), orderBy("createdAt", "desc"))
+      );
+      const raw = orderSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+      const ids = Array.from(new Set(raw.map((o) => o.userId).filter(Boolean)));
+      const userMap: Record<string, any> = {};
+      await Promise.all(
+        ids.map(async (uid) => {
+          const uSnap = await getDoc(doc(db, "users", uid));
+          if (uSnap.exists()) userMap[uid] = uSnap.data();
+        })
+      );
+      setOrders(raw.map((o) => ({ ...o, user: userMap[o.userId] })));
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to view orders.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to view orders.</p>;
 
   const statusOptions = [
     "pending",

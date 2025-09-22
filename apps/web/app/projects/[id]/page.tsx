@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { db, auth } from '@/lib/firebase';
 import { doc, getDoc, collection, query, where, getDocs, addDoc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { extractUserRoles, hasRole } from '@/lib/roles';
 import Link from 'next/link';
 import StatusBadge from '@/components/StatusBadge';
 import PortalContainer from '@/components/PortalContainer';
@@ -123,7 +124,8 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       const user = auth.currentUser;
       if (user) {
         const uSnap = await getDoc(doc(db, 'users', user.uid));
-        setIsStaffUser((uSnap.data() as any)?.isStaff === true);
+        const roles = extractUserRoles(uSnap.data());
+        setIsStaffUser(hasRole(roles, ['admin', 'projects']));
         // Load signature request for this project & user
         const sigQ = query(collection(db,'signatures'), where('projectId','==', params.id), where('signerUid','==', user.uid), where('status','==','requested'));
         const sigSnap = await getDocs(sigQ);

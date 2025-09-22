@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { auth, db } from '@/lib/firebase';
 import { collection, doc, getDoc, getDocs, updateDoc } from 'firebase/firestore';
+import { extractUserRoles, hasRole } from '@/lib/roles';
 
 /**
  * Admin Quotes & Proposals Management
@@ -13,7 +14,7 @@ import { collection, doc, getDoc, getDocs, updateDoc } from 'firebase/firestore'
  * Status can be updated inline and quick links are provided for deeper review.
  */
 export default function AdminQuotesProposalsPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const [canManage, setCanManage] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<'proposals' | 'quotes' | 'archived'>('proposals');
   const [proposals, setProposals] = useState<any[]>([]);
@@ -23,12 +24,13 @@ export default function AdminQuotesProposalsPage() {
   useEffect(() => {
     (async () => {
       const user = auth.currentUser;
-      if (!user) { setIsStaff(false); setLoading(false); return; }
+      if (!user) { setCanManage(false); setLoading(false); return; }
       const uSnap = await getDoc(doc(db, 'users', user.uid));
       const me = uSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
+      const roles = extractUserRoles(me);
+      const allowed = hasRole(roles, ['admin', 'sales']);
+      setCanManage(allowed);
+      if (allowed) {
         const [propSnap, quoteSnap, userSnap] = await Promise.all([
           getDocs(collection(db, 'proposals')),
           getDocs(collection(db, 'quoteRequests')),
@@ -53,7 +55,7 @@ export default function AdminQuotesProposalsPage() {
   };
 
   if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage quotes or proposals.</p>;
+  if (!canManage) return <p>You do not have permission to manage quotes or proposals.</p>;
 
   const activeProposals = proposals.filter((p) => p.status === 'sent');
   const archivedProposals = proposals.filter((p) => p.status !== 'sent');

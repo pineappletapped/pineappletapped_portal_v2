@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { auth, db } from '@/lib/firebase';
+import { extractUserRoles, hasRole } from '@/lib/roles';
 import { onAuthStateChanged } from 'firebase/auth';
 
 type AnalyticsEventRecord = {
@@ -34,7 +35,7 @@ const parseDateRange = (start: string, end: string) => {
 };
 
 export default function AnalyticsClientPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const [canAccess, setCanAccess] = useState<boolean | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [events, setEvents] = useState<AnalyticsEventRecord[]>([]);
   const [fetching, setFetching] = useState(false);
@@ -51,15 +52,16 @@ export default function AnalyticsClientPage() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
-        setIsStaff(false);
+        setCanAccess(false);
         setAuthLoading(false);
         return;
       }
       const { doc, getDoc } = await import('firebase/firestore');
       const me = await getDoc(doc(db, 'users', user.uid));
       const data = me.data() as Record<string, any> | undefined;
-      const staff = data?.isStaff === true;
-      setIsStaff(staff);
+      const roles = extractUserRoles(data);
+      const allowed = hasRole(roles, ['admin', 'marketing']);
+      setCanAccess(allowed);
       setAuthLoading(false);
     });
     return () => unsub();
@@ -68,7 +70,7 @@ export default function AnalyticsClientPage() {
   const dateRange = useMemo(() => parseDateRange(startDate, endDate), [startDate, endDate]);
 
   useEffect(() => {
-    if (isStaff !== true) {
+    if (canAccess !== true) {
       return;
     }
     if (!dateRange) {
@@ -119,7 +121,7 @@ export default function AnalyticsClientPage() {
     return () => {
       active = false;
     };
-  }, [dateRange, isStaff]);
+  }, [dateRange, canAccess]);
 
   const topPages = useMemo(() => {
     const counts: Record<string, { views: number; visitors: Set<string> }> = {};
@@ -207,10 +209,10 @@ export default function AnalyticsClientPage() {
 
   const hasActiveFilters = Boolean(selectedPath || selectedReferrer);
 
-  if (authLoading || (isStaff && fetching && !events.length)) {
+  if (authLoading || (canAccess && fetching && !events.length)) {
     return <p>Loading…</p>;
   }
-  if (!isStaff) return <p>You do not have permission to view analytics.</p>;
+  if (!canAccess) return <p>You do not have permission to view analytics.</p>;
 
   return (
     <div className="max-w-5xl mx-auto p-4 space-y-6">

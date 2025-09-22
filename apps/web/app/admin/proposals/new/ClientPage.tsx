@@ -7,6 +7,7 @@ import { auth, db, functions } from "@/lib/firebase";
 import { doc, getDoc, collection, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { getProductKit } from "@/lib/equipment";
+import { extractUserRoles, hasRole } from "@/lib/roles";
 
 interface ProposalItem {
   type: "product" | "custom";
@@ -19,7 +20,7 @@ interface ProposalItem {
 
 export default function NewProposalPage() {
   const router = useRouter();
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const [canManage, setCanManage] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [step, setStep] = useState(1);
 
@@ -40,12 +41,13 @@ export default function NewProposalPage() {
   useEffect(() => {
     (async () => {
       const user = auth.currentUser;
-      if (!user) { setIsStaff(false); setLoading(false); return; }
+      if (!user) { setCanManage(false); setLoading(false); return; }
       const uSnap = await getDoc(doc(db, "users", user.uid));
       const me = uSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
+      const roles = extractUserRoles(me);
+      const allowed = hasRole(roles, ["admin", "sales"]);
+      setCanManage(allowed);
+      if (allowed) {
         const [orgSnap, prodSnap, secSnap, agrSnap, tplSnap] = await Promise.all([
           getDocs(collection(db, "orgs")),
           getDocs(collection(db, "products")),
@@ -139,7 +141,7 @@ export default function NewProposalPage() {
   };
 
   if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to create proposals.</p>;
+  if (!canManage) return <p>You do not have permission to create proposals.</p>;
 
   return (
     <div className="grid gap-6 max-w-3xl">

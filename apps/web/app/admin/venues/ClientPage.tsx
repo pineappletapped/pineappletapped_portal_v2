@@ -1,19 +1,19 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { auth, db } from "@/lib/firebase";
+import { db } from "@/lib/firebase";
 import {
   addDoc,
   collection,
   deleteDoc,
   doc,
-  getDoc,
   getDocs,
   serverTimestamp,
   updateDoc,
 } from "firebase/firestore";
 import type { Venue } from "@/lib/venues";
 import VenueMap from "@/components/VenueMap";
+import { useRoleGate } from "@/hooks/useRoleGate";
 
 interface FormState {
   name: string;
@@ -241,7 +241,7 @@ function VenueForm({
 }
 
 export default function AdminVenuesPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [loading, setLoading] = useState(true);
   const [venues, setVenues] = useState<Venue[]>([]);
   const [search, setSearch] = useState("");
@@ -255,22 +255,15 @@ export default function AdminVenuesPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setIsStaff(false);
+      if (guardLoading) return;
+      if (!allowed) {
         setLoading(false);
         return;
       }
-      const snap = await getDoc(doc(db, "users", user.uid));
-      const me = snap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        await refresh();
-      }
+      await refresh();
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const refresh = async () => {
     const snap = await getDocs(collection(db, "venues"));
@@ -444,8 +437,8 @@ export default function AdminVenuesPage() {
     });
   }, [venues, search]);
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage venues.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to manage venues.</p>;
 
   return (
     <div className="grid gap-6">

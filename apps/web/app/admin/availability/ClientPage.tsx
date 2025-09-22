@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import AvailabilityCalendar, { AvailabilityStatus } from "@/components/AvailabilityCalendar";
-import { auth, db } from "@/lib/firebase";
-import { doc, getDoc, collection, query, where, getDocs, setDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
+import { doc, collection, query, where, getDocs, setDoc } from "firebase/firestore";
 import { adminListUsers } from "@/lib/admin";
+import { useRoleGate } from "@/hooks/useRoleGate";
 
 interface User {
   id: string;
@@ -13,21 +14,20 @@ interface User {
 }
 
 export default function AdminAvailabilityPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(["projects", "operations"]);
   const [members, setMembers] = useState<User[]>([]);
   const [selected, setSelected] = useState<string>("");
   const [availability, setAvailability] = useState<Record<string, AvailabilityStatus>>({});
+  const [loadingMembers, setLoadingMembers] = useState(true);
 
   // load staff status and team list
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) return setIsStaff(false);
-      const uSnap = await getDoc(doc(db, "users", user.uid));
-      const me = uSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (!staff) return;
+      if (guardLoading) return;
+      if (!allowed) {
+        setLoadingMembers(false);
+        return;
+      }
       try {
         const result: any = await adminListUsers();
         const users: User[] = result.users || [];
@@ -37,13 +37,15 @@ export default function AdminAvailabilityPage() {
         if (def) setSelected(def.id);
       } catch (err) {
         console.error(err);
+      } finally {
+        setLoadingMembers(false);
       }
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   // load availability for selected member
   useEffect(() => {
-    if (!selected) return;
+    if (!allowed || !selected) return;
     (async () => {
       const q = query(collection(db, "availability"), where("uid", "==", selected));
       const snap = await getDocs(q);
@@ -54,7 +56,7 @@ export default function AdminAvailabilityPage() {
       });
       setAvailability(map);
     })();
-  }, [selected]);
+  }, [allowed, selected]);
 
   const updateDay = async (date: string, status: AvailabilityStatus) => {
     setAvailability({ ...availability, [date]: status });
@@ -65,8 +67,8 @@ export default function AdminAvailabilityPage() {
     });
   };
 
-  if (isStaff === null) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage availability.</p>;
+  if (guardLoading || loadingMembers) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to manage availability.</p>;
 
   return (
     <div className="flex gap-6">

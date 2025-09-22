@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { auth, db, storage } from '@/lib/firebase';
+import { db, storage } from '@/lib/firebase';
 import {
   collection,
   addDoc,
@@ -15,13 +15,14 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
 import Image from 'next/image';
 import type { Category } from '@/lib/categories';
+import { useRoleGate } from '@/hooks/useRoleGate';
 
 interface PageDoc { id: string; title: string; slug: string; }
 interface PostDoc { id: string; title: string; }
 interface HomeCard { id: string; title: string; text: string; link?: string; }
 
 export default function WebsiteDesignPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(['marketing']);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<'home' | 'pages' | 'blog' | 'menu' | 'branding'>('pages');
 
@@ -56,32 +57,31 @@ export default function WebsiteDesignPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) { setIsStaff(false); setLoading(false); return; }
-      const meSnap = await getDoc(doc(db, 'users', user.uid));
-      const me = meSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        const [pSnap, bSnap, cSnap, sSnap, hSnap] = await Promise.all([
+      if (guardLoading) return;
+      if (!allowed) {
+        setLoading(false);
+        return;
+      }
+      try {
+        const [pSnap, bSnap, cSnap, brandingSnap, homeSnap] = await Promise.all([
           getDocs(collection(db, 'pages')),
           getDocs(collection(db, 'blogPosts')),
           getDocs(collection(db, 'categories')),
           getDoc(doc(db, 'settings', 'branding')),
           getDoc(doc(db, 'settings', 'homepage')),
         ]);
-        setPages(pSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
-        setPosts(bSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
+        setPages(pSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+        setPosts(bSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setMenuCats(
           cSnap.docs
             .map((d) => ({ id: d.id, ...(d.data() as any) }))
             .sort((a, b) => (a.order || 0) - (b.order || 0))
         );
-        const branding = sSnap.data() as any;
+        const branding = brandingSnap.data() as any;
         setLogoUrl(branding?.logoUrl || '');
         setMetaPixelId(branding?.metaPixelId || '');
         setLinkedinPartnerId(branding?.linkedinPartnerId || '');
-        const home = hSnap.data() as any;
+        const home = homeSnap.data() as any;
         if (home) {
           setHomeTitle(home.heroTitle || '');
           setHomeSubtitle(home.heroSubtitle || '');
@@ -93,10 +93,13 @@ export default function WebsiteDesignPage() {
           setHomeCtaBtnLink(home.ctaButtonLink || '');
           setHomeCards(home.cards || []);
         }
+      } catch (error) {
+        console.error('Failed to load website configuration', error);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const addPage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -201,8 +204,8 @@ export default function WebsiteDesignPage() {
     }
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage the website design.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to manage the website design.</p>;
 
   return (
     <div className="grid gap-4">

@@ -6,9 +6,10 @@ import { auth, db, storage } from "@/lib/firebase";
 import { collection, addDoc, getDocs, getDoc, doc, deleteDoc, updateDoc } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import type { ClientLogo } from "@/lib/clientLogos";
+import { extractUserRoles, hasRole } from "@/lib/roles";
 
 export default function AdminClientLogosPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const [canManage, setCanManage] = useState<boolean | null>(null);
   const [logos, setLogos] = useState<ClientLogo[]>([]);
   const [name, setName] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -19,15 +20,16 @@ export default function AdminClientLogosPage() {
     (async () => {
       const user = auth.currentUser;
       if (!user) {
-        setIsStaff(false);
+        setCanManage(false);
         setLoading(false);
         return;
       }
       const snap = await getDoc(doc(db, "users", user.uid));
       const me = snap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) await refresh();
+      const roles = extractUserRoles(me);
+      const allowed = hasRole(roles, ["admin", "marketing"]);
+      setCanManage(allowed);
+      if (allowed) await refresh();
       setLoading(false);
     })();
   }, []);
@@ -71,7 +73,7 @@ export default function AdminClientLogosPage() {
   };
 
   if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage client logos.</p>;
+  if (!canManage) return <p>You do not have permission to manage client logos.</p>;
 
   return (
     <div className="grid gap-6">

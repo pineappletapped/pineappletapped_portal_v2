@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { auth, db } from '@/lib/firebase';
 import { doc, getDoc, collection, query, where, getDocs, getDoc as getDoc2, setDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { extractUserRoles, hasRole } from '@/lib/roles';
 
 /**
  * Shows details for a single organisation, including its members, brand packs and
@@ -99,7 +100,8 @@ export default function OrgDetailPage() {
         setMyRole(myMem?.role || null);
         // Check staff
         const uDocSnap = await getDoc(doc(db, 'users', user.uid));
-        setIsStaff((uDocSnap.data() as any)?.isStaff === true);
+        const roles = extractUserRoles(uDocSnap.data());
+        setIsStaff(hasRole(roles, ['admin', 'projects']));
       }
       // Brand packs
       const bpSnap = await getDocs(query(collection(db, 'brandPacks'), where('orgId', '==', orgId)));

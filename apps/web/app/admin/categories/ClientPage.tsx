@@ -2,11 +2,10 @@
 
 import Image from "next/image";
 import { useEffect, useState } from "react";
-import { auth, db, storage } from "@/lib/firebase";
+import { db, storage } from "@/lib/firebase";
 import {
   collection,
   addDoc,
-  getDoc,
   getDocs,
   doc,
   deleteDoc,
@@ -14,9 +13,10 @@ import {
 } from "firebase/firestore";
 import type { Category } from "@/lib/categories";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { useRoleGate } from "@/hooks/useRoleGate";
 
 export default function AdminCategoriesPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(["marketing"]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [name, setName] = useState("");
@@ -43,22 +43,15 @@ export default function AdminCategoriesPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setIsStaff(false);
+      if (guardLoading) return;
+      if (!allowed) {
         setLoading(false);
         return;
       }
-      const snap = await getDoc(doc(db, "users", user.uid));
-      const me = snap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        await refresh();
-      }
+      await refresh();
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const refresh = async () => {
     const catSnap = await getDocs(collection(db, "categories"));
@@ -145,8 +138,8 @@ export default function AdminCategoriesPage() {
     await refresh();
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage categories.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to manage categories.</p>;
   const CategoryRow = ({
     category,
     depth = 0,

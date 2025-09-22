@@ -1,48 +1,332 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { auth, db } from '@/lib/firebase';
-import { collection, doc, getDoc, getDocs, updateDoc } from 'firebase/firestore';
+import { adminListUsers } from '@/lib/admin';
+import { db, ensureFirebase } from '@/lib/firebase';
+import { useRoleGate } from '@/hooks/useRoleGate';
+import { extractUserRoles, type UserRoles } from '@/lib/roles';
+import { collection, doc, getDocs, Timestamp, updateDoc } from 'firebase/firestore';
+
+interface StaffOption {
+  uid: string;
+  label: string;
+  email?: string | null;
+}
+
+type ProjectPriority = 'low' | 'medium' | 'high' | '';
+
+interface ProjectRecord {
+  id: string;
+  title?: string | null;
+  userEmail?: string | null;
+  userId?: string | null;
+  createdAt?: any;
+  status?: string;
+  ownerUid?: string | null;
+  ownerName?: string | null;
+  kickoffDate?: Timestamp | Date | null;
+  dueDate?: Timestamp | Date | null;
+  priority?: ProjectPriority | string | null;
+  [key: string]: any;
+}
+
+const STATUS_ORDER = ['intake', 'in_progress', 'review', 'completed'];
+
+const PRIORITY_OPTIONS: { value: ProjectPriority; label: string }[] = [
+  { value: '', label: 'No priority' },
+  { value: 'high', label: 'High' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'low', label: 'Low' },
+];
+
+const DUE_GROUPS = [
+  { key: 'overdue', label: 'Overdue' },
+  { key: 'week', label: 'Due this week' },
+  { key: 'month', label: 'Due in 30 days' },
+  { key: 'later', label: 'Future' },
+  { key: 'none', label: 'No due date' },
+] as const;
+
+function coerceDate(value: ProjectRecord['dueDate']): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  const candidate: any = value;
+  if (candidate && typeof candidate.toDate === 'function') {
+    try {
+      return candidate.toDate();
+    } catch (err) {
+      console.error('Failed to parse Firestore timestamp', err);
+      return null;
+    }
+  }
+  const parsed = new Date(candidate);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+}
+
+function toDateInputValue(value: ProjectRecord['dueDate']): string {
+  const date = coerceDate(value);
+  if (!date) return '';
+  const iso = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+    .toISOString()
+    .slice(0, 10);
+  return iso;
+}
+
+function formatDateDisplay(value: any): string {
+  const date = coerceDate(value);
+  if (!date) return '';
+  return date.toLocaleDateString();
+}
 
 export default function AdminProjectsPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
-  const [projects, setProjects] = useState<any[]>([]);
+  const { allowed, loading: guardLoading } = useRoleGate(['admin', 'projects']);
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [staff, setStaff] = useState<StaffOption[]>([]);
   const [view, setView] = useState<'kanban' | 'list'>('kanban');
   const [filter, setFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [ownerFilter, setOwnerFilter] = useState('');
+  const [dueFilter, setDueFilter] = useState<'all' | 'overdue' | 'week' | 'month' | 'none'>('all');
+  const [groupBy, setGroupBy] = useState<'status' | 'owner' | 'due'>('status');
 
   useEffect(() => {
+    let active = true;
     (async () => {
-      const user = auth.currentUser;
-      if (!user) { setIsStaff(false); return; }
-      const uSnap = await getDoc(doc(db, 'users', user.uid));
-      const me = uSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
+      if (guardLoading || !allowed) return;
+      try {
         const snap = await getDocs(collection(db, 'projects'));
-        setProjects(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
+        if (!active) return;
+        const items: ProjectRecord[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as ProjectRecord),
+        }));
+        setProjects(items);
+      } catch (err) {
+        console.error('Failed to load projects', err);
       }
     })();
+
+    return () => {
+      active = false;
+    };
+  }, [allowed, guardLoading]);
+
+  useEffect(() => {
+    let active = true;
+
+    (async () => {
+      try {
+        await ensureFirebase();
+        const result: any = await adminListUsers();
+        if (!active) return;
+        const options = ((result?.users as any[]) || [])
+          .reduce<StaffOption[]>((acc, user: any) => {
+            const roles = extractUserRoles(user as { roles?: UserRoles; isStaff?: boolean });
+            if (
+              roles.admin ||
+              roles.sales ||
+              roles.operations ||
+              roles.projects ||
+              roles.marketing ||
+              roles.finance
+            ) {
+              acc.push({
+                uid: user.id as string,
+                label:
+                  user.fullName ||
+                  user.displayName ||
+                  user.email ||
+                  'Unnamed user',
+                email: user.email || null,
+              });
+            }
+            return acc;
+          }, [])
+          .sort((a, b) => a.label.localeCompare(b.label));
+        setStaff(options);
+      } catch (err) {
+        console.error('Failed to load staff directory', err);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
   }, []);
 
-  const updateStatus = async (id: string, status: string) => {
-    await updateDoc(doc(db, 'projects', id), { status });
-    setProjects(projects.map(p => p.id === id ? { ...p, status } : p));
-  };
+  const staffMap = useMemo(() => {
+    return new Map(staff.map((member) => [member.uid, member] as const));
+  }, [staff]);
 
-  if (isStaff === null) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to view projects.</p>;
+  const updateProject = useCallback(async (id: string, updates: Record<string, any>) => {
+    try {
+      await updateDoc(doc(db, 'projects', id), updates);
+      setProjects((prev) =>
+        prev.map((project) => (project.id === id ? { ...project, ...updates } : project))
+      );
+    } catch (err) {
+      console.error('Failed to update project', err);
+      alert('Failed to update project. Please try again.');
+    }
+  }, []);
 
-  const statuses = ['intake','in_progress','review','completed'];
-  const filtered = projects.filter(p => {
-    const matchesText = filter
-      ? (p.userEmail || '').toLowerCase().includes(filter.toLowerCase()) || (p.userId || '').includes(filter)
-      : true;
-    const matchesStatus = statusFilter ? p.status === statusFilter : true;
-    return matchesText && matchesStatus;
-  });
+  const updateStatus = useCallback(
+    async (id: string, status: string) => {
+      await updateProject(id, { status });
+    },
+    [updateProject]
+  );
+
+  const updateOwner = useCallback(
+    async (id: string, ownerUid: string | null) => {
+      const member = ownerUid ? staffMap.get(ownerUid) : null;
+      await updateProject(id, {
+        ownerUid: ownerUid || null,
+        ownerName: member?.label || null,
+      });
+    },
+    [staffMap, updateProject]
+  );
+
+  const updateDateField = useCallback(
+    async (id: string, field: 'dueDate' | 'kickoffDate', value: string) => {
+      const payload: Record<string, any> = {};
+      if (value) {
+        const [year, month, day] = value.split('-').map((part) => Number(part));
+        if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
+          const date = new Date(year, (month || 1) - 1, day || 1);
+          payload[field] = Timestamp.fromDate(date);
+        } else {
+          alert('Please provide a valid date.');
+          return;
+        }
+      } else {
+        payload[field] = null;
+      }
+      await updateProject(id, payload);
+    },
+    [updateProject]
+  );
+
+  const updatePriority = useCallback(
+    async (id: string, priority: ProjectPriority) => {
+      await updateProject(id, { priority: priority || null });
+    },
+    [updateProject]
+  );
+
+  const resolveDueBucket = useCallback((project: ProjectRecord) => {
+    const due = coerceDate(project.dueDate);
+    const today = new Date();
+    const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const weekEnd = new Date(startToday);
+    weekEnd.setDate(startToday.getDate() + 7);
+    const monthEnd = new Date(startToday);
+    monthEnd.setDate(startToday.getDate() + 30);
+
+    if (!due) return 'none';
+    if (due < startToday) return 'overdue';
+    if (due <= weekEnd) return 'week';
+    if (due <= monthEnd) return 'month';
+    return 'later';
+  }, []);
+
+  const statuses = STATUS_ORDER;
+
+  const filtered = useMemo(() => {
+    const text = filter.trim().toLowerCase();
+    return projects.filter((project) => {
+      const matchesText = text
+        ? (project.userEmail || '').toLowerCase().includes(text) ||
+          (project.userId || '').toLowerCase().includes(text) ||
+          (project.title || project.name || '')
+            .toString()
+            .toLowerCase()
+            .includes(text)
+        : true;
+      const matchesStatus = statusFilter ? project.status === statusFilter : true;
+      const matchesOwner = ownerFilter
+        ? ownerFilter === '__unassigned'
+          ? !project.ownerUid
+          : project.ownerUid === ownerFilter
+        : true;
+      let matchesDue = true;
+      if (dueFilter !== 'all') {
+        const bucket = resolveDueBucket(project);
+        if (dueFilter === 'none') {
+          matchesDue = bucket === 'none';
+        } else if (dueFilter === 'overdue') {
+          matchesDue = bucket === 'overdue';
+        } else if (dueFilter === 'week') {
+          matchesDue = bucket === 'week';
+        } else if (dueFilter === 'month') {
+          matchesDue = bucket === 'week' || bucket === 'month';
+        }
+      }
+      return matchesText && matchesStatus && matchesOwner && matchesDue;
+    });
+  }, [projects, filter, statusFilter, ownerFilter, dueFilter, resolveDueBucket]);
+
+  const groupedColumns = useMemo(() => {
+    if (groupBy === 'owner') {
+      const buckets = new Map<string, ProjectRecord[]>();
+      filtered.forEach((project) => {
+        const key = project.ownerUid || '__unassigned';
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key)!.push(project);
+      });
+      const defs = [
+        { key: '__unassigned', title: 'Unassigned' },
+        ...staff.map((member) => ({ key: member.uid, title: member.label })),
+      ];
+      return defs.map((def) => ({
+        key: def.key,
+        title: def.title,
+        projects: buckets.get(def.key) || [],
+        droppable: true,
+        onDrop: (id: string) =>
+          updateOwner(id, def.key === '__unassigned' ? null : (def.key as string)),
+      }));
+    }
+
+    if (groupBy === 'due') {
+      const buckets = new Map<string, ProjectRecord[]>();
+      filtered.forEach((project) => {
+        const bucket = resolveDueBucket(project);
+        if (!buckets.has(bucket)) buckets.set(bucket, []);
+        buckets.get(bucket)!.push(project);
+      });
+      return DUE_GROUPS.map((group) => ({
+        key: group.key,
+        title: group.label,
+        projects: buckets.get(group.key) || [],
+        droppable: false,
+        onDrop: undefined,
+      }));
+    }
+
+    const buckets = new Map<string, ProjectRecord[]>();
+    filtered.forEach((project) => {
+      const status = statuses.includes(project.status || '')
+        ? (project.status as string)
+        : statuses[0];
+      if (!buckets.has(status)) buckets.set(status, []);
+      buckets.get(status)!.push(project);
+    });
+
+    return statuses.map((status) => ({
+      key: status,
+      title: status.replace('_', ' '),
+      projects: buckets.get(status) || [],
+      droppable: true,
+      onDrop: (id: string) => updateStatus(id, status),
+    }));
+  }, [filtered, groupBy, resolveDueBucket, staff, updateOwner, updateStatus, statuses]);
+
+  if (guardLoading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to view projects.</p>;
 
   return (
     <div className="grid gap-4">
@@ -50,7 +334,7 @@ export default function AdminProjectsPage() {
       <div className="flex flex-wrap gap-2 items-center">
         <input
           type="text"
-          placeholder="Filter by client email"
+          placeholder="Filter by client or project"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           className="input max-w-xs"
@@ -61,81 +345,263 @@ export default function AdminProjectsPage() {
           className="input max-w-xs"
         >
           <option value="">All statuses</option>
-          {statuses.map(s => <option key={s} value={s}>{s.replace('_',' ')}</option>)}
+          {statuses.map((s) => (
+            <option key={s} value={s}>
+              {s.replace('_', ' ')}
+            </option>
+          ))}
         </select>
-        <button className="btn-outline btn-sm" onClick={() => setView(view === 'kanban' ? 'list' : 'kanban')}>
+        <select
+          value={ownerFilter}
+          onChange={(e) => setOwnerFilter(e.target.value)}
+          className="input max-w-xs"
+        >
+          <option value="">All assignees</option>
+          <option value="__unassigned">Unassigned</option>
+          {staff.map((member) => (
+            <option key={member.uid} value={member.uid}>
+              {member.label}
+            </option>
+          ))}
+        </select>
+        <select
+          value={dueFilter}
+          onChange={(e) => setDueFilter(e.target.value as typeof dueFilter)}
+          className="input max-w-xs"
+        >
+          <option value="all">All deadlines</option>
+          <option value="overdue">Overdue</option>
+          <option value="week">Due this week</option>
+          <option value="month">Due in 30 days</option>
+          <option value="none">No due date</option>
+        </select>
+        {view === 'kanban' && (
+          <select
+            value={groupBy}
+            onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
+            className="input max-w-xs"
+          >
+            <option value="status">Group by status</option>
+            <option value="owner">Group by assignee</option>
+            <option value="due">Group by deadline</option>
+          </select>
+        )}
+        <button
+          className="btn-outline btn-sm"
+          onClick={() => setView(view === 'kanban' ? 'list' : 'kanban')}
+        >
           {view === 'kanban' ? 'List View' : 'Kanban View'}
         </button>
       </div>
       {view === 'list' ? (
-        <table className="w-full text-sm border">
-          <thead>
-            <tr className="bg-gray-100 text-left">
-              <th className="p-2">Title</th>
-              <th className="p-2">Client</th>
-              <th className="p-2">Created</th>
-              <th className="p-2">Status</th>
-              <th className="p-2">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map(p => (
-              <tr key={p.id} className="border-t">
-                <td className="p-2">{p.title || 'Untitled'}</td>
-                <td className="p-2">{p.userEmail || '-'}</td>
-                <td className="p-2">{p.createdAt?.toDate ? p.createdAt.toDate().toLocaleDateString() : ''}</td>
-                <td className="p-2">
-                  <select value={p.status} onChange={(e) => updateStatus(p.id, e.target.value)} className="input">
-                    {statuses.map(s => <option key={s} value={s}>{s.replace('_',' ')}</option>)}
-                  </select>
-                </td>
-                <td className="p-2 flex gap-2">
-                  <Link href={`/projects/${p.id}`} className="btn-sm">View</Link>
-                  {p.orderId && (
-                    <Link href={`/orders/${p.orderId}`} className="btn-sm btn-outline">Order</Link>
-                  )}
-                </td>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[900px] text-sm border">
+            <thead>
+              <tr className="bg-gray-100 text-left">
+                <th className="p-2">Title</th>
+                <th className="p-2">Client</th>
+                <th className="p-2">Assignee</th>
+                <th className="p-2">Kickoff</th>
+                <th className="p-2">Due</th>
+                <th className="p-2">Priority</th>
+                <th className="p-2">Status</th>
+                <th className="p-2">Created</th>
+                <th className="p-2">Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {filtered.map((p) => (
+                <tr key={p.id} className="border-t">
+                  <td className="p-2 align-top">{p.title || 'Untitled'}</td>
+                  <td className="p-2 align-top">{p.userEmail || '-'}</td>
+                  <td className="p-2 align-top">
+                    <select
+                      value={p.ownerUid || ''}
+                      onChange={(e) => updateOwner(p.id, e.target.value || null)}
+                      className="input w-full text-sm"
+                    >
+                      <option value="">Unassigned</option>
+                      {staff.map((member) => (
+                        <option key={member.uid} value={member.uid}>
+                          {member.label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="p-2 align-top">
+                    <input
+                      type="date"
+                      value={toDateInputValue(p.kickoffDate)}
+                      onChange={(e) => updateDateField(p.id, 'kickoffDate', e.target.value)}
+                      className="input w-full text-sm"
+                    />
+                  </td>
+                  <td className="p-2 align-top">
+                    <input
+                      type="date"
+                      value={toDateInputValue(p.dueDate)}
+                      onChange={(e) => updateDateField(p.id, 'dueDate', e.target.value)}
+                      className="input w-full text-sm"
+                    />
+                  </td>
+                  <td className="p-2 align-top">
+                    <select
+                      value={(p.priority as ProjectPriority) || ''}
+                      onChange={(e) => updatePriority(p.id, e.target.value as ProjectPriority)}
+                      className="input w-full text-sm"
+                    >
+                      {PRIORITY_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="p-2 align-top">
+                    <select
+                      value={p.status || statuses[0]}
+                      onChange={(e) => updateStatus(p.id, e.target.value)}
+                      className="input w-full text-sm"
+                    >
+                      {statuses.map((s) => (
+                        <option key={s} value={s}>
+                          {s.replace('_', ' ')}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="p-2 align-top whitespace-nowrap">
+                    {formatDateDisplay(p.createdAt)}
+                  </td>
+                  <td className="p-2 align-top">
+                    <div className="flex flex-wrap gap-2">
+                      <Link href={`/projects/${p.id}`} className="btn-sm">
+                        View
+                      </Link>
+                      {p.orderId && (
+                        <Link href={`/orders/${p.orderId}`} className="btn-sm btn-outline">
+                          Order
+                        </Link>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          {statuses.map(s => (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+          {groupedColumns.map((column) => (
             <div
-              key={s}
-              className="border rounded-md p-3 min-h-[200px]"
-              onDragOver={(e) => e.preventDefault()}
+              key={column.key}
+              className="border rounded-md p-3 min-h-[220px]"
+              onDragOver={(e) => column.droppable && e.preventDefault()}
               onDrop={(e) => {
+                if (!column.droppable || !column.onDrop) return;
                 e.preventDefault();
                 const id = e.dataTransfer.getData('text/plain');
-                if (id) updateStatus(id, s);
+                if (id) column.onDrop(id);
               }}
             >
-              <h3 className="font-semibold mb-2 capitalize">{s.replace('_',' ')}</h3>
-              {filtered.filter(p => p.status === s).length === 0 ? (
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <h3 className="font-semibold text-sm capitalize">{column.title}</h3>
+                <span className="text-xs text-gray-500">{column.projects.length}</span>
+              </div>
+              {column.projects.length === 0 ? (
                 <p className="text-sm text-gray-500">No projects</p>
               ) : (
                 <div className="flex flex-col gap-2">
-                  {filtered.filter(p => p.status === s).map(p => (
+                  {column.projects.map((project) => (
                     <div
-                      key={p.id}
-                      className="card p-2 grid gap-1"
-                      draggable
+                      key={project.id}
+                      className="card p-2 grid gap-2"
+                      draggable={column.droppable}
                       onDragStart={(e) => {
-                        e.dataTransfer.setData('text/plain', p.id);
+                        if (!column.droppable) return;
+                        e.dataTransfer.setData('text/plain', project.id);
                       }}
                     >
-                      <p className="font-medium text-sm">{p.title || 'Untitled'}</p>
-                      <p className="text-xs text-gray-600">{p.userEmail || ''}</p>
-                      <Link href={`/projects/${p.id}`} className="btn-sm w-fit">Open</Link>
-                      <select
-                        value={p.status}
-                        onChange={(e) => updateStatus(p.id, e.target.value)}
-                        className="input text-xs mt-1"
-                      >
-                        {statuses.map(opt => <option key={opt} value={opt}>{opt.replace('_',' ')}</option>)}
-                      </select>
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="font-medium text-sm">{project.title || 'Untitled'}</p>
+                          <p className="text-xs text-gray-600">{project.userEmail || ''}</p>
+                        </div>
+                        <span className="text-xs text-gray-500 whitespace-nowrap">
+                          {formatDateDisplay(project.dueDate)}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-xs text-gray-600">
+                        {project.ownerUid && staffMap.get(project.ownerUid)?.label && (
+                          <span className="rounded-full bg-gray-100 px-2 py-1">
+                            {staffMap.get(project.ownerUid)?.label}
+                          </span>
+                        )}
+                        {project.priority && (
+                          <span className="rounded-full bg-amber-100 px-2 py-1 capitalize">
+                            {project.priority}
+                          </span>
+                        )}
+                      </div>
+                      <div className="grid gap-1 text-xs">
+                        <select
+                          value={project.ownerUid || ''}
+                          onChange={(e) => updateOwner(project.id, e.target.value || null)}
+                          className="input text-xs"
+                        >
+                          <option value="">Unassigned</option>
+                          {staff.map((member) => (
+                            <option key={member.uid} value={member.uid}>
+                              {member.label}
+                            </option>
+                          ))}
+                        </select>
+                        <div className="flex gap-1">
+                          <label className="flex-1">
+                            <span className="sr-only">Due date</span>
+                            <input
+                              type="date"
+                              value={toDateInputValue(project.dueDate)}
+                              onChange={(e) => updateDateField(project.id, 'dueDate', e.target.value)}
+                              className="input text-xs"
+                            />
+                          </label>
+                          <label className="flex-1">
+                            <span className="sr-only">Kickoff date</span>
+                            <input
+                              type="date"
+                              value={toDateInputValue(project.kickoffDate)}
+                              onChange={(e) => updateDateField(project.id, 'kickoffDate', e.target.value)}
+                              className="input text-xs"
+                            />
+                          </label>
+                        </div>
+                        <select
+                          value={(project.priority as ProjectPriority) || ''}
+                          onChange={(e) => updatePriority(project.id, e.target.value as ProjectPriority)}
+                          className="input text-xs"
+                        >
+                          {PRIORITY_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          value={project.status || statuses[0]}
+                          onChange={(e) => updateStatus(project.id, e.target.value)}
+                          className="input text-xs"
+                        >
+                          {statuses.map((s) => (
+                            <option key={s} value={s}>
+                              {s.replace('_', ' ')}
+                            </option>
+                          ))}
+                        </select>
+                        <Link href={`/projects/${project.id}`} className="btn-sm w-fit">
+                          Open
+                        </Link>
+                      </div>
                     </div>
                   ))}
                 </div>

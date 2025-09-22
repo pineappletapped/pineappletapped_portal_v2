@@ -1,0 +1,130 @@
+export type RoleKey =
+  | 'admin'
+  | 'operations'
+  | 'finance'
+  | 'projects'
+  | 'sales'
+  | 'marketing';
+
+export type UserRoles = Partial<Record<RoleKey, boolean>>;
+
+export interface RoleDefinition {
+  key: RoleKey;
+  label: string;
+  description: string;
+}
+
+export const ROLE_DEFINITIONS: RoleDefinition[] = [
+  {
+    key: 'admin',
+    label: 'Admin',
+    description: 'Full access to all administrative tools and settings.',
+  },
+  {
+    key: 'operations',
+    label: 'Operations',
+    description: 'Manage orders, products, modifiers, venues, equipment, and workflows.',
+  },
+  {
+    key: 'finance',
+    label: 'Finance',
+    description: 'Access invoicing, expenses, and financial reporting features.',
+  },
+  {
+    key: 'projects',
+    label: 'Projects',
+    description: 'Plan and track project delivery, tasks, and resource assignments.',
+  },
+  {
+    key: 'sales',
+    label: 'Sales & CRM',
+    description: 'Manage CRM records, proposals, quotes, and commercial offers.',
+  },
+  {
+    key: 'marketing',
+    label: 'Marketing',
+    description: 'Control website content, email schedules, analytics, and brand assets.',
+  },
+];
+
+export const ROLE_LABELS: Record<RoleKey, string> = ROLE_DEFINITIONS.reduce(
+  (acc, role) => {
+    acc[role.key] = role.label;
+    return acc;
+  },
+  {} as Record<RoleKey, string>
+);
+
+export const ROLE_KEYS = ROLE_DEFINITIONS.map((role) => role.key);
+
+export function normalizeRoles(input: unknown): UserRoles {
+  if (!input) {
+    return {};
+  }
+
+  if (Array.isArray(input)) {
+    return input.reduce((acc, key) => {
+      if (ROLE_KEYS.includes(key as RoleKey)) {
+        acc[key as RoleKey] = true;
+      }
+      return acc;
+    }, {} as UserRoles);
+  }
+
+  if (typeof input === 'object') {
+    return Object.entries(input as Record<string, unknown>).reduce((acc, [key, value]) => {
+      if (ROLE_KEYS.includes(key as RoleKey) && value === true) {
+        acc[key as RoleKey] = true;
+      }
+      return acc;
+    }, {} as UserRoles);
+  }
+
+  return {};
+}
+
+export function extractUserRoles(userDoc: any): UserRoles {
+  const normalized = normalizeRoles(userDoc?.roles);
+  if (userDoc?.isStaff === true) {
+    return { ...normalized, admin: true };
+  }
+  return normalized;
+}
+
+export function hasRole(
+  roles: UserRoles | null | undefined,
+  required: RoleKey | RoleKey[]
+): boolean {
+  if (!roles) return false;
+  if (roles.admin) return true;
+  const requiredList = Array.isArray(required) ? required : [required];
+  return requiredList.some((role) => roles[role]);
+}
+
+export function rolesToList(roles: UserRoles | null | undefined): RoleKey[] {
+  if (!roles) return [];
+  return ROLE_KEYS.filter((key) => roles[key]);
+}
+
+export function encodeRolesCookie(roles: UserRoles): string {
+  return rolesToList(roles).join(',');
+}
+
+export function decodeRolesCookie(value: string | undefined | null): RoleKey[] {
+  if (!value) return [];
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part): part is RoleKey => ROLE_KEYS.includes(part as RoleKey));
+}
+
+export function getDefaultAdminRoute(roles: UserRoles | null | undefined): string {
+  if (!roles) return '/admin';
+  if (roles.admin) return '/admin';
+  if (roles.operations) return '/admin/orders';
+  if (roles.finance) return '/admin/finance';
+  if (roles.projects) return '/admin/projects';
+  if (roles.sales) return '/admin/proposals';
+  if (roles.marketing) return '/admin/analytics';
+  return '/admin';
+}

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { auth, db } from '@/lib/firebase';
 import { collection, getDoc, doc, getDocs, addDoc, updateDoc, serverTimestamp, query, where, orderBy } from 'firebase/firestore';
+import { extractUserRoles, hasRole } from '@/lib/roles';
 
 /**
  * Project Tasks Board
@@ -38,7 +39,8 @@ export default function ProjectTasksPage() {
       if (!user) { setIsStaffOrAdmin(false); } else {
         const uSnap = await getDoc(doc(db, 'users', user.uid));
         const me = uSnap.data() as any;
-        let canEdit = me?.isStaff === true;
+        const roles = extractUserRoles(me);
+        let canEdit = hasRole(roles, ['admin', 'projects']);
         // Check membership role
         const memDoc = await getDoc(doc(db, 'memberships', proj.orgId + '_' + user.uid));
         if (memDoc.exists()) {

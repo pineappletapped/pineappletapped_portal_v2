@@ -116,7 +116,12 @@ export interface ProductSEO {
 }
 
 export interface ProductBudget {
+  labourFilming?: number;
+  labourEditing?: number;
   labour?: number;
+  kitMode?: "manual" | "guided";
+  kitManual?: number;
+  kitGuidance?: number;
   kit?: number;
   travelMiles?: number;
   travelRate?: number;
@@ -135,6 +140,8 @@ export interface Product {
   deliveryTime?: string;
   deliverables?: ProductDeliverable[];
   modifiers?: ProductModifierSelection[];
+  /** Modifier group IDs enabled for this product. */
+  modifierGroups?: string[];
   variations?: ProductVariation[];
   storyboardImages?: string[];
   exampleWorkUrl?: string;

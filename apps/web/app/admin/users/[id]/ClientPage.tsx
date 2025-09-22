@@ -3,13 +3,14 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { auth, db } from '@/lib/firebase';
+import { db } from '@/lib/firebase';
 import { doc, getDoc, collection, query, where, getDocs, orderBy } from 'firebase/firestore';
+import { useRoleGate } from '@/hooks/useRoleGate';
 
 export default function AdminUserDetailPage() {
   const params = useParams<{ id: string }>();
   const { id } = params;
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(['sales']);
   const [user, setUser] = useState<any | null>(null);
   const [orders, setOrders] = useState<any[]>([]);
   const [events, setEvents] = useState<any[]>([]);
@@ -17,34 +18,27 @@ export default function AdminUserDetailPage() {
 
   useEffect(() => {
     (async () => {
-      const current = auth.currentUser;
-      if (!current) {
-        setIsStaff(false);
+      if (guardLoading) return;
+      if (!allowed) {
         setLoading(false);
         return;
       }
-      const meSnap = await getDoc(doc(db, 'users', current.uid));
-      const me = meSnap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) {
-        const uSnap = await getDoc(doc(db, 'users', id));
-        setUser(uSnap.data() ? { id: uSnap.id, ...uSnap.data() } : null);
-        const oQ = query(collection(db, 'orders'), where('userId', '==', id), orderBy('createdAt', 'desc'));
-        const oSnap = await getDocs(oQ);
-        setOrders(oSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-        const eQ = query(collection(db, 'analyticsEvents'), where('uid', '==', id));
-        const eSnap = await getDocs(eQ);
-        const evs: any[] = eSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-        evs.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
-        setEvents(evs);
-      }
+      const uSnap = await getDoc(doc(db, 'users', id));
+      setUser(uSnap.data() ? { id: uSnap.id, ...uSnap.data() } : null);
+      const oQ = query(collection(db, 'orders'), where('userId', '==', id), orderBy('createdAt', 'desc'));
+      const oSnap = await getDocs(oQ);
+      setOrders(oSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const eQ = query(collection(db, 'analyticsEvents'), where('uid', '==', id));
+      const eSnap = await getDocs(eQ);
+      const evs: any[] = eSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      evs.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
+      setEvents(evs);
       setLoading(false);
     })();
-  }, [id]);
+  }, [allowed, guardLoading, id]);
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to view this page.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to view this page.</p>;
   if (!user) return <p>User not found.</p>;
 
   return (

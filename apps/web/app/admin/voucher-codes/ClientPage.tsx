@@ -1,15 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { auth, db } from "@/lib/firebase";
+import { db } from "@/lib/firebase";
 import {
   collection,
   addDoc,
   getDocs,
-  getDoc,
   doc,
   deleteDoc,
 } from "firebase/firestore";
+import { useRoleGate } from "@/hooks/useRoleGate";
 
 interface Voucher {
   id: string;
@@ -22,7 +22,7 @@ interface Voucher {
 }
 
 export default function AdminVoucherCodesPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const { allowed, loading: guardLoading } = useRoleGate(["sales"]);
   const [vouchers, setVouchers] = useState<Voucher[]>([]);
   const [code, setCode] = useState("");
   const [type, setType] = useState<"percentage" | "fixed">("percentage");
@@ -34,20 +34,15 @@ export default function AdminVoucherCodesPage() {
 
   useEffect(() => {
     (async () => {
-      const user = auth.currentUser;
-      if (!user) {
-        setIsStaff(false);
+      if (guardLoading) return;
+      if (!allowed) {
         setLoading(false);
         return;
       }
-      const snap = await getDoc(doc(db, "users", user.uid));
-      const me = snap.data() as any;
-      const staff = me?.isStaff === true;
-      setIsStaff(staff);
-      if (staff) await refresh();
+      await refresh();
       setLoading(false);
     })();
-  }, []);
+  }, [allowed, guardLoading]);
 
   const refresh = async () => {
     const snap = await getDocs(collection(db, "vouchers"));
@@ -87,8 +82,8 @@ export default function AdminVoucherCodesPage() {
     await refresh();
   };
 
-  if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage voucher codes.</p>;
+  if (guardLoading || loading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to manage voucher codes.</p>;
 
   return (
     <div className="grid gap-6">

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { auth, db, functions } from '@/lib/firebase';
 import { doc, getDoc, collection, getDocs } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
+import { extractUserRoles, hasRole } from '@/lib/roles';
 
 /**
  * Admin Email Schedules
@@ -14,7 +15,7 @@ import { httpsCallable } from 'firebase/functions';
  * provides a form to create new ones. Editing and deletion are also supported.
  */
 export default function AdminEmailSchedulesPage() {
-  const [isStaff, setIsStaff] = useState<boolean | null>(null);
+  const [canManage, setCanManage] = useState<boolean | null>(null);
   const [schedules, setSchedules] = useState<any[]>([]);
   const [groups, setGroups] = useState<any[]>([]);
   const [groupId, setGroupId] = useState('');
@@ -33,11 +34,13 @@ export default function AdminEmailSchedulesPage() {
   useEffect(() => {
     (async () => {
       const user = auth.currentUser;
-      if (!user) { setIsStaff(false); setLoading(false); return; }
+      if (!user) { setCanManage(false); setLoading(false); return; }
       const uSnap = await getDoc(doc(db, 'users', user.uid));
       const me = uSnap.data() as any;
-      setIsStaff(me?.isStaff === true);
-      if (me?.isStaff) {
+      const roles = extractUserRoles(me);
+      const allowed = hasRole(roles, ['admin', 'marketing']);
+      setCanManage(allowed);
+      if (allowed) {
         const grpSnap = await getDocs(collection(db, 'groups'));
         setGroups(grpSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
         const schedSnap = await getDocs(collection(db, 'emailSchedules'));
@@ -103,7 +106,7 @@ export default function AdminEmailSchedulesPage() {
   };
 
   if (loading) return <p>Loading…</p>;
-  if (!isStaff) return <p>You do not have permission to manage email schedules.</p>;
+  if (!canManage) return <p>You do not have permission to manage email schedules.</p>;
   return (
     <div className="grid gap-6">
       <h1 className="text-xl font-semibold">Manage Email Schedules</h1>
