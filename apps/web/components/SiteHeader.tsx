@@ -6,6 +6,7 @@ import { useState, useEffect, useRef } from 'react';
 import type { FocusEvent, KeyboardEvent } from 'react';
 import { FiSearch, FiShoppingCart, FiMenu, FiX } from 'react-icons/fi';
 import SearchBar from '@/components/SearchBar';
+import AuthLinks from '@/components/AuthLinks';
 import { useCart } from '@/lib/cart';
 import type { Category } from '@/lib/categories';
 import type { Product } from '@/lib/products';
@@ -198,17 +199,7 @@ export default function SiteHeader({
               </div>
             )}
           </div>
-          <div className="flex items-center gap-2">
-            <Link href="/admin" className="btn btn-xs btn-outline">
-              Admin
-            </Link>
-            <Link href="/contractors" className="btn btn-xs btn-outline">
-              Team Portal
-            </Link>
-            <Link href="/dashboard" className="btn btn-xs">
-              Client Portal
-            </Link>
-          </div>
+          <AuthLinks size="xs" />
         </div>
       </div>
       {mobileOpen && (

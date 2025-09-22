@@ -1,10 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
-import { auth, db } from '@/lib/firebase';
-import { onAuthStateChanged } from 'firebase/auth';
+import { useEffect, useMemo, useState } from 'react';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
+import { auth, db } from '@/lib/firebase';
 import {
   ROLE_KEYS,
   encodeRolesCookie,
@@ -14,7 +14,18 @@ import {
   UserRoles,
 } from '@/lib/roles';
 
-export default function AuthLinks() {
+type AuthLinksProps = {
+  size?: 'xs' | 'sm' | 'md';
+  className?: string;
+};
+
+const SIZE_CLASSNAMES: Record<Required<AuthLinksProps>['size'], string> = {
+  xs: 'btn-xs',
+  sm: 'btn-sm',
+  md: 'btn-md',
+};
+
+export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {}) {
   const [user, setUser] = useState<any>(null);
   const [roles, setRoles] = useState<UserRoles>({});
   const [checked, setChecked] = useState(false);
@@ -45,33 +56,64 @@ export default function AuthLinks() {
     return () => unsub();
   }, []);
 
+  const buttonSizeClass = SIZE_CLASSNAMES[size] ?? SIZE_CLASSNAMES.sm;
+  const wrapperClass = useMemo(
+    () => ['flex items-center gap-2', className].filter(Boolean).join(' '),
+    [className]
+  );
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error('Failed to sign out', error);
+    } finally {
+      ['token', 'uid', 'roles'].forEach((cookie) => {
+        document.cookie = `${cookie}=; path=/; max-age=0`;
+      });
+    }
+  };
+
   if (!checked) return null;
 
   if (user) {
     const canAccessAdmin = hasRole(roles, ROLE_KEYS);
     const adminHref = getDefaultAdminRoute(roles);
     return (
-      <div className="flex items-center gap-2">
-        <Link href="/dashboard" className="btn btn-sm">
+      <div className={wrapperClass}>
+        <Link href="/dashboard" className={`btn ${buttonSizeClass}`}>
           Client Portal
         </Link>
         {canAccessAdmin && (
-          <>
-            <Link href={adminHref} className="btn btn-sm btn-outline">
-              Admin
-            </Link>
-            <Link href="/contractors" className="btn btn-sm btn-outline">
-              Contractor Portal
-            </Link>
-          </>
+          <Link href={adminHref} className={`btn ${buttonSizeClass} btn-outline`}>
+            Admin
+          </Link>
         )}
+        <Link href="/contractors" className={`btn ${buttonSizeClass} btn-outline`}>
+          Team Portal
+        </Link>
+        <button
+          type="button"
+          onClick={handleSignOut}
+          className={`btn ${buttonSizeClass} btn-ghost`}
+        >
+          Log out
+        </button>
       </div>
     );
   }
 
   return (
-    <Link href="/login" className="btn btn-sm">
-      Portal Login
-    </Link>
+    <div className={wrapperClass}>
+      <Link href="/admin" className={`btn ${buttonSizeClass} btn-outline`}>
+        Admin
+      </Link>
+      <Link href="/contractors" className={`btn ${buttonSizeClass} btn-outline`}>
+        Team Portal
+      </Link>
+      <Link href="/dashboard" className={`btn ${buttonSizeClass}`}>
+        Client Portal
+      </Link>
+    </div>
   );
 }
