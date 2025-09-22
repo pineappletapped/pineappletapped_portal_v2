@@ -49,6 +49,23 @@ interface StaffOption {
   email?: string | null;
 }
 
+interface AdminDirectoryUser {
+  id: string;
+  email?: string | null;
+  displayName?: string | null;
+  fullName?: string | null;
+  roles?: UserRoles | null;
+  isStaff?: boolean | null;
+}
+
+interface AdminListUsersResponse {
+  users?: AdminDirectoryUser[];
+}
+
+type StaffCandidate = StaffOption & {
+  roles: UserRoles;
+};
+
 const STATUS_OPTIONS: { value: MessageStatus; label: string }[] = [
   { value: 'new', label: 'New' },
   { value: 'in_progress', label: 'In Progress' },
@@ -153,30 +170,35 @@ export default function AdminMessagesPage() {
     (async () => {
       try {
         await ensureFirebase();
-        const result: any = await adminListUsers();
+        const result = (await adminListUsers()) as AdminListUsersResponse;
         if (!active) return;
-        const options: StaffOption[] = (result.users || [])
-          .map((user: any) => ({
-            id: user.id,
-            email: user.email || null,
-            label: user.fullName || user.displayName || user.email || 'Unnamed user',
-            roles: extractUserRoles(user as { roles?: UserRoles; isStaff?: boolean }),
-          }))
-          .filter((user: any) => {
-            const roles: UserRoles = user.roles || {};
-            return (
+
+        const rawUsers: AdminDirectoryUser[] = Array.isArray(result?.users)
+          ? result.users!
+          : [];
+
+        const candidates = rawUsers.map<StaffCandidate>((user) => ({
+          uid: user.id,
+          label: user.fullName || user.displayName || user.email || 'Unnamed user',
+          email: user.email || null,
+          roles: extractUserRoles(user),
+        }));
+
+        const options: StaffOption[] = candidates
+          .filter(({ roles }) =>
+            Boolean(
               roles.admin ||
-              roles.sales ||
-              roles.operations ||
-              roles.projects ||
-              roles.marketing ||
-              roles.finance
-            );
-          })
-          .map((user: any) => ({
-            uid: user.id,
-            label: user.label,
-            email: user.email,
+                roles.sales ||
+                roles.operations ||
+                roles.projects ||
+                roles.marketing ||
+                roles.finance
+            )
+          )
+          .map<StaffOption>(({ uid, label, email }) => ({
+            uid,
+            label,
+            email,
           }))
           .sort((a, b) => a.label.localeCompare(b.label));
         setStaff(options);
