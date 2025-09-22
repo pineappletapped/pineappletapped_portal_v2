@@ -7,8 +7,17 @@ import { httpsCallable, type Functions } from "firebase/functions";
 import { doc, getDoc } from "firebase/firestore";
 import { signInWithEmailAndPassword, type Auth, type User } from "firebase/auth";
 import { loadStripe } from "@stripe/stripe-js";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Elements } from "@stripe/react-stripe-js";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { useRouter } from "next/navigation";
+import CheckoutPaymentForm from "./CheckoutPaymentForm";
 
 export default function CheckoutPage() {
   const { items, clear } = useCart();
@@ -17,13 +26,16 @@ export default function CheckoutPage() {
     (sum, i) => sum + (i.rentalTotal || 0) * i.quantity,
     0
   );
-  const total = productTotal + rentalTotal;
   const [discount, setDiscount] = useState(0);
   const discountAmount = productTotal * (discount / 100);
   const finalTotal = productTotal - discountAmount + rentalTotal;
   const vat = finalTotal * VAT_RATE;
   const grandTotal = finalTotal + vat;
   const router = useRouter();
+  const stripePromise = useMemo(() => {
+    const key = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "";
+    return key ? loadStripe(key) : null;
+  }, []);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -32,11 +44,71 @@ export default function CheckoutPage() {
   const [location, setLocation] = useState("");
   const [projectName, setProjectName] = useState("");
   const [voucher, setVoucher] = useState("");
-  const [loading, setLoading] = useState(false);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [orderId, setOrderId] = useState<string | null>(null);
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [initializingPayment, setInitializingPayment] = useState(false);
   const authRef = useRef<Auth | null>(null);
   const functionsRef = useRef<Functions | null>(null);
+  const lastIntentPayload = useRef<string | null>(null);
+  const authEmail = currentUser?.email || "";
+  const orderInput = useMemo(() => {
+    const itemPayload = items.map((item) => ({
+      id: item.id,
+      quantity: item.quantity,
+      rentalTotal: item.rentalTotal ?? 0,
+      modifiers: (item.modifiers ?? []).map((mod) => ({ ...mod })),
+    }));
+    const kitItemsPayload = items.flatMap((item) => item.kitItems || []);
+    return {
+      items: itemPayload,
+      kitItems: kitItemsPayload,
+      rentalSubtotal: rentalTotal,
+      userEmail: authEmail || email,
+      customerName: name,
+      companyName: company || null,
+      location: location || null,
+      projectName: projectName || null,
+      voucher: voucher || null,
+    };
+  }, [
+    items,
+    rentalTotal,
+    authEmail,
+    email,
+    name,
+    company,
+    location,
+    projectName,
+    voucher,
+  ]);
+  const currentIntentPayload = useMemo(
+    () =>
+      JSON.stringify({
+        ...orderInput,
+        items: orderInput.items.map((item) => ({
+          id: item.id,
+          quantity: item.quantity,
+          rentalTotal: item.rentalTotal,
+          modifiers: (item.modifiers ?? []).map((mod) => ({
+            groupId: mod.groupId,
+            optionId: mod.optionId,
+            price: mod.price ?? null,
+          })),
+        })),
+        kitItems: orderInput.kitItems.map((kit) => ({
+          id: kit.id,
+          start: kit.start,
+          end: kit.end,
+        })),
+      }),
+    [orderInput]
+  );
+  const paymentDetailsStale =
+    lastIntentPayload.current !== null &&
+    lastIntentPayload.current !== currentIntentPayload;
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -97,6 +169,24 @@ export default function CheckoutPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (items.length === 0) {
+      setClientSecret(null);
+      setOrderId(null);
+      lastIntentPayload.current = null;
+      setPaymentError(null);
+    }
+  }, [items.length]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setClientSecret(null);
+      setOrderId(null);
+      lastIntentPayload.current = null;
+      setPaymentError(null);
+    }
+  }, [currentUser]);
+
   const login = async (e: FormEvent) => {
     e.preventDefault();
     try {
@@ -116,56 +206,113 @@ export default function CheckoutPage() {
     }
   };
 
-  const complete = async () => {
-    const authInstance = authRef.current;
-    const user = authInstance?.currentUser ?? currentUser;
-    if (loading || items.length === 0 || !name || (!user && !email)) return;
-    setLoading(true);
+  const initializePaymentIntent = useCallback(async () => {
+    if (initializingPayment) {
+      return false;
+    }
+    if (!currentUser) {
+      setPaymentError("Sign in to continue to payment.");
+      return false;
+    }
+    if (items.length === 0) {
+      setPaymentError("Your cart is empty.");
+      return false;
+    }
+    if (!orderInput.customerName) {
+      setPaymentError("Please enter your name before continuing.");
+      return false;
+    }
+    if (!stripePromise) {
+      setPaymentError("Payment configuration is unavailable.");
+      return false;
+    }
+
+    setInitializingPayment(true);
+    setPaymentError(null);
+
     try {
-      const functionsInstance = functionsRef.current;
+      let functionsInstance = functionsRef.current;
+      if (!functionsInstance) {
+        const { functions } = await ensureFirebase();
+        functionsInstance = functions ?? null;
+        functionsRef.current = functionsInstance;
+      }
       if (!functionsInstance) {
         throw new Error("Firebase functions are unavailable.");
       }
+
       const createOrder = httpsCallable(functionsInstance, "createOrder");
-      const orderRes: any = await createOrder({
-        userEmail: user?.email || email,
-        customerName: name,
-        companyName: company || null,
-        location: location || null,
-        projectName: projectName || null,
-        voucher: voucher || null,
-        items: items.map((i) => ({
-          id: i.id,
-          quantity: i.quantity,
-          rentalTotal: i.rentalTotal || 0,
-          modifiers: i.modifiers || [],
-        })),
-        kitItems: items.flatMap((i) => i.kitItems || []),
-        rentalSubtotal: rentalTotal,
-      });
-      const orderId = orderRes.data?.orderId;
+      const orderRes: any = await createOrder(orderInput);
+      const createdOrderId: string | undefined = orderRes.data?.orderId;
+      if (!createdOrderId) {
+        throw new Error("Failed to create order.");
+      }
 
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const res: any = await createIntent({ orderId, type: "deposit" });
-      const clientSecret = res.data?.clientSecret;
-      const stripe = await loadStripe(
-        process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || ""
+      const createIntent = httpsCallable(
+        functionsInstance,
+        "stripe_createPaymentIntent"
       );
-      if (!stripe || !clientSecret) throw new Error("Payment failed");
-      const result = await stripe.confirmCardPayment(clientSecret, {
-        payment_method: "pm_card_visa",
+      const intentRes: any = await createIntent({
+        orderId: createdOrderId,
+        type: "deposit",
       });
-      if (result.error) throw result.error;
+      const secret: string | undefined = intentRes.data?.clientSecret;
+      if (!secret) {
+        throw new Error("Payment session could not be created.");
+      }
 
-      clear();
-      router.push(`/orders/${orderId}`);
-    } catch (err) {
-      console.error(err);
-      alert("Could not complete order");
+      setOrderId(createdOrderId);
+      setClientSecret(secret);
+      lastIntentPayload.current = currentIntentPayload;
+      return true;
+    } catch (error) {
+      console.error("Failed to initialise payment intent", error);
+      const message =
+        error instanceof Error ? error.message : "Could not start payment.";
+      setPaymentError(message);
+      setOrderId(null);
+      setClientSecret(null);
+      return false;
     } finally {
-      setLoading(false);
+      setInitializingPayment(false);
     }
-  };
+  }, [
+    currentUser,
+    currentIntentPayload,
+    initializingPayment,
+    items.length,
+    orderInput,
+    stripePromise,
+  ]);
+
+  useEffect(() => {
+    if (
+      authReady &&
+      currentUser &&
+      !clientSecret &&
+      !initializingPayment &&
+      items.length > 0 &&
+      name
+    ) {
+      void initializePaymentIntent();
+    }
+  }, [
+    authReady,
+    clientSecret,
+    currentUser,
+    initializePaymentIntent,
+    initializingPayment,
+    items.length,
+    name,
+  ]);
+
+  const handlePaymentSuccess = useCallback(
+    (completedOrderId: string) => {
+      clear();
+      router.push(`/orders/${completedOrderId}`);
+    },
+    [clear, router]
+  );
 
   return (
     <div className="max-w-5xl mx-auto grid md:grid-cols-2 gap-8">
@@ -284,21 +431,76 @@ export default function CheckoutPage() {
           value={voucher}
           onChange={(e) => setVoucher(e.target.value)}
         />
-        <div className="border p-4 text-center text-sm text-gray-500">
-          Stripe payment form placeholder
+        <div className="border rounded p-4 space-y-4">
+          {paymentError ? (
+            <div
+              className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+              role="alert"
+            >
+              {paymentError}
+            </div>
+          ) : null}
+          {clientSecret && orderId && stripePromise ? (
+            <>
+              {paymentDetailsStale ? (
+                <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  Your customer or cart details have changed. Refresh your
+                  payment session before confirming.
+                </div>
+              ) : null}
+              <Elements stripe={stripePromise} options={{ clientSecret }}>
+                <CheckoutPaymentForm
+                  orderId={orderId}
+                  disabled={paymentDetailsStale || initializingPayment}
+                  onSuccess={handlePaymentSuccess}
+                  onError={setPaymentError}
+                />
+              </Elements>
+              {paymentDetailsStale ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost w-full"
+                  onClick={initializePaymentIntent}
+                  disabled={initializingPayment}
+                >
+                  {initializingPayment
+                    ? "Refreshing..."
+                    : "Refresh payment details"}
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-gray-500">
+                {items.length === 0
+                  ? "Add items to your cart to continue."
+                  : !currentUser
+                  ? "Sign in to continue to payment."
+                  : !name
+                  ? "Enter your name to continue."
+                  : !stripePromise
+                  ? "Payment is currently unavailable."
+                  : "Prepare your payment details to enter card information."}
+              </p>
+              <button
+                type="button"
+                className="btn w-full"
+                onClick={initializePaymentIntent}
+                disabled={
+                  initializingPayment ||
+                  items.length === 0 ||
+                  !currentUser ||
+                  !name ||
+                  !stripePromise
+                }
+              >
+                {initializingPayment
+                  ? "Preparing payment..."
+                  : "Prepare payment"}
+              </button>
+            </>
+          )}
         </div>
-        <button
-          className="btn w-full"
-          onClick={complete}
-          disabled={
-            loading ||
-            items.length === 0 ||
-            !name ||
-            (!currentUser && !email)
-          }
-        >
-          {loading ? "Processing..." : "Complete Order"}
-        </button>
       </div>
     </div>
   );
