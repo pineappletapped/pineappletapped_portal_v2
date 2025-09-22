@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { auth, db } from '@/lib/firebase';
+import { extractUserRoles, hasRole } from '@/lib/roles';
 import { onAuthStateChanged } from 'firebase/auth';
 
 type AnalyticsEventRecord = {
