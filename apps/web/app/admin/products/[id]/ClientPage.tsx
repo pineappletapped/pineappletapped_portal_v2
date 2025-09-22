@@ -144,7 +144,7 @@ export default function EditProductPage() {
   const [taskSubtasks, setTaskSubtasks] = useState("");
   const [kitGroups, setKitGroups] = useState<{ groupId: string; items: string[] }[]>([]);
   const [equipmentList, setEquipmentList] = useState<
-    { id: string; name: string; rentalPrice?: number; category?: string }
+    { id: string; name: string; rentalPrice?: number; category?: string }[]
   >([]);
   const [labourFilmingRate, setLabourFilmingRate] = useState("0");
   const [labourEditingRate, setLabourEditingRate] = useState("0");

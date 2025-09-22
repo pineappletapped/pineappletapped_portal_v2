@@ -98,10 +98,13 @@ export default function AdminProjectsPage() {
       try {
         const snap = await getDocs(collection(db, 'projects'));
         if (!active) return;
-        const items: ProjectRecord[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as ProjectRecord),
-        }));
+        const items: ProjectRecord[] = snap.docs.map((d) => {
+          const { id: _ignoredId, ...rest } = d.data() as ProjectRecord;
+          return {
+            ...rest,
+            id: d.id,
+          };
+        });
         setProjects(items);
       } catch (err) {
         console.error('Failed to load projects', err);
