@@ -29,6 +29,16 @@ export default function SiteHeader({
   const flyoutRef = useRef<HTMLDivElement | null>(null);
   const cartSectionRef = useRef<HTMLDivElement | null>(null);
   const flyoutId = 'site-header-category-flyout';
+  const formatCurrency = (value: number) => `£${value.toFixed(2)}`;
+  const productSubtotal = items.reduce(
+    (sum, item) => sum + item.price * item.quantity,
+    0
+  );
+  const rentalSubtotal = items.reduce(
+    (sum, item) => sum + (item.rentalTotal || 0) * item.quantity,
+    0
+  );
+  const combinedSubtotal = productSubtotal + rentalSubtotal;
 
   const makeTriggerId = (catId: string) => `site-header-cat-${catId}`;
 
@@ -254,38 +264,65 @@ export default function SiteHeader({
                 {items.length === 0 ? (
                   <p className="py-4 text-center text-slate-500">Your Cart is Currently Empty</p>
                 ) : (
-                  <ul className="max-h-60 space-y-3 overflow-auto">
-                    {items.map((item, index) => (
-                      <li
-                        key={`${item.id}-${index}`}
-                        className="flex items-start justify-between gap-3 border-b border-slate-100 pb-2 last:border-b-0 last:pb-0"
-                      >
-                        <div className="flex-1 space-y-1">
-                          <span className="block font-medium text-blue">{item.name}</span>
-                          {item.variation && (
-                            <span className="block text-xs text-slate-500">{item.variation}</span>
-                          )}
-                          {item.date && <span className="block text-xs text-slate-500">{item.date}</span>}
+                  <>
+                    <ul className="max-h-60 space-y-3 overflow-auto">
+                      {items.map((item, index) => (
+                        <li
+                          key={`${item.id}-${index}`}
+                          className="flex items-start justify-between gap-3 border-b border-slate-100 pb-2 last:border-b-0 last:pb-0"
+                        >
+                          <div className="flex-1 space-y-1">
+                            <span className="block font-medium text-blue">{item.name}</span>
+                            {item.variation && (
+                              <span className="block text-xs text-slate-500">{item.variation}</span>
+                            )}
+                            {item.date && <span className="block text-xs text-slate-500">{item.date}</span>}
+                          </div>
+                          <div className="flex flex-col items-end gap-1 text-right">
+                            <div className="space-y-0.5">
+                              <span className="block text-xs text-slate-500">
+                                {formatCurrency(item.price)} each
+                              </span>
+                              <span className="block text-sm font-semibold text-blue">
+                                {formatCurrency(item.price * item.quantity)}
+                              </span>
+                              {item.rentalTotal ? (
+                                <span className="block text-xs text-slate-500">
+                                  +{formatCurrency((item.rentalTotal || 0) * item.quantity)} rent
+                                </span>
+                              ) : null}
+                            </div>
+                            <span className="text-xs font-semibold text-blue">×{item.quantity}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                remove(index);
+                                if (items.length === 1) {
+                                  setCartOpen(false);
+                                }
+                              }}
+                              className="rounded border border-transparent px-2 py-1 text-xs text-slate-500 transition hover:text-orange focus-visible:border-orange focus-visible:text-orange focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange"
+                              aria-label={`Remove ${item.name} from cart`}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-3 space-y-2">
+                      {rentalSubtotal > 0 && (
+                        <div className="flex items-center justify-between text-xs text-slate-500">
+                          <span>Rental included</span>
+                          <span>{formatCurrency(rentalSubtotal)}</span>
                         </div>
-                        <div className="flex flex-col items-end gap-1">
-                          <span className="text-xs font-semibold text-blue">×{item.quantity}</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              remove(index);
-                              if (items.length === 1) {
-                                setCartOpen(false);
-                              }
-                            }}
-                            className="rounded border border-transparent px-2 py-1 text-xs text-slate-500 transition hover:text-orange focus-visible:border-orange focus-visible:text-orange focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange"
-                            aria-label={`Remove ${item.name} from cart`}
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
+                      )}
+                      <div className="flex items-center justify-between rounded-md bg-slate-100 px-3 py-2 text-sm font-semibold text-blue">
+                        <span>Subtotal</span>
+                        <span>{formatCurrency(combinedSubtotal)}</span>
+                      </div>
+                    </div>
+                  </>
                 )}
                 <Link
                   href="/cart"
