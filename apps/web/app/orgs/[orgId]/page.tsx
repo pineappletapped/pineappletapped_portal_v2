@@ -3,8 +3,8 @@ import Image from 'next/image';
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { auth, db } from '@/lib/firebase';
-import { doc, getDoc, collection, query, where, getDocs, getDoc as getDoc2, setDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { auth, db, ensureFirebase } from '@/lib/firebase';
+import { doc, getDoc, collection, query, where, getDocs, setDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
 import { extractUserRoles, hasRole } from '@/lib/roles';
 
 /**
@@ -34,6 +34,7 @@ export default function OrgDetailPage() {
     if (!inviteEmail) return;
     setInviteLoading(true);
     try {
+      await ensureFirebase();
       // Find user by email
       const uSnap = await getDocs(query(collection(db, 'users'), where('email', '==', inviteEmail)));
       if (uSnap.empty) {
@@ -78,43 +79,74 @@ export default function OrgDetailPage() {
 
   useEffect(() => {
     if (!orgId) return;
+    let active = true;
+
     (async () => {
-      const orgSnap = await getDoc(doc(db, 'orgs', orgId));
-      setOrg({ id: orgSnap.id, ...orgSnap.data() });
-      // Members: query memberships by orgId
-      const memSnap = await getDocs(query(collection(db, 'memberships'), where('orgId', '==', orgId)));
-      const mems = memSnap.docs.map((d) => ({ id: d.id, ...d.data() })) as any[];
-      // Fetch user docs for each membership
-      const userPromises = mems.map((m) => getDoc(doc(db, 'users', m.userId)));
-      const userSnaps = await Promise.all(userPromises);
-      setMembers(
-        mems.map((m, i) => {
-          const u = userSnaps[i];
-          return { id: u.id, ...u.data(), role: m.role };
-        })
-      );
-      // Determine current user's role and staff flag
-      const user = auth.currentUser;
-      if (user) {
-        const myMem = mems.find((m) => m.userId === user.uid);
-        setMyRole(myMem?.role || null);
-        // Check staff
-        const uDocSnap = await getDoc(doc(db, 'users', user.uid));
-        const roles = extractUserRoles(uDocSnap.data());
-        setIsStaff(hasRole(roles, ['admin', 'projects']));
+      try {
+        await ensureFirebase();
+        if (!active) return;
+
+        const orgSnap = await getDoc(doc(db, 'orgs', orgId));
+        if (!orgSnap.exists()) {
+          throw new Error('Organisation not found');
+        }
+
+        const memSnap = await getDocs(query(collection(db, 'memberships'), where('orgId', '==', orgId)));
+        const memberships = memSnap.docs.map((d) => ({ id: d.id, ...d.data() })) as any[];
+        const userSnaps = await Promise.all(memberships.map((m) => getDoc(doc(db, 'users', m.userId))));
+        const loadedMembers = memberships.map((m, index) => {
+          const userDoc = userSnaps[index];
+          return { id: userDoc.id, ...userDoc.data(), role: m.role };
+        });
+
+        const currentUser = auth.currentUser;
+        let nextRole: string | null = null;
+        let nextIsStaff = false;
+        if (currentUser) {
+          const myMembership = memberships.find((m) => m.userId === currentUser.uid);
+          nextRole = myMembership?.role || null;
+          const currentUserSnap = await getDoc(doc(db, 'users', currentUser.uid));
+          const roles = extractUserRoles(currentUserSnap.data());
+          nextIsStaff = hasRole(roles, ['admin', 'projects']);
+        }
+
+        const brandPackSnap = await getDocs(query(collection(db, 'brandPacks'), where('orgId', '==', orgId)));
+        const loadedBrandPacks = brandPackSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+        const projectSnap = await getDocs(query(collection(db, 'projects'), where('orgId', '==', orgId)));
+        const loadedProjects = projectSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+        if (!active) return;
+
+        setOrg({ id: orgSnap.id, ...orgSnap.data() });
+        setMembers(loadedMembers);
+        setMyRole(nextRole);
+        setIsStaff(nextIsStaff);
+        setBrandPacks(loadedBrandPacks);
+        setProjects(loadedProjects);
+        setLoading(false);
+      } catch (error) {
+        console.error('Failed to load organisation details', error);
+        if (active) {
+          setOrg(null);
+          setMembers([]);
+          setBrandPacks([]);
+          setProjects([]);
+          setMyRole(null);
+          setIsStaff(false);
+          setLoading(false);
+        }
       }
-      // Brand packs
-      const bpSnap = await getDocs(query(collection(db, 'brandPacks'), where('orgId', '==', orgId)));
-      setBrandPacks(bpSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      // Projects
-      const projSnap = await getDocs(query(collection(db, 'projects'), where('orgId', '==', orgId)));
-      setProjects(projSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      setLoading(false);
     })();
+
+    return () => {
+      active = false;
+    };
   }, [orgId]);
 
   if (!orgId) return <p>Organisation id missing.</p>;
-  if (loading || !org) return <p>Loading…</p>;
+  if (loading) return <p>Loading…</p>;
+  if (!org) return <p>Organisation not found.</p>;
 
   return (
     <div className="grid gap-6">

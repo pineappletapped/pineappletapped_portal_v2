@@ -27,13 +27,53 @@ const config = {
   measurementId,
 };
 
+const missingServiceError = (service: string) =>
+  new Error(
+    `Firebase ${service} has not been initialised yet. Ensure ensureFirebase() has resolved before accessing ${service}.`
+  );
+
+const noop = () => {};
+
+const createAuthPlaceholder = () => ({
+  __isPlaceholder: true,
+  currentUser: null,
+  onAuthStateChanged: () => noop,
+  signOut: undefined,
+});
+
+const createServicePlaceholder = (service: string) =>
+  new Proxy(
+    {},
+    {
+      get: (_target, key) => {
+        if (key === '__isPlaceholder') {
+          return true;
+        }
+        if (key === 'toString') {
+          return () => `[uninitialised Firebase ${service}]`;
+        }
+        if (typeof key === 'symbol' && key.toString() === 'Symbol.toStringTag') {
+          return `Firebase${service}Placeholder`;
+        }
+        throw missingServiceError(service);
+      },
+      apply: () => {
+        throw missingServiceError(service);
+      },
+    }
+  );
+
+const createHttpsCallablePlaceholder = () => () => {
+  throw missingServiceError('functions (httpsCallable)');
+};
+
 // Defer all Firebase imports to the browser to avoid issues during SSR builds
 let app: any;
-let auth: any = null;
+let auth: any = createAuthPlaceholder();
 let db: any = null;
-let storage: any = null;
-let functions: any = null;
-let httpsCallable: any;
+let storage: any = createServicePlaceholder('storage');
+let functions: any = createServicePlaceholder('functions');
+let httpsCallable: any = createHttpsCallablePlaceholder();
 let sendSignInLinkToEmail: any;
 let isSignInWithEmailLink: any;
 let signInWithEmailLink: any;
@@ -92,6 +132,7 @@ async function ensureFirebase() {
   if (!coreInitPromise) {
     coreInitPromise = initCoreFirebase().catch((error) => {
       console.error('Failed to initialise Firebase app', error);
+      db = null;
       coreInitPromise = null;
       throw error;
     });
@@ -103,6 +144,10 @@ async function ensureFirebase() {
     if (!browserInitPromise) {
       browserInitPromise = initBrowserFirebase().catch((error) => {
         console.error('Failed to initialise browser Firebase services', error);
+        auth = createAuthPlaceholder();
+        storage = createServicePlaceholder('storage');
+        functions = createServicePlaceholder('functions');
+        httpsCallable = createHttpsCallablePlaceholder();
         browserInitPromise = null;
         throw error;
       });
