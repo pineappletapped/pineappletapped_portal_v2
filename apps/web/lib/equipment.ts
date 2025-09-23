@@ -58,6 +58,9 @@ export interface KitBag {
   description?: string;
   itemIds: string[];
   assignedProductIds?: string[];
+  availableFrom?: string | null;
+  availableTo?: string | null;
+  availabilityNotes?: string | null;
   updatedAt?: any;
 }
 

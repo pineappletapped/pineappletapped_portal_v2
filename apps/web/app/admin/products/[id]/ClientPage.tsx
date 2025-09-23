@@ -24,7 +24,7 @@ import type {
   ProductVariation,
 } from "@/lib/products";
 import type { Venue } from "@/lib/venues";
-import type { KitBag } from "@/lib/equipment";
+import type { KitBag, EquipmentStandard } from "@/lib/equipment";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -155,6 +155,8 @@ export default function EditProductPage() {
     { id: string; name: string; rentalPrice?: number; category?: string }[]
   >([]);
   const [kitBags, setKitBags] = useState<KitBag[]>([]);
+  const [standards, setStandards] = useState<EquipmentStandard[]>([]);
+  const [productStandards, setProductStandards] = useState<string[]>([]);
   const [labourFilmingRate, setLabourFilmingRate] = useState("0");
   const [labourEditingRate, setLabourEditingRate] = useState("0");
   const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
@@ -176,6 +178,15 @@ export default function EditProductPage() {
   };
   const formatCurrency = (value: number) =>
     `£${(Number.isFinite(value) ? value : 0).toFixed(2)}`;
+
+  const toggleProductStandard = (standardId: string) => {
+    setProductStandards((prev) => {
+      const current = Array.isArray(prev) ? prev : [];
+      return current.includes(standardId)
+        ? current.filter((id) => id !== standardId)
+        : [...current, standardId];
+    });
+  };
 
   useEffect(() => {
     (async () => {
@@ -290,14 +301,36 @@ export default function EditProductPage() {
               };
             })
           );
+          const rawStandards = Array.isArray((p as any).requiredStandards)
+            ? (p as any).requiredStandards
+            : [];
+          const requiredStandards: string[] = Array.from(
+            new Set(
+              rawStandards
+                .map((value: unknown) =>
+                  typeof value === "string" ? value.trim() : ""
+                )
+                .filter((value: string) => value.length > 0)
+            )
+          );
+          setProductStandards(requiredStandards);
         }
-        const [catSnap, modSnap, wfSnap, eqSnap, venueSnap, bagSnap] = await Promise.all([
+        const [
+          catSnap,
+          modSnap,
+          wfSnap,
+          eqSnap,
+          venueSnap,
+          bagSnap,
+          standardSnap,
+        ] = await Promise.all([
           getDocs(collection(db, "categories")),
           getDocs(collection(db, "modifiers")),
           getDocs(collection(db, "workflows")),
           getDocs(collection(db, "equipment")),
           getDocs(collection(db, "venues")),
           getDocs(collection(db, "kitBags")),
+          getDocs(collection(db, "equipmentStandards")),
         ]);
         setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setAllModifiers(
@@ -322,6 +355,17 @@ export default function EditProductPage() {
           bagSnap.docs
             .map((d) => ({ id: d.id, ...(d.data() as any) }))
             .sort((a, b) => (a.name || "").localeCompare(b.name || "")) as KitBag[]
+        );
+        setStandards(
+          standardSnap.docs
+            .map(
+              (d) =>
+                ({
+                  id: d.id,
+                  ...(d.data() as any),
+                } as EquipmentStandard)
+            )
+            .sort((a, b) => (a.title || "").localeCompare(b.title || ""))
         );
         const venueList = venueSnap.docs
           .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
@@ -440,6 +484,15 @@ export default function EditProductPage() {
         optionId: m.optionId,
         ...(m.price ? { price: Number(m.price) } : {}),
       }));
+    const requiredStandards = Array.isArray(productStandards)
+      ? Array.from(
+          new Set(
+            productStandards
+              .map((id) => (typeof id === "string" ? id.trim() : ""))
+              .filter((id) => id.length > 0)
+          )
+        )
+      : [];
     await updateDoc(doc(db, "products", id), {
       name,
       description,
@@ -473,6 +526,7 @@ export default function EditProductPage() {
       venueId: venueId || null,
       hidden,
       requiredKit: kitGroups,
+      requiredStandards,
       defaultTasks: tasks,
       seo: {
         title: seo.title || null,
@@ -777,6 +831,17 @@ export default function EditProductPage() {
     }
     return Array.from(missing);
   }, [kitGroups, equipmentLookup]);
+  const selectedStandardNames = useMemo(() => {
+    const lookup = new Map<string, string>();
+    standards.forEach((standard) => {
+      if (standard.id) {
+        lookup.set(standard.id, standard.title || standard.id);
+      }
+    });
+    return (Array.isArray(productStandards) ? productStandards : [])
+      .map((id) => lookup.get(id) || id)
+      .filter((name, index, array) => array.indexOf(name) === index);
+  }, [productStandards, standards]);
   const labourFilmingValue = parseMoney(labourFilmingRate);
   const labourEditingValue = parseMoney(labourEditingRate);
   const labourValue = labourFilmingValue + labourEditingValue;
@@ -1327,6 +1392,51 @@ export default function EditProductPage() {
             </button>
             {kitGroups.length === 0 && (
               <span className="text-sm text-gray-600">Create a group to start assigning kit.</span>
+            )}
+          </div>
+          <div className="grid gap-2">
+            <h3 className="font-medium">Required equipment standards</h3>
+            <p className="text-xs text-gray-500">
+              Select the standards a crew must meet before they can pick up this product in the portal.
+            </p>
+            {standards.length === 0 ? (
+              <p className="text-xs text-gray-500">
+                No standards defined yet. Create standards in the equipment register to make them available here.
+              </p>
+            ) : (
+              <div className="max-h-48 overflow-y-auto rounded border p-3">
+                <ul className="grid gap-2">
+                  {standards.map((standard) => {
+                    if (!standard.id) return null;
+                    const checked = productStandards.includes(standard.id);
+                    return (
+                      <li key={standard.id}>
+                        <label className="flex items-start gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleProductStandard(standard.id!)}
+                          />
+                          <span>
+                            <span className="font-medium">{standard.title || "Untitled standard"}</span>
+                            {standard.minimumSpec && (
+                              <span className="block text-xs text-gray-500">{standard.minimumSpec}</span>
+                            )}
+                            {standard.description && (
+                              <span className="block text-xs text-gray-500">{standard.description}</span>
+                            )}
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+            {selectedStandardNames.length > 0 && (
+              <p className="text-xs text-gray-500">
+                Selected: {selectedStandardNames.join(", ")}
+              </p>
             )}
           </div>
           {kitBags.length > 0 && (

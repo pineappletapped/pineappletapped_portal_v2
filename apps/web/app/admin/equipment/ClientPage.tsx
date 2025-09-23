@@ -35,6 +35,9 @@ export default function AdminEquipmentPage() {
     description: "",
     itemIds: [] as string[],
     productIds: [] as string[],
+    availableFrom: "",
+    availableTo: "",
+    availabilityNotes: "",
   });
   const [editingBagId, setEditingBagId] = useState<string | null>(null);
   const [showBagForm, setShowBagForm] = useState(false);
@@ -52,6 +55,17 @@ export default function AdminEquipmentPage() {
   const [standardSaving, setStandardSaving] = useState(false);
   const [standardError, setStandardError] = useState<string | null>(null);
   const [showStandardForm, setShowStandardForm] = useState(false);
+
+  const formatDate = (value?: string | null) => {
+    if (!value) return null;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toLocaleDateString(undefined, {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+  };
 
   useEffect(() => {
     (async () => {
@@ -188,7 +202,15 @@ export default function AdminEquipmentPage() {
   };
 
   const resetKitBagForm = () => {
-    setKitBagForm({ name: "", description: "", itemIds: [], productIds: [] });
+    setKitBagForm({
+      name: "",
+      description: "",
+      itemIds: [],
+      productIds: [],
+      availableFrom: "",
+      availableTo: "",
+      availabilityNotes: "",
+    });
     setEditingBagId(null);
     setBagError(null);
   };
@@ -207,6 +229,15 @@ export default function AdminEquipmentPage() {
       productIds: Array.isArray(bag.assignedProductIds)
         ? [...bag.assignedProductIds]
         : [],
+      availableFrom:
+        typeof bag.availableFrom === "string" && bag.availableFrom
+          ? bag.availableFrom
+          : "",
+      availableTo:
+        typeof bag.availableTo === "string" && bag.availableTo
+          ? bag.availableTo
+          : "",
+      availabilityNotes: bag.availabilityNotes || "",
     });
     setEditingBagId(bag.id || null);
     setBagError(null);
@@ -317,12 +348,28 @@ export default function AdminEquipmentPage() {
     const name = kitBagForm.name.trim();
     const uniqueItems = Array.from(new Set(kitBagForm.itemIds.filter(Boolean)));
     const productIds = Array.from(new Set(kitBagForm.productIds.filter(Boolean)));
+    const fromValue = kitBagForm.availableFrom.trim();
+    const toValue = kitBagForm.availableTo.trim();
+    const fromTime = fromValue ? Date.parse(fromValue) : NaN;
+    const toTime = toValue ? Date.parse(toValue) : NaN;
     if (!name) {
       setBagError("Kit bags need a name.");
       return;
     }
     if (!uniqueItems.length) {
       setBagError("Select at least one piece of kit for this bag.");
+      return;
+    }
+    if (fromValue && Number.isNaN(fromTime)) {
+      setBagError("Enter a valid availability start date.");
+      return;
+    }
+    if (toValue && Number.isNaN(toTime)) {
+      setBagError("Enter a valid availability end date.");
+      return;
+    }
+    if (!Number.isNaN(fromTime) && !Number.isNaN(toTime) && fromTime > toTime) {
+      setBagError("The availability start date must be before the end date.");
       return;
     }
     setBagError(null);
@@ -333,6 +380,9 @@ export default function AdminEquipmentPage() {
         description: kitBagForm.description.trim() || null,
         itemIds: uniqueItems,
         assignedProductIds: productIds,
+        availableFrom: fromValue || null,
+        availableTo: toValue || null,
+        availabilityNotes: kitBagForm.availabilityNotes.trim() || null,
         updatedAt: new Date(),
       };
       let bagId = editingBagId;
@@ -733,6 +783,63 @@ export default function AdminEquipmentPage() {
                   rows={3}
                 />
               </div>
+              <div className="grid gap-2 md:grid-cols-2">
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium" htmlFor="kit-bag-available-from">
+                    Available from (optional)
+                  </label>
+                  <input
+                    id="kit-bag-available-from"
+                    type="date"
+                    className="input input-bordered"
+                    value={kitBagForm.availableFrom}
+                    onChange={(e) =>
+                      setKitBagForm((prev) => ({
+                        ...prev,
+                        availableFrom: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-sm font-medium" htmlFor="kit-bag-available-to">
+                    Available until (optional)
+                  </label>
+                  <input
+                    id="kit-bag-available-to"
+                    type="date"
+                    className="input input-bordered"
+                    value={kitBagForm.availableTo}
+                    onChange={(e) =>
+                      setKitBagForm((prev) => ({
+                        ...prev,
+                        availableTo: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+              <div className="grid gap-2">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="kit-bag-availability-notes"
+                >
+                  Availability notes (optional)
+                </label>
+                <textarea
+                  id="kit-bag-availability-notes"
+                  className="textarea textarea-bordered"
+                  value={kitBagForm.availabilityNotes}
+                  onChange={(e) =>
+                    setKitBagForm((prev) => ({
+                      ...prev,
+                      availabilityNotes: e.target.value,
+                    }))
+                  }
+                  placeholder="Blackout periods, lead times, or other scheduling details"
+                  rows={2}
+                />
+              </div>
               <div className="grid gap-2">
                 <div className="flex items-center justify-between">
                   <label className="text-sm font-medium">
@@ -846,6 +953,12 @@ export default function AdminEquipmentPage() {
                         .map((id) => productLookup.get(id) || id)
                         .filter(Boolean)
                     : [];
+                  const availableFromLabel = formatDate(
+                    typeof bag.availableFrom === "string" ? bag.availableFrom : null
+                  );
+                  const availableToLabel = formatDate(
+                    typeof bag.availableTo === "string" ? bag.availableTo : null
+                  );
                   return (
                     <li key={bag.id} className="rounded border p-3">
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
@@ -855,6 +968,17 @@ export default function AdminEquipmentPage() {
                             {bag.description && (
                               <p className="text-sm text-gray-600">
                                 {bag.description}
+                              </p>
+                            )}
+                            {(availableFromLabel || availableToLabel) && (
+                              <p className="text-xs text-gray-500">
+                                Availability: {availableFromLabel ? `from ${availableFromLabel}` : "Immediate"}
+                                {availableToLabel ? ` until ${availableToLabel}` : ""}
+                              </p>
+                            )}
+                            {bag.availabilityNotes && (
+                              <p className="text-xs text-gray-500">
+                                {bag.availabilityNotes}
                               </p>
                             )}
                           </div>
