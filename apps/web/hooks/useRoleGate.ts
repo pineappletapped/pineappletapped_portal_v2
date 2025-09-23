@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
 import { doc, getDoc } from 'firebase/firestore';
 import { extractUserRoles, hasRole, type RoleKey, type UserRoles } from '@/lib/roles';
@@ -11,10 +11,26 @@ export function useRoleGate(required: RoleKey | RoleKey[]) {
   const [allowed, setAllowed] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  const requirementKey = useMemo(() => {
+    if (Array.isArray(required)) {
+      const unique = Array.from(new Set(required as RoleKey[]));
+      unique.sort();
+      return unique.join('|');
+    }
+    return required;
+  }, [required]);
+
   useEffect(() => {
     setLoading(true);
     let unsubscribe: (() => void) | undefined;
     let cancelled = false;
+
+    const requirementList =
+      requirementKey && requirementKey.length > 0
+        ? (requirementKey.split('|').filter(Boolean) as RoleKey[])
+        : [];
+    const requirementForHasRole: RoleKey | RoleKey[] =
+      requirementList.length === 1 ? requirementList[0] : requirementList;
 
     (async () => {
       try {
@@ -50,7 +66,7 @@ export function useRoleGate(required: RoleKey | RoleKey[]) {
             const snap = await getDoc(doc(db, 'users', user.uid));
             const parsed = extractUserRoles(snap.data());
             setRoles(parsed);
-            setAllowed(hasRole(parsed, required));
+            setAllowed(hasRole(parsed, requirementForHasRole));
           } catch (error) {
             console.error('Failed to load user roles', error);
             setRoles(null);
@@ -77,7 +93,7 @@ export function useRoleGate(required: RoleKey | RoleKey[]) {
         unsubscribe();
       }
     };
-  }, [required]);
+  }, [requirementKey]);
 
   return { roles, allowed, loading };
 }
