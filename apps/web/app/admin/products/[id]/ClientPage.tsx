@@ -24,6 +24,7 @@ import type {
   ProductVariation,
 } from "@/lib/products";
 import type { Venue } from "@/lib/venues";
+import type { KitBag } from "@/lib/equipment";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -89,6 +90,13 @@ const deliverableIcons: Record<DeliverableType, IconType> = {
   document: FiFileText,
 };
 
+type KitGroup = {
+  groupId: string;
+  items: string[];
+  label?: string | null;
+  kitBagId?: string | null;
+};
+
 export default function EditProductPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -142,10 +150,11 @@ export default function EditProductPage() {
   const [taskTitle, setTaskTitle] = useState("");
   const [taskForCustomer, setTaskForCustomer] = useState(false);
   const [taskSubtasks, setTaskSubtasks] = useState("");
-  const [kitGroups, setKitGroups] = useState<{ groupId: string; items: string[] }[]>([]);
+  const [kitGroups, setKitGroups] = useState<KitGroup[]>([]);
   const [equipmentList, setEquipmentList] = useState<
     { id: string; name: string; rentalPrice?: number; category?: string }[]
   >([]);
+  const [kitBags, setKitBags] = useState<KitBag[]>([]);
   const [labourFilmingRate, setLabourFilmingRate] = useState("0");
   const [labourEditingRate, setLabourEditingRate] = useState("0");
   const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
@@ -250,14 +259,45 @@ export default function EditProductPage() {
           setHidden(p.hidden || false);
           setTasks(p.defaultTasks || []);
           setWorkflowId((p as any).workflowId || "");
-          setKitGroups((p as any).requiredKit || []);
+          const requiredKit = Array.isArray((p as any).requiredKit)
+            ? (p as any).requiredKit
+            : [];
+          setKitGroups(
+            requiredKit.map((group: any): KitGroup => {
+              const rawGroupId = typeof group?.groupId === "string" ? group.groupId : "";
+              const items = Array.isArray(group?.items)
+                ? group.items.filter(
+                    (value: unknown): value is string => typeof value === "string"
+                  )
+                : [];
+              const kitBagId =
+                typeof group?.kitBagId === "string"
+                  ? group.kitBagId
+                  : rawGroupId.startsWith("kitBag:")
+                  ? rawGroupId.split(":")[1] || null
+                  : null;
+              const label =
+                typeof group?.label === "string"
+                  ? group.label
+                  : kitBagId
+                  ? group?.name || rawGroupId
+                  : rawGroupId;
+              return {
+                groupId: rawGroupId,
+                items,
+                label,
+                kitBagId,
+              };
+            })
+          );
         }
-        const [catSnap, modSnap, wfSnap, eqSnap, venueSnap] = await Promise.all([
+        const [catSnap, modSnap, wfSnap, eqSnap, venueSnap, bagSnap] = await Promise.all([
           getDocs(collection(db, "categories")),
           getDocs(collection(db, "modifiers")),
           getDocs(collection(db, "workflows")),
           getDocs(collection(db, "equipment")),
           getDocs(collection(db, "venues")),
+          getDocs(collection(db, "kitBags")),
         ]);
         setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setAllModifiers(
@@ -277,6 +317,11 @@ export default function EditProductPage() {
               category: data.category || undefined,
             };
           })
+        );
+        setKitBags(
+          bagSnap.docs
+            .map((d) => ({ id: d.id, ...(d.data() as any) }))
+            .sort((a, b) => (a.name || "").localeCompare(b.name || "")) as KitBag[]
         );
         const venueList = venueSnap.docs
           .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
@@ -436,6 +481,51 @@ export default function EditProductPage() {
         socialImageUrl: seoImage || null,
       },
     });
+    const attachedBagIds = new Set(
+      kitGroups
+        .map((group) => group.kitBagId)
+        .filter((value): value is string => typeof value === "string")
+    );
+    const bagAssignmentUpdates: Record<string, string[]> = {};
+    await Promise.all(
+      kitBags
+        .filter((bag): bag is KitBag & { id: string } => typeof bag.id === "string" && bag.id.length > 0)
+        .map(async (bag) => {
+          const currentAssignments = Array.isArray(bag.assignedProductIds)
+            ? bag.assignedProductIds.filter(
+                (value: unknown): value is string => typeof value === "string"
+              )
+            : [];
+          const shouldHave = attachedBagIds.has(bag.id);
+          const alreadyHas = currentAssignments.includes(id);
+          if (shouldHave && !alreadyHas) {
+            const nextAssignments = [...currentAssignments, id];
+            bagAssignmentUpdates[bag.id] = nextAssignments;
+            await updateDoc(doc(db, "kitBags", bag.id), {
+              assignedProductIds: nextAssignments,
+              updatedAt: new Date(),
+            });
+          } else if (!shouldHave && alreadyHas) {
+            const nextAssignments = currentAssignments.filter(
+              (productId) => productId !== id
+            );
+            bagAssignmentUpdates[bag.id] = nextAssignments;
+            await updateDoc(doc(db, "kitBags", bag.id), {
+              assignedProductIds: nextAssignments,
+              updatedAt: new Date(),
+            });
+          }
+        })
+    );
+    if (Object.keys(bagAssignmentUpdates).length) {
+      setKitBags((prev) =>
+        prev.map((bag) =>
+          bag.id && bagAssignmentUpdates[bag.id]
+            ? { ...bag, assignedProductIds: bagAssignmentUpdates[bag.id] }
+            : bag
+        )
+      );
+    }
     if (workflowId) {
       const fn = httpsCallable(functions, "admin_assignWorkflow");
       await fn({ productId: id, workflowId });
@@ -562,13 +652,21 @@ export default function EditProductPage() {
 
   const addKitGroup = () =>
     setKitGroups((g) => {
-      const next = [...g, { groupId: "", items: [] }];
+      const next = [...g, { groupId: "", items: [], label: "" }];
       setActiveKitGroup(next.length - 1);
       return next;
     });
   const updateKitGroupId = (index: number, groupId: string) =>
     setKitGroups((prev) =>
-      prev.map((g, i) => (i === index ? { ...g, groupId } : g))
+      prev.map((g, i) =>
+        i === index
+          ? {
+              ...g,
+              groupId,
+              ...(g.kitBagId ? {} : { label: groupId }),
+            }
+          : g
+      )
     );
   const addEquipmentToGroup = (index: number, eqId: string) =>
     setKitGroups((prev) =>
@@ -592,6 +690,53 @@ export default function EditProductPage() {
       if (prev > index) return prev - 1;
       return prev;
     });
+  };
+
+  const applyKitBag = (bag: KitBag) => {
+    if (!bag?.id) return;
+    const uniqueItems = Array.isArray(bag.itemIds)
+      ? Array.from(
+          new Set(
+            bag.itemIds.filter(
+              (value: unknown): value is string => typeof value === "string"
+            )
+          )
+        )
+      : [];
+    if (uniqueItems.length === 0) return;
+    let nextActive: number | null = null;
+    setKitGroups((prev) => {
+      const existingIndex = prev.findIndex((group) => group.kitBagId === bag.id);
+      if (existingIndex >= 0) {
+        nextActive = existingIndex;
+        return prev.map((group, idx) =>
+          idx === existingIndex
+            ? {
+                ...group,
+                items: uniqueItems,
+                label: bag.name || group.label || group.groupId,
+                kitBagId: bag.id,
+                groupId: group.groupId || `kitBag:${bag.id}`,
+              }
+            : group
+        );
+      }
+      const groupId = `kitBag:${bag.id}`;
+      const next = [
+        ...prev,
+        {
+          groupId,
+          items: uniqueItems,
+          label: bag.name || groupId,
+          kitBagId: bag.id,
+        },
+      ];
+      nextActive = next.length - 1;
+      return next;
+    });
+    if (nextActive !== null) {
+      setActiveKitGroup(nextActive);
+    }
   };
 
   const removeProduct = async () => {
@@ -1132,7 +1277,11 @@ export default function EditProductPage() {
               />
               {kitGroups.length > 0 && activeKitGroup !== null && (
                 <div className="rounded border px-3 py-2 text-sm text-gray-600">
-                  Adding to: {kitGroups[activeKitGroup].groupId || `Group ${activeKitGroup + 1}`}
+                  Adding to: {
+                    kitGroups[activeKitGroup].label ||
+                    kitGroups[activeKitGroup].groupId ||
+                    `Group ${activeKitGroup + 1}`
+                  }
                 </div>
               )}
             </div>
@@ -1180,9 +1329,59 @@ export default function EditProductPage() {
               <span className="text-sm text-gray-600">Create a group to start assigning kit.</span>
             )}
           </div>
+          {kitBags.length > 0 && (
+            <div className="grid gap-2">
+              <h3 className="font-medium">Kit bag shortcuts</h3>
+              <p className="text-xs text-gray-500">
+                Attach a predefined kit bag to this product or refresh it after
+                updating the bag in the equipment register.
+              </p>
+              <div className="grid gap-3 md:grid-cols-2">
+                {kitBags.map((bag) => {
+                  const attachedIndex = kitGroups.findIndex(
+                    (group) => group.kitBagId === bag.id
+                  );
+                  const itemCount = Array.isArray(bag.itemIds)
+                    ? bag.itemIds.length
+                    : 0;
+                  return (
+                    <div key={bag.id} className="rounded border p-3 space-y-2">
+                      <div>
+                        <p className="font-medium">{bag.name}</p>
+                        {bag.description && (
+                          <p className="text-xs text-gray-500">{bag.description}</p>
+                        )}
+                        <p className="text-xs text-gray-500">
+                          {itemCount} item{itemCount === 1 ? "" : "s"}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="btn btn-xs"
+                          onClick={() => applyKitBag(bag)}
+                        >
+                          {attachedIndex >= 0 ? "Refresh bag" : "Attach bag"}
+                        </button>
+                        {attachedIndex >= 0 && (
+                          <button
+                            type="button"
+                            className="btn btn-outline btn-xs"
+                            onClick={() => removeKitGroup(attachedIndex)}
+                          >
+                            Detach
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {kitGroups.map((g, i) => (
             <div
-              key={`${g.groupId || "group"}-${i}`}
+              key={g.kitBagId ? `bag-${g.kitBagId}` : `group-${i}-${g.groupId}`}
               className={`border p-4 rounded grid gap-3 ${
                 activeKitGroup === i ? "border-black" : "border-gray-200"
               }`}
@@ -1194,12 +1393,27 @@ export default function EditProductPage() {
               }}
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <input
-                  className="input flex-1"
-                  placeholder="Group label (e.g. Camera Ops)"
-                  value={g.groupId}
-                  onChange={(e) => updateKitGroupId(i, e.target.value)}
-                />
+                {g.kitBagId ? (
+                  <div className="flex flex-1 flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{g.label || g.groupId}</span>
+                      <span className="inline-flex items-center rounded bg-orange-100 px-2 py-0.5 text-xs text-orange-700">
+                        Kit bag
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      Linked to kit bag {g.kitBagId}. Update its contents from the
+                      equipment register.
+                    </p>
+                  </div>
+                ) : (
+                  <input
+                    className="input flex-1"
+                    placeholder="Group label (e.g. Camera Ops)"
+                    value={g.groupId}
+                    onChange={(e) => updateKitGroupId(i, e.target.value)}
+                  />
+                )}
                 <button
                   type="button"
                   className={`btn btn-xs ${
@@ -1239,7 +1453,7 @@ export default function EditProductPage() {
                 className="text-sm text-red-600 w-fit"
                 onClick={() => removeKitGroup(i)}
               >
-                Remove Group
+                {g.kitBagId ? "Detach kit bag" : "Remove Group"}
               </button>
             </div>
           ))}

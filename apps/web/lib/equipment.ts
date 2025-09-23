@@ -24,6 +24,7 @@ export interface Equipment {
   length?: string;
   photo?: string;
   documents?: string[];
+  meetsStandards?: string[];
   config?: {
     username?: string;
     password?: string;
@@ -49,6 +50,24 @@ export interface EquipmentBooking {
 export interface ProductKitGroup {
   groupId: string;
   items: Equipment[];
+}
+
+export interface KitBag {
+  id?: string;
+  name: string;
+  description?: string;
+  itemIds: string[];
+  assignedProductIds?: string[];
+  updatedAt?: any;
+}
+
+export interface EquipmentStandard {
+  id?: string;
+  title: string;
+  category?: string;
+  minimumSpec?: string;
+  description?: string;
+  requiresApproval?: boolean;
 }
 
 export async function getProductKit(productId: string): Promise<ProductKitGroup[]> {

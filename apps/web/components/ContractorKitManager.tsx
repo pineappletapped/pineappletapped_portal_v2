@@ -3,7 +3,7 @@
 import Image from "next/image";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import type { Auth, User } from "firebase/auth";
-import type { Equipment } from "@/lib/equipment";
+import type { Equipment, EquipmentStandard } from "@/lib/equipment";
 import { ensureFirebase } from "@/lib/firebase";
 import {
   collection,
@@ -41,6 +41,7 @@ interface FormState {
   available: boolean;
   photoUrl: string;
   documents: string[];
+  meetsStandards: string[];
 }
 
 const EMPTY_FORM: FormState = {
@@ -59,6 +60,7 @@ const EMPTY_FORM: FormState = {
   available: true,
   photoUrl: "",
   documents: [],
+  meetsStandards: [],
 };
 
 const RENTAL_PERCENTAGE = 0.025;
@@ -134,6 +136,7 @@ const detectConflicts = (bookings: BookingEntry[]) => {
 
 export default function ContractorKitManager() {
   const [items, setItems] = useState<Equipment[]>([]);
+  const [standards, setStandards] = useState<EquipmentStandard[]>([]);
   const [loading, setLoading] = useState(true);
   const [authReady, setAuthReady] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -360,11 +363,53 @@ export default function ContractorKitManager() {
     };
   }, [firestore, items]);
 
+  useEffect(() => {
+    if (!firestore) {
+      setStandards([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const snap = await getDocs(collection(firestore, "equipmentStandards"));
+        if (cancelled) return;
+        const list = snap.docs
+          .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as any) }))
+          .sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+        setStandards(list as EquipmentStandard[]);
+      } catch (err) {
+        console.error("Failed to load equipment standards", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [firestore]);
+
   const suggestedRental = useMemo(() => {
     const purchase = toNumber(form.newValue);
     if (!purchase) return 0;
     return parseFloat((purchase * RENTAL_PERCENTAGE).toFixed(2));
   }, [form.newValue]);
+
+  const standardLookup = useMemo(() => {
+    const map = new Map<string, EquipmentStandard>();
+    standards.forEach((standard) => {
+      if (standard.id) {
+        map.set(standard.id, standard);
+      }
+    });
+    return map;
+  }, [standards]);
+
+  const applicableStandards = useMemo(() => {
+    const category = form.category.trim().toLowerCase();
+    if (!category) return standards;
+    return standards.filter((standard) => {
+      if (!standard.category) return true;
+      return standard.category.toLowerCase() === category;
+    });
+  }, [standards, form.category]);
 
   const resetForm = () => {
     setForm(EMPTY_FORM);
@@ -401,6 +446,9 @@ export default function ContractorKitManager() {
       available: item.available !== false,
       photoUrl: item.photo || "",
       documents: Array.isArray(item.documents) ? [...item.documents] : [],
+      meetsStandards: Array.isArray(item.meetsStandards)
+        ? [...item.meetsStandards]
+        : [],
     });
     setRentalTouched(true);
     setCurrentTouched(true);
@@ -425,6 +473,18 @@ export default function ContractorKitManager() {
         next.add(id);
       }
       return next;
+    });
+  };
+
+  const toggleStandard = (id: string) => {
+    setForm((prev) => {
+      const exists = prev.meetsStandards.includes(id);
+      return {
+        ...prev,
+        meetsStandards: exists
+          ? prev.meetsStandards.filter((value) => value !== id)
+          : [...prev.meetsStandards, id],
+      };
     });
   };
 
@@ -574,6 +634,7 @@ export default function ContractorKitManager() {
         photo: photoUrl,
         documents: documentUrls,
         updatedAt: timestamp,
+        meetsStandards: Array.from(new Set(form.meetsStandards)),
       };
 
       if (!editingId) {
@@ -737,6 +798,58 @@ export default function ContractorKitManager() {
             value={form.damage}
             onChange={(e) => handleFieldChange("damage", e.target.value)}
           />
+          {standards.length > 0 && (
+            <div className="space-y-2">
+              <span className="block text-sm font-medium">
+                Standards this kit meets
+              </span>
+              <p className="text-xs text-gray-500">
+                Tick the requirements your equipment fulfils so schedulers know
+                what you can cover.
+              </p>
+              {applicableStandards.length === 0 ? (
+                <p className="text-xs text-gray-500">
+                  No standards match this category yet.
+                </p>
+              ) : (
+                <ul className="space-y-2">
+                  {applicableStandards.map((standard) => {
+                    if (!standard.id) return null;
+                    const checked = form.meetsStandards.includes(standard.id);
+                    return (
+                      <li key={`standard-${standard.id}`}>
+                        <label className="flex items-start gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleStandard(standard.id!)}
+                          />
+                          <span>
+                            <span className="font-medium">{standard.title}</span>
+                            {standard.minimumSpec && (
+                              <span className="block text-xs text-gray-500">
+                                {standard.minimumSpec}
+                              </span>
+                            )}
+                            {standard.description && (
+                              <span className="block text-xs text-gray-500">
+                                {standard.description}
+                              </span>
+                            )}
+                            {standard.requiresApproval && (
+                              <span className="mt-1 inline-flex rounded bg-yellow-100 px-2 py-0.5 text-[11px] font-medium text-yellow-900">
+                                Requires approval
+                              </span>
+                            )}
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          )}
           <div className="grid gap-3 md:grid-cols-3">
             <input
               className="input input-bordered"
@@ -867,6 +980,7 @@ export default function ContractorKitManager() {
                 <th className="p-2">Purchase £</th>
                 <th className="p-2">Rental £</th>
                 <th className="p-2">Documents</th>
+                <th className="p-2">Standards</th>
                 <th className="p-2">Available</th>
                 <th className="p-2">Schedule</th>
                 <th className="p-2">Actions</th>
@@ -911,11 +1025,30 @@ export default function ContractorKitManager() {
                         </ul>
                       ) : (
                         <span className="text-xs text-gray-500">None</span>
-                      )}
-                    </td>
-                    <td className="p-2 align-top">
-                      {item.available === false ? "No" : "Yes"}
-                    </td>
+                    )}
+                  </td>
+                  <td className="p-2 align-top">
+                    {Array.isArray(item.meetsStandards) && item.meetsStandards.length ? (
+                      <ul className="flex flex-wrap gap-1">
+                        {item.meetsStandards.map((standardId) => {
+                          const standard = standardLookup.get(standardId);
+                          if (!standardId) return null;
+                          return (
+                            <li key={`${item.id}-standard-${standardId}`}>
+                              <span className="inline-flex items-center rounded bg-orange-50 px-2 py-0.5 text-xs text-orange-700">
+                                {standard?.title || standardId}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : (
+                      <span className="text-xs text-gray-500">None</span>
+                    )}
+                  </td>
+                  <td className="p-2 align-top">
+                    {item.available === false ? "No" : "Yes"}
+                  </td>
                     <td className="p-2 align-top">
                       <div className="flex flex-col gap-1">
                         <button
