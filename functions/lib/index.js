@@ -1,5 +1,6 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
+import { onRequest } from 'firebase-functions/v2/https';
 import Stripe from 'stripe';
 import sharp from 'sharp';
 import { v4 as uuidv4 } from 'uuid';
@@ -13,6 +14,11 @@ import { Readable } from 'stream';
 import fetch from 'node-fetch';
 import * as cors from 'cors';
 const corsHandler = cors.default({ origin: true });
+const ANALYTICS_ALLOWED_ORIGINS = [
+    'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
+    'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
+    'http://localhost:3000',
+];
 // TODO: wrap all http functions with the cors handler, for example:
 // exports.myFunction = functions.https.onRequest((req, res) => {
 //   corsHandler(req, res, () => {
@@ -389,60 +395,75 @@ export const bookings_request = functions.https.onCall(async (data, context) => 
     return { id: ref.id };
 });
 // Track page view analytics from the public site
-export const analytics_track = functions.https.onRequest((req, res) => {
-    corsHandler(req, res, async () => {
-        try {
-            let uid = null;
-            let userName = null;
-            const authHeader = req.headers.authorization;
-            if (authHeader?.startsWith('Bearer ')) {
+export const analytics_track = onRequest({ region: 'us-central1', cors: ANALYTICS_ALLOWED_ORIGINS }, async (req, res) => {
+    try {
+        let uid = null;
+        let userName = null;
+        const authHeader = req.get('authorization');
+        if (authHeader?.startsWith('Bearer ')) {
+            try {
+                const decoded = await admin
+                    .auth()
+                    .verifyIdToken(authHeader.split('Bearer ')[1]);
+                uid = decoded.uid;
+                const userSnap = await db.collection('users').doc(uid).get();
+                const udata = userSnap.data();
+                if (udata) {
+                    userName = udata.fullName || udata.email || null;
+                }
+            }
+            catch (err) {
+                console.error('verifyIdToken failed', err);
+            }
+        }
+        const rawBody = req.body;
+        let data = {};
+        if (typeof rawBody === 'string') {
+            if (rawBody.trim()) {
                 try {
-                    const decoded = await admin
-                        .auth()
-                        .verifyIdToken(authHeader.split('Bearer ')[1]);
-                    uid = decoded.uid;
-                    const userSnap = await db.collection('users').doc(uid).get();
-                    const udata = userSnap.data();
-                    if (udata) {
-                        userName = udata.fullName || udata.email || null;
-                    }
+                    data = JSON.parse(rawBody);
                 }
                 catch (err) {
-                    console.error('verifyIdToken failed', err);
+                    console.error('analytics_track invalid JSON payload', err);
                 }
             }
-            const data = req.body || {};
-            const visitorId = data.visitorId || null;
-            if (!uid && visitorId) {
-                const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
-                const mapData = mapSnap.data();
-                if (mapData) {
-                    uid = mapData.uid || null;
-                    userName = mapData.userName || null;
-                }
-            }
-            if (visitorId && uid && userName) {
-                await db.collection('analyticsVisitors').doc(visitorId).set({ uid, userName }, { merge: true });
-            }
-            const event = {
-                uid,
-                userName,
-                path: data.path || null,
-                referrer: data.referrer || null,
-                userAgent: data.userAgent || req.get('user-agent') || null,
-                visitorId,
-                duration: data.duration || null,
-                ip: req.ip,
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            };
-            await db.collection('analyticsEvents').add(event);
-            res.json({ ok: true });
         }
-        catch (err) {
-            console.error('analytics_track error', err);
-            res.status(500).json({ error: 'internal' });
+        else if (rawBody && typeof rawBody === 'object') {
+            data = rawBody;
         }
-    });
+        const visitorId = data.visitorId ?? null;
+        if (!uid && visitorId) {
+            const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
+            const mapData = mapSnap.data();
+            if (mapData) {
+                uid = mapData.uid || null;
+                userName = mapData.userName || null;
+            }
+        }
+        if (visitorId && uid && userName) {
+            await db
+                .collection('analyticsVisitors')
+                .doc(visitorId)
+                .set({ uid, userName }, { merge: true });
+        }
+        const event = {
+            uid,
+            userName,
+            path: data.path || null,
+            referrer: data.referrer || null,
+            userAgent: data.userAgent || req.get('user-agent') || null,
+            visitorId,
+            duration: data.duration || null,
+            ip: req.ip,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        await db.collection('analyticsEvents').add(event);
+        res.json({ ok: true });
+    }
+    catch (err) {
+        console.error('analytics_track error', err);
+        res.status(500).json({ error: 'internal' });
+    }
 });
 export const bookings_confirm = functions.https.onCall(async (data, context) => {
     if (!context.auth)
