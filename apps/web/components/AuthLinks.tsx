@@ -30,6 +30,15 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
   const [roles, setRoles] = useState<UserRoles>({});
   const [checked, setChecked] = useState(false);
   const authRef = useRef<Auth | null>(null);
+  const cookieAttributes = useMemo(() => {
+    const secureAttr =
+      typeof window !== 'undefined' && window.location.protocol === 'https:' ? '; Secure' : '';
+    const maxAge = 60 * 60 * 24 * 7; // 7 days
+    return {
+      persistent: `Path=/; Max-Age=${maxAge}; SameSite=Strict${secureAttr}`,
+      clear: `Path=/; Max-Age=0; SameSite=Strict${secureAttr}`,
+    };
+  }, []);
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -75,9 +84,11 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
               }
               setRoles(extracted);
               const token = await u.getIdToken();
-              document.cookie = `token=${token}; path=/`;
-              document.cookie = `uid=${u.uid}; path=/`;
-              document.cookie = `roles=${encodeURIComponent(encodeRolesCookie(extracted))}; path=/`;
+              document.cookie = `token=${encodeURIComponent(token)}; ${cookieAttributes.persistent}`;
+              document.cookie = `uid=${encodeURIComponent(u.uid)}; ${cookieAttributes.persistent}`;
+              document.cookie = `roles=${encodeURIComponent(
+                encodeRolesCookie(extracted)
+              )}; ${cookieAttributes.persistent}`;
             } catch (error) {
               console.error('Failed to derive user roles', error);
               setRoles({});
@@ -103,7 +114,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
         unsubscribe();
       }
     };
-  }, []);
+  }, [cookieAttributes]);
 
   const buttonSizeClass = SIZE_CLASSNAMES[size] ?? SIZE_CLASSNAMES.sm;
   const wrapperClass = useMemo(
@@ -127,7 +138,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
       console.error('Failed to sign out', error);
     } finally {
       ['token', 'uid', 'roles'].forEach((cookie) => {
-        document.cookie = `${cookie}=; path=/; max-age=0`;
+        document.cookie = `${cookie}=; ${cookieAttributes.clear}`;
       });
     }
   };
