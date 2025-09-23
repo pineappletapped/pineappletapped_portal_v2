@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { db } from '@/lib/firebase';
+import { ensureFirebase } from '@/lib/firebase';
 import {
   collection,
   getDocs,
@@ -35,31 +35,44 @@ export default function AdminFinancePage() {
       return;
     }
     (async () => {
-      const [contrSnap, clientSnap, expSnap, projSnap] = await Promise.all([
-        getDocs(collection(db, 'invoices')),
-        getDocs(collection(db, 'clientInvoices')),
-        getDocs(collection(db, 'expenses')),
-        getDocs(
-          query(
-            collection(db, 'projects'),
-            orderBy('createdAt', 'desc'),
-            limit(5)
-          )
-        ),
-      ]);
-      setContractorInvoices(
-        contrSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
-      );
-      setClientInvoices(clientSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      const exps = expSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setExpenses(exps);
-      setProjects(projSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      setLoading(false);
+      try {
+        const { db } = await ensureFirebase();
+        if (!db) {
+          throw new Error('Firestore is unavailable');
+        }
+        const [contrSnap, clientSnap, expSnap, projSnap] = await Promise.all([
+          getDocs(collection(db, 'invoices')),
+          getDocs(collection(db, 'clientInvoices')),
+          getDocs(collection(db, 'expenses')),
+          getDocs(
+            query(
+              collection(db, 'projects'),
+              orderBy('createdAt', 'desc'),
+              limit(5)
+            )
+          ),
+        ]);
+        setContractorInvoices(
+          contrSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        );
+        setClientInvoices(clientSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        const exps = expSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        setExpenses(exps);
+        setProjects(projSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      } catch (err) {
+        console.error('Failed to load finance data', err);
+      } finally {
+        setLoading(false);
+      }
     })();
   }, [allowed, guardLoading]);
 
   const updateInvoiceStatus = async (invoiceId: string, status: string) => {
     try {
+      const { db } = await ensureFirebase();
+      if (!db) {
+        throw new Error('Firestore is unavailable');
+      }
       await updateDoc(doc(db, 'invoices', invoiceId), { status });
       setContractorInvoices((prev) =>
         prev.map((inv) => (inv.id === invoiceId ? { ...inv, status } : inv))

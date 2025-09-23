@@ -29,10 +29,10 @@ const config = {
 
 // Defer all Firebase imports to the browser to avoid issues during SSR builds
 let app: any;
-let auth: any = { currentUser: null };
+let auth: any = null;
 let db: any = null;
-let storage: any = {};
-let functions: any = {};
+let storage: any = null;
+let functions: any = null;
 let httpsCallable: any;
 let sendSignInLinkToEmail: any;
 let isSignInWithEmailLink: any;
@@ -41,43 +41,62 @@ let signInWithEmailAndPassword: any;
 let createUserWithEmailAndPassword: any;
 let sendPasswordResetEmail: any;
 
-let initPromise: Promise<void> | null = null;
-async function initFirebase() {
+let coreInitPromise: Promise<void> | null = null;
+let browserInitPromise: Promise<void> | null = null;
+
+async function initCoreFirebase() {
   const appMod = await import('firebase/app');
   const firestoreMod = await import('firebase/firestore');
 
   app = appMod.getApps().length ? appMod.getApp() : appMod.initializeApp(config);
   db = firestoreMod.getFirestore(app);
+}
 
-  if (typeof window !== 'undefined') {
-    const authMod = await import('firebase/auth');
-    const functionsMod = await import('firebase/functions');
-    const storageMod = await import('firebase/storage');
+async function initBrowserFirebase() {
+  await initCoreFirebase();
 
-    auth = authMod.getAuth(app);
-    storage = storageMod.getStorage(app);
-    functions = functionsMod.getFunctions(app);
-    ({ httpsCallable } = functionsMod);
+  const authMod = await import('firebase/auth');
+  const functionsMod = await import('firebase/functions');
+  const storageMod = await import('firebase/storage');
 
-    ({
-      sendSignInLinkToEmail,
-      isSignInWithEmailLink,
-      signInWithEmailLink,
-      signInWithEmailAndPassword,
-      createUserWithEmailAndPassword,
-      sendPasswordResetEmail,
-    } = authMod);
-  }
+  auth = authMod.getAuth(app);
+  storage = storageMod.getStorage(app);
+  functions = functionsMod.getFunctions(app);
+  ({ httpsCallable } = functionsMod);
+
+  ({
+    sendSignInLinkToEmail,
+    isSignInWithEmailLink,
+    signInWithEmailLink,
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    sendPasswordResetEmail,
+  } = authMod);
 }
 
 async function ensureFirebase() {
-  if (!initPromise) {
-    initPromise = initFirebase().catch((error) => {
-      console.error('Failed to initialise Firebase', error);
+  if (!coreInitPromise) {
+    coreInitPromise = initCoreFirebase().catch((error) => {
+      console.error('Failed to initialise Firebase app', error);
+      coreInitPromise = null;
       throw error;
     });
   }
-  await initPromise;
+
+  await coreInitPromise;
+
+  if (typeof window !== 'undefined') {
+    if (!browserInitPromise) {
+      browserInitPromise = initBrowserFirebase().catch((error) => {
+        console.error('Failed to initialise browser Firebase services', error);
+        browserInitPromise = null;
+        throw error;
+      });
+    }
+
+    await browserInitPromise;
+  }
+
   return { app, auth, db, storage, functions };
 }
 
