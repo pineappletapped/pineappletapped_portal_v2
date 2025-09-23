@@ -17,14 +17,16 @@ type SortOption =
   | "price-asc"
   | "price-desc"
   | "name-asc"
-  | "newest";
+  | "date-desc"
+  | "date-asc";
 
 const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: "default", label: "Recommended" },
   { value: "price-asc", label: "Price: Low to High" },
   { value: "price-desc", label: "Price: High to Low" },
   { value: "name-asc", label: "Name: A to Z" },
-  { value: "newest", label: "Newest" },
+  { value: "date-desc", label: "Date: Newest First" },
+  { value: "date-asc", label: "Date: Oldest First" },
 ];
 
 function getStartingPrice(product: Product): number | null {
@@ -109,8 +111,11 @@ function sortProducts(products: Product[], sort: SortOption): Product[] {
         return nameA.localeCompare(nameB);
       });
       break;
-    case "newest":
+    case "date-desc":
       sorted.sort((a, b) => getComparableTimestamp(b) - getComparableTimestamp(a));
+      break;
+    case "date-asc":
+      sorted.sort((a, b) => getComparableTimestamp(a) - getComparableTimestamp(b));
       break;
   }
   return sorted;
