@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { ensureFirebase } from '@/lib/firebase';
+import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
 import { doc, getDoc } from 'firebase/firestore';
 import { extractUserRoles, hasRole, type RoleKey, type UserRoles } from '@/lib/roles';
 import type { User } from 'firebase/auth';
@@ -23,11 +23,19 @@ export function useRoleGate(required: RoleKey | RoleKey[]) {
           return;
         }
 
-        if (!auth || typeof auth.onAuthStateChanged !== 'function' || !db) {
+        if (!auth || !db) {
           throw new Error('Firebase auth or database is unavailable.');
         }
 
-        unsubscribe = auth.onAuthStateChanged(async (user: User | null) => {
+        const { onAuthStateChanged } = await loadAuthModule();
+        if (cancelled) {
+          return;
+        }
+        if (typeof onAuthStateChanged !== 'function') {
+          throw new Error('Firebase auth listener helper is unavailable.');
+        }
+
+        unsubscribe = onAuthStateChanged(auth, async (user: User | null) => {
           if (cancelled) {
             return;
           }

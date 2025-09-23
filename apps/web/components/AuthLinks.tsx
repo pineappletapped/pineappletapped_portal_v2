@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { signOut, type Auth, type User } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
-import { ensureFirebase } from '@/lib/firebase';
+import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
 import {
   ROLE_KEYS,
   encodeRolesCookie,
@@ -42,13 +42,21 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
           return;
         }
 
-        if (!auth || typeof auth.onAuthStateChanged !== 'function' || !db) {
+        if (!auth || !db) {
           throw new Error('Firebase auth or database is unavailable.');
         }
 
         authRef.current = auth;
 
-        unsubscribe = auth.onAuthStateChanged(async (u: User | null) => {
+        const { onAuthStateChanged } = await loadAuthModule();
+        if (cancelled) {
+          return;
+        }
+        if (typeof onAuthStateChanged !== 'function') {
+          throw new Error('Firebase auth listener helper is unavailable.');
+        }
+
+        unsubscribe = onAuthStateChanged(auth, async (u: User | null) => {
           if (cancelled) {
             return;
           }

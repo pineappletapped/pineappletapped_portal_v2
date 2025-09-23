@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ensureFirebase } from '@/lib/firebase';
+import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
 import { extractUserRoles, hasRole } from '@/lib/roles';
 import type { User } from 'firebase/auth';
 import type { Firestore } from 'firebase/firestore';
@@ -62,13 +62,21 @@ export default function AnalyticsClientPage() {
           return;
         }
 
-        if (!auth || typeof auth.onAuthStateChanged !== 'function' || !db) {
+        if (!auth || !db) {
           throw new Error('Firebase auth or database is unavailable.');
         }
 
         setFirestore(db);
 
-        unsubscribe = auth.onAuthStateChanged(async (user: User | null) => {
+        const { onAuthStateChanged } = await loadAuthModule();
+        if (cancelled) {
+          return;
+        }
+        if (typeof onAuthStateChanged !== 'function') {
+          throw new Error('Firebase auth listener helper is unavailable.');
+        }
+
+        unsubscribe = onAuthStateChanged(auth, async (user: User | null) => {
           if (cancelled) {
             return;
           }

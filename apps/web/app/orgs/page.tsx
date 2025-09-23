@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { ensureFirebase } from '@/lib/firebase';
+import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
 import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 
 /**
@@ -26,11 +26,19 @@ export default function OrgsPage() {
           return;
         }
 
-        if (!auth || typeof auth.onAuthStateChanged !== 'function' || !db) {
+        if (!auth || !db) {
           throw new Error('Firebase auth or database is unavailable.');
         }
 
-        unsubscribe = auth.onAuthStateChanged(async (user: any) => {
+        const { onAuthStateChanged } = await loadAuthModule();
+        if (cancelled) {
+          return;
+        }
+        if (typeof onAuthStateChanged !== 'function') {
+          throw new Error('Firebase auth listener helper is unavailable.');
+        }
+
+        unsubscribe = onAuthStateChanged(auth, async (user: any) => {
           if (cancelled) {
             return;
           }

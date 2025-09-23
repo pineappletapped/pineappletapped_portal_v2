@@ -41,6 +41,8 @@ let signInWithEmailAndPassword: any;
 let createUserWithEmailAndPassword: any;
 let sendPasswordResetEmail: any;
 
+let authModulePromise: Promise<typeof import('firebase/auth')> | null = null;
+
 let coreInitPromise: Promise<void> | null = null;
 let browserInitPromise: Promise<void> | null = null;
 
@@ -52,10 +54,22 @@ async function initCoreFirebase() {
   db = firestoreMod.getFirestore(app);
 }
 
+async function loadAuthModule() {
+  if (!authModulePromise) {
+    authModulePromise = import('firebase/auth').catch((error) => {
+      console.error('Failed to load firebase/auth module', error);
+      authModulePromise = null;
+      throw error;
+    });
+  }
+
+  return authModulePromise;
+}
+
 async function initBrowserFirebase() {
   await initCoreFirebase();
 
-  const authMod = await import('firebase/auth');
+  const authMod = await loadAuthModule();
   const functionsMod = await import('firebase/functions');
   const storageMod = await import('firebase/storage');
 
@@ -157,4 +171,5 @@ export {
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
   ensureFirebase,
+  loadAuthModule,
 };

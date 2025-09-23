@@ -1,7 +1,7 @@
 "use client";
 
 import { useCart } from "@/lib/cart";
-import { ensureFirebase } from "@/lib/firebase";
+import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import { VAT_RATE } from "@/lib/vat";
 import { httpsCallable, type Functions } from "firebase/functions";
 import { doc, getDoc } from "firebase/firestore";
@@ -121,14 +121,22 @@ export default function CheckoutPage() {
           return;
         }
 
-        if (!auth || typeof auth.onAuthStateChanged !== "function" || !db) {
+        if (!auth || !db) {
           throw new Error("Firebase auth or database is unavailable.");
         }
 
         authRef.current = auth;
         functionsRef.current = functions ?? null;
 
-        unsubscribe = auth.onAuthStateChanged(async (user: User | null) => {
+        const { onAuthStateChanged } = await loadAuthModule();
+        if (cancelled) {
+          return;
+        }
+        if (typeof onAuthStateChanged !== "function") {
+          throw new Error("Firebase auth listener helper is unavailable.");
+        }
+
+        unsubscribe = onAuthStateChanged(auth, async (user: User | null) => {
           if (cancelled) {
             return;
           }

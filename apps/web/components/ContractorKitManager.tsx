@@ -4,7 +4,7 @@ import Image from "next/image";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import type { Auth, User } from "firebase/auth";
 import type { Equipment, EquipmentStandard } from "@/lib/equipment";
-import { ensureFirebase } from "@/lib/firebase";
+import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import {
   collection,
   getDocs,
@@ -183,8 +183,8 @@ export default function ContractorKitManager() {
           return;
         }
 
-        if (!auth || typeof auth.onAuthStateChanged !== "function") {
-          markUnavailable("Firebase auth is unavailable or missing onAuthStateChanged");
+        if (!auth) {
+          markUnavailable("Firebase auth is unavailable.");
           return;
         }
 
@@ -200,7 +200,16 @@ export default function ContractorKitManager() {
         setFirestore(db);
         setStorageInstance(storage ?? null);
 
-        stopAuth = auth.onAuthStateChanged((user: User | null) => {
+        const { onAuthStateChanged } = await loadAuthModule();
+        if (cancelled) {
+          return;
+        }
+        if (typeof onAuthStateChanged !== "function") {
+          markUnavailable("Firebase auth listener helper is unavailable");
+          return;
+        }
+
+        stopAuth = onAuthStateChanged(auth, (user: User | null) => {
           unsubscribe?.();
           if (!user) {
             setItems([]);
