@@ -45,6 +45,30 @@ const ROLE_KEYS: RoleKey[] = ['admin', 'operations', 'finance', 'projects', 'sal
 const AUDIT_LOG_RETENTION_DAYS = 180;
 const AUDIT_LOG_BATCH_SIZE = 500;
 
+const GOD_ADMIN_UIDS = new Set<string>(['WK6WCuSueLN5M3Zq6D7WBbHyGPo1']);
+const GOD_ADMIN_EMAILS = new Set<string>([
+  'ryan@pineappletapped.com',
+  'ryanadmin@pineappletapped.com',
+]);
+
+type IdentityLike = {
+  uid?: string | null;
+  email?: string | null;
+};
+
+function isGodAdminIdentity(identity?: IdentityLike | null): boolean {
+  if (!identity) {
+    return false;
+  }
+  if (identity.uid && GOD_ADMIN_UIDS.has(identity.uid)) {
+    return true;
+  }
+  if (identity.email && GOD_ADMIN_EMAILS.has(identity.email.toLowerCase())) {
+    return true;
+  }
+  return false;
+}
+
 type AuditLogChanges = Record<string, { before: any; after: any }>;
 
 function serializeForAudit(value: any): any {
@@ -149,9 +173,17 @@ async function writeAuditLog(entry: {
   await db.collection('adminAuditLogs').add(payload);
 }
 
-function extractRoleSet(data: admin.firestore.DocumentData | undefined): Set<RoleKey> {
+function extractRoleSet(
+  data: admin.firestore.DocumentData | undefined,
+  identity?: IdentityLike | null,
+): Set<RoleKey> {
   const roles = new Set<RoleKey>();
-  if (!data) return roles;
+  if (!data) {
+    if (isGodAdminIdentity(identity)) {
+      roles.add('admin');
+    }
+    return roles;
+  }
   const rawRoles = (data as any)?.roles;
   if (Array.isArray(rawRoles)) {
     for (const value of rawRoles) {
@@ -167,6 +199,9 @@ function extractRoleSet(data: admin.firestore.DocumentData | undefined): Set<Rol
     }
   }
   if ((data as any)?.isStaff === true) {
+    roles.add('admin');
+  }
+  if (isGodAdminIdentity(identity)) {
     roles.add('admin');
   }
   return roles;
@@ -2623,11 +2658,18 @@ async function assertStaff(
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
   }
+  const identity: IdentityLike = {
+    uid: context.auth.uid,
+    email: typeof context.auth.token?.email === 'string' ? context.auth.token.email : null,
+  };
   const snap = await db.collection('users').doc(context.auth.uid).get();
   if (!snap.exists) {
+    if (isGodAdminIdentity(identity)) {
+      return new Set<RoleKey>(['admin']);
+    }
     throw new functions.https.HttpsError('permission-denied', 'Staff only');
   }
-  const roles = extractRoleSet(snap.data());
+  const roles = extractRoleSet(snap.data(), identity);
   if (!hasRequiredRole(roles, requiredRoles)) {
     throw new functions.https.HttpsError('permission-denied', 'Staff only');
   }
@@ -2647,12 +2689,19 @@ async function assertStaffRequest(
   try {
     const token = authHeader.split('Bearer ')[1];
     const decoded = await admin.auth().verifyIdToken(token);
+    const identity: IdentityLike = {
+      uid: decoded.uid,
+      email: typeof decoded.email === 'string' ? decoded.email : null,
+    };
     const snap = await db.collection('users').doc(decoded.uid).get();
     if (!snap.exists) {
+      if (isGodAdminIdentity(identity)) {
+        return { uid: decoded.uid, roles: new Set<RoleKey>(['admin']) };
+      }
       res.status(403).json({ error: 'Staff only' });
       return null;
     }
-    const roles = extractRoleSet(snap.data());
+    const roles = extractRoleSet(snap.data(), identity);
     if (!hasRequiredRole(roles, requiredRoles)) {
       res.status(403).json({ error: 'Staff only' });
       return null;

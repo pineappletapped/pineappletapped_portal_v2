@@ -35,6 +35,23 @@ const VAT_RATE = 0.2;
 const ROLE_KEYS = ['admin', 'operations', 'finance', 'projects', 'sales', 'marketing'];
 const AUDIT_LOG_RETENTION_DAYS = 180;
 const AUDIT_LOG_BATCH_SIZE = 500;
+const GOD_ADMIN_UIDS = new Set(['WK6WCuSueLN5M3Zq6D7WBbHyGPo1']);
+const GOD_ADMIN_EMAILS = new Set([
+    'ryan@pineappletapped.com',
+    'ryanadmin@pineappletapped.com',
+]);
+function isGodAdminIdentity(identity) {
+    if (!identity) {
+        return false;
+    }
+    if (identity.uid && GOD_ADMIN_UIDS.has(identity.uid)) {
+        return true;
+    }
+    if (identity.email && GOD_ADMIN_EMAILS.has(identity.email.toLowerCase())) {
+        return true;
+    }
+    return false;
+}
 function serializeForAudit(value) {
     if (value === undefined || value === null) {
         return null;
@@ -123,10 +140,14 @@ async function writeAuditLog(entry) {
     }
     await db.collection('adminAuditLogs').add(payload);
 }
-function extractRoleSet(data) {
+function extractRoleSet(data, identity) {
     const roles = new Set();
-    if (!data)
+    if (!data) {
+        if (isGodAdminIdentity(identity)) {
+            roles.add('admin');
+        }
         return roles;
+    }
     const rawRoles = data?.roles;
     if (Array.isArray(rawRoles)) {
         for (const value of rawRoles) {
@@ -143,6 +164,9 @@ function extractRoleSet(data) {
         }
     }
     if (data?.isStaff === true) {
+        roles.add('admin');
+    }
+    if (isGodAdminIdentity(identity)) {
         roles.add('admin');
     }
     return roles;
@@ -2504,11 +2528,18 @@ async function assertStaff(context, requiredRoles) {
     if (!context.auth) {
         throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
     }
+    const identity = {
+        uid: context.auth.uid,
+        email: typeof context.auth.token?.email === 'string' ? context.auth.token.email : null,
+    };
     const snap = await db.collection('users').doc(context.auth.uid).get();
     if (!snap.exists) {
+        if (isGodAdminIdentity(identity)) {
+            return new Set(['admin']);
+        }
         throw new functions.https.HttpsError('permission-denied', 'Staff only');
     }
-    const roles = extractRoleSet(snap.data());
+    const roles = extractRoleSet(snap.data(), identity);
     if (!hasRequiredRole(roles, requiredRoles)) {
         throw new functions.https.HttpsError('permission-denied', 'Staff only');
     }
@@ -2523,12 +2554,19 @@ async function assertStaffRequest(req, res, requiredRoles) {
     try {
         const token = authHeader.split('Bearer ')[1];
         const decoded = await admin.auth().verifyIdToken(token);
+        const identity = {
+            uid: decoded.uid,
+            email: typeof decoded.email === 'string' ? decoded.email : null,
+        };
         const snap = await db.collection('users').doc(decoded.uid).get();
         if (!snap.exists) {
+            if (isGodAdminIdentity(identity)) {
+                return { uid: decoded.uid, roles: new Set(['admin']) };
+            }
             res.status(403).json({ error: 'Staff only' });
             return null;
         }
-        const roles = extractRoleSet(snap.data());
+        const roles = extractRoleSet(snap.data(), identity);
         if (!hasRequiredRole(roles, requiredRoles)) {
             res.status(403).json({ error: 'Staff only' });
             return null;
