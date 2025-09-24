@@ -447,7 +447,34 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       <div className="card">
         <h2 className="font-semibold mb-2">Brand Guidelines</h2>
         {project.brandGuidelinesCompleted ? (
-          <p className="text-sm text-green-700">Completed</p>
+          <div className="grid gap-2 text-sm">
+            <p className="text-green-700">Completed</p>
+            {project.brandFontName ? (
+              <div className="flex flex-wrap items-center gap-2 text-gray-700">
+                <span className="font-medium text-gray-900">Font:</span>
+                <span>{project.brandFontName}</span>
+                {project.brandFontSource ? (
+                  <span className="text-xs uppercase tracking-wide text-gray-500">
+                    {project.brandFontSource}
+                  </span>
+                ) : null}
+                {project.brandFontDownloadUrl ? (
+                  <a
+                    href={project.brandFontDownloadUrl}
+                    className="text-orange-600 underline"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Download font
+                  </a>
+                ) : null}
+              </div>
+            ) : null}
+            {project.brandFontCategory ? (
+              <p className="text-xs text-gray-500">Category: {project.brandFontCategory}</p>
+            ) : null}
+            <Link href={`/projects/${project.id}/brand-wizard`} className="btn-sm w-fit">Update Guidelines</Link>
+          </div>
         ) : (
           <div className="grid gap-2">
             <p className="text-sm text-red-600">Not configured</p>
