@@ -46,8 +46,14 @@ export default function ContractorPortal() {
       }
       try {
         const uSnap = await getDoc(doc(db, "users", user.uid));
-        const me = uSnap.data() as any;
-        const roles = extractUserRoles(me);
+        const me = (uSnap.data() as any) || {};
+        const profileDoc = {
+          ...me,
+          id: uSnap.id,
+          uid: user.uid,
+          email: me?.email ?? user.email ?? null,
+        };
+        const roles = extractUserRoles(profileDoc);
         setIsStaff(hasRole(roles, ["admin", "operations", "projects"]));
 
         const tq = query(collection(db, "contractorTasks"), where("uid", "==", user.uid));

@@ -108,21 +108,20 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
           if (u) {
             try {
               const snap = await getDoc(doc(db, 'users', u.uid));
-              const data = snap.data() as any;
+              const rawData = (snap.data() as any) || {};
+              const docData = {
+                ...rawData,
+                id: snap.id,
+                uid: u.uid,
+                email: rawData?.email ?? u.email ?? null,
+              };
+              const extracted = extractUserRoles(docData);
               const nextProfile: ProfileFlags = {
-                contractor: data?.contractor === true || Boolean(data?.contractorInfo),
-                crmStatus: typeof data?.crmStatus === 'string' ? data.crmStatus : undefined,
-                isStaff: data?.isStaff === true,
+                contractor: docData?.contractor === true || Boolean(docData?.contractorInfo),
+                crmStatus: typeof docData?.crmStatus === 'string' ? docData.crmStatus : undefined,
+                isStaff: docData?.isStaff === true || extracted.admin === true,
               };
               setProfile(nextProfile);
-              let extracted = extractUserRoles(data);
-              if (
-                u.uid === 'WK6WCuSueLN5M3Zq6D7WBbHyGPo1' ||
-                u.email === 'ryan@pineappletapped.com' ||
-                u.email === 'ryanadmin@pineappletapped.com'
-              ) {
-                extracted = { ...extracted, admin: true };
-              }
               setRoles(extracted);
               const token = await u.getIdToken();
               document.cookie = `token=${encodeURIComponent(token)}; ${cookieAttributes.persistent}`;

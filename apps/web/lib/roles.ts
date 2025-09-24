@@ -8,6 +8,18 @@ export type RoleKey =
 
 export type UserRoles = Partial<Record<RoleKey, boolean>>;
 
+const GOD_ADMIN_UIDS = new Set<string>(['WK6WCuSueLN5M3Zq6D7WBbHyGPo1']);
+const GOD_ADMIN_EMAILS = new Set<string>([
+  'ryan@pineappletapped.com',
+  'ryanadmin@pineappletapped.com',
+]);
+
+type IdentityLike = {
+  id?: string | null | undefined;
+  uid?: string | null | undefined;
+  email?: string | null | undefined;
+};
+
 export interface RoleDefinition {
   key: RoleKey;
   label: string;
@@ -57,6 +69,33 @@ export const ROLE_LABELS: Record<RoleKey, string> = ROLE_DEFINITIONS.reduce(
 
 export const ROLE_KEYS = ROLE_DEFINITIONS.map((role) => role.key);
 
+export function isGodAdmin(identity?: IdentityLike | null): boolean {
+  if (!identity) {
+    return false;
+  }
+  const { id, uid, email } = identity;
+  if (uid && GOD_ADMIN_UIDS.has(uid)) {
+    return true;
+  }
+  if (id && GOD_ADMIN_UIDS.has(id)) {
+    return true;
+  }
+  if (email && GOD_ADMIN_EMAILS.has(email.toLowerCase())) {
+    return true;
+  }
+  return false;
+}
+
+export function applyGodAdminRoles(
+  roles: UserRoles,
+  identity?: IdentityLike | null
+): UserRoles {
+  if (!isGodAdmin(identity) || roles.admin) {
+    return roles;
+  }
+  return { ...roles, admin: true };
+}
+
 export function normalizeRoles(input: unknown): UserRoles {
   if (!input) {
     return {};
@@ -85,10 +124,8 @@ export function normalizeRoles(input: unknown): UserRoles {
 
 export function extractUserRoles(userDoc: any): UserRoles {
   const normalized = normalizeRoles(userDoc?.roles);
-  if (userDoc?.isStaff === true) {
-    return { ...normalized, admin: true };
-  }
-  return normalized;
+  const base = userDoc?.isStaff === true ? { ...normalized, admin: true } : normalized;
+  return applyGodAdminRoles(base, userDoc);
 }
 
 export function hasRole(
