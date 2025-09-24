@@ -5,11 +5,14 @@ import { useRouter } from "next/navigation";
 import { auth, db, storage } from "@/lib/firebase";
 import { collection, addDoc, getDocs, getDoc, doc } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import type { EquipmentStandard } from "@/lib/equipment";
 
 export default function NewEquipmentPage() {
   const router = useRouter();
   const [allowed, setAllowed] = useState<boolean | null>(null);
   const [users, setUsers] = useState<any[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [standards, setStandards] = useState<EquipmentStandard[]>([]);
   const [form, setForm] = useState({
     name: "",
     serialNumber: "",
@@ -26,6 +29,7 @@ export default function NewEquipmentPage() {
     damage: "",
     config: { username: "", password: "", ip: "", firmware: "", lastServiced: "" },
     available: true,
+    meetsStandards: [] as string[],
   });
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
@@ -40,14 +44,59 @@ export default function NewEquipmentPage() {
       setAllowed(!!ok);
       if (ok) {
         const uSnap = await getDocs(collection(db, "users"));
-        const list = uSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) })).filter(u => u.isStaff || u.contractor);
+        const list = uSnap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as any) }))
+          .filter((u) => u.isStaff || u.contractor);
         setUsers(list);
-      if (!me?.isStaff) {
-          setForm(f => ({ ...f, ownerId: user.uid }));
+        if (!me?.isStaff) {
+          setForm((f) => ({ ...f, ownerId: user.uid }));
+        }
+        try {
+          const [equipmentSnap, standardSnap] = await Promise.all([
+            getDocs(collection(db, "equipment")),
+            getDocs(collection(db, "equipmentStandards")),
+          ]);
+          const categorySet = new Set<string>();
+          equipmentSnap.docs.forEach((docSnap) => {
+            const rawCategory = (docSnap.data() as any)?.category;
+            if (typeof rawCategory === "string") {
+              const trimmed = rawCategory.trim();
+              if (trimmed) categorySet.add(trimmed);
+            }
+          });
+          setCategories(Array.from(categorySet).sort((a, b) => a.localeCompare(b)));
+          setStandards(
+            standardSnap.docs
+              .map(
+                (d) =>
+                  ({
+                    id: d.id,
+                    ...(d.data() as any),
+                  } as EquipmentStandard)
+              )
+              .sort((a, b) => (a.title || "").localeCompare(b.title || ""))
+          );
+        } catch (error) {
+          console.error("Failed to load equipment metadata", error);
         }
       }
     })();
   }, []);
+
+  const toggleStandard = (standardId: string) => {
+    setForm((prev) => {
+      const current = Array.isArray(prev.meetsStandards)
+        ? prev.meetsStandards
+        : [];
+      const exists = current.includes(standardId);
+      return {
+        ...prev,
+        meetsStandards: exists
+          ? current.filter((id) => id !== standardId)
+          : [...current, standardId],
+      };
+    });
+  };
 
   const submit = async () => {
     setLoading(true);
@@ -58,8 +107,20 @@ export default function NewEquipmentPage() {
         await uploadBytes(r, photoFile);
         photoUrl = await getDownloadURL(r);
       }
+      const category = form.category.trim();
+      const meetsStandards = Array.isArray(form.meetsStandards)
+        ? Array.from(
+            new Set(
+              form.meetsStandards
+                .map((id) => (typeof id === "string" ? id.trim() : ""))
+                .filter((id) => id.length > 0)
+            )
+          )
+        : [];
       const data: any = {
         ...form,
+        category,
+        meetsStandards,
         newValue: parseFloat(form.newValue) || 0,
         currentValue: parseFloat(form.currentValue) || 0,
         rentalPrice: parseFloat(form.rentalPrice) || 0,
@@ -84,7 +145,29 @@ export default function NewEquipmentPage() {
       <h1 className="text-xl font-semibold">Add Equipment</h1>
       <input className="input input-bordered" placeholder="Name" value={form.name} onChange={e=>setForm({...form,name:e.target.value})} />
       <input className="input input-bordered" placeholder="Serial Number" value={form.serialNumber} onChange={e=>setForm({...form,serialNumber:e.target.value})} />
-      <input className="input input-bordered" placeholder="Category" value={form.category} onChange={e=>setForm({...form,category:e.target.value})} />
+      <div className="grid gap-2">
+        <label className="text-sm font-medium" htmlFor="equipment-category">
+          Category
+        </label>
+        <input
+          id="equipment-category"
+          className="input input-bordered"
+          list="equipment-category-options"
+          placeholder="Select an existing category or enter a new one"
+          value={form.category}
+          onChange={(e) => setForm({ ...form, category: e.target.value })}
+        />
+        <datalist id="equipment-category-options">
+          {categories.map((category) => (
+            <option key={category} value={category} />
+          ))}
+        </datalist>
+        {categories.length === 0 && (
+          <p className="text-xs text-gray-500">
+            No categories yet — start typing to create one.
+          </p>
+        )}
+      </div>
       {users.length > 0 && (
         <select className="select select-bordered" value={form.ownerId} onChange={e=>setForm({...form,ownerId:e.target.value})} disabled={!users.some(u=>u.id===form.ownerId) && form.ownerId!=="company"}>
           <option value="company">Pineapple Tapped</option>
@@ -102,6 +185,43 @@ export default function NewEquipmentPage() {
       <input className="input input-bordered" placeholder="Manual / Instructions URL" value={form.manualUrl} onChange={e=>setForm({...form,manualUrl:e.target.value})} />
       <textarea className="textarea textarea-bordered" placeholder="Notes" value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} />
       <textarea className="textarea textarea-bordered" placeholder="Damage Notes" value={form.damage} onChange={e=>setForm({...form,damage:e.target.value})} />
+      <div className="grid gap-2">
+        <span className="text-sm font-medium">Equipment standards</span>
+        {standards.length === 0 ? (
+          <p className="text-xs text-gray-500">
+            No standards defined yet. Create standards in the equipment register to make them available here.
+          </p>
+        ) : (
+          <div className="max-h-48 overflow-y-auto rounded border p-3">
+            <ul className="grid gap-2">
+              {standards.map((standard) => {
+                if (!standard.id) return null;
+                const checked = form.meetsStandards.includes(standard.id);
+                return (
+                  <li key={standard.id}>
+                    <label className="flex items-start gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleStandard(standard.id!)}
+                      />
+                      <span>
+                        <span className="font-medium">{standard.title || "Untitled standard"}</span>
+                        {standard.minimumSpec && (
+                          <span className="block text-xs text-gray-500">{standard.minimumSpec}</span>
+                        )}
+                        {standard.description && (
+                          <span className="block text-xs text-gray-500">{standard.description}</span>
+                        )}
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+      </div>
       <label className="flex items-center gap-2"><input type="checkbox" checked={form.available} onChange={e=>setForm({...form,available:e.target.checked})} /> Available for rental</label>
       <input className="input input-bordered" placeholder="Config Username" value={form.config.username} onChange={e=>setForm({...form,config:{...form.config,username:e.target.value}})} />
       <input className="input input-bordered" placeholder="Config Password" value={form.config.password} onChange={e=>setForm({...form,config:{...form.config,password:e.target.value}})} />

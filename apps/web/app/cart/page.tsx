@@ -5,7 +5,7 @@ import { VAT_RATE } from "@/lib/vat";
 import { useRouter } from "next/navigation";
 
 export default function CartPage() {
-  const { items, remove } = useCart();
+  const { items, remove, updateQuantity } = useCart();
   const productTotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
   const rentalTotal = items.reduce(
     (sum, i) => sum + (i.rentalTotal || 0) * i.quantity,
@@ -28,38 +28,77 @@ export default function CartPage() {
         <p>Your cart is empty.</p>
       ) : (
         <div className="space-y-4">
-          {items.map((item, idx) => (
-            <div
-              key={idx}
-              className="flex items-center justify-between border p-2 rounded"
-            >
-              <div>
-                <p className="font-medium">{item.name}</p>
-                <p className="text-sm text-gray-600">
-                  {new Date(item.date).toLocaleDateString()}
-                </p>
-                {item.variation && (
-                  <p className="text-sm text-gray-600">{item.variation}</p>
-                )}
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="text-right">
-                  <span className="block">£{(item.price * item.quantity).toFixed(2)}</span>
-                  {item.rentalTotal && (
-                    <span className="block text-xs text-gray-600">
-                      £{(item.rentalTotal * item.quantity).toFixed(2)} rent
-                    </span>
+          {items.map((item, idx) => {
+            const decreaseLabel =
+              item.quantity === 1
+                ? `Remove ${item.name} from cart`
+                : `Decrease quantity of ${item.name}`;
+
+            return (
+              <div
+                key={idx}
+                className="flex flex-wrap items-center justify-between gap-4 rounded border p-4"
+              >
+                <div className="min-w-[12rem] flex-1">
+                  <p className="font-medium">{item.name}</p>
+                  <p className="text-sm text-gray-600">
+                    {new Date(item.date).toLocaleDateString()}
+                  </p>
+                  {item.variation && (
+                    <p className="text-sm text-gray-600">{item.variation}</p>
                   )}
                 </div>
-                <button
-                  className="text-sm text-red-600"
-                  onClick={() => remove(idx)}
-                >
-                  Remove
-                </button>
+                <div className="flex flex-wrap items-center gap-4">
+                  <div
+                    className="flex items-center gap-2"
+                    role="group"
+                    aria-label={`Quantity for ${item.name}`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => updateQuantity(idx, item.quantity - 1)}
+                      aria-label={decreaseLabel}
+                      className="flex h-8 w-8 items-center justify-center rounded border border-gray-300 text-lg leading-none text-gray-700 transition hover:border-gray-400 focus-visible:border-orange focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange"
+                    >
+                      <span aria-hidden="true">-</span>
+                    </button>
+                    <span
+                      className="min-w-[2ch] text-center text-sm font-medium"
+                      aria-live="polite"
+                    >
+                      {item.quantity}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => updateQuantity(idx, item.quantity + 1)}
+                      aria-label={`Increase quantity of ${item.name}`}
+                      className="flex h-8 w-8 items-center justify-center rounded border border-gray-300 text-lg leading-none text-gray-700 transition hover:border-gray-400 focus-visible:border-orange focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange"
+                    >
+                      <span aria-hidden="true">+</span>
+                    </button>
+                  </div>
+                  <div className="text-right">
+                    <span className="block">
+                      £{(item.price * item.quantity).toFixed(2)}
+                    </span>
+                    {item.rentalTotal && (
+                      <span className="block text-xs text-gray-600">
+                        £{(item.rentalTotal * item.quantity).toFixed(2)} rent
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="text-sm text-red-600 transition hover:text-red-700 focus-visible:underline"
+                    onClick={() => remove(idx)}
+                    aria-label={`Remove ${item.name} from cart`}
+                  >
+                    Remove
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
           <div className="flex justify-between font-semibold pt-4 border-t">
             <span>Subtotal</span>
             <span>£{productTotal.toFixed(2)}</span>

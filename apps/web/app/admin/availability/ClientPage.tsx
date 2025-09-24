@@ -2,8 +2,16 @@
 
 import { useEffect, useState } from "react";
 import AvailabilityCalendar, { AvailabilityStatus } from "@/components/AvailabilityCalendar";
-import { db } from "@/lib/firebase";
-import { doc, collection, query, where, getDocs, setDoc } from "firebase/firestore";
+import { ensureFirebase } from "@/lib/firebase";
+import {
+  doc,
+  collection,
+  query,
+  where,
+  getDocs,
+  setDoc,
+  type Firestore,
+} from "firebase/firestore";
 import { adminListUsers } from "@/lib/admin";
 import { useRoleGate } from "@/hooks/useRoleGate";
 
@@ -46,25 +54,65 @@ export default function AdminAvailabilityPage() {
   // load availability for selected member
   useEffect(() => {
     if (!allowed || !selected) return;
+
+    let cancelled = false;
+
     (async () => {
-      const q = query(collection(db, "availability"), where("uid", "==", selected));
-      const snap = await getDocs(q);
-      const map: Record<string, AvailabilityStatus> = {};
-      snap.docs.forEach((d) => {
-        const data = d.data() as any;
-        if (data.date && data.status) map[data.date] = data.status;
-      });
-      setAvailability(map);
+      try {
+        const { db } = await ensureFirebase();
+        if (!db || cancelled) {
+          return;
+        }
+
+        const q = query(collection(db, "availability"), where("uid", "==", selected));
+        const snap = await getDocs(q);
+        const map: Record<string, AvailabilityStatus> = {};
+        snap.docs.forEach((d) => {
+          const data = d.data() as any;
+          if (data.date && data.status) map[data.date] = data.status;
+        });
+        if (!cancelled) {
+          setAvailability(map);
+        }
+      } catch (error) {
+        console.error("Failed to load availability", error);
+      }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [allowed, selected]);
 
+  const resolveDb = async (): Promise<Firestore> => {
+    const { db } = await ensureFirebase();
+    if (!db) {
+      throw new Error("Firestore is unavailable");
+    }
+    return db;
+  };
+
   const updateDay = async (date: string, status: AvailabilityStatus) => {
-    setAvailability({ ...availability, [date]: status });
-    await setDoc(doc(db, "availability", `${selected}_${date}`), {
-      uid: selected,
-      date,
-      status,
-    });
+    const previous = availability[date];
+    setAvailability((current) => ({ ...current, [date]: status }));
+
+    try {
+      const db = await resolveDb();
+      await setDoc(doc(db, "availability", `${selected}_${date}`), {
+        uid: selected,
+        date,
+        status,
+      });
+    } catch (error) {
+      console.error("Failed to update availability", error);
+      setAvailability((current) => {
+        if (typeof previous === "undefined") {
+          const { [date]: _ignored, ...rest } = current;
+          return rest;
+        }
+        return { ...current, [date]: previous };
+      });
+    }
   };
 
   if (guardLoading || loadingMembers) return <p>Loading…</p>;

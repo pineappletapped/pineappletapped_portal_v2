@@ -27,13 +27,53 @@ const config = {
   measurementId,
 };
 
+const missingServiceError = (service: string) =>
+  new Error(
+    `Firebase ${service} has not been initialised yet. Ensure ensureFirebase() has resolved before accessing ${service}.`
+  );
+
+const noop = () => {};
+
+const createAuthPlaceholder = () => ({
+  __isPlaceholder: true,
+  currentUser: null,
+  onAuthStateChanged: () => noop,
+  signOut: undefined,
+});
+
+const createServicePlaceholder = (service: string) =>
+  new Proxy(
+    {},
+    {
+      get: (_target, key) => {
+        if (key === '__isPlaceholder') {
+          return true;
+        }
+        if (key === 'toString') {
+          return () => `[uninitialised Firebase ${service}]`;
+        }
+        if (typeof key === 'symbol' && key.toString() === 'Symbol.toStringTag') {
+          return `Firebase${service}Placeholder`;
+        }
+        throw missingServiceError(service);
+      },
+      apply: () => {
+        throw missingServiceError(service);
+      },
+    }
+  );
+
+const createHttpsCallablePlaceholder = () => () => {
+  throw missingServiceError('functions (httpsCallable)');
+};
+
 // Defer all Firebase imports to the browser to avoid issues during SSR builds
 let app: any;
-let auth: any = { currentUser: null };
+let auth: any = createAuthPlaceholder();
 let db: any = null;
-let storage: any = {};
-let functions: any = {};
-let httpsCallable: any;
+let storage: any = createServicePlaceholder('storage');
+let functions: any = createServicePlaceholder('functions');
+let httpsCallable: any = createHttpsCallablePlaceholder();
 let sendSignInLinkToEmail: any;
 let isSignInWithEmailLink: any;
 let signInWithEmailLink: any;
@@ -41,43 +81,81 @@ let signInWithEmailAndPassword: any;
 let createUserWithEmailAndPassword: any;
 let sendPasswordResetEmail: any;
 
-let initPromise: Promise<void> | null = null;
-async function initFirebase() {
+let authModulePromise: Promise<typeof import('firebase/auth')> | null = null;
+
+let coreInitPromise: Promise<void> | null = null;
+let browserInitPromise: Promise<void> | null = null;
+
+async function initCoreFirebase() {
   const appMod = await import('firebase/app');
   const firestoreMod = await import('firebase/firestore');
 
   app = appMod.getApps().length ? appMod.getApp() : appMod.initializeApp(config);
   db = firestoreMod.getFirestore(app);
-
-  if (typeof window !== 'undefined') {
-    const authMod = await import('firebase/auth');
-    const functionsMod = await import('firebase/functions');
-    const storageMod = await import('firebase/storage');
-
-    auth = authMod.getAuth(app);
-    storage = storageMod.getStorage(app);
-    functions = functionsMod.getFunctions(app);
-    ({ httpsCallable } = functionsMod);
-
-    ({
-      sendSignInLinkToEmail,
-      isSignInWithEmailLink,
-      signInWithEmailLink,
-      signInWithEmailAndPassword,
-      createUserWithEmailAndPassword,
-      sendPasswordResetEmail,
-    } = authMod);
-  }
 }
 
-async function ensureFirebase() {
-  if (!initPromise) {
-    initPromise = initFirebase().catch((error) => {
-      console.error('Failed to initialise Firebase', error);
+async function loadAuthModule() {
+  if (!authModulePromise) {
+    authModulePromise = import('firebase/auth').catch((error) => {
+      console.error('Failed to load firebase/auth module', error);
+      authModulePromise = null;
       throw error;
     });
   }
-  await initPromise;
+
+  return authModulePromise;
+}
+
+async function initBrowserFirebase() {
+  await initCoreFirebase();
+
+  const authMod = await loadAuthModule();
+  const functionsMod = await import('firebase/functions');
+  const storageMod = await import('firebase/storage');
+
+  auth = authMod.getAuth(app);
+  storage = storageMod.getStorage(app);
+  functions = functionsMod.getFunctions(app);
+  ({ httpsCallable } = functionsMod);
+
+  ({
+    sendSignInLinkToEmail,
+    isSignInWithEmailLink,
+    signInWithEmailLink,
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    sendPasswordResetEmail,
+  } = authMod);
+}
+
+async function ensureFirebase() {
+  if (!coreInitPromise) {
+    coreInitPromise = initCoreFirebase().catch((error) => {
+      console.error('Failed to initialise Firebase app', error);
+      db = null;
+      coreInitPromise = null;
+      throw error;
+    });
+  }
+
+  await coreInitPromise;
+
+  if (typeof window !== 'undefined') {
+    if (!browserInitPromise) {
+      browserInitPromise = initBrowserFirebase().catch((error) => {
+        console.error('Failed to initialise browser Firebase services', error);
+        auth = createAuthPlaceholder();
+        storage = createServicePlaceholder('storage');
+        functions = createServicePlaceholder('functions');
+        httpsCallable = createHttpsCallablePlaceholder();
+        browserInitPromise = null;
+        throw error;
+      });
+    }
+
+    await browserInitPromise;
+  }
+
   return { app, auth, db, storage, functions };
 }
 
@@ -138,4 +216,5 @@ export {
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
   ensureFirebase,
+  loadAuthModule,
 };

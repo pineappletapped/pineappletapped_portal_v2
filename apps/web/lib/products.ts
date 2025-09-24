@@ -108,6 +108,11 @@ export interface ProductVariation {
   features?: string[];
 }
 
+export interface ProductVideoLink {
+  url: string;
+  title?: string;
+}
+
 export interface ProductSEO {
   title?: string;
   description?: string;
@@ -144,7 +149,9 @@ export interface Product {
   modifierGroups?: string[];
   variations?: ProductVariation[];
   storyboardImages?: string[];
-  exampleWorkUrl?: string;
+  /** @deprecated replaced by exampleVideos */
+  exampleWorkUrl?: string | null;
+  exampleVideos?: ProductVideoLink[];
   category?: string;
   /** Optional date for time-limited products such as Exhibition Videography */
   eventDate?: string;
@@ -174,6 +181,16 @@ const sampleProducts: Product[] = [
     category: "video-production",
     storyboardImages: ["/placeholder.jpg"],
     exampleWorkUrl: "https://example.com/work1",
+    exampleVideos: [
+      {
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title: "Sample highlight reel",
+      },
+      {
+        url: "https://vimeo.com/123456789",
+        title: "Community spotlight teaser",
+      },
+    ],
   },
   {
     id: "LIVE_STREAM_BASIC",
@@ -184,6 +201,12 @@ const sampleProducts: Product[] = [
     category: "live-streaming",
     storyboardImages: ["/placeholder.jpg"],
     exampleWorkUrl: "https://example.com/work2",
+    exampleVideos: [
+      {
+        url: "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+        title: "Livestream capture demo",
+      },
+    ],
   },
 ];
 

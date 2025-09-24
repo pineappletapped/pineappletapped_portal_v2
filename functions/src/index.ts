@@ -1,6 +1,7 @@
 
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
+import { onRequest } from 'firebase-functions/v2/https';
 import Stripe from 'stripe';
 import sharp from 'sharp';
 import { v4 as uuidv4 } from 'uuid';
@@ -15,6 +16,12 @@ import fetch from 'node-fetch';
 import * as cors from 'cors';
 
 const corsHandler = cors.default({ origin: true });
+
+const ANALYTICS_ALLOWED_ORIGINS = [
+  'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
+  'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
+  'http://localhost:3000',
+];
 
 // TODO: wrap all http functions with the cors handler, for example:
 // exports.myFunction = functions.https.onRequest((req, res) => {
@@ -429,12 +436,13 @@ export const bookings_request = functions.https.onCall(async (data, context) => 
 });
 
 // Track page view analytics from the public site
-export const analytics_track = functions.https.onRequest((req, res) => {
-  corsHandler(req, res, async () => {
+export const analytics_track = onRequest(
+  { region: 'us-central1', cors: ANALYTICS_ALLOWED_ORIGINS },
+  async (req, res) => {
     try {
       let uid: string | null = null;
       let userName: string | null = null;
-      const authHeader = req.headers.authorization;
+      const authHeader = req.get('authorization');
       if (authHeader?.startsWith('Bearer ')) {
         try {
           const decoded = await admin
@@ -450,8 +458,22 @@ export const analytics_track = functions.https.onRequest((req, res) => {
           console.error('verifyIdToken failed', err);
         }
       }
-      const data = req.body || {};
-      const visitorId = data.visitorId || null;
+
+      const rawBody = req.body;
+      let data: Record<string, any> = {};
+      if (typeof rawBody === 'string') {
+        if (rawBody.trim()) {
+          try {
+            data = JSON.parse(rawBody);
+          } catch (err) {
+            console.error('analytics_track invalid JSON payload', err);
+          }
+        }
+      } else if (rawBody && typeof rawBody === 'object') {
+        data = rawBody as Record<string, any>;
+      }
+
+      const visitorId = data.visitorId ?? null;
       if (!uid && visitorId) {
         const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
         const mapData = mapSnap.data() as any;
@@ -461,7 +483,10 @@ export const analytics_track = functions.https.onRequest((req, res) => {
         }
       }
       if (visitorId && uid && userName) {
-        await db.collection('analyticsVisitors').doc(visitorId).set({ uid, userName }, { merge: true });
+        await db
+          .collection('analyticsVisitors')
+          .doc(visitorId)
+          .set({ uid, userName }, { merge: true });
       }
       const event = {
         uid,
@@ -480,8 +505,8 @@ export const analytics_track = functions.https.onRequest((req, res) => {
       console.error('analytics_track error', err);
       res.status(500).json({ error: 'internal' });
     }
-  });
-});
+  }
+);
 
 export const bookings_confirm = functions.https.onCall(async (data, context) => {
   if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'Sign in required');

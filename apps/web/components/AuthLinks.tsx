@@ -1,10 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
-import { auth, db } from '@/lib/firebase';
-import { onAuthStateChanged } from 'firebase/auth';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { signOut, type Auth, type User } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
+import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
 import {
   ROLE_KEYS,
   encodeRolesCookie,
@@ -14,36 +14,134 @@ import {
   UserRoles,
 } from '@/lib/roles';
 
-export default function AuthLinks() {
+type AuthLinksProps = {
+  size?: 'xs' | 'sm' | 'md';
+  className?: string;
+};
+
+const SIZE_CLASSNAMES: Record<Required<AuthLinksProps>['size'], string> = {
+  xs: 'btn-xs',
+  sm: 'btn-sm',
+  md: 'btn-md',
+};
+
+export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {}) {
   const [user, setUser] = useState<any>(null);
   const [roles, setRoles] = useState<UserRoles>({});
   const [checked, setChecked] = useState(false);
+  const authRef = useRef<Auth | null>(null);
+  const cookieAttributes = useMemo(() => {
+    const secureAttr =
+      typeof window !== 'undefined' && window.location.protocol === 'https:' ? '; Secure' : '';
+    const maxAge = 60 * 60 * 24 * 7; // 7 days
+    return {
+      persistent: `Path=/; Max-Age=${maxAge}; SameSite=Strict${secureAttr}`,
+      clear: `Path=/; Max-Age=0; SameSite=Strict${secureAttr}`,
+    };
+  }, []);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
-      setUser(u);
-      if (u) {
-        const snap = await getDoc(doc(db, 'users', u.uid));
-        let extracted = extractUserRoles(snap.data());
-        if (
-          u.uid === 'WK6WCuSueLN5M3Zq6D7WBbHyGPo1' ||
-          u.email === 'ryan@pineappletapped.com' ||
-          u.email === 'ryanadmin@pineappletapped.com'
-        ) {
-          extracted = { ...extracted, admin: true };
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { auth, db } = await ensureFirebase();
+        if (cancelled) {
+          return;
         }
-        setRoles(extracted);
-        const token = await u.getIdToken();
-        document.cookie = `token=${token}; path=/`;
-        document.cookie = `uid=${u.uid}; path=/`;
-        document.cookie = `roles=${encodeURIComponent(encodeRolesCookie(extracted))}; path=/`;
-      } else {
-        setRoles({});
+
+        if (!auth || !db) {
+          throw new Error('Firebase auth or database is unavailable.');
+        }
+
+        authRef.current = auth;
+
+        const { onAuthStateChanged } = await loadAuthModule();
+        if (cancelled) {
+          return;
+        }
+        if (typeof onAuthStateChanged !== 'function') {
+          throw new Error('Firebase auth listener helper is unavailable.');
+        }
+
+        unsubscribe = onAuthStateChanged(auth, async (u: User | null) => {
+          if (cancelled) {
+            return;
+          }
+
+          setUser(u);
+          if (u) {
+            try {
+              const snap = await getDoc(doc(db, 'users', u.uid));
+              let extracted = extractUserRoles(snap.data());
+              if (
+                u.uid === 'WK6WCuSueLN5M3Zq6D7WBbHyGPo1' ||
+                u.email === 'ryan@pineappletapped.com' ||
+                u.email === 'ryanadmin@pineappletapped.com'
+              ) {
+                extracted = { ...extracted, admin: true };
+              }
+              setRoles(extracted);
+              const token = await u.getIdToken();
+              document.cookie = `token=${encodeURIComponent(token)}; ${cookieAttributes.persistent}`;
+              document.cookie = `uid=${encodeURIComponent(u.uid)}; ${cookieAttributes.persistent}`;
+              document.cookie = `roles=${encodeURIComponent(
+                encodeRolesCookie(extracted)
+              )}; ${cookieAttributes.persistent}`;
+            } catch (error) {
+              console.error('Failed to derive user roles', error);
+              setRoles({});
+            }
+          } else {
+            setRoles({});
+          }
+          setChecked(true);
+        });
+      } catch (error) {
+        console.error('Failed to subscribe to auth changes', error);
+        if (!cancelled) {
+          setUser(null);
+          setRoles({});
+          setChecked(true);
+        }
       }
-      setChecked(true);
-    });
-    return () => unsub();
-  }, []);
+    })();
+
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
+  }, [cookieAttributes]);
+
+  const buttonSizeClass = SIZE_CLASSNAMES[size] ?? SIZE_CLASSNAMES.sm;
+  const wrapperClass = useMemo(
+    () => ['flex items-center gap-2', className].filter(Boolean).join(' '),
+    [className]
+  );
+
+  const handleSignOut = async () => {
+    let instance = authRef.current;
+    try {
+      if (!instance) {
+        const { auth } = await ensureFirebase();
+        instance = auth ?? null;
+        authRef.current = instance;
+      }
+      if (!instance) {
+        throw new Error('Firebase auth is unavailable.');
+      }
+      await signOut(instance);
+    } catch (error) {
+      console.error('Failed to sign out', error);
+    } finally {
+      ['token', 'uid', 'roles'].forEach((cookie) => {
+        document.cookie = `${cookie}=; ${cookieAttributes.clear}`;
+      });
+    }
+  };
 
   if (!checked) return null;
 
@@ -51,27 +149,40 @@ export default function AuthLinks() {
     const canAccessAdmin = hasRole(roles, ROLE_KEYS);
     const adminHref = getDefaultAdminRoute(roles);
     return (
-      <div className="flex items-center gap-2">
-        <Link href="/dashboard" className="btn btn-sm">
+      <div className={wrapperClass}>
+        <Link href="/dashboard" className={`btn ${buttonSizeClass}`}>
           Client Portal
         </Link>
         {canAccessAdmin && (
-          <>
-            <Link href={adminHref} className="btn btn-sm btn-outline">
-              Admin
-            </Link>
-            <Link href="/contractors" className="btn btn-sm btn-outline">
-              Contractor Portal
-            </Link>
-          </>
+          <Link href={adminHref} className={`btn ${buttonSizeClass} btn-outline`}>
+            Admin
+          </Link>
         )}
+        <Link href="/contractors" className={`btn ${buttonSizeClass} btn-outline`}>
+          Team Portal
+        </Link>
+        <button
+          type="button"
+          onClick={handleSignOut}
+          className={`btn ${buttonSizeClass} btn-ghost`}
+        >
+          Log out
+        </button>
       </div>
     );
   }
 
   return (
-    <Link href="/login" className="btn btn-sm">
-      Portal Login
-    </Link>
+    <div className={wrapperClass}>
+      <Link href="/admin" className={`btn ${buttonSizeClass} btn-outline`}>
+        Admin
+      </Link>
+      <Link href="/contractors" className={`btn ${buttonSizeClass} btn-outline`}>
+        Team Portal
+      </Link>
+      <Link href="/dashboard" className={`btn ${buttonSizeClass}`}>
+        Client Portal
+      </Link>
+    </div>
   );
 }

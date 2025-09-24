@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { adminListUsers } from '@/lib/admin';
-import { db, ensureFirebase } from '@/lib/firebase';
+import { ensureFirebase } from '@/lib/firebase';
 import { useRoleGate } from '@/hooks/useRoleGate';
 import { extractUserRoles, type UserRoles } from '@/lib/roles';
 import { collection, doc, getDocs, Timestamp, updateDoc } from 'firebase/firestore';
@@ -96,12 +96,19 @@ export default function AdminProjectsPage() {
     (async () => {
       if (guardLoading || !allowed) return;
       try {
+        const { db } = await ensureFirebase();
+        if (!db) {
+          throw new Error('Firestore is unavailable');
+        }
         const snap = await getDocs(collection(db, 'projects'));
         if (!active) return;
-        const items: ProjectRecord[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as ProjectRecord),
-        }));
+        const items: ProjectRecord[] = snap.docs.map((d) => {
+          const { id: _ignoredId, ...rest } = d.data() as ProjectRecord;
+          return {
+            ...rest,
+            id: d.id,
+          };
+        });
         setProjects(items);
       } catch (err) {
         console.error('Failed to load projects', err);
@@ -160,17 +167,29 @@ export default function AdminProjectsPage() {
     return new Map(staff.map((member) => [member.uid, member] as const));
   }, [staff]);
 
-  const updateProject = useCallback(async (id: string, updates: Record<string, any>) => {
-    try {
-      await updateDoc(doc(db, 'projects', id), updates);
-      setProjects((prev) =>
-        prev.map((project) => (project.id === id ? { ...project, ...updates } : project))
-      );
-    } catch (err) {
-      console.error('Failed to update project', err);
-      alert('Failed to update project. Please try again.');
+  const resolveDb = useCallback(async () => {
+    const { db } = await ensureFirebase();
+    if (!db) {
+      throw new Error('Firestore is unavailable');
     }
+    return db;
   }, []);
+
+  const updateProject = useCallback(
+    async (id: string, updates: Record<string, any>) => {
+      try {
+        const db = await resolveDb();
+        await updateDoc(doc(db, 'projects', id), updates);
+        setProjects((prev) =>
+          prev.map((project) => (project.id === id ? { ...project, ...updates } : project))
+        );
+      } catch (err) {
+        console.error('Failed to update project', err);
+        alert('Failed to update project. Please try again.');
+      }
+    },
+    [resolveDb]
+  );
 
   const updateStatus = useCallback(
     async (id: string, status: string) => {

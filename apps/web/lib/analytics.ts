@@ -7,6 +7,9 @@ const projectId =
     : 'ptfbportalbackend';
 const ANALYTICS_ENDPOINT = `https://us-central1-${projectId}.cloudfunctions.net/analytics_track`;
 
+let analyticsDisabled = false;
+let hasLoggedFailure = false;
+
 let visitorId: string | null = null;
 function getVisitorId() {
   if (visitorId) return visitorId;
@@ -20,10 +23,11 @@ function getVisitorId() {
 }
 
 export async function trackPageView(path: string, duration?: number) {
-  if (typeof window === 'undefined') return;
+  if (analyticsDisabled || typeof window === 'undefined') return;
+
   try {
     const token = auth?.currentUser ? await auth.currentUser.getIdToken() : null;
-    await fetch(ANALYTICS_ENDPOINT, {
+    const response = await fetch(ANALYTICS_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -37,8 +41,16 @@ export async function trackPageView(path: string, duration?: number) {
         duration: duration || 0,
       }),
     });
+
+    if (!response.ok) {
+      throw new Error(`Analytics request failed with status ${response.status}`);
+    }
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('trackPageView failed', err);
+    analyticsDisabled = true;
+    if (!hasLoggedFailure) {
+      hasLoggedFailure = true;
+      // eslint-disable-next-line no-console
+      console.warn('trackPageView disabled after error', err);
+    }
   }
 }

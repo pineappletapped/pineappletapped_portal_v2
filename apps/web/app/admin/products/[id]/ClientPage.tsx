@@ -22,8 +22,10 @@ import type {
   DeliverableType,
   ProductSEO,
   ProductVariation,
+  ProductVideoLink,
 } from "@/lib/products";
 import type { Venue } from "@/lib/venues";
+import type { KitBag, EquipmentStandard } from "@/lib/equipment";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -89,6 +91,33 @@ const deliverableIcons: Record<DeliverableType, IconType> = {
   document: FiFileText,
 };
 
+type KitGroup = {
+  groupId: string;
+  items: string[];
+  label?: string | null;
+  kitBagId?: string | null;
+};
+
+type ExampleVideoInput = {
+  id: string;
+  title: string;
+  url: string;
+};
+
+const createVideoInput = (defaults?: Partial<ExampleVideoInput>): ExampleVideoInput => {
+  const randomId =
+    typeof globalThis !== "undefined" &&
+    globalThis.crypto &&
+    typeof globalThis.crypto.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+  return {
+    id: randomId,
+    title: defaults?.title ?? "",
+    url: defaults?.url ?? "",
+  };
+};
+
 export default function EditProductPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -142,10 +171,14 @@ export default function EditProductPage() {
   const [taskTitle, setTaskTitle] = useState("");
   const [taskForCustomer, setTaskForCustomer] = useState(false);
   const [taskSubtasks, setTaskSubtasks] = useState("");
-  const [kitGroups, setKitGroups] = useState<{ groupId: string; items: string[] }[]>([]);
+  const [kitGroups, setKitGroups] = useState<KitGroup[]>([]);
   const [equipmentList, setEquipmentList] = useState<
-    { id: string; name: string; rentalPrice?: number; category?: string }
+    { id: string; name: string; rentalPrice?: number; category?: string }[]
   >([]);
+  const [kitBags, setKitBags] = useState<KitBag[]>([]);
+  const [standards, setStandards] = useState<EquipmentStandard[]>([]);
+  const [productStandards, setProductStandards] = useState<string[]>([]);
+  const [exampleVideos, setExampleVideos] = useState<ExampleVideoInput[]>([]);
   const [labourFilmingRate, setLabourFilmingRate] = useState("0");
   const [labourEditingRate, setLabourEditingRate] = useState("0");
   const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
@@ -167,6 +200,15 @@ export default function EditProductPage() {
   };
   const formatCurrency = (value: number) =>
     `£${(Number.isFinite(value) ? value : 0).toFixed(2)}`;
+
+  const toggleProductStandard = (standardId: string) => {
+    setProductStandards((prev) => {
+      const current = Array.isArray(prev) ? prev : [];
+      return current.includes(standardId)
+        ? current.filter((id) => id !== standardId)
+        : [...current, standardId];
+    });
+  };
 
   useEffect(() => {
     (async () => {
@@ -250,14 +292,100 @@ export default function EditProductPage() {
           setHidden(p.hidden || false);
           setTasks(p.defaultTasks || []);
           setWorkflowId((p as any).workflowId || "");
-          setKitGroups((p as any).requiredKit || []);
+          const requiredKit = Array.isArray((p as any).requiredKit)
+            ? (p as any).requiredKit
+            : [];
+          setKitGroups(
+            requiredKit.map((group: any): KitGroup => {
+              const rawGroupId = typeof group?.groupId === "string" ? group.groupId : "";
+              const items = Array.isArray(group?.items)
+                ? group.items.filter(
+                    (value: unknown): value is string => typeof value === "string"
+                  )
+                : [];
+              const kitBagId =
+                typeof group?.kitBagId === "string"
+                  ? group.kitBagId
+                  : rawGroupId.startsWith("kitBag:")
+                  ? rawGroupId.split(":")[1] || null
+                  : null;
+              const label =
+                typeof group?.label === "string"
+                  ? group.label
+                  : kitBagId
+                  ? group?.name || rawGroupId
+                  : rawGroupId;
+              return {
+                groupId: rawGroupId,
+                items,
+                label,
+                kitBagId,
+              };
+            })
+          );
+          const rawStandards = Array.isArray((p as any).requiredStandards)
+            ? (p as any).requiredStandards
+            : [];
+          const requiredStandards: string[] = Array.from(
+            new Set(
+              rawStandards
+                .map((value: unknown) =>
+                  typeof value === "string" ? value.trim() : ""
+                )
+                .filter((value: string) => value.length > 0)
+            )
+          );
+          setProductStandards(requiredStandards);
+          const rawVideos = Array.isArray((p as any).exampleVideos)
+            ? (p as any).exampleVideos
+            : [];
+          const normalisedVideos = rawVideos
+            .map((item: any): ExampleVideoInput | null => {
+              if (typeof item === "string") {
+                const url = item.trim();
+                if (!url) return null;
+                return createVideoInput({ url });
+              }
+              if (item && typeof item.url === "string") {
+                const url = item.url.trim();
+                if (!url) return null;
+                const title =
+                  typeof item.title === "string" ? item.title : "";
+                return createVideoInput({ url, title });
+              }
+              return null;
+            })
+            .filter(
+              (entry: ExampleVideoInput | null): entry is ExampleVideoInput =>
+                entry !== null
+            );
+          if (normalisedVideos.length === 0) {
+            const fallback =
+              typeof (p as any).exampleWorkUrl === "string"
+                ? (p as any).exampleWorkUrl.trim()
+                : "";
+            if (fallback) {
+              normalisedVideos.push(createVideoInput({ url: fallback }));
+            }
+          }
+          setExampleVideos(normalisedVideos);
         }
-        const [catSnap, modSnap, wfSnap, eqSnap, venueSnap] = await Promise.all([
+        const [
+          catSnap,
+          modSnap,
+          wfSnap,
+          eqSnap,
+          venueSnap,
+          bagSnap,
+          standardSnap,
+        ] = await Promise.all([
           getDocs(collection(db, "categories")),
           getDocs(collection(db, "modifiers")),
           getDocs(collection(db, "workflows")),
           getDocs(collection(db, "equipment")),
           getDocs(collection(db, "venues")),
+          getDocs(collection(db, "kitBags")),
+          getDocs(collection(db, "equipmentStandards")),
         ]);
         setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setAllModifiers(
@@ -277,6 +405,22 @@ export default function EditProductPage() {
               category: data.category || undefined,
             };
           })
+        );
+        setKitBags(
+          bagSnap.docs
+            .map((d) => ({ id: d.id, ...(d.data() as any) }))
+            .sort((a, b) => (a.name || "").localeCompare(b.name || "")) as KitBag[]
+        );
+        setStandards(
+          standardSnap.docs
+            .map(
+              (d) =>
+                ({
+                  id: d.id,
+                  ...(d.data() as any),
+                } as EquipmentStandard)
+            )
+            .sort((a, b) => (a.title || "").localeCompare(b.title || ""))
         );
         const venueList = venueSnap.docs
           .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
@@ -395,6 +539,26 @@ export default function EditProductPage() {
         optionId: m.optionId,
         ...(m.price ? { price: Number(m.price) } : {}),
       }));
+    const requiredStandards = Array.isArray(productStandards)
+      ? Array.from(
+          new Set(
+            productStandards
+              .map((id) => (typeof id === "string" ? id.trim() : ""))
+              .filter((id) => id.length > 0)
+          )
+        )
+      : [];
+    const videoData = exampleVideos
+      .map((video) => {
+        const url = video.url.trim();
+        if (!url) return null;
+        const entry: ProductVideoLink = { url };
+        const title = video.title.trim();
+        if (title) entry.title = title;
+        return entry;
+      })
+      .filter((entry): entry is ProductVideoLink => !!entry);
+    const primaryExampleVideo = videoData.length > 0 ? videoData[0].url : null;
     await updateDoc(doc(db, "products", id), {
       name,
       description,
@@ -420,6 +584,8 @@ export default function EditProductPage() {
       deliveryTime: deliveryOptions[deliveryIndex],
       deliverables: deliverableData,
       variations: variationData,
+      exampleVideos: videoData,
+      exampleWorkUrl: primaryExampleVideo,
       modifierGroups: enabledGroups,
       modifiers: modifierData,
       category: category || null,
@@ -428,6 +594,7 @@ export default function EditProductPage() {
       venueId: venueId || null,
       hidden,
       requiredKit: kitGroups,
+      requiredStandards,
       defaultTasks: tasks,
       seo: {
         title: seo.title || null,
@@ -436,11 +603,73 @@ export default function EditProductPage() {
         socialImageUrl: seoImage || null,
       },
     });
+    const attachedBagIds = new Set(
+      kitGroups
+        .map((group) => group.kitBagId)
+        .filter((value): value is string => typeof value === "string")
+    );
+    const bagAssignmentUpdates: Record<string, string[]> = {};
+    await Promise.all(
+      kitBags
+        .filter((bag): bag is KitBag & { id: string } => typeof bag.id === "string" && bag.id.length > 0)
+        .map(async (bag) => {
+          const currentAssignments = Array.isArray(bag.assignedProductIds)
+            ? bag.assignedProductIds.filter(
+                (value: unknown): value is string => typeof value === "string"
+              )
+            : [];
+          const shouldHave = attachedBagIds.has(bag.id);
+          const alreadyHas = currentAssignments.includes(id);
+          if (shouldHave && !alreadyHas) {
+            const nextAssignments = [...currentAssignments, id];
+            bagAssignmentUpdates[bag.id] = nextAssignments;
+            await updateDoc(doc(db, "kitBags", bag.id), {
+              assignedProductIds: nextAssignments,
+              updatedAt: new Date(),
+            });
+          } else if (!shouldHave && alreadyHas) {
+            const nextAssignments = currentAssignments.filter(
+              (productId) => productId !== id
+            );
+            bagAssignmentUpdates[bag.id] = nextAssignments;
+            await updateDoc(doc(db, "kitBags", bag.id), {
+              assignedProductIds: nextAssignments,
+              updatedAt: new Date(),
+            });
+          }
+        })
+    );
+    if (Object.keys(bagAssignmentUpdates).length) {
+      setKitBags((prev) =>
+        prev.map((bag) =>
+          bag.id && bagAssignmentUpdates[bag.id]
+            ? { ...bag, assignedProductIds: bagAssignmentUpdates[bag.id] }
+            : bag
+        )
+      );
+    }
     if (workflowId) {
       const fn = httpsCallable(functions, "admin_assignWorkflow");
       await fn({ productId: id, workflowId });
     }
     router.push("/admin/products");
+  };
+
+  const addExampleVideo = () => {
+    setExampleVideos((prev) => [...prev, createVideoInput()]);
+  };
+
+  const updateExampleVideo = (
+    index: number,
+    patch: Partial<ExampleVideoInput>
+  ) => {
+    setExampleVideos((prev) =>
+      prev.map((video, i) => (i === index ? { ...video, ...patch } : video))
+    );
+  };
+
+  const removeExampleVideo = (index: number) => {
+    setExampleVideos((prev) => prev.filter((_, i) => i !== index));
   };
 
   const addDeliverable = () => {
@@ -562,13 +791,21 @@ export default function EditProductPage() {
 
   const addKitGroup = () =>
     setKitGroups((g) => {
-      const next = [...g, { groupId: "", items: [] }];
+      const next = [...g, { groupId: "", items: [], label: "" }];
       setActiveKitGroup(next.length - 1);
       return next;
     });
   const updateKitGroupId = (index: number, groupId: string) =>
     setKitGroups((prev) =>
-      prev.map((g, i) => (i === index ? { ...g, groupId } : g))
+      prev.map((g, i) =>
+        i === index
+          ? {
+              ...g,
+              groupId,
+              ...(g.kitBagId ? {} : { label: groupId }),
+            }
+          : g
+      )
     );
   const addEquipmentToGroup = (index: number, eqId: string) =>
     setKitGroups((prev) =>
@@ -592,6 +829,53 @@ export default function EditProductPage() {
       if (prev > index) return prev - 1;
       return prev;
     });
+  };
+
+  const applyKitBag = (bag: KitBag) => {
+    if (!bag?.id) return;
+    const uniqueItems = Array.isArray(bag.itemIds)
+      ? Array.from(
+          new Set(
+            bag.itemIds.filter(
+              (value: unknown): value is string => typeof value === "string"
+            )
+          )
+        )
+      : [];
+    if (uniqueItems.length === 0) return;
+    let nextActive: number | null = null;
+    setKitGroups((prev) => {
+      const existingIndex = prev.findIndex((group) => group.kitBagId === bag.id);
+      if (existingIndex >= 0) {
+        nextActive = existingIndex;
+        return prev.map((group, idx) =>
+          idx === existingIndex
+            ? {
+                ...group,
+                items: uniqueItems,
+                label: bag.name || group.label || group.groupId,
+                kitBagId: bag.id,
+                groupId: group.groupId || `kitBag:${bag.id}`,
+              }
+            : group
+        );
+      }
+      const groupId = `kitBag:${bag.id}`;
+      const next = [
+        ...prev,
+        {
+          groupId,
+          items: uniqueItems,
+          label: bag.name || groupId,
+          kitBagId: bag.id,
+        },
+      ];
+      nextActive = next.length - 1;
+      return next;
+    });
+    if (nextActive !== null) {
+      setActiveKitGroup(nextActive);
+    }
   };
 
   const removeProduct = async () => {
@@ -632,6 +916,17 @@ export default function EditProductPage() {
     }
     return Array.from(missing);
   }, [kitGroups, equipmentLookup]);
+  const selectedStandardNames = useMemo(() => {
+    const lookup = new Map<string, string>();
+    standards.forEach((standard) => {
+      if (standard.id) {
+        lookup.set(standard.id, standard.title || standard.id);
+      }
+    });
+    return (Array.isArray(productStandards) ? productStandards : [])
+      .map((id) => lookup.get(id) || id)
+      .filter((name, index, array) => array.indexOf(name) === index);
+  }, [productStandards, standards]);
   const labourFilmingValue = parseMoney(labourFilmingRate);
   const labourEditingValue = parseMoney(labourEditingRate);
   const labourValue = labourFilmingValue + labourEditingValue;
@@ -704,6 +999,88 @@ export default function EditProductPage() {
               className="h-auto w-32 object-cover"
             />
           )}
+          <div className="rounded border bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-sm font-medium">Example videos</p>
+                <p className="text-xs text-gray-600">
+                  Add YouTube or Vimeo links to showcase previous work on the
+                  storefront.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-xs"
+                onClick={addExampleVideo}
+              >
+                Add video
+              </button>
+            </div>
+            <div className="mt-3 grid gap-3">
+              {exampleVideos.length === 0 && (
+                <p className="text-xs text-gray-500">
+                  No example videos added yet.
+                </p>
+              )}
+              {exampleVideos.map((video, index) => {
+                const titleId = `example-video-title-${index}`;
+                const urlId = `example-video-url-${index}`;
+                return (
+                  <div
+                    key={video.id}
+                    className="grid gap-2 rounded border bg-white p-3"
+                  >
+                    <div className="flex items-center justify-between text-sm font-medium">
+                      <span>Video {index + 1}</span>
+                      <button
+                        type="button"
+                        className="btn btn-xs btn-ghost"
+                        onClick={() => removeExampleVideo(index)}
+                        aria-label={`Remove video ${index + 1}`}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <label
+                      className="text-xs font-medium text-gray-600"
+                      htmlFor={titleId}
+                    >
+                      Title (optional)
+                    </label>
+                    <input
+                      id={titleId}
+                      className="input"
+                      placeholder="Behind the scenes highlight"
+                      value={video.title}
+                      onChange={(e) =>
+                        updateExampleVideo(index, { title: e.target.value })
+                      }
+                    />
+                    <label
+                      className="text-xs font-medium text-gray-600"
+                      htmlFor={urlId}
+                    >
+                      Video URL
+                    </label>
+                    <input
+                      id={urlId}
+                      type="url"
+                      className="input"
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      value={video.url}
+                      onChange={(e) =>
+                        updateExampleVideo(index, { url: e.target.value })
+                      }
+                    />
+                    <p className="text-xs text-gray-500">
+                      Only public links are embedded. The first video appears
+                      first on the product page.
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
           <label className="text-sm font-medium">Category</label>
           <select className="input" value={category} onChange={(e) => setCategory(e.target.value)}>
             <option value="">None</option>
@@ -1132,7 +1509,11 @@ export default function EditProductPage() {
               />
               {kitGroups.length > 0 && activeKitGroup !== null && (
                 <div className="rounded border px-3 py-2 text-sm text-gray-600">
-                  Adding to: {kitGroups[activeKitGroup].groupId || `Group ${activeKitGroup + 1}`}
+                  Adding to: {
+                    kitGroups[activeKitGroup].label ||
+                    kitGroups[activeKitGroup].groupId ||
+                    `Group ${activeKitGroup + 1}`
+                  }
                 </div>
               )}
             </div>
@@ -1180,9 +1561,104 @@ export default function EditProductPage() {
               <span className="text-sm text-gray-600">Create a group to start assigning kit.</span>
             )}
           </div>
+          <div className="grid gap-2">
+            <h3 className="font-medium">Required equipment standards</h3>
+            <p className="text-xs text-gray-500">
+              Select the standards a crew must meet before they can pick up this product in the portal.
+            </p>
+            {standards.length === 0 ? (
+              <p className="text-xs text-gray-500">
+                No standards defined yet. Create standards in the equipment register to make them available here.
+              </p>
+            ) : (
+              <div className="max-h-48 overflow-y-auto rounded border p-3">
+                <ul className="grid gap-2">
+                  {standards.map((standard) => {
+                    if (!standard.id) return null;
+                    const checked = productStandards.includes(standard.id);
+                    return (
+                      <li key={standard.id}>
+                        <label className="flex items-start gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleProductStandard(standard.id!)}
+                          />
+                          <span>
+                            <span className="font-medium">{standard.title || "Untitled standard"}</span>
+                            {standard.minimumSpec && (
+                              <span className="block text-xs text-gray-500">{standard.minimumSpec}</span>
+                            )}
+                            {standard.description && (
+                              <span className="block text-xs text-gray-500">{standard.description}</span>
+                            )}
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+            {selectedStandardNames.length > 0 && (
+              <p className="text-xs text-gray-500">
+                Selected: {selectedStandardNames.join(", ")}
+              </p>
+            )}
+          </div>
+          {kitBags.length > 0 && (
+            <div className="grid gap-2">
+              <h3 className="font-medium">Kit bag shortcuts</h3>
+              <p className="text-xs text-gray-500">
+                Attach a predefined kit bag to this product or refresh it after
+                updating the bag in the equipment register.
+              </p>
+              <div className="grid gap-3 md:grid-cols-2">
+                {kitBags.map((bag) => {
+                  const attachedIndex = kitGroups.findIndex(
+                    (group) => group.kitBagId === bag.id
+                  );
+                  const itemCount = Array.isArray(bag.itemIds)
+                    ? bag.itemIds.length
+                    : 0;
+                  return (
+                    <div key={bag.id} className="rounded border p-3 space-y-2">
+                      <div>
+                        <p className="font-medium">{bag.name}</p>
+                        {bag.description && (
+                          <p className="text-xs text-gray-500">{bag.description}</p>
+                        )}
+                        <p className="text-xs text-gray-500">
+                          {itemCount} item{itemCount === 1 ? "" : "s"}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="btn btn-xs"
+                          onClick={() => applyKitBag(bag)}
+                        >
+                          {attachedIndex >= 0 ? "Refresh bag" : "Attach bag"}
+                        </button>
+                        {attachedIndex >= 0 && (
+                          <button
+                            type="button"
+                            className="btn btn-outline btn-xs"
+                            onClick={() => removeKitGroup(attachedIndex)}
+                          >
+                            Detach
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {kitGroups.map((g, i) => (
             <div
-              key={`${g.groupId || "group"}-${i}`}
+              key={g.kitBagId ? `bag-${g.kitBagId}` : `group-${i}-${g.groupId}`}
               className={`border p-4 rounded grid gap-3 ${
                 activeKitGroup === i ? "border-black" : "border-gray-200"
               }`}
@@ -1194,12 +1670,27 @@ export default function EditProductPage() {
               }}
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <input
-                  className="input flex-1"
-                  placeholder="Group label (e.g. Camera Ops)"
-                  value={g.groupId}
-                  onChange={(e) => updateKitGroupId(i, e.target.value)}
-                />
+                {g.kitBagId ? (
+                  <div className="flex flex-1 flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{g.label || g.groupId}</span>
+                      <span className="inline-flex items-center rounded bg-orange-100 px-2 py-0.5 text-xs text-orange-700">
+                        Kit bag
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      Linked to kit bag {g.kitBagId}. Update its contents from the
+                      equipment register.
+                    </p>
+                  </div>
+                ) : (
+                  <input
+                    className="input flex-1"
+                    placeholder="Group label (e.g. Camera Ops)"
+                    value={g.groupId}
+                    onChange={(e) => updateKitGroupId(i, e.target.value)}
+                  />
+                )}
                 <button
                   type="button"
                   className={`btn btn-xs ${
@@ -1239,7 +1730,7 @@ export default function EditProductPage() {
                 className="text-sm text-red-600 w-fit"
                 onClick={() => removeKitGroup(i)}
               >
-                Remove Group
+                {g.kitBagId ? "Detach kit bag" : "Remove Group"}
               </button>
             </div>
           ))}
