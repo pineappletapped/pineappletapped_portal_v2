@@ -2,7 +2,7 @@
 
 import { Product, DeliverableType } from "@/lib/products";
 import type { Venue } from "@/lib/venues";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import ProductFeatureCard from "./ProductFeatureCard";
@@ -19,6 +19,8 @@ import {
   FiImage,
   FiMusic,
   FiFileText,
+  FiPlay,
+  FiExternalLink,
 } from "react-icons/fi";
 
 const deliverableIcons: Record<DeliverableType, IconType> = {
@@ -44,6 +46,62 @@ export default function ProductDetail({
   const [basePrice, setBasePrice] = useState(product.price);
   const [variation, setVariation] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
+
+  const exampleVideos = useMemo(() => {
+    const rawVideos = Array.isArray(product.exampleVideos)
+      ? product.exampleVideos
+      : [];
+    const normalised = rawVideos
+      .map((video: any) => {
+        if (typeof video === "string") {
+          const url = video.trim();
+          if (!url) return null;
+          return { url, title: "" };
+        }
+        if (video && typeof video.url === "string") {
+          const url = video.url.trim();
+          if (!url) return null;
+          const title =
+            typeof video.title === "string" ? video.title.trim() : "";
+          return { url, title };
+        }
+        return null;
+      })
+      .filter((entry): entry is { url: string; title: string } => !!entry);
+    if (normalised.length === 0) {
+      const fallback =
+        typeof product.exampleWorkUrl === "string"
+          ? product.exampleWorkUrl.trim()
+          : "";
+      if (fallback) {
+        normalised.push({ url: fallback, title: "" });
+      }
+    }
+    return normalised;
+  }, [product.exampleVideos, product.exampleWorkUrl]);
+
+  const resolveYouTubeEmbed = (input: string) => {
+    try {
+      const url = new URL(input);
+      const host = url.hostname.replace(/^www\./, "");
+      let id = "";
+      if (host === "youtu.be") {
+        id = url.pathname.split("/").filter(Boolean)[0] || "";
+      } else if (host.endsWith("youtube.com")) {
+        if (url.searchParams.get("v")) {
+          id = url.searchParams.get("v") || "";
+        } else if (url.pathname.startsWith("/shorts/")) {
+          id = url.pathname.replace("/shorts/", "").split("/")[0] || "";
+        } else if (url.pathname.startsWith("/embed/")) {
+          id = url.pathname.replace("/embed/", "").split("/")[0] || "";
+        }
+      }
+      if (!id) return null;
+      return `https://www.youtube-nocookie.com/embed/${id}?rel=0`;
+    } catch {
+      return null;
+    }
+  };
 
   const handleVariation = (id: string) => {
     const v = product.variations?.find((va) => va.id === id);
@@ -267,17 +325,52 @@ export default function ProductDetail({
         </section>
       )}
 
-      {product.exampleWorkUrl && (
+      {exampleVideos.length > 0 && (
         <section>
-          <h2 className="text-xl font-semibold mb-2">Example Work</h2>
-          <a
-            href={product.exampleWorkUrl}
-            className="text-orange underline"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            View example
-          </a>
+          <h2 className="text-xl font-semibold mb-2">Example Videos</h2>
+          <div className="grid gap-6 md:grid-cols-2">
+            {exampleVideos.map((video, index) => {
+              const embedUrl = resolveYouTubeEmbed(video.url);
+              const label = video.title || `Example video ${index + 1}`;
+              return (
+                <div
+                  key={`${video.url}-${index}`}
+                  className="space-y-3 rounded-lg border bg-white p-3 shadow-sm"
+                >
+                  <div className="aspect-video w-full overflow-hidden rounded-md bg-black">
+                    {embedUrl ? (
+                      <iframe
+                        src={embedUrl}
+                        title={label}
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                        allowFullScreen
+                        loading="lazy"
+                        className="h-full w-full border-0"
+                        referrerPolicy="no-referrer-when-downgrade"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-br from-slate-900 via-gray-800 to-slate-700 p-6 text-center text-sm text-white/90">
+                        <FiPlay className="h-8 w-8" />
+                        <p>Preview not available. Open the link below to watch.</p>
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <p className="font-medium text-gray-900">{label}</p>
+                    <a
+                      href={video.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-sm font-medium text-orange hover:text-orange/80"
+                    >
+                      <FiExternalLink className="h-4 w-4" aria-hidden />
+                      Watch in new tab
+                    </a>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </section>
       )}
 

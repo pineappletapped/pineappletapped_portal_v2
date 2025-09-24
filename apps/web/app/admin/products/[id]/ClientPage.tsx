@@ -22,6 +22,7 @@ import type {
   DeliverableType,
   ProductSEO,
   ProductVariation,
+  ProductVideoLink,
 } from "@/lib/products";
 import type { Venue } from "@/lib/venues";
 import type { KitBag, EquipmentStandard } from "@/lib/equipment";
@@ -97,6 +98,26 @@ type KitGroup = {
   kitBagId?: string | null;
 };
 
+type ExampleVideoInput = {
+  id: string;
+  title: string;
+  url: string;
+};
+
+const createVideoInput = (defaults?: Partial<ExampleVideoInput>): ExampleVideoInput => {
+  const randomId =
+    typeof globalThis !== "undefined" &&
+    globalThis.crypto &&
+    typeof globalThis.crypto.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+  return {
+    id: randomId,
+    title: defaults?.title ?? "",
+    url: defaults?.url ?? "",
+  };
+};
+
 export default function EditProductPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -157,6 +178,7 @@ export default function EditProductPage() {
   const [kitBags, setKitBags] = useState<KitBag[]>([]);
   const [standards, setStandards] = useState<EquipmentStandard[]>([]);
   const [productStandards, setProductStandards] = useState<string[]>([]);
+  const [exampleVideos, setExampleVideos] = useState<ExampleVideoInput[]>([]);
   const [labourFilmingRate, setLabourFilmingRate] = useState("0");
   const [labourEditingRate, setLabourEditingRate] = useState("0");
   const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
@@ -314,6 +336,39 @@ export default function EditProductPage() {
             )
           );
           setProductStandards(requiredStandards);
+          const rawVideos = Array.isArray((p as any).exampleVideos)
+            ? (p as any).exampleVideos
+            : [];
+          const normalisedVideos = rawVideos
+            .map((item: any): ExampleVideoInput | null => {
+              if (typeof item === "string") {
+                const url = item.trim();
+                if (!url) return null;
+                return createVideoInput({ url });
+              }
+              if (item && typeof item.url === "string") {
+                const url = item.url.trim();
+                if (!url) return null;
+                const title =
+                  typeof item.title === "string" ? item.title : "";
+                return createVideoInput({ url, title });
+              }
+              return null;
+            })
+            .filter(
+              (entry: ExampleVideoInput | null): entry is ExampleVideoInput =>
+                entry !== null
+            );
+          if (normalisedVideos.length === 0) {
+            const fallback =
+              typeof (p as any).exampleWorkUrl === "string"
+                ? (p as any).exampleWorkUrl.trim()
+                : "";
+            if (fallback) {
+              normalisedVideos.push(createVideoInput({ url: fallback }));
+            }
+          }
+          setExampleVideos(normalisedVideos);
         }
         const [
           catSnap,
@@ -493,6 +548,17 @@ export default function EditProductPage() {
           )
         )
       : [];
+    const videoData = exampleVideos
+      .map((video) => {
+        const url = video.url.trim();
+        if (!url) return null;
+        const entry: ProductVideoLink = { url };
+        const title = video.title.trim();
+        if (title) entry.title = title;
+        return entry;
+      })
+      .filter((entry): entry is ProductVideoLink => !!entry);
+    const primaryExampleVideo = videoData.length > 0 ? videoData[0].url : null;
     await updateDoc(doc(db, "products", id), {
       name,
       description,
@@ -518,6 +584,8 @@ export default function EditProductPage() {
       deliveryTime: deliveryOptions[deliveryIndex],
       deliverables: deliverableData,
       variations: variationData,
+      exampleVideos: videoData,
+      exampleWorkUrl: primaryExampleVideo,
       modifierGroups: enabledGroups,
       modifiers: modifierData,
       category: category || null,
@@ -585,6 +653,23 @@ export default function EditProductPage() {
       await fn({ productId: id, workflowId });
     }
     router.push("/admin/products");
+  };
+
+  const addExampleVideo = () => {
+    setExampleVideos((prev) => [...prev, createVideoInput()]);
+  };
+
+  const updateExampleVideo = (
+    index: number,
+    patch: Partial<ExampleVideoInput>
+  ) => {
+    setExampleVideos((prev) =>
+      prev.map((video, i) => (i === index ? { ...video, ...patch } : video))
+    );
+  };
+
+  const removeExampleVideo = (index: number) => {
+    setExampleVideos((prev) => prev.filter((_, i) => i !== index));
   };
 
   const addDeliverable = () => {
@@ -914,6 +999,88 @@ export default function EditProductPage() {
               className="h-auto w-32 object-cover"
             />
           )}
+          <div className="rounded border bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-sm font-medium">Example videos</p>
+                <p className="text-xs text-gray-600">
+                  Add YouTube or Vimeo links to showcase previous work on the
+                  storefront.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-xs"
+                onClick={addExampleVideo}
+              >
+                Add video
+              </button>
+            </div>
+            <div className="mt-3 grid gap-3">
+              {exampleVideos.length === 0 && (
+                <p className="text-xs text-gray-500">
+                  No example videos added yet.
+                </p>
+              )}
+              {exampleVideos.map((video, index) => {
+                const titleId = `example-video-title-${index}`;
+                const urlId = `example-video-url-${index}`;
+                return (
+                  <div
+                    key={video.id}
+                    className="grid gap-2 rounded border bg-white p-3"
+                  >
+                    <div className="flex items-center justify-between text-sm font-medium">
+                      <span>Video {index + 1}</span>
+                      <button
+                        type="button"
+                        className="btn btn-xs btn-ghost"
+                        onClick={() => removeExampleVideo(index)}
+                        aria-label={`Remove video ${index + 1}`}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <label
+                      className="text-xs font-medium text-gray-600"
+                      htmlFor={titleId}
+                    >
+                      Title (optional)
+                    </label>
+                    <input
+                      id={titleId}
+                      className="input"
+                      placeholder="Behind the scenes highlight"
+                      value={video.title}
+                      onChange={(e) =>
+                        updateExampleVideo(index, { title: e.target.value })
+                      }
+                    />
+                    <label
+                      className="text-xs font-medium text-gray-600"
+                      htmlFor={urlId}
+                    >
+                      Video URL
+                    </label>
+                    <input
+                      id={urlId}
+                      type="url"
+                      className="input"
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      value={video.url}
+                      onChange={(e) =>
+                        updateExampleVideo(index, { url: e.target.value })
+                      }
+                    />
+                    <p className="text-xs text-gray-500">
+                      Only public links are embedded. The first video appears
+                      first on the product page.
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
           <label className="text-sm font-medium">Category</label>
           <select className="input" value={category} onChange={(e) => setCategory(e.target.value)}>
             <option value="">None</option>

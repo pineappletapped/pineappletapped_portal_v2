@@ -13,6 +13,7 @@ import type {
   DeliverableType,
   ProductSEO,
   ProductVariation,
+  ProductVideoLink,
 } from "@/lib/products";
 import type { Venue } from "@/lib/venues";
 import type { IconType } from "react-icons";
@@ -80,6 +81,26 @@ const deliverableIcons: Record<DeliverableType, IconType> = {
   document: FiFileText,
 };
 
+type ExampleVideoInput = {
+  id: string;
+  title: string;
+  url: string;
+};
+
+const createVideoInput = (defaults?: Partial<ExampleVideoInput>): ExampleVideoInput => {
+  const randomId =
+    typeof globalThis !== "undefined" &&
+    globalThis.crypto &&
+    typeof globalThis.crypto.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+  return {
+    id: randomId,
+    title: defaults?.title ?? "",
+    url: defaults?.url ?? "",
+  };
+};
+
 export default function NewProductPage() {
   const router = useRouter();
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
@@ -133,6 +154,7 @@ export default function NewProductPage() {
   const [parkingCost, setParkingCost] = useState("0");
   const [travelMilesTouched, setTravelMilesTouched] = useState(false);
   const [parkingTouched, setParkingTouched] = useState(false);
+  const [exampleVideos, setExampleVideos] = useState<ExampleVideoInput[]>([]);
   const selectedVenue = useMemo(
     () => venues.find((v) => v.id === venueId) || null,
     [venues, venueId]
@@ -234,6 +256,17 @@ export default function NewProductPage() {
         optionId: m.optionId,
         ...(m.price ? { price: Number(m.price) } : {}),
       }));
+    const videoData = exampleVideos
+      .map((video) => {
+        const url = video.url.trim();
+        if (!url) return null;
+        const entry: ProductVideoLink = { url };
+        const title = video.title.trim();
+        if (title) entry.title = title;
+        return entry;
+      })
+      .filter((entry): entry is ProductVideoLink => !!entry);
+    const primaryExampleVideo = videoData.length > 0 ? videoData[0].url : null;
     const docRef = await addDoc(collection(db, "products"), {
       name,
       description,
@@ -268,6 +301,8 @@ export default function NewProductPage() {
         description: seo.description || null,
         keywords: seo.keywords || null,
       },
+      exampleVideos: videoData,
+      exampleWorkUrl: primaryExampleVideo,
       modifierGroups: enabledGroups,
     });
     let imageUrl = "";
@@ -310,6 +345,23 @@ export default function NewProductPage() {
       await fn({ productId: docRef.id, workflowId });
     }
     router.push(`/admin/products/${docRef.id}`);
+  };
+
+  const addExampleVideo = () => {
+    setExampleVideos((prev) => [...prev, createVideoInput()]);
+  };
+
+  const updateExampleVideo = (
+    index: number,
+    patch: Partial<ExampleVideoInput>
+  ) => {
+    setExampleVideos((prev) =>
+      prev.map((video, i) => (i === index ? { ...video, ...patch } : video))
+    );
+  };
+
+  const removeExampleVideo = (index: number) => {
+    setExampleVideos((prev) => prev.filter((_, i) => i !== index));
   };
 
   const addDeliverable = () => {
@@ -474,6 +526,86 @@ export default function NewProductPage() {
         <ReactQuill theme="snow" value={description} onChange={setDescription} />
           <label className="text-sm font-medium">Image</label>
           <input type="file" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
+          <div className="rounded border bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-sm font-medium">Example videos</p>
+                <p className="text-xs text-gray-600">
+                  Add YouTube or Vimeo links to appear on the product page.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-xs"
+                onClick={addExampleVideo}
+              >
+                Add video
+              </button>
+            </div>
+            <div className="mt-3 grid gap-3">
+              {exampleVideos.length === 0 && (
+                <p className="text-xs text-gray-500">
+                  No example videos yet.
+                </p>
+              )}
+              {exampleVideos.map((video, index) => {
+                const titleId = `new-example-video-title-${index}`;
+                const urlId = `new-example-video-url-${index}`;
+                return (
+                  <div
+                    key={video.id}
+                    className="grid gap-2 rounded border bg-white p-3"
+                  >
+                    <div className="flex items-center justify-between text-sm font-medium">
+                      <span>Video {index + 1}</span>
+                      <button
+                        type="button"
+                        className="btn btn-xs btn-ghost"
+                        onClick={() => removeExampleVideo(index)}
+                        aria-label={`Remove video ${index + 1}`}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <label
+                      className="text-xs font-medium text-gray-600"
+                      htmlFor={titleId}
+                    >
+                      Title (optional)
+                    </label>
+                    <input
+                      id={titleId}
+                      className="input"
+                      placeholder="Launch teaser"
+                      value={video.title}
+                      onChange={(e) =>
+                        updateExampleVideo(index, { title: e.target.value })
+                      }
+                    />
+                    <label
+                      className="text-xs font-medium text-gray-600"
+                      htmlFor={urlId}
+                    >
+                      Video URL
+                    </label>
+                    <input
+                      id={urlId}
+                      type="url"
+                      className="input"
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      value={video.url}
+                      onChange={(e) =>
+                        updateExampleVideo(index, { url: e.target.value })
+                      }
+                    />
+                    <p className="text-xs text-gray-500">
+                      The first video will be highlighted on the storefront.
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
           <label className="text-sm font-medium">Category</label>
           <select className="input" value={category} onChange={(e) => setCategory(e.target.value)}>
             <option value="">None</option>
