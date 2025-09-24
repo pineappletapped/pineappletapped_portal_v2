@@ -1,17 +1,25 @@
 "use client";
 import { useState } from 'react';
 
+interface ProductOption {
+  id: string;
+  name: string;
+}
+
 interface Props {
   status: 'client' | 'prospect' | 'outreach';
   onSave: (data: any) => void;
   onClose: () => void;
+  products?: ProductOption[];
 }
 
-export default function CRMRecordForm({ status, onSave, onClose }: Props) {
+export default function CRMRecordForm({ status, onSave, onClose, products = [] }: Props) {
   const [tab, setTab] = useState<'organisation' | 'contact' | 'branding' | 'log' | 'projects'>('organisation');
   const [form, setForm] = useState<any>({});
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+  const handleChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>,
+  ) => {
     setForm({ ...form, [e.target.name]: e.target.value });
   };
 
@@ -200,6 +208,27 @@ export default function CRMRecordForm({ status, onSave, onClose }: Props) {
           </div>
 
           <div className={tab === 'projects' ? 'grid gap-2' : 'hidden'}>
+            {status === 'outreach' && (
+              <div className="grid gap-1">
+                <label className="text-sm font-medium" htmlFor="suggestedProductId">
+                  Suggested Product
+                </label>
+                <select
+                  id="suggestedProductId"
+                  name="suggestedProductId"
+                  className="border p-2"
+                  value={form.suggestedProductId || ''}
+                  onChange={handleChange}
+                >
+                  <option value="">Select a product</option>
+                  {products.map((product) => (
+                    <option key={product.id} value={product.id}>
+                      {product.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <textarea
               name="projects"
               placeholder="Project details"
