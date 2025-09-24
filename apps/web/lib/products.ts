@@ -200,6 +200,8 @@ export interface Product {
   imageUrl?: string;
   requirements?: string;
   deliveryTime?: string;
+  /** Details about on-site operations shared with the customer. */
+  operationsInfo?: string;
   deliverables?: ProductDeliverable[];
   modifiers?: ProductModifierSelection[];
   /** Modifier group IDs enabled for this product. */

@@ -235,7 +235,7 @@ export default function ProductDetail({
         </section>
       )}
 
-      {(product.requirements || product.deliveryTime ||
+      {(product.requirements || product.deliveryTime || product.operationsInfo ||
         (product.deliverables && product.deliverables.length > 0)) && (
         <section>
           <h2 className="text-xl font-semibold mb-2">Project Details</h2>
@@ -245,9 +245,15 @@ export default function ProductDetail({
                 <p className="whitespace-pre-line">{product.requirements}</p>
               </ProductFeatureCard>
             )}
-            {product.deliveryTime && (
+            {(product.deliveryTime || product.operationsInfo) && (
               <ProductFeatureCard title="Delivery Time" icon={FiClock}>
-                <p>{product.deliveryTime}</p>
+                {product.deliveryTime && <p>{product.deliveryTime}</p>}
+                {product.operationsInfo && (
+                  <div className={`grid gap-1${product.deliveryTime ? " mt-3" : ""}`}>
+                    <p className="font-semibold text-gray-900">Our Operations</p>
+                    <p className="whitespace-pre-line">{product.operationsInfo}</p>
+                  </div>
+                )}
               </ProductFeatureCard>
             )}
             {product.deliverables && product.deliverables.length > 0 && (

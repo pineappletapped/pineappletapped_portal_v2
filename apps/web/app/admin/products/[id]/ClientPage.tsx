@@ -500,6 +500,7 @@ export default function EditProductPage() {
   const [imageUrl, setImageUrl] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [requirements, setRequirements] = useState("");
+  const [operationsInfo, setOperationsInfo] = useState("");
   const [deliveryIndex, setDeliveryIndex] = useState(0);
   const [deliverables, setDeliverables] = useState<
     (ProductDeliverable & { file?: File })[]
@@ -990,6 +991,7 @@ export default function EditProductPage() {
           );
           setImageUrl(p.imageUrl || "");
           setRequirements(p.requirements || "");
+          setOperationsInfo(p.operationsInfo || "");
           const idx = deliveryOptions.indexOf(p.deliveryTime || "");
           setDeliveryIndex(idx >= 0 ? idx : 0);
           setDeliverables((p.deliverables || []) as any);
@@ -1485,6 +1487,7 @@ export default function EditProductPage() {
       },
       imageUrl: img || null,
       requirements: requirements || null,
+      operationsInfo: operationsInfo || null,
       deliveryTime: deliveryOptions[deliveryIndex],
       deliverables: deliverableData,
       variations: variationData,
@@ -2221,14 +2224,26 @@ export default function EditProductPage() {
           </label>
           <label className="text-sm font-medium">Requirements</label>
           <textarea className="input" value={requirements} onChange={(e) => setRequirements(e.target.value)} />
-      <label className="text-sm font-medium">Delivery Time: {deliveryOptions[deliveryIndex]}</label>
-      <input
-        type="range"
-        min={0}
-        max={deliveryOptions.length - 1}
-        value={deliveryIndex}
-        onChange={(e) => setDeliveryIndex(Number(e.target.value))}
-      />
+          <label className="text-sm font-medium">
+            Delivery Time: {deliveryOptions[deliveryIndex]}
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={deliveryOptions.length - 1}
+            value={deliveryIndex}
+            onChange={(e) => setDeliveryIndex(Number(e.target.value))}
+          />
+          <label className="text-sm font-medium">Our Operations</label>
+          <textarea
+            className="input"
+            value={operationsInfo}
+            onChange={(e) => setOperationsInfo(e.target.value)}
+            placeholder="Arrival window, on-site timings, contact details, etc."
+          />
+          <p className="text-xs text-gray-500 -mt-1">
+            Shown beneath Delivery Time on the customer product page.
+          </p>
     </div>
   )}
 
