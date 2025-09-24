@@ -300,6 +300,119 @@ export default function ProductDetail({
 
   const venueName = venue?.name || product.venue || "";
 
+  const variationNameById = useMemo(() => {
+    if (!Array.isArray(product.variations)) {
+      return new Map<string, string>();
+    }
+    return new Map(
+      product.variations.map((entry, index) => [
+        entry.id,
+        entry.name?.trim() || `Package ${index + 1}`,
+      ])
+    );
+  }, [product.variations]);
+
+  const deliverableDisplay = useMemo(() => {
+    const entries = Array.isArray(product.deliverables)
+      ? product.deliverables.filter(
+          (item): item is Product["deliverables"][number] =>
+            !!item && typeof item === "object"
+        )
+      : [];
+
+    const availableVariationIds = Array.isArray(product.variations)
+      ? product.variations
+          .map((v) => v.id)
+          .filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [];
+
+    const selectedId =
+      variation && availableVariationIds.includes(variation) ? variation : null;
+
+    let hasRestricted = false;
+
+    const visible = entries.filter((deliverable) => {
+      const scopedIds = Array.isArray(deliverable.variationIds)
+        ? deliverable.variationIds.filter(
+            (id): id is string => typeof id === "string" && id.trim().length > 0
+          )
+        : [];
+      if (scopedIds.length > 0) {
+        hasRestricted = true;
+        if (!selectedId) {
+          return false;
+        }
+        return scopedIds.includes(selectedId);
+      }
+      return true;
+    });
+
+    return {
+      visible,
+      hasRestricted,
+      selectedId,
+      total: entries.length,
+    } as const;
+  }, [product.deliverables, product.variations, variation]);
+
+  const deliverableItems = useMemo(() => {
+    return deliverableDisplay.visible
+      .map((deliverable, index) => {
+        const title =
+          typeof deliverable.title === "string"
+            ? deliverable.title.trim()
+            : "";
+        const description =
+          typeof deliverable.description === "string"
+            ? deliverable.description.trim()
+            : "";
+        const thumb =
+          typeof deliverable.thumbnailUrl === "string"
+            ? deliverable.thumbnailUrl.trim()
+            : "";
+        if (!title && !description && !thumb) return null;
+        const Icon =
+          (deliverable.type && deliverableIcons[deliverable.type]) || FiCheck;
+        const scopeLabels = Array.isArray(deliverable.variationIds)
+          ? deliverable.variationIds
+              .filter(
+                (id): id is string => typeof id === "string" && id.trim().length > 0
+              )
+              .map((id) => variationNameById.get(id) || id)
+          : [];
+
+        return (
+          <li
+            key={`${index}-${title || "deliverable"}`}
+            className="flex items-start gap-2"
+          >
+            <Icon className="mt-1 text-orange shrink-0" />
+            <div>
+              {title && <p className="font-medium">{title}</p>}
+              {description && (
+                <p className="text-gray-700 text-sm">{description}</p>
+              )}
+              {thumb && (
+                <Image
+                  src={thumb}
+                  alt={title || `Deliverable ${index + 1}`}
+                  width={64}
+                  height={64}
+                  className="w-16 h-16 object-cover rounded mt-1"
+                />
+              )}
+              {scopeLabels.length > 0 && (
+                <p className="mt-1 text-xs text-gray-500">
+                  Included with: {scopeLabels.join(", ")}
+                </p>
+              )}
+            </div>
+          </li>
+        );
+      })
+      .filter((item): item is JSX.Element => item !== null);
+  }, [deliverableDisplay.visible, variationNameById]);
+
   return (
     <div className="space-y-12">
       <div className="grid md:grid-cols-2 gap-8">
@@ -477,36 +590,30 @@ export default function ProductDetail({
             )}
             {product.deliverables && product.deliverables.length > 0 && (
               <ProductFeatureCard title="Deliverables" icon={FiGift}>
-                <ul className="space-y-2">
-                  {product.deliverables.map((d, i) => {
-                    const title = d.title?.trim();
-                    const description = d.description?.trim();
-                    const thumb = d.thumbnailUrl?.trim();
-                    if (!title && !description && !thumb) return null;
-                    const Icon =
-                      (d.type && deliverableIcons[d.type]) || FiCheck;
-                    return (
-                      <li key={i} className="flex items-start gap-2">
-                        <Icon className="mt-1 text-orange shrink-0" />
-                        <div>
-                          {title && <p className="font-medium">{title}</p>}
-                          {description && (
-                            <p className="text-gray-700 text-sm">{description}</p>
-                          )}
-                          {thumb && (
-                            <Image
-                              src={thumb}
-                              alt={title || `Deliverable ${i + 1}`}
-                              width={64}
-                              height={64}
-                              className="w-16 h-16 object-cover rounded mt-1"
-                            />
-                          )}
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
+                {deliverableDisplay.hasRestricted &&
+                !deliverableDisplay.selectedId &&
+                deliverableItems.length === 0 ? (
+                  <p className="text-sm text-gray-600">
+                    Select a package to see the deliverables included.
+                  </p>
+                ) : deliverableItems.length > 0 ? (
+                  <>
+                    <ul className="space-y-2">{deliverableItems}</ul>
+                    {deliverableDisplay.hasRestricted &&
+                      !deliverableDisplay.selectedId && (
+                        <p className="mt-3 text-xs text-gray-500">
+                          Some deliverables vary by package. Choose one to see
+                          everything that’s included.
+                        </p>
+                      )}
+                  </>
+                ) : (
+                  <p className="text-sm text-gray-600">
+                    {deliverableDisplay.selectedId
+                      ? "No deliverables are assigned to this package yet."
+                      : "Deliverables will be confirmed during scoping."}
+                  </p>
+                )}
               </ProductFeatureCard>
             )}
           </div>

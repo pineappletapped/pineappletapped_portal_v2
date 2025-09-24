@@ -491,6 +491,30 @@ export default function NewProductPage() {
     (ProductDeliverable & { file?: File })[]
   >([]);
   const [variations, setVariations] = useState<VariationFormState[]>([]);
+  useEffect(() => {
+    setDeliverables((prev) => {
+      if (prev.length === 0) return prev;
+      const allowed = new Set(variations.map((variation) => variation.id));
+      let changed = false;
+      const next = prev.map((deliverable) => {
+        if (!Array.isArray(deliverable.variationIds)) return deliverable;
+        const filtered = deliverable.variationIds.filter((id) =>
+          allowed.has(id)
+        );
+        if (filtered.length === deliverable.variationIds.length) {
+          return deliverable;
+        }
+        changed = true;
+        if (filtered.length === 0) {
+          const clone = { ...deliverable };
+          delete clone.variationIds;
+          return clone;
+        }
+        return { ...deliverable, variationIds: filtered };
+      });
+      return changed ? next : prev;
+    });
+  }, [variations]);
   const [modifiers, setModifiers] = useState<ModifierSelectionFormState[]>([]);
   const [enabledModifierGroups, setEnabledModifierGroups] = useState<string[]>([]);
   const [seo, setSeo] = useState<ProductSEO>({});
@@ -1269,6 +1293,12 @@ export default function NewProductPage() {
       const desc = d.description?.trim();
       if (desc) item.description = desc;
       if (thumb) item.thumbnailUrl = thumb;
+      const scopedIds = Array.isArray(d.variationIds)
+        ? d.variationIds.filter(
+            (id): id is string => typeof id === "string" && id.trim().length > 0
+          )
+        : [];
+      if (scopedIds.length > 0) item.variationIds = scopedIds;
       deliverableData.push(item);
     }
     let seoImage = "";
@@ -1316,6 +1346,36 @@ export default function NewProductPage() {
   };
   const updateDeliverable = (index: number, data: Partial<ProductDeliverable & { file?: File }>) => {
     setDeliverables((prev) => prev.map((d, i) => (i === index ? { ...d, ...data } : d)));
+  };
+  const setDeliverableVariation = (
+    index: number,
+    variationId: string,
+    checked: boolean
+  ) => {
+    setDeliverables((prev) =>
+      prev.map((deliverable, i) => {
+        if (i !== index) return deliverable;
+        const existing = Array.isArray(deliverable.variationIds)
+          ? deliverable.variationIds.filter(
+              (id): id is string => typeof id === "string" && id.trim().length > 0
+            )
+          : [];
+        const nextIds = checked
+          ? existing.includes(variationId)
+            ? existing
+            : [...existing, variationId]
+          : existing.filter((id) => id !== variationId);
+        if (nextIds.length === existing.length) {
+          return deliverable;
+        }
+        if (nextIds.length === 0) {
+          const clone = { ...deliverable };
+          delete clone.variationIds;
+          return clone;
+        }
+        return { ...deliverable, variationIds: nextIds };
+      })
+    );
   };
   const removeDeliverable = (index: number) => {
     setDeliverables((prev) => prev.filter((_, i) => i !== index));
@@ -2495,6 +2555,45 @@ export default function NewProductPage() {
                 value={d.description || ""}
                 onChange={(e) => updateDeliverable(i, { description: e.target.value })}
               />
+              {variations.length > 0 && (
+                <div className="grid gap-2">
+                  <p className="text-xs font-medium text-gray-600">
+                    Included with
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {variations.map((variation, variationIndex) => {
+                      const label = variation.name.trim()
+                        ? variation.name.trim()
+                        : `Package ${variationIndex + 1}`;
+                      const checked = Array.isArray(d.variationIds)
+                        ? d.variationIds.includes(variation.id)
+                        : false;
+                      return (
+                        <label
+                          key={variation.id}
+                          className="flex items-center gap-2 rounded border px-2 py-1 text-xs"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) =>
+                              setDeliverableVariation(
+                                i,
+                                variation.id,
+                                e.target.checked
+                              )
+                            }
+                          />
+                          {label}
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Leave unticked to include with every package.
+                  </p>
+                </div>
+              )}
               <input
                 type="file"
                 onChange={(e) => updateDeliverable(i, { file: e.target.files?.[0] || undefined })}
