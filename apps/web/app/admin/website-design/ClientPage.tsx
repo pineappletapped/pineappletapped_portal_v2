@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react';
 import { db, storage } from '@/lib/firebase';
 import {
   collection,
-  addDoc,
   getDocs,
   doc,
   getDoc,
@@ -18,20 +17,16 @@ import type { Category } from '@/lib/categories';
 import { useRoleGate } from '@/hooks/useRoleGate';
 
 interface PageDoc { id: string; title: string; slug: string; }
-interface PostDoc { id: string; title: string; }
 interface HomeCard { id: string; title: string; text: string; link?: string; }
 
 export default function WebsiteDesignPage() {
   const { allowed, loading: guardLoading } = useRoleGate(['marketing']);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<'home' | 'pages' | 'blog' | 'menu' | 'branding'>('pages');
+  const [tab, setTab] = useState<'home' | 'pages' | 'menu' | 'branding'>('pages');
 
   const [pages, setPages] = useState<PageDoc[]>([]);
   const [pageTitle, setPageTitle] = useState('');
   const [pageSlug, setPageSlug] = useState('');
-
-  const [posts, setPosts] = useState<PostDoc[]>([]);
-  const [postTitle, setPostTitle] = useState('');
 
   const [menuCats, setMenuCats] = useState<Category[]>([]);
 
@@ -63,15 +58,13 @@ export default function WebsiteDesignPage() {
         return;
       }
       try {
-        const [pSnap, bSnap, cSnap, brandingSnap, homeSnap] = await Promise.all([
+        const [pSnap, cSnap, brandingSnap, homeSnap] = await Promise.all([
           getDocs(collection(db, 'pages')),
-          getDocs(collection(db, 'blogPosts')),
           getDocs(collection(db, 'categories')),
           getDoc(doc(db, 'settings', 'branding')),
           getDoc(doc(db, 'settings', 'homepage')),
         ]);
         setPages(pSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
-        setPosts(bSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setMenuCats(
           cSnap.docs
             .map((d) => ({ id: d.id, ...(d.data() as any) }))
@@ -107,13 +100,6 @@ export default function WebsiteDesignPage() {
     setPages(p => [...p, { id: docRef.id, title: pageTitle, slug: pageSlug }]);
     setPageTitle('');
     setPageSlug('');
-  };
-
-  const addPost = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const docRef = await addDoc(collection(db, 'blogPosts'), { title: postTitle });
-    setPosts(p => [...p, { id: docRef.id, title: postTitle }]);
-    setPostTitle('');
   };
 
   const addHomeCard = (e: React.FormEvent) => {
@@ -213,7 +199,6 @@ export default function WebsiteDesignPage() {
       <div className="flex gap-2">
         <button onClick={() => setTab('home')} className={`btn-sm ${tab === 'home' ? 'btn' : 'btn-outline'}`}>Homepage</button>
         <button onClick={() => setTab('pages')} className={`btn-sm ${tab === 'pages' ? 'btn' : 'btn-outline'}`}>Pages</button>
-        <button onClick={() => setTab('blog')} className={`btn-sm ${tab === 'blog' ? 'btn' : 'btn-outline'}`}>Blog</button>
         <button onClick={() => setTab('menu')} className={`btn-sm ${tab === 'menu' ? 'btn' : 'btn-outline'}`}>Menu</button>
         <button onClick={() => setTab('branding')} className={`btn-sm ${tab === 'branding' ? 'btn' : 'btn-outline'}`}>Branding</button>
       </div>
@@ -230,20 +215,6 @@ export default function WebsiteDesignPage() {
               <li key={p.id} className="border p-2 rounded">
                 <span className="font-medium">{p.title}</span> – /{p.slug}
               </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {tab === 'blog' && (
-        <div className="grid gap-4">
-          <form onSubmit={addPost} className="grid gap-2 max-w-md">
-            <input className="input" placeholder="Title" value={postTitle} onChange={e => setPostTitle(e.target.value)} required />
-            <button type="submit" className="btn btn-sm w-fit">Add Post</button>
-          </form>
-          <ul className="grid gap-2">
-            {posts.map(p => (
-              <li key={p.id} className="border p-2 rounded">{p.title}</li>
             ))}
           </ul>
         </div>
