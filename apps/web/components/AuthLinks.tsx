@@ -1,9 +1,19 @@
 'use client';
 
+import clsx from 'clsx';
 import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { signOut, type Auth, type User } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  query,
+  where,
+  type Firestore,
+} from 'firebase/firestore';
 import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
 import {
   ROLE_KEYS,
@@ -20,16 +30,36 @@ type AuthLinksProps = {
 };
 
 const SIZE_CLASSNAMES: Record<Required<AuthLinksProps>['size'], string> = {
-  xs: 'btn-xs',
-  sm: 'btn-sm',
-  md: 'btn-md',
+  xs: 'h-8 px-3 text-xs',
+  sm: 'h-9 px-4 text-sm',
+  md: 'h-10 px-5 text-sm',
+};
+
+const BUTTON_VARIANTS = {
+  solid: 'border-orange bg-orange text-white hover:bg-orange/90 focus-visible:outline-orange',
+  outline:
+    'border-orange bg-white text-orange hover:bg-orange hover:text-white focus-visible:outline-orange',
+  ghost:
+    'border-transparent text-slate-600 hover:border-orange/60 hover:bg-orange/10 hover:text-orange focus-visible:outline-orange',
+} as const;
+
+type ButtonVariant = keyof typeof BUTTON_VARIANTS;
+
+type ProfileFlags = {
+  contractor: boolean;
+  crmStatus?: string;
+  isStaff: boolean;
 };
 
 export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {}) {
   const [user, setUser] = useState<any>(null);
   const [roles, setRoles] = useState<UserRoles>({});
   const [checked, setChecked] = useState(false);
+  const [profile, setProfile] = useState<ProfileFlags | null>(null);
+  const [hasClientMembership, setHasClientMembership] = useState(false);
+  const [hasClientOrders, setHasClientOrders] = useState(false);
   const authRef = useRef<Auth | null>(null);
+  const dbRef = useRef<Firestore | null>(null);
   const cookieAttributes = useMemo(() => {
     const secureAttr =
       typeof window !== 'undefined' && window.location.protocol === 'https:' ? '; Secure' : '';
@@ -56,6 +86,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
         }
 
         authRef.current = auth;
+        dbRef.current = db;
 
         const { onAuthStateChanged } = await loadAuthModule();
         if (cancelled) {
@@ -71,17 +102,26 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
           }
 
           setUser(u);
+          setProfile(null);
+          setHasClientMembership(false);
+          setHasClientOrders(false);
           if (u) {
             try {
               const snap = await getDoc(doc(db, 'users', u.uid));
-              let extracted = extractUserRoles(snap.data());
-              if (
-                u.uid === 'WK6WCuSueLN5M3Zq6D7WBbHyGPo1' ||
-                u.email === 'ryan@pineappletapped.com' ||
-                u.email === 'ryanadmin@pineappletapped.com'
-              ) {
-                extracted = { ...extracted, admin: true };
-              }
+              const rawData = (snap.data() as any) || {};
+              const docData = {
+                ...rawData,
+                id: snap.id,
+                uid: u.uid,
+                email: rawData?.email ?? u.email ?? null,
+              };
+              const extracted = extractUserRoles(docData);
+              const nextProfile: ProfileFlags = {
+                contractor: docData?.contractor === true || Boolean(docData?.contractorInfo),
+                crmStatus: typeof docData?.crmStatus === 'string' ? docData.crmStatus : undefined,
+                isStaff: docData?.isStaff === true || extracted.admin === true,
+              };
+              setProfile(nextProfile);
               setRoles(extracted);
               const token = await u.getIdToken();
               document.cookie = `token=${encodeURIComponent(token)}; ${cookieAttributes.persistent}`;
@@ -92,9 +132,13 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
             } catch (error) {
               console.error('Failed to derive user roles', error);
               setRoles({});
+              setProfile({ contractor: false, isStaff: false });
             }
           } else {
             setRoles({});
+            setProfile(null);
+            setHasClientMembership(false);
+            setHasClientOrders(false);
           }
           setChecked(true);
         });
@@ -103,6 +147,9 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
         if (!cancelled) {
           setUser(null);
           setRoles({});
+          setProfile(null);
+          setHasClientMembership(false);
+          setHasClientOrders(false);
           setChecked(true);
         }
       }
@@ -116,11 +163,109 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
     };
   }, [cookieAttributes]);
 
-  const buttonSizeClass = SIZE_CLASSNAMES[size] ?? SIZE_CLASSNAMES.sm;
+  const sizeClass = SIZE_CLASSNAMES[size] ?? SIZE_CLASSNAMES.sm;
   const wrapperClass = useMemo(
-    () => ['flex items-center gap-2', className].filter(Boolean).join(' '),
+    () => clsx('flex flex-wrap items-center gap-2', className),
     [className]
   );
+  const profileLoaded = profile !== null;
+  const isProfileContractor = profile?.contractor === true;
+
+  useEffect(() => {
+    const db = dbRef.current;
+    if (!user || !db) {
+      setHasClientMembership(false);
+      return;
+    }
+
+    if (!profileLoaded) {
+      return;
+    }
+
+    if (!isProfileContractor) {
+      setHasClientMembership(true);
+      return;
+    }
+
+    let cancelled = false;
+    setHasClientMembership(false);
+
+    (async () => {
+      try {
+        const membershipSnap = await getDocs(
+          query(collection(db, 'memberships'), where('userId', '==', user.uid), limit(1))
+        );
+        if (!cancelled) {
+          setHasClientMembership(!membershipSnap.empty);
+        }
+      } catch (error) {
+        console.error('Failed to verify client memberships', error);
+        if (!cancelled) {
+          setHasClientMembership(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isProfileContractor, profileLoaded, user]);
+
+  useEffect(() => {
+    const db = dbRef.current;
+    if (!user || !db) {
+      setHasClientOrders(false);
+      return;
+    }
+
+    if (!profileLoaded) {
+      return;
+    }
+
+    if (!isProfileContractor) {
+      setHasClientOrders(true);
+      return;
+    }
+
+    let cancelled = false;
+    setHasClientOrders(false);
+
+    (async () => {
+      try {
+        let hasOrders = false;
+        const direct = await getDocs(
+          query(collection(db, 'orders'), where('userId', '==', user.uid), limit(1))
+        );
+        if (!direct.empty) {
+          hasOrders = true;
+        } else {
+          const legacy = await getDocs(
+            query(collection(db, 'orders'), where('uid', '==', user.uid), limit(1))
+          );
+          hasOrders = !legacy.empty;
+        }
+        if (!cancelled) {
+          setHasClientOrders(hasOrders);
+        }
+      } catch (error) {
+        console.error('Failed to verify client orders', error);
+        if (!cancelled) {
+          setHasClientOrders(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isProfileContractor, profileLoaded, user]);
+
+  const makeButtonClass = (variant: ButtonVariant) =>
+    clsx(
+      'inline-flex items-center justify-center rounded-full border font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2',
+      sizeClass,
+      BUTTON_VARIANTS[variant]
+    );
 
   const handleSignOut = async () => {
     let instance = authRef.current;
@@ -147,24 +292,36 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
 
   if (user) {
     const canAccessAdmin = hasRole(roles, ROLE_KEYS);
+    const isGodAdmin = hasRole(roles, 'admin');
+    const isContractor = isProfileContractor;
+    const clientStatus = (profile?.crmStatus || 'client') === 'client';
+    const showClientPortal =
+      isGodAdmin ||
+      (!isContractor && clientStatus) ||
+      (isContractor && clientStatus && (hasClientMembership || hasClientOrders));
+    const showTeamPortal = isGodAdmin || isContractor;
     const adminHref = getDefaultAdminRoute(roles);
     return (
       <div className={wrapperClass}>
-        <Link href="/dashboard" className={`btn ${buttonSizeClass}`}>
-          Client Portal
-        </Link>
+        {showClientPortal && (
+          <Link href="/dashboard" className={makeButtonClass('solid')}>
+            Client Portal
+          </Link>
+        )}
         {canAccessAdmin && (
-          <Link href={adminHref} className={`btn ${buttonSizeClass} btn-outline`}>
+          <Link href={adminHref} className={makeButtonClass('outline')}>
             Admin
           </Link>
         )}
-        <Link href="/contractors" className={`btn ${buttonSizeClass} btn-outline`}>
-          Team Portal
-        </Link>
+        {showTeamPortal && (
+          <Link href="/contractors" className={makeButtonClass('outline')}>
+            Team Portal
+          </Link>
+        )}
         <button
           type="button"
           onClick={handleSignOut}
-          className={`btn ${buttonSizeClass} btn-ghost`}
+          className={makeButtonClass('ghost')}
         >
           Log out
         </button>
@@ -174,13 +331,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
 
   return (
     <div className={wrapperClass}>
-      <Link href="/admin" className={`btn ${buttonSizeClass} btn-outline`}>
-        Admin
-      </Link>
-      <Link href="/contractors" className={`btn ${buttonSizeClass} btn-outline`}>
-        Team Portal
-      </Link>
-      <Link href="/dashboard" className={`btn ${buttonSizeClass}`}>
+      <Link href="/login" className={makeButtonClass('solid')}>
         Client Portal
       </Link>
     </div>

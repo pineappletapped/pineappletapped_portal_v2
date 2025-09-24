@@ -7,6 +7,12 @@ interface HomeCard {
   link?: string;
 }
 
+export interface ProcessStage {
+  id: string;
+  title: string;
+  description: string;
+}
+
 export interface HomepageContent {
   heroTitle: string;
   heroSubtitle: string;
@@ -17,6 +23,11 @@ export interface HomepageContent {
   ctaButtonText: string;
   ctaButtonLink: string;
   cards: HomeCard[];
+  processTitle: string;
+  processDescription: string;
+  processVideoUrl: string;
+  processPosterUrl: string;
+  processStages: ProcessStage[];
 }
 
 async function loadFirestore() {
@@ -43,6 +54,32 @@ const sampleHomepage: HomepageContent = {
   ctaButtonText: "Explore Podcast Services",
   ctaButtonLink: "/categories/video-production",
   cards: [],
+  processTitle: "See the Pineapple Tapped workflow in action",
+  processDescription:
+    "Collaborate with our producers inside the client portal, review live updates, and keep every milestone on track from kickoff to delivery.",
+  processVideoUrl: "https://www.w3schools.com/html/mov_bbb.mp4",
+  processPosterUrl:
+    "https://dummyimage.com/1280x720/ff7f27/ffffff&text=Client+Portal+Preview",
+  processStages: [
+    {
+      id: "discover",
+      title: "Discover",
+      description:
+        "Share your brief and goals so we can scope the creative, technical, and delivery milestones together.",
+    },
+    {
+      id: "collaborate",
+      title: "Collaborate",
+      description:
+        "Review treatments, timelines, and live production notes inside the portal with instant notifications.",
+    },
+    {
+      id: "deliver",
+      title: "Deliver",
+      description:
+        "Approve final assets, track revisions, and download everything from a single, secure destination.",
+    },
+  ],
 };
 
 export async function getHomepage(): Promise<HomepageContent> {
@@ -52,6 +89,7 @@ export async function getHomepage(): Promise<HomepageContent> {
     const snap = await fs.getDoc(fs.doc(db, "settings", "homepage"));
     if (!snap.exists()) return sampleHomepage;
     const data = snap.data() as any;
+    const rawStages = Array.isArray(data.processStages) ? data.processStages : null;
     return {
       heroTitle: data.heroTitle || sampleHomepage.heroTitle,
       heroSubtitle: data.heroSubtitle || sampleHomepage.heroSubtitle,
@@ -62,6 +100,29 @@ export async function getHomepage(): Promise<HomepageContent> {
       ctaButtonText: data.ctaButtonText || sampleHomepage.ctaButtonText,
       ctaButtonLink: data.ctaButtonLink || sampleHomepage.ctaButtonLink,
       cards: data.cards || [],
+      processTitle: data.processTitle || sampleHomepage.processTitle,
+      processDescription: data.processDescription || sampleHomepage.processDescription,
+      processVideoUrl: data.processVideoUrl || sampleHomepage.processVideoUrl,
+      processPosterUrl: data.processPosterUrl || sampleHomepage.processPosterUrl,
+      processStages: rawStages
+        ? rawStages
+            .map((stage: any, index: number) => {
+              const title =
+                typeof stage?.title === "string" ? stage.title.trim() : "";
+              const description =
+                typeof stage?.description === "string"
+                  ? stage.description.trim()
+                  : "";
+              const idCandidate =
+                typeof stage?.id === "string" ? stage.id.trim() : "";
+              return {
+                id: idCandidate || `stage-${index}`,
+                title,
+                description,
+              };
+            })
+            .filter((stage: ProcessStage) => stage.title && stage.description)
+        : sampleHomepage.processStages,
     };
   } catch {
     return sampleHomepage;

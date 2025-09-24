@@ -4,13 +4,21 @@ import { useEffect, useState } from 'react';
 import { db } from '@/lib/firebase';
 import { collection, addDoc, orderBy, query, getDocs, serverTimestamp } from 'firebase/firestore';
 
+type StepField = {
+  key: string;
+  label: string;
+  type: string;
+  required?: boolean;
+  profileFieldKey?: string | null;
+};
+
 interface Step {
   id: string;
   order: number;
   title: string;
   description: string;
   mediaUrl?: string;
-  fields?: { key: string; label: string; type: string; required?: boolean }[];
+  fields?: StepField[];
   agreementText?: string;
 }
 

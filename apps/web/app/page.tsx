@@ -8,6 +8,7 @@ import { getPosts } from '@/lib/blog';
 import { getClientLogos } from '@/lib/clientLogos';
 import { getCategories } from '@/lib/categories';
 import { getHomepage } from '@/lib/homepage';
+import ProcessSection from '@/components/ProcessSection';
 
 export default async function Home() {
   const [homepage, products, posts, logos, categories] = await Promise.all([
@@ -29,6 +30,14 @@ export default async function Home() {
         videoSrc="https://www.w3schools.com/html/mov_bbb.mp4"
         posterSrc="/placeholder.jpg"
         posterAlt="Pineapple Tapped hero background"
+      />
+
+      <ProcessSection
+        title={homepage.processTitle}
+        description={homepage.processDescription}
+        videoUrl={homepage.processVideoUrl}
+        posterUrl={homepage.processPosterUrl}
+        stages={homepage.processStages}
       />
 
       {homepage.cards.length > 0 && (

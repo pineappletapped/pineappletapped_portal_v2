@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { db } from "@/lib/firebase";
 import {
   collection,
@@ -11,11 +11,21 @@ import {
   deleteDoc,
 } from "firebase/firestore";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import type { CrewRoleTemplate, ProductBudgetOverride } from "@/lib/products";
+
+interface ModifierCrewAdjustment {
+  templateId: string;
+  quantity?: number | null;
+  unitRate?: number | null;
+  includeInBudget?: boolean | null;
+}
 
 interface ModifierOption {
   id: string;
   name: string;
   price: number;
+  budgetAdjustments?: ProductBudgetOverride | null;
+  crewAdjustments?: ModifierCrewAdjustment[] | null;
 }
 
 interface ModifierGroup {
@@ -25,12 +35,170 @@ interface ModifierGroup {
   options: ModifierOption[];
 }
 
+type BudgetFormState = {
+  labourFilming: string;
+  labourEditing: string;
+  kitManual: string;
+  kit: string;
+  kitMode: "" | "manual" | "guided";
+  travelMiles: string;
+  travelRate: string;
+  travelCost: string;
+  parking: string;
+};
+
+const emptyBudgetForm: BudgetFormState = {
+  labourFilming: "",
+  labourEditing: "",
+  kitManual: "",
+  kit: "",
+  kitMode: "",
+  travelMiles: "",
+  travelRate: "",
+  travelCost: "",
+  parking: "",
+};
+
+const createRowId = () =>
+  typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+
+const toBudgetForm = (
+  budget?: ProductBudgetOverride | null
+): BudgetFormState => ({
+  labourFilming:
+    typeof budget?.labourFilming === "number" && Number.isFinite(budget.labourFilming)
+      ? String(budget.labourFilming)
+      : "",
+  labourEditing:
+    typeof budget?.labourEditing === "number" && Number.isFinite(budget.labourEditing)
+      ? String(budget.labourEditing)
+      : "",
+  kitManual:
+    typeof budget?.kitManual === "number" && Number.isFinite(budget.kitManual)
+      ? String(budget.kitManual)
+      : "",
+  kit:
+    typeof budget?.kit === "number" && Number.isFinite(budget.kit)
+      ? String(budget.kit)
+      : "",
+  kitMode:
+    budget?.kitMode === "manual" || budget?.kitMode === "guided"
+      ? budget.kitMode
+      : "",
+  travelMiles:
+    typeof budget?.travelMiles === "number" && Number.isFinite(budget.travelMiles)
+      ? String(budget.travelMiles)
+      : "",
+  travelRate:
+    typeof budget?.travelRate === "number" && Number.isFinite(budget.travelRate)
+      ? String(budget.travelRate)
+      : "",
+  travelCost:
+    typeof budget?.travelCost === "number" && Number.isFinite(budget.travelCost)
+      ? String(budget.travelCost)
+      : "",
+  parking:
+    typeof budget?.parking === "number" && Number.isFinite(budget.parking)
+      ? String(budget.parking)
+      : "",
+});
+
+const parseNumberInput = (value: string): number | undefined => {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const toBudgetOverride = (
+  form: BudgetFormState
+): ProductBudgetOverride | undefined => {
+  const payload: ProductBudgetOverride = {};
+  const labourFilming = parseNumberInput(form.labourFilming);
+  if (labourFilming !== undefined) payload.labourFilming = labourFilming;
+  const labourEditing = parseNumberInput(form.labourEditing);
+  if (labourEditing !== undefined) payload.labourEditing = labourEditing;
+  const kitManual = parseNumberInput(form.kitManual);
+  if (kitManual !== undefined) payload.kitManual = kitManual;
+  const kit = parseNumberInput(form.kit);
+  if (kit !== undefined) payload.kit = kit;
+  if (form.kitMode === "manual" || form.kitMode === "guided") {
+    payload.kitMode = form.kitMode;
+  }
+  const travelMiles = parseNumberInput(form.travelMiles);
+  if (travelMiles !== undefined) payload.travelMiles = travelMiles;
+  const travelRate = parseNumberInput(form.travelRate);
+  if (travelRate !== undefined) payload.travelRate = travelRate;
+  const travelCost = parseNumberInput(form.travelCost);
+  if (travelCost !== undefined) payload.travelCost = travelCost;
+  const parking = parseNumberInput(form.parking);
+  if (parking !== undefined) payload.parking = parking;
+  return Object.keys(payload).length ? payload : undefined;
+};
+
+type CrewAdjustmentFormRow = {
+  id: string;
+  templateId: string;
+  quantity: string;
+  unitRate: string;
+  includeInBudget: "inherit" | "include" | "exclude";
+};
+
+const toCrewAdjustmentRows = (
+  adjustments?: ModifierCrewAdjustment[] | null
+): CrewAdjustmentFormRow[] => {
+  if (!Array.isArray(adjustments)) return [];
+  return adjustments.map((adj) => ({
+    id: createRowId(),
+    templateId: typeof adj?.templateId === "string" ? adj.templateId : "",
+    quantity:
+      typeof adj?.quantity === "number" && Number.isFinite(adj.quantity)
+        ? String(adj.quantity)
+        : "",
+    unitRate:
+      typeof adj?.unitRate === "number" && Number.isFinite(adj.unitRate)
+        ? String(adj.unitRate)
+        : "",
+    includeInBudget:
+      adj?.includeInBudget === true
+        ? "include"
+        : adj?.includeInBudget === false
+        ? "exclude"
+        : "inherit",
+  }));
+};
+
+const fromCrewAdjustmentRows = (
+  rows: CrewAdjustmentFormRow[]
+): ModifierCrewAdjustment[] | undefined => {
+  const result = rows
+    .map((row) => {
+      const templateId = row.templateId.trim();
+      if (!templateId) return null;
+      const quantity = parseNumberInput(row.quantity);
+      const unitRate = parseNumberInput(row.unitRate);
+      const include =
+        row.includeInBudget === "inherit"
+          ? undefined
+          : row.includeInBudget === "include";
+      const payload: ModifierCrewAdjustment = { templateId };
+      if (quantity !== undefined) payload.quantity = quantity;
+      if (unitRate !== undefined) payload.unitRate = unitRate;
+      if (include !== undefined) payload.includeInBudget = include;
+      return payload;
+    })
+    .filter((entry): entry is ModifierCrewAdjustment => entry !== null);
+  return result.length ? result : undefined;
+};
+
 export default function ModifiersPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [loading, setLoading] = useState(true);
   const [groups, setGroups] = useState<ModifierGroup[]>([]);
   const [newName, setNewName] = useState("");
   const [newMultiple, setNewMultiple] = useState(false);
+  const [templates, setTemplates] = useState<CrewRoleTemplate[]>([]);
 
   useEffect(() => {
     (async () => {
@@ -39,9 +207,22 @@ export default function ModifiersPage() {
         setLoading(false);
         return;
       }
-      const snap = await getDocs(collection(db, "modifiers"));
+      const [modifierSnap, templateSnap] = await Promise.all([
+        getDocs(collection(db, "modifiers")),
+        getDocs(collection(db, "crewRoleTemplates")),
+      ]);
       setGroups(
-        snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as any
+        modifierSnap.docs.map((d) => ({
+          id: d.id,
+          multiple: false,
+          options: [],
+          ...(d.data() as any),
+        })) as any
+      );
+      setTemplates(
+        templateSnap.docs
+          .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as any) }))
+          .sort((a, b) => a.name.localeCompare(b.name))
       );
       setLoading(false);
     })();
@@ -114,16 +295,10 @@ export default function ModifiersPage() {
     setGroups((gs) => gs.filter((g) => g.id !== groupId));
   };
 
-  const updateOption = async (
-    groupId: string,
-    optionId: string,
-    data: { name: string; price: number }
-  ) => {
+  const updateOption = async (groupId: string, option: ModifierOption) => {
     const group = groups.find((g) => g.id === groupId);
     if (!group) return;
-    const opts = group.options.map((o) =>
-      o.id === optionId ? { ...o, ...data } : o
-    );
+    const opts = group.options.map((o) => (o.id === option.id ? option : o));
     await updateDoc(doc(db, "modifiers", groupId), { options: opts });
     setGroups((gs) =>
       gs.map((g) => (g.id === groupId ? { ...g, options: opts } : g))
@@ -175,6 +350,7 @@ export default function ModifiersPage() {
           <ModifierGroupCard
             key={g.id}
             group={g}
+            templates={templates}
             onAddOption={addOption}
             onUpdateGroup={updateGroupMeta}
             onDeleteGroup={removeGroup}
@@ -232,62 +408,407 @@ function OptionForm({
 function EditableOptionRow({
   groupId,
   option,
+  templates,
   onUpdate,
   onDelete,
 }: {
   groupId: string;
   option: ModifierOption;
-  onUpdate: (groupId: string, optionId: string, data: { name: string; price: number }) => void;
+  templates: CrewRoleTemplate[];
+  onUpdate: (groupId: string, option: ModifierOption) => void;
   onDelete: (groupId: string, optionId: string) => void;
 }) {
   const [name, setName] = useState(option.name);
   const [price, setPrice] = useState(option.price.toString());
+  const [budgetForm, setBudgetForm] = useState<BudgetFormState>(() =>
+    toBudgetForm(option.budgetAdjustments)
+  );
+  const [crewRows, setCrewRows] = useState<CrewAdjustmentFormRow[]>(() =>
+    toCrewAdjustmentRows(option.crewAdjustments)
+  );
+
   useEffect(() => {
     setName(option.name);
     setPrice(option.price.toString());
-  }, [option.id, option.name, option.price]);
+    setBudgetForm(toBudgetForm(option.budgetAdjustments));
+    setCrewRows(toCrewAdjustmentRows(option.crewAdjustments));
+  }, [option]);
+
+  const templateNameLookup = useMemo(() => {
+    const map = new Map<string, string>();
+    templates.forEach((tpl) =>
+      map.set(tpl.id, tpl.name || "Untitled template")
+    );
+    return map;
+  }, [templates]);
+
+  const budgetHasValues = useMemo(
+    () =>
+      Object.entries(budgetForm).some(([key, value]) =>
+        key === "kitMode" ? value !== "" : value.trim().length > 0
+      ),
+    [budgetForm]
+  );
+
+  const handleBudgetChange = (
+    field: keyof BudgetFormState,
+    value: string
+  ) => {
+    setBudgetForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const updateCrewRow = (
+    rowId: string,
+    patch: Partial<CrewAdjustmentFormRow>
+  ) => {
+    setCrewRows((rows) =>
+      rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row))
+    );
+  };
+
+  const addCrewRow = () => {
+    setCrewRows((rows) => [
+      ...rows,
+      {
+        id: createRowId(),
+        templateId: "",
+        quantity: "",
+        unitRate: "",
+        includeInBudget: "inherit",
+      },
+    ]);
+  };
+
+  const removeCrewRow = (rowId: string) => {
+    setCrewRows((rows) => rows.filter((row) => row.id !== rowId));
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const payload: ModifierOption = {
+      ...option,
+      name: trimmed,
+      price: Number(price) || 0,
+    };
+    const budgetOverrides = toBudgetOverride(budgetForm);
+    if (budgetOverrides) payload.budgetAdjustments = budgetOverrides;
+    else delete (payload as any).budgetAdjustments;
+    const crewAdjustments = fromCrewAdjustmentRows(crewRows);
+    if (crewAdjustments) payload.crewAdjustments = crewAdjustments;
+    else delete (payload as any).crewAdjustments;
+    onUpdate(groupId, payload);
+  };
 
   return (
     <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        onUpdate(groupId, option.id, {
-          name: name.trim(),
-          price: Number(price) || 0,
-        });
-      }}
-      className="flex flex-wrap items-center gap-2 rounded border p-2 text-sm"
+      onSubmit={handleSubmit}
+      className="grid gap-3 rounded border p-3 text-sm bg-white"
     >
-      <input
-        className="input flex-1 min-w-[160px]"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        required
-      />
-      <input
-        type="number"
-        className="input w-24"
-        value={price}
-        onChange={(e) => setPrice(e.target.value)}
-      />
-      <div className="flex items-center gap-2">
-        <button type="submit" className="btn btn-sm w-fit">
-          Save
-        </button>
-        <button
-          type="button"
-          className="btn btn-sm w-fit bg-red-600 text-white"
-          onClick={() => onDelete(groupId, option.id)}
-        >
-          Delete
-        </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          className="input flex-1 min-w-[160px]"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          required
+        />
+        <input
+          type="number"
+          className="input w-28"
+          value={price}
+          onChange={(e) => setPrice(e.target.value)}
+        />
+        <div className="flex items-center gap-2">
+          <button type="submit" className="btn btn-sm w-fit">
+            Save
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm w-fit bg-red-600 text-white"
+            onClick={() => onDelete(groupId, option.id)}
+          >
+            Delete
+          </button>
+        </div>
       </div>
+
+      <details
+        className="rounded border border-dashed p-3"
+        open={budgetHasValues}
+      >
+        <summary className="cursor-pointer text-sm font-medium">
+          Budget adjustments
+        </summary>
+        <div className="mt-3 grid gap-2 md:grid-cols-2">
+          <label className="grid gap-1">
+            <span className="text-xs font-medium text-gray-600">
+              Labour (filming)
+            </span>
+            <input
+              type="number"
+              className="input"
+              value={budgetForm.labourFilming}
+              onChange={(e) =>
+                handleBudgetChange("labourFilming", e.target.value)
+              }
+              placeholder="Inherit"
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-xs font-medium text-gray-600">
+              Labour (editing)
+            </span>
+            <input
+              type="number"
+              className="input"
+              value={budgetForm.labourEditing}
+              onChange={(e) =>
+                handleBudgetChange("labourEditing", e.target.value)
+              }
+              placeholder="Inherit"
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-xs font-medium text-gray-600">Kit total</span>
+            <input
+              type="number"
+              className="input"
+              value={budgetForm.kit}
+              onChange={(e) => handleBudgetChange("kit", e.target.value)}
+              placeholder="Inherit"
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-xs font-medium text-gray-600">
+              Manual kit value
+            </span>
+            <input
+              type="number"
+              className="input"
+              value={budgetForm.kitManual}
+              onChange={(e) =>
+                handleBudgetChange("kitManual", e.target.value)
+              }
+              placeholder="Inherit"
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-xs font-medium text-gray-600">
+              Kit mode override
+            </span>
+            <select
+              className="input"
+              value={budgetForm.kitMode}
+              onChange={(e) =>
+                handleBudgetChange("kitMode", e.target.value)
+              }
+            >
+              <option value="">Inherit</option>
+              <option value="manual">Manual</option>
+              <option value="guided">Guided</option>
+            </select>
+          </label>
+          <label className="grid gap-1">
+            <span className="text-xs font-medium text-gray-600">
+              Travel miles
+            </span>
+            <input
+              type="number"
+              className="input"
+              value={budgetForm.travelMiles}
+              onChange={(e) =>
+                handleBudgetChange("travelMiles", e.target.value)
+              }
+              placeholder="Inherit"
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-xs font-medium text-gray-600">
+              Travel rate
+            </span>
+            <input
+              type="number"
+              step="0.01"
+              className="input"
+              value={budgetForm.travelRate}
+              onChange={(e) =>
+                handleBudgetChange("travelRate", e.target.value)
+              }
+              placeholder="Inherit"
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-xs font-medium text-gray-600">
+              Travel cost
+            </span>
+            <input
+              type="number"
+              className="input"
+              value={budgetForm.travelCost}
+              onChange={(e) =>
+                handleBudgetChange("travelCost", e.target.value)
+              }
+              placeholder="Inherit"
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-xs font-medium text-gray-600">
+              Parking
+            </span>
+            <input
+              type="number"
+              className="input"
+              value={budgetForm.parking}
+              onChange={(e) =>
+                handleBudgetChange("parking", e.target.value)
+              }
+              placeholder="Inherit"
+            />
+          </label>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="btn btn-xs"
+            onClick={() => setBudgetForm(emptyBudgetForm)}
+          >
+            Clear budget overrides
+          </button>
+        </div>
+      </details>
+
+      <details
+        className="rounded border border-dashed p-3"
+        open={crewRows.length > 0}
+      >
+        <summary className="cursor-pointer text-sm font-medium">
+          Crew adjustments
+        </summary>
+        <div className="mt-3 grid gap-3">
+          {crewRows.length === 0 && (
+            <p className="text-xs text-gray-500">
+              No crew template overrides added.
+            </p>
+          )}
+          {crewRows.map((row) => (
+            <div
+              key={row.id}
+              className="grid gap-2 rounded border bg-white p-3"
+            >
+              <label className="grid gap-1">
+                <span className="text-xs font-medium text-gray-600">
+                  Crew template
+                </span>
+                <select
+                  className="input"
+                  value={row.templateId}
+                  onChange={(e) =>
+                    updateCrewRow(row.id, { templateId: e.target.value })
+                  }
+                >
+                  <option value="">Select template</option>
+                  {templates.map((tpl) => (
+                    <option key={tpl.id} value={tpl.id}>
+                      {tpl.name || "Untitled template"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="grid gap-2 md:grid-cols-3">
+                <label className="grid gap-1">
+                  <span className="text-xs font-medium text-gray-600">
+                    Quantity override
+                  </span>
+                  <input
+                    type="number"
+                    className="input"
+                    value={row.quantity}
+                    onChange={(e) =>
+                      updateCrewRow(row.id, { quantity: e.target.value })
+                    }
+                    placeholder="Inherit"
+                  />
+                </label>
+                <label className="grid gap-1">
+                  <span className="text-xs font-medium text-gray-600">
+                    Unit rate override
+                  </span>
+                  <input
+                    type="number"
+                    className="input"
+                    value={row.unitRate}
+                    onChange={(e) =>
+                      updateCrewRow(row.id, { unitRate: e.target.value })
+                    }
+                    placeholder="Inherit"
+                  />
+                </label>
+                <label className="grid gap-1">
+                  <span className="text-xs font-medium text-gray-600">
+                    Budget inclusion
+                  </span>
+                  <select
+                    className="input"
+                    value={row.includeInBudget}
+                    onChange={(e) =>
+                      updateCrewRow(row.id, {
+                        includeInBudget: e.target
+                          .value as CrewAdjustmentFormRow["includeInBudget"],
+                      })
+                    }
+                  >
+                    <option value="inherit">Inherit</option>
+                    <option value="include">Force include</option>
+                    <option value="exclude">Force exclude</option>
+                  </select>
+                </label>
+              </div>
+              {row.templateId && !templateNameLookup.has(row.templateId) && (
+                <p className="text-xs text-amber-600">
+                  Template no longer exists. Update or remove this override.
+                </p>
+              )}
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  className="btn btn-xs"
+                  onClick={() => removeCrewRow(row.id)}
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" className="btn btn-xs" onClick={addCrewRow}>
+            Add crew adjustment
+          </button>
+          {crewRows.length > 0 && (
+            <button
+              type="button"
+              className="btn btn-xs"
+              onClick={() => setCrewRows([])}
+            >
+              Clear crew adjustments
+            </button>
+          )}
+        </div>
+        {templates.length === 0 && (
+          <p className="mt-2 text-xs text-gray-500">
+            No crew role templates found. Create templates to target roles by
+            default.
+          </p>
+        )}
+      </details>
     </form>
   );
 }
 
 function ModifierGroupCard({
   group,
+  templates,
   onAddOption,
   onUpdateGroup,
   onDeleteGroup,
@@ -295,10 +816,11 @@ function ModifierGroupCard({
   onDeleteOption,
 }: {
   group: ModifierGroup;
+  templates: CrewRoleTemplate[];
   onAddOption: (groupId: string, name: string, price: string, reset: () => void) => void;
   onUpdateGroup: (groupId: string, name: string, multiple: boolean) => void;
   onDeleteGroup: (groupId: string) => void;
-  onUpdateOption: (groupId: string, optionId: string, data: { name: string; price: number }) => void;
+  onUpdateOption: (groupId: string, option: ModifierOption) => void;
   onDeleteOption: (groupId: string, optionId: string) => void;
 }) {
   const [name, setName] = useState(group.name);
@@ -355,11 +877,12 @@ function ModifierGroupCard({
               key={option.id}
               groupId={group.id}
               option={option}
+              templates={templates}
               onUpdate={onUpdateOption}
               onDelete={onDeleteOption}
             />
           ))
-        )}
+      )}
       </div>
       <OptionForm groupId={group.id} onAdd={onAddOption} />
     </div>

@@ -1,9 +1,17 @@
 "use client";
-import { useEffect, useState } from 'react';
-import { db, auth } from '@/lib/firebase';
-import { collection, query, where, getDocs, addDoc, serverTimestamp, doc, updateDoc, arrayUnion } from 'firebase/firestore';
+import { useEffect, useRef, useState } from 'react';
+import type { User } from 'firebase/auth';
+import {
+  addDoc,
+  arrayUnion,
+  collection,
+  doc,
+  serverTimestamp,
+  updateDoc,
+} from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
-import { functions } from '@/lib/firebase';
+import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
+import { fetchOrgDocs, fetchUserOrgIds } from '@/lib/crm';
 
 /**
  * Groups page: allows creation of contact groups and assigning leads into groups for
@@ -16,77 +24,174 @@ export default function GroupsPage() {
   const [selectedLeadId, setSelectedLeadId] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Mass outreach state
   const [emailSubject, setEmailSubject] = useState('');
   const [emailBody, setEmailBody] = useState('');
   const [sending, setSending] = useState(false);
+  const orgIdsRef = useRef<string[]>([]);
 
   useEffect(() => {
-    (async () => {
-      const user = auth.currentUser;
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+
+    const handleUserChange = async (user: User | null, db: any) => {
+      if (cancelled) {
+        return;
+      }
+
       if (!user) {
+        orgIdsRef.current = [];
+        setGroups([]);
+        setLeads([]);
         setLoading(false);
         return;
       }
-      // find org memberships
-      const memSnap = await getDocs(query(collection(db, 'memberships'), where('userId', '==', user.uid)));
-      const orgIds = memSnap.docs.map((m) => (m.data() as any).orgId);
-      if (orgIds.length > 0) {
-        const gq = query(collection(db, 'groups'), where('orgId', 'in', orgIds));
-        const gs = await getDocs(gq);
-        setGroups(gs.docs.map((d) => ({ id: d.id, ...d.data() })));
-        const lq = query(collection(db, 'leads'), where('orgId', 'in', orgIds));
-        const ls = await getDocs(lq);
-        setLeads(ls.docs.map((d) => ({ id: d.id, ...d.data() })));
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const orgIds = await fetchUserOrgIds(db, user.uid);
+        orgIdsRef.current = orgIds;
+        if (orgIds.length === 0) {
+          setGroups([]);
+          setLeads([]);
+          return;
+        }
+
+        const [loadedGroups, loadedLeads] = await Promise.all([
+          fetchOrgDocs(db, 'groups', orgIds),
+          fetchOrgDocs(db, 'leads', orgIds),
+        ]);
+        setGroups(loadedGroups);
+        setLeads(loadedLeads);
+      } catch (err) {
+        console.error('Failed to load CRM groups', err);
+        if (!cancelled) {
+          setError('Failed to load groups. Please try again.');
+          setGroups([]);
+          setLeads([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-      setLoading(false);
+    };
+
+    (async () => {
+      try {
+        const { auth, db } = await ensureFirebase();
+        if (cancelled) {
+          return;
+        }
+
+        if (!auth || !db) {
+          throw new Error('Firebase auth or database is unavailable.');
+        }
+
+        const { onAuthStateChanged } = await loadAuthModule();
+        if (cancelled) {
+          return;
+        }
+        if (typeof onAuthStateChanged !== 'function') {
+          throw new Error('Firebase auth listener helper is unavailable.');
+        }
+
+        unsubscribe = onAuthStateChanged(auth, (user: User | null) => handleUserChange(user, db));
+      } catch (err) {
+        console.error('Failed to initialise CRM groups view', err);
+        if (!cancelled) {
+          setError('Failed to initialise CRM. Please refresh the page.');
+          setGroups([]);
+          setLeads([]);
+          setLoading(false);
+        }
+      }
     })();
+
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
   }, []);
 
   const addGroup = async (e: React.FormEvent) => {
     e.preventDefault();
-    const user = auth.currentUser;
-    if (!user) return;
+    setError(null);
     setSaving(true);
+
     try {
-      const memSnap = await getDocs(query(collection(db, 'memberships'), where('userId', '==', user.uid)));
-      const orgId = memSnap.docs[0]?.data()?.orgId;
+      const { auth, db } = await ensureFirebase();
+      if (!auth || !db) {
+        throw new Error('Firebase auth or database is unavailable.');
+      }
+
+      const user: User | null = auth.currentUser;
+      if (!user) {
+        throw new Error('You must be signed in to create groups.');
+      }
+
+      const orgIds = orgIdsRef.current.length
+        ? orgIdsRef.current
+        : await fetchUserOrgIds(db, user.uid);
+      if (orgIds.length === 0) {
+        throw new Error('No organisation membership found for your account.');
+      }
+
+      const orgId = orgIds[0];
+      if (!orgId) {
+        throw new Error('Unable to determine an organisation for the new group.');
+      }
+
       await addDoc(collection(db, 'groups'), {
         orgId,
         name: groupName,
         leadIds: [],
         createdAt: serverTimestamp(),
       });
+
       setGroupName('');
-      const gq = query(collection(db, 'groups'), where('orgId', '==', orgId));
-      const gs = await getDocs(gq);
-      setGroups(gs.docs.map((d) => ({ id: d.id, ...d.data() })));
-    } catch (err:any) {
+
+      const refreshed = await fetchOrgDocs(db, 'groups', orgIds);
+      setGroups(refreshed);
+    } catch (err: any) {
       console.error(err);
-      alert(err.message || 'Error adding group');
+      setError(err?.message || 'Error adding group');
     } finally {
       setSaving(false);
     }
   };
 
   const addLeadToGroup = async (groupId: string) => {
-    if (!selectedLeadId) return;
+    if (!selectedLeadId) {
+      return;
+    }
+
     try {
+      const { db } = await ensureFirebase();
+      if (!db) {
+        throw new Error('Firebase database is unavailable.');
+      }
+
       await updateDoc(doc(db, 'groups', groupId), {
         leadIds: arrayUnion(selectedLeadId),
       });
-      // refresh groups
-      const user = auth.currentUser;
-      const memSnap = await getDocs(query(collection(db, 'memberships'), where('userId', '==', user?.uid)));
-      const orgId = memSnap.docs[0]?.data()?.orgId;
-      const gq = query(collection(db, 'groups'), where('orgId', '==', orgId));
-      const gs = await getDocs(gq);
-      setGroups(gs.docs.map((d) => ({ id: d.id, ...d.data() })));
+
+      const orgIds = orgIdsRef.current;
+      if (orgIds.length > 0) {
+        const refreshed = await fetchOrgDocs(db, 'groups', orgIds);
+        setGroups(refreshed);
+      }
+
       alert('Lead added');
-    } catch (err:any) {
+    } catch (err: any) {
       console.error(err);
-      alert(err.message || 'Error adding lead to group');
+      alert(err?.message || 'Error adding lead to group');
     }
   };
 
@@ -98,6 +203,11 @@ export default function GroupsPage() {
     }
     setSending(true);
     try {
+      const { functions } = await ensureFirebase();
+      if (!functions) {
+        throw new Error('Email service is unavailable.');
+      }
+
       const callable = httpsCallable(functions, 'sendGroupEmail');
       const result = await callable({ groupId, subject: emailSubject, body: emailBody });
       alert(`Sent to ${(result.data as any).count} leads`);
@@ -105,7 +215,7 @@ export default function GroupsPage() {
       setEmailBody('');
     } catch (err: any) {
       console.error(err);
-      alert(err.message || 'Error sending group email');
+      alert(err?.message || 'Error sending group email');
     } finally {
       setSending(false);
     }
@@ -116,6 +226,11 @@ export default function GroupsPage() {
     <div className="grid gap-6">
       <h1 className="text-xl font-semibold">Groups</h1>
       <form onSubmit={addGroup} className="card p-4 grid gap-2 max-w-md">
+        {error && (
+          <p className="text-sm text-red-600" role="alert">
+            {error}
+          </p>
+        )}
         <input
           className="input"
           placeholder="Group name"

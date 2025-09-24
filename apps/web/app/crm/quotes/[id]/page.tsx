@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
-import { db, functions } from '@/lib/firebase';
+import { ensureFirebase } from '@/lib/firebase';
 
 export default function QuoteRequestDetail({ params }: { params: { id: string } }) {
   const [request, setRequest] = useState<any | null>(null);
@@ -12,34 +12,80 @@ export default function QuoteRequestDetail({ params }: { params: { id: string } 
   const [status, setStatus] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const dbRef = useRef<any>(null);
+
+  const resolveDb = async () => {
+    if (dbRef.current) {
+      return dbRef.current;
+    }
+    const { db } = await ensureFirebase();
+    if (!db) {
+      throw new Error('Firebase database is unavailable.');
+    }
+    dbRef.current = db;
+    return db;
+  };
 
   useEffect(() => {
+    let cancelled = false;
+
     (async () => {
-      const snap = await getDoc(doc(db, 'quoteRequests', params.id));
-      if (snap.exists()) {
-        const data = snap.data() as any;
-        const itemsWithNames = await Promise.all(
-          (data.items || []).map(async (it: any) => {
-            const prodSnap = await getDoc(doc(db, 'products', it.productId));
-            return { ...it, name: prodSnap.data()?.name || '' };
-          })
-        );
-        setRequest({ id: snap.id, ...data, items: itemsWithNames });
-        setStatus(data.status || '');
-        setNotes(data.internalNotes || '');
+      try {
+        const db = await resolveDb();
+        if (cancelled) {
+          return;
+        }
+
+        const snap = await getDoc(doc(db, 'quoteRequests', params.id));
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          const itemsWithNames = await Promise.all(
+            (data.items || []).map(async (it: any) => {
+              const prodSnap = await getDoc(doc(db, 'products', it.productId));
+              return { ...it, name: prodSnap.data()?.name || '' };
+            })
+          );
+          if (!cancelled) {
+            setRequest({ id: snap.id, ...data, items: itemsWithNames });
+            setStatus(data.status || '');
+            setNotes(data.internalNotes || '');
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load quote request', err);
+        if (!cancelled) {
+          setError('Failed to load quote request. Please try again.');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-      setLoading(false);
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [params.id]);
 
   const save = async () => {
     setSaving(true);
-    await updateDoc(doc(db, 'quoteRequests', params.id), {
-      status,
-      internalNotes: notes || null,
-    });
-    setRequest((prev: any) => ({ ...prev, status, internalNotes: notes }));
-    setSaving(false);
+    setError(null);
+
+    try {
+      const db = await resolveDb();
+      await updateDoc(doc(db, 'quoteRequests', params.id), {
+        status,
+        internalNotes: notes || null,
+      });
+      setRequest((prev: any) => ({ ...prev, status, internalNotes: notes }));
+    } catch (err: any) {
+      console.error('Failed to save quote request', err);
+      setError(err?.message || 'Error saving quote request.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const createProposal = async () => {
@@ -48,7 +94,14 @@ export default function QuoteRequestDetail({ params }: { params: { id: string } 
       return;
     }
     setSaving(true);
+    setError(null);
     try {
+      const { db, functions } = await ensureFirebase();
+      if (!db || !functions) {
+        throw new Error('Proposal service is unavailable.');
+      }
+      dbRef.current = db;
+
       const userSnap = await getDoc(doc(db, 'users', request.userId));
       const user = userSnap.data() as any;
       if (!user?.orgId || !user?.email) {
@@ -88,7 +141,8 @@ export default function QuoteRequestDetail({ params }: { params: { id: string } 
         proposalId: res.data?.id || null,
       }));
     } catch (err: any) {
-      alert(err.message || 'Error creating proposal');
+      console.error('Failed to create proposal', err);
+      alert(err?.message || 'Error creating proposal');
     }
     setSaving(false);
   };
@@ -102,6 +156,11 @@ export default function QuoteRequestDetail({ params }: { params: { id: string } 
       <h1 className="text-xl font-semibold">
         {request.projectName || `Request #${request.id.substring(0, 6)}`}
       </h1>
+      {error && (
+        <p className="text-sm text-red-600" role="alert">
+          {error}
+        </p>
+      )}
       <div className="grid gap-2 bg-white p-4 rounded">
         <div><span className="font-medium">Name:</span> {request.name || '—'}</div>
         <div><span className="font-medium">Email:</span> {request.email || '—'}</div>

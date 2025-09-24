@@ -16,6 +16,8 @@ interface User {
   contractor?: boolean;
   disabled?: boolean;
   roles?: UserRoles;
+  displayName?: string | null;
+  contractorInfo?: { name?: string | null } | null;
 }
 
 export default function AdminTeamPage() {
@@ -32,11 +34,18 @@ export default function AdminTeamPage() {
       if (!allowed) return;
       try {
         const res: any = await adminListUsers();
-        const hydrated = (res.users || []).map((user: User) => ({
-          ...user,
-          roles: extractUserRoles(user),
-          isStaff: extractUserRoles(user).admin ?? user.isStaff,
-        }));
+        const hydrated = (res.users || []).map((user: User) => {
+          const docForRoles: Partial<User> & { id: string } = {
+            ...user,
+            id: user.id,
+          };
+          const roles = extractUserRoles({ ...docForRoles, uid: user.id });
+          return {
+            ...user,
+            roles,
+            isStaff: roles.admin === true || user.isStaff === true,
+          };
+        });
         setUsers(hydrated);
         const appSnap = await getDocs(collection(db, 'contractorApplications'));
         setApps(appSnap.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -125,6 +134,20 @@ export default function AdminTeamPage() {
   const staffUsers = users.filter(u => u.roles?.admin);
   const contractorUsers = users.filter(u => u.contractor);
 
+  const resolveName = (user: User) => {
+    if (typeof user.fullName === 'string' && user.fullName.trim().length > 0) {
+      return user.fullName;
+    }
+    const profileName = user.contractorInfo?.name;
+    if (typeof profileName === 'string' && profileName.trim().length > 0) {
+      return profileName;
+    }
+    if (typeof user.displayName === 'string' && user.displayName.trim().length > 0) {
+      return user.displayName;
+    }
+    return user.email;
+  };
+
   const renderList = (list: User[], showStaff: boolean, showContractor: boolean) => (
     list.length === 0 ? (
       <p>No records.</p>
@@ -142,7 +165,7 @@ export default function AdminTeamPage() {
           {list.map(user => (
             <tr key={user.id} className="border-t">
               <td className="p-2">{user.email}</td>
-              <td className="p-2">{user.fullName || '-'}</td>
+              <td className="p-2">{resolveName(user) || '-'}</td>
               <td className="p-2">{user.disabled ? 'Yes' : 'No'}</td>
               <td className="p-2 flex gap-2 flex-wrap">
                 <button onClick={() => sendReset(user)} className="btn btn-sm">Reset</button>
@@ -177,7 +200,7 @@ export default function AdminTeamPage() {
           <button className="btn btn-sm" onClick={createUser}>Save</button>
         </div>
       )}
-      {activeTab === 'staff' && renderList(staffUsers, true, false)}
+      {activeTab === 'staff' && renderList(staffUsers, true, true)}
       {activeTab === 'contractor' && renderList(contractorUsers, false, true)}
       {activeTab === 'applications' && (
         apps.length === 0 ? (

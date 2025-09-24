@@ -95,10 +95,34 @@ export interface ProductDeliverable {
   thumbnailUrl?: string;
 }
 
+export interface ProductBudgetOverride {
+  labourFilming?: number | null;
+  labourEditing?: number | null;
+  labour?: number | null;
+  kitMode?: "manual" | "guided" | null;
+  kitManual?: number | null;
+  kitGuidance?: number | null;
+  kit?: number | null;
+  travelMiles?: number | null;
+  travelRate?: number | null;
+  travelCost?: number | null;
+  parking?: number | null;
+  labourCrew?: number | null;
+}
+
+export interface ProductCrewRoleOverride {
+  roleId: string;
+  quantity?: number | null;
+  unitRate?: number | null;
+  includeInBudget?: boolean | null;
+}
+
 export interface ProductModifierSelection {
   groupId: string;
   optionId: string;
   price?: number;
+  budgetOverrides?: ProductBudgetOverride;
+  crewOverrides?: ProductCrewRoleOverride[];
 }
 
 export interface ProductVariation {
@@ -106,11 +130,43 @@ export interface ProductVariation {
   name: string;
   price: number;
   features?: string[];
+  budgetOverrides?: ProductBudgetOverride;
+  crewOverrides?: ProductCrewRoleOverride[];
 }
 
 export interface ProductVideoLink {
   url: string;
   title?: string;
+}
+
+export interface ProductSpec {
+  overview?: string;
+  preparation?: string;
+  filming?: string;
+  editing?: string;
+  delivery?: string;
+  notes?: string;
+}
+
+export interface ProductCrewRole {
+  id: string;
+  roleId?: string | null;
+  title: string;
+  description?: string;
+  instructions?: string;
+  quantity?: number;
+  unitRate?: number;
+  includeInBudget?: boolean;
+}
+
+export interface CrewRoleTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  instructions?: string;
+  defaultQuantity?: number;
+  defaultRate?: number;
+  defaultIncludeInBudget?: boolean;
 }
 
 export interface ProductSEO {
@@ -132,6 +188,7 @@ export interface ProductBudget {
   travelRate?: number;
   travelCost?: number;
   parking?: number;
+  labourCrew?: number;
 }
 
 export interface Product {
@@ -167,6 +224,8 @@ export interface Product {
   labourCost?: number;
   defaultKitCost?: number;
   budget?: ProductBudget;
+  productSpec?: ProductSpec;
+  crewRoles?: ProductCrewRole[];
 }
 
 // Fallback sample products if Firestore is unavailable
@@ -189,6 +248,37 @@ const sampleProducts: Product[] = [
       {
         url: "https://vimeo.com/123456789",
         title: "Community spotlight teaser",
+      },
+    ],
+    productSpec: {
+      overview:
+        "Film three participating businesses and a hero community spotlight to build awareness for the BID.",
+      filming:
+        "Capture exterior establishing shots, two interview setups, and b-roll for each location.",
+      editing:
+        "Deliver colour graded 4K masters with captions and square cutdowns for social.",
+      delivery:
+        "Upload the final videos to the client portal with export notes and thumbnail options.",
+      notes:
+        "Share the production brief with assigned crew at least 48 hours before filming.",
+    },
+    crewRoles: [
+      {
+        id: "lead-videographer",
+        title: "Lead Videographer",
+        quantity: 1,
+        unitRate: 275,
+        instructions:
+          "Responsible for directing interviews, camera setup, and ensuring schedule adherence.",
+        includeInBudget: true,
+      },
+      {
+        id: "video-editor",
+        title: "Video Editor",
+        quantity: 1,
+        unitRate: 220,
+        instructions: "Edit four deliverables with brand-approved lower-thirds and captions.",
+        includeInBudget: true,
       },
     ],
   },
