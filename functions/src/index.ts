@@ -298,16 +298,82 @@ export const onOrderCreated = functions.firestore
                 : admin.firestore.Timestamp.fromDate(
                     new Date(Date.now() + dueDays * 86400000)
                   );
+              const rawFieldType =
+                typeof t.fieldType === 'string' && t.fieldType.trim().length > 0
+                  ? t.fieldType.trim()
+                  : null;
+              const fieldType = rawFieldType && rawFieldType !== 'none' ? rawFieldType : null;
+              const fieldLabel =
+                typeof t.fieldLabel === 'string' && t.fieldLabel.trim().length > 0
+                  ? t.fieldLabel.trim()
+                  : typeof t.title === 'string'
+                    ? t.title
+                    : '';
+              const fieldPlaceholder =
+                typeof t.fieldPlaceholder === 'string' ? t.fieldPlaceholder : '';
+              const fieldHelpText =
+                typeof t.fieldHelpText === 'string' ? t.fieldHelpText : '';
+              const fieldAccept =
+                typeof t.fieldAccept === 'string' ? t.fieldAccept : '';
+              const fieldRequired = fieldType ? t.fieldRequired === true : false;
+              const fieldOptions =
+                fieldType === 'select' && Array.isArray(t.fieldOptions)
+                  ? t.fieldOptions
+                      .map((opt: any) => {
+                        const label =
+                          typeof opt?.label === 'string' ? opt.label.trim() : '';
+                        const value =
+                          typeof opt?.value === 'string' ? opt.value.trim() : label;
+                        if (!label && !value) return null;
+                        return { label: label || value, value: value || label };
+                      })
+                      .filter((opt): opt is { label: string; value: string } => Boolean(opt))
+                  : [];
+              const dependsOn: string[] = Array.isArray(t.dependsOn)
+                ? t.dependsOn
+                    .map((dep: any) =>
+                      typeof dep === 'string' && dep.trim().length > 0 ? dep.trim() : null,
+                    )
+                    .filter((dep): dep is string => Boolean(dep))
+                : [];
+              const assignmentScope =
+                fieldType === 'team-member' && t.assignmentScope === 'contractor'
+                  ? 'contractor'
+                  : fieldType === 'team-member'
+                    ? 'team'
+                    : null;
+              const shareAssigneeContact =
+                fieldType === 'team-member' && t.shareAssigneeContact === true;
+              const fieldKey =
+                typeof t.fieldKey === 'string' && t.fieldKey.trim().length > 0
+                  ? t.fieldKey.trim()
+                  : null;
+              const templateKey =
+                typeof t.fieldTemplateKey === 'string' && t.fieldTemplateKey.trim().length > 0
+                  ? t.fieldTemplateKey.trim()
+                  : null;
               taskDocs.push({
-                title: t.title,
-                description: t.description || '',
-                fieldType: t.fieldType || null,
+                title: typeof t.title === 'string' ? t.title : 'Untitled task',
+                description: typeof t.description === 'string' ? t.description : '',
+                fieldType,
+                fieldTemplateKey: templateKey,
+                fieldKey,
+                fieldLabel,
+                fieldPlaceholder,
+                fieldHelpText,
+                fieldRequired,
+                fieldAccept: fieldType === 'file' ? fieldAccept : '',
+                fieldOptions,
+                dependsOn,
+                workflowTaskId: typeof t.id === 'string' ? t.id : null,
                 dueAt,
                 forCustomer: !!t.forCustomer,
                 status: 'todo',
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
                 assignedTo: null,
                 assigneeName: null,
+                assignmentScope,
+                shareAssigneeContact,
               });
             }
           }
@@ -2957,23 +3023,129 @@ export const admin_deleteProduct = functions.https.onCall(async (data: any, cont
   return { ok: true };
 });
 
+function sanitizeWorkflowTasks(raw: any): any[] {
+  if (!Array.isArray(raw)) return [];
+  const seenIds = new Set<string>();
+  const usedFieldKeys = new Set<string>();
+  const provisional = raw.map((task: any, index: number) => {
+    const input = task || {};
+    const preferredId =
+      typeof input.id === 'string' && input.id.trim().length > 0
+        ? input.id.trim()
+        : uuidv4();
+    let id = preferredId;
+    let idSuffix = 2;
+    while (seenIds.has(id)) {
+      id = `${preferredId}-${idSuffix}`;
+      idSuffix += 1;
+    }
+    seenIds.add(id);
+    const title = typeof input.title === 'string' ? input.title.trim() : '';
+    const description =
+      typeof input.description === 'string' ? input.description.trim() : '';
+    const dueDaysValue = input.dueDays;
+    const dueDays =
+      typeof dueDaysValue === 'number'
+        ? String(dueDaysValue)
+        : typeof dueDaysValue === 'string'
+          ? dueDaysValue.trim()
+          : '';
+    const rawFieldType =
+      typeof input.fieldType === 'string' && input.fieldType.trim().length > 0
+        ? input.fieldType.trim()
+        : null;
+    const fieldType = rawFieldType && rawFieldType !== 'none' ? rawFieldType : null;
+    const forCustomer = input.forCustomer === true;
+    const fieldLabel =
+      typeof input.fieldLabel === 'string' ? input.fieldLabel.trim() : '';
+    const fieldPlaceholder =
+      typeof input.fieldPlaceholder === 'string'
+        ? input.fieldPlaceholder.trim()
+        : '';
+    const fieldHelpText =
+      typeof input.fieldHelpText === 'string' ? input.fieldHelpText.trim() : '';
+    const fieldAccept =
+      typeof input.fieldAccept === 'string' ? input.fieldAccept.trim() : '';
+    const fieldRequired = fieldType ? input.fieldRequired === true : false;
+    const templateKey =
+      typeof input.fieldTemplateKey === 'string' && input.fieldTemplateKey.trim().length > 0
+        ? input.fieldTemplateKey.trim()
+        : null;
+    const assignmentScope =
+      fieldType === 'team-member' && input.assignmentScope === 'contractor'
+        ? 'contractor'
+        : fieldType === 'team-member'
+          ? 'team'
+          : null;
+    const shareAssigneeContact =
+      fieldType === 'team-member' && input.shareAssigneeContact === true;
+    const rawFieldKey =
+      typeof input.fieldKey === 'string' && input.fieldKey.trim().length > 0
+        ? input.fieldKey.trim()
+        : `field-${id.slice(0, 8)}`;
+    let fieldKey = rawFieldKey;
+    let fieldSuffix = 2;
+    while (usedFieldKeys.has(fieldKey)) {
+      fieldKey = `${rawFieldKey}-${fieldSuffix}`;
+      fieldSuffix += 1;
+    }
+    usedFieldKeys.add(fieldKey);
+    const dependsOn: string[] = Array.isArray(input.dependsOn)
+      ? input.dependsOn
+          .map((dep: any) =>
+            typeof dep === 'string' && dep.trim().length > 0 ? dep.trim() : null,
+          )
+          .filter((dep): dep is string => Boolean(dep) && dep !== id)
+      : [];
+    const fieldOptions =
+      fieldType === 'select' && Array.isArray(input.fieldOptions)
+        ? input.fieldOptions
+            .map((opt: any) => {
+              const label =
+                typeof opt?.label === 'string' ? opt.label.trim() : '';
+              const value =
+                typeof opt?.value === 'string' ? opt.value.trim() : label;
+              if (!label && !value) return null;
+              return { label: label || value, value: value || label };
+            })
+            .filter((opt): opt is { label: string; value: string } => Boolean(opt))
+        : [];
+    return {
+      id,
+      title,
+      description,
+      dueDays,
+      forCustomer,
+      fieldType,
+      fieldTemplateKey: templateKey,
+      fieldKey,
+      fieldLabel: fieldLabel || (fieldType ? title : ''),
+      fieldPlaceholder,
+      fieldHelpText,
+      fieldRequired,
+      fieldAccept: fieldType === 'file' ? fieldAccept : '',
+      fieldOptions,
+      dependsOn,
+      shareAssigneeContact,
+      assignmentScope,
+    };
+  });
+  const validIds = new Set(provisional.map((task) => task.id));
+  return provisional.map((task) => ({
+    ...task,
+    dependsOn: task.dependsOn.filter((depId: string) => validIds.has(depId)),
+  }));
+}
+
 /**
- * Create a new workflow. Expects { name, description, tasks } where tasks is an array of
- * { title, description, dueDays, fieldType }. FieldType defines how the task collects data: e.g. 'text', 'file', etc.
+ * Create a new workflow. Expects { name, description, tasks } where tasks include metadata for
+ * client/staff forms and internal dependencies.
  */
 export const admin_createWorkflow = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
   await assertStaff(context, ['admin', 'operations']);
   const { name, description, tasks } = data;
   if (!name) throw new functions.https.HttpsError('invalid-argument', 'Name required');
-  const safeTasks = Array.isArray(tasks)
-    ? tasks.map((t: any) => ({
-        title: t.title || '',
-        description: t.description || '',
-        dueDays: t.dueDays || '',
-        fieldType: t.fieldType || '',
-        forCustomer: !!t.forCustomer,
-      }))
-    : [];
+  const safeTasks = sanitizeWorkflowTasks(tasks);
   const workflow = {
     name,
     description: description || '',
@@ -3001,6 +3173,9 @@ export const admin_updateWorkflow = functions.https.onCall(async (data: any, con
   const { workflowId, updates } = data;
   if (!workflowId || !updates) throw new functions.https.HttpsError('invalid-argument', 'workflowId and updates required');
   const workflowRef = db.collection('workflows').doc(workflowId);
+  if (Array.isArray((updates as any)?.tasks)) {
+    (updates as any).tasks = sanitizeWorkflowTasks((updates as any).tasks);
+  }
   const beforeSnap = await workflowRef.get();
   const beforeData = beforeSnap.exists ? (beforeSnap.data() as admin.firestore.DocumentData) : undefined;
   await workflowRef.set(updates, { merge: true });
