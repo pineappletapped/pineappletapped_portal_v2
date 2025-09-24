@@ -2,11 +2,12 @@
 
 import { Product, DeliverableType } from "@/lib/products";
 import type { Venue } from "@/lib/venues";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import ProductFeatureCard from "./ProductFeatureCard";
 import type { IconType } from "react-icons";
+import clsx from "clsx";
 import {
   FiClipboard,
   FiClock,
@@ -32,6 +33,139 @@ const deliverableIcons: Record<DeliverableType, IconType> = {
   "audio-licence": FiMusic,
   document: FiFileText,
 };
+
+type VideoPlayback =
+  | { kind: "iframe"; src: string }
+  | { kind: "file"; src: string }
+  | { kind: "external"; src: string };
+
+interface NormalizedVideo {
+  url: string;
+  title: string;
+  playback: VideoPlayback;
+}
+
+type GalleryItem =
+  | { id: string; type: "video"; label: string; video: NormalizedVideo }
+  | { id: string; type: "image"; label: string; src: string }
+  | { id: string; type: "placeholder"; label: string };
+
+function resolveVideoPlayback(input: string): VideoPlayback | null {
+  try {
+    const url = new URL(input);
+    const host = url.hostname.replace(/^www\./, "");
+
+    const ytIdFromSearch = () => url.searchParams.get("v") || "";
+    if (host === "youtu.be") {
+      const id = url.pathname.split("/").filter(Boolean)[0] || "";
+      if (id) {
+        return {
+          kind: "iframe",
+          src: `https://www.youtube-nocookie.com/embed/${id}?rel=0`,
+        };
+      }
+    }
+    if (host.endsWith("youtube.com")) {
+      let id = "";
+      if (ytIdFromSearch()) {
+        id = ytIdFromSearch();
+      } else if (url.pathname.startsWith("/shorts/")) {
+        id = url.pathname.replace("/shorts/", "").split("/")[0] || "";
+      } else if (url.pathname.startsWith("/embed/")) {
+        id = url.pathname.replace("/embed/", "").split("/")[0] || "";
+      }
+      if (id) {
+        return {
+          kind: "iframe",
+          src: `https://www.youtube-nocookie.com/embed/${id}?rel=0`,
+        };
+      }
+    }
+
+    if (host.endsWith("vimeo.com")) {
+      let id = "";
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (host === "player.vimeo.com") {
+        const videoIndex = parts.findIndex((segment) => segment === "video");
+        if (videoIndex !== -1 && parts[videoIndex + 1]) {
+          id = parts[videoIndex + 1];
+        }
+      } else if (parts[0] && /^\d+$/.test(parts[0])) {
+        id = parts[0];
+      }
+      if (id) {
+        return { kind: "iframe", src: `https://player.vimeo.com/video/${id}` };
+      }
+    }
+
+    const pathname = url.pathname.toLowerCase();
+    if (/\.(mp4|webm|ogg|mov|m4v)$/i.test(pathname)) {
+      return { kind: "file", src: input };
+    }
+
+    return { kind: "external", src: input };
+  } catch {
+    return null;
+  }
+}
+
+function VideoPlayer({
+  video,
+  label,
+  showExternalLink,
+}: {
+  video: NormalizedVideo;
+  label: string;
+  showExternalLink?: boolean;
+}) {
+  if (video.playback.kind === "iframe") {
+    return (
+      <iframe
+        src={video.playback.src}
+        title={label}
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+        allowFullScreen
+        loading="lazy"
+        className="h-full w-full border-0"
+        referrerPolicy="no-referrer-when-downgrade"
+      />
+    );
+  }
+
+  if (video.playback.kind === "file") {
+    return (
+      <video
+        className="h-full w-full"
+        controls
+        controlsList="nodownload"
+        preload="metadata"
+        playsInline
+      >
+        <source src={video.playback.src} />
+        Your browser does not support embedded videos.
+        <a href={video.url} className="ml-1">Watch the video in a new tab.</a>
+      </video>
+    );
+  }
+
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-br from-slate-900 via-gray-800 to-slate-700 p-6 text-center text-sm text-white/90">
+      <FiPlay className="h-8 w-8" />
+      <p>Preview not available. Open the link below to watch.</p>
+      {showExternalLink && (
+        <a
+          href={video.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 rounded bg-white/10 px-3 py-1 text-xs font-medium text-white transition hover:bg-white/20"
+        >
+          <FiExternalLink className="h-3 w-3" aria-hidden />
+          Watch in new tab
+        </a>
+      )}
+    </div>
+  );
+}
 import AddToCartWizard from "./AddToCartWizard";
 import ProductModifierSummary from "./ProductModifierSummary";
 import VenueMap from "./VenueMap";
@@ -47,61 +181,108 @@ export default function ProductDetail({
   const [variation, setVariation] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
 
-  const exampleVideos = useMemo(() => {
+  const exampleVideos = useMemo<NormalizedVideo[]>(() => {
     const rawVideos = Array.isArray(product.exampleVideos)
       ? product.exampleVideos
       : [];
-    const normalised = rawVideos
-      .map((video: any) => {
-        if (typeof video === "string") {
-          const url = video.trim();
-          if (!url) return null;
-          return { url, title: "" };
-        }
-        if (video && typeof video.url === "string") {
-          const url = video.url.trim();
-          if (!url) return null;
-          const title =
-            typeof video.title === "string" ? video.title.trim() : "";
-          return { url, title };
-        }
-        return null;
-      })
-      .filter((entry): entry is { url: string; title: string } => !!entry);
-    if (normalised.length === 0) {
+    const entries: NormalizedVideo[] = [];
+
+    rawVideos.forEach((video: any) => {
+      let url = "";
+      let title = "";
+      if (typeof video === "string") {
+        url = video.trim();
+      } else if (video && typeof video.url === "string") {
+        url = video.url.trim();
+        title = typeof video.title === "string" ? video.title.trim() : "";
+      }
+      if (!url) return;
+      const playback = resolveVideoPlayback(url);
+      if (!playback) return;
+      entries.push({ url, title, playback });
+    });
+
+    if (entries.length === 0) {
       const fallback =
         typeof product.exampleWorkUrl === "string"
           ? product.exampleWorkUrl.trim()
           : "";
       if (fallback) {
-        normalised.push({ url: fallback, title: "" });
-      }
-    }
-    return normalised;
-  }, [product.exampleVideos, product.exampleWorkUrl]);
-
-  const resolveYouTubeEmbed = (input: string) => {
-    try {
-      const url = new URL(input);
-      const host = url.hostname.replace(/^www\./, "");
-      let id = "";
-      if (host === "youtu.be") {
-        id = url.pathname.split("/").filter(Boolean)[0] || "";
-      } else if (host.endsWith("youtube.com")) {
-        if (url.searchParams.get("v")) {
-          id = url.searchParams.get("v") || "";
-        } else if (url.pathname.startsWith("/shorts/")) {
-          id = url.pathname.replace("/shorts/", "").split("/")[0] || "";
-        } else if (url.pathname.startsWith("/embed/")) {
-          id = url.pathname.replace("/embed/", "").split("/")[0] || "";
+        const playback = resolveVideoPlayback(fallback);
+        if (playback) {
+          entries.push({ url: fallback, title: "", playback });
         }
       }
-      if (!id) return null;
-      return `https://www.youtube-nocookie.com/embed/${id}?rel=0`;
-    } catch {
-      return null;
     }
-  };
+
+    return entries;
+  }, [product.exampleVideos, product.exampleWorkUrl]);
+
+  const galleryMedia = useMemo<GalleryItem[]>(() => {
+    const items: GalleryItem[] = [];
+
+    exampleVideos.forEach((video, index) => {
+      const label = video.title || `Example video ${index + 1}`;
+      items.push({
+        id: `video-${index}-${video.url}`,
+        type: "video",
+        label,
+        video,
+      });
+    });
+
+    const coverImage =
+      typeof product.imageUrl === "string" ? product.imageUrl.trim() : "";
+    if (coverImage) {
+      items.push({
+        id: "image-cover",
+        type: "image",
+        label: product.name ? `${product.name} cover` : "Product image",
+        src: coverImage,
+      });
+    }
+
+    if (Array.isArray(product.storyboardImages)) {
+      product.storyboardImages.forEach((imageUrl, index) => {
+        if (typeof imageUrl !== "string") return;
+        const trimmed = imageUrl.trim();
+        if (!trimmed) return;
+        items.push({
+          id: `storyboard-${index}-${trimmed}`,
+          type: "image",
+          label: `Storyboard ${index + 1}`,
+          src: trimmed,
+        });
+      });
+    }
+
+    if (items.length === 0) {
+      items.push({
+        id: "placeholder",
+        type: "placeholder",
+        label: product.name || "Product preview",
+      });
+    }
+
+    return items;
+  }, [exampleVideos, product.imageUrl, product.storyboardImages, product.name]);
+
+  const [activeMediaId, setActiveMediaId] = useState<string | null>(
+    galleryMedia[0]?.id ?? null
+  );
+
+  useEffect(() => {
+    setActiveMediaId(galleryMedia[0]?.id ?? null);
+  }, [galleryMedia]);
+
+  const activeMedia = useMemo(() => {
+    return galleryMedia.find((item) => item.id === activeMediaId) ?? galleryMedia[0];
+  }, [galleryMedia, activeMediaId]);
+
+  const selectableMedia = useMemo(
+    () => galleryMedia.filter((item) => item.type !== "placeholder"),
+    [galleryMedia]
+  );
 
   const handleVariation = (id: string) => {
     const v = product.variations?.find((va) => va.id === id);
@@ -123,30 +304,68 @@ export default function ProductDetail({
     <div className="space-y-12">
       <div className="grid md:grid-cols-2 gap-8">
         <div className="space-y-4">
-          {product.imageUrl ? (
-            <Image
-              src={product.imageUrl}
-              alt={product.name}
-              width={800}
-              height={600}
-              priority
-              className="w-full h-80 object-cover rounded"
-            />
-          ) : (
-            <div className="w-full h-80 bg-gray-200 rounded" />
-          )}
-          {product.storyboardImages && product.storyboardImages.length > 0 && (
-            <div className="grid grid-cols-3 gap-2">
-              {product.storyboardImages.map((url, i) => (
-                <Image
-                  key={i}
-                  src={url}
-                  alt={`Storyboard ${i + 1}`}
-                  width={300}
-                  height={200}
-                  className="w-full h-24 object-cover rounded"
+          <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-gray-200">
+            {activeMedia?.type === "image" && (
+              <Image
+                src={activeMedia.src}
+                alt={activeMedia.label || product.name || "Product image"}
+                fill
+                priority
+                sizes="(min-width: 768px) 50vw, 100vw"
+                className="object-cover"
+              />
+            )}
+            {activeMedia?.type === "video" && (
+              <div className="absolute inset-0">
+                <VideoPlayer
+                  video={activeMedia.video}
+                  label={activeMedia.label}
+                  showExternalLink
                 />
-              ))}
+              </div>
+            )}
+            {activeMedia?.type === "placeholder" && (
+              <div className="flex h-full w-full items-center justify-center bg-gray-200 text-sm text-gray-500">
+                No preview available
+              </div>
+            )}
+          </div>
+          {selectableMedia.length > 1 && (
+            <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">
+              {selectableMedia.map((item) => {
+                const isActive = activeMedia?.id === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setActiveMediaId(item.id)}
+                    aria-pressed={isActive}
+                    aria-label={`Show ${item.label}`}
+                    className={clsx(
+                      "relative h-20 overflow-hidden rounded-lg border transition focus:outline-none focus-visible:ring-2 focus-visible:ring-orange focus-visible:ring-offset-2 focus-visible:ring-offset-white",
+                      isActive
+                        ? "border-orange ring-2 ring-orange"
+                        : "border-gray-200 hover:border-orange/70"
+                    )}
+                  >
+                    {item.type === "image" ? (
+                      <div className="relative h-full w-full">
+                        <Image
+                          src={item.src}
+                          alt={item.label}
+                          fill
+                          sizes="100px"
+                          className="object-cover"
+                        />
+                      </div>
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center bg-slate-900/80 text-white">
+                        <FiPlay className="h-6 w-6" aria-hidden />
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
@@ -299,30 +518,14 @@ export default function ProductDetail({
           <h2 className="text-xl font-semibold mb-2">Example Videos</h2>
           <div className="grid gap-6 md:grid-cols-2">
             {exampleVideos.map((video, index) => {
-              const embedUrl = resolveYouTubeEmbed(video.url);
               const label = video.title || `Example video ${index + 1}`;
               return (
                 <div
                   key={`${video.url}-${index}`}
                   className="space-y-3 rounded-lg border bg-white p-3 shadow-sm"
                 >
-                  <div className="aspect-video w-full overflow-hidden rounded-md bg-black">
-                    {embedUrl ? (
-                      <iframe
-                        src={embedUrl}
-                        title={label}
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                        allowFullScreen
-                        loading="lazy"
-                        className="h-full w-full border-0"
-                        referrerPolicy="no-referrer-when-downgrade"
-                      />
-                    ) : (
-                      <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-br from-slate-900 via-gray-800 to-slate-700 p-6 text-center text-sm text-white/90">
-                        <FiPlay className="h-8 w-8" />
-                        <p>Preview not available. Open the link below to watch.</p>
-                      </div>
-                    )}
+                  <div className="relative aspect-video w-full overflow-hidden rounded-md bg-black">
+                    <VideoPlayer video={video} label={label} />
                   </div>
                   <div className="space-y-1">
                     <p className="font-medium text-gray-900">{label}</p>
