@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { db, storage, functions } from "@/lib/firebase";
@@ -27,6 +27,9 @@ import type {
   ProductSpec,
   ProductCrewRole,
   CrewRoleTemplate,
+  ProductBudgetOverride,
+  ProductCrewRoleOverride,
+  ProductModifierSelection,
 } from "@/lib/products";
 import type { Venue } from "@/lib/venues";
 import type { KitBag, EquipmentStandard } from "@/lib/equipment";
@@ -50,10 +53,19 @@ import "react-quill/dist/quill.snow.css";
 
 const PRODUCT_IMAGE_ROOT = "Product_Images";
 
+interface ModifierCrewAdjustment {
+  templateId: string;
+  quantity?: number | null;
+  unitRate?: number | null;
+  includeInBudget?: boolean | null;
+}
+
 interface ModifierOption {
   id: string;
   name: string;
   price: number;
+  budgetAdjustments?: ProductBudgetOverride | null;
+  crewAdjustments?: ModifierCrewAdjustment[] | null;
 }
 
 interface ModifierGroup {
@@ -191,6 +203,272 @@ const parseRoleQuantity = (value: string): number => {
   return rounded > 0 ? rounded : 1;
 };
 
+type BudgetOverrideFormState = {
+  labourFilming: string;
+  labourEditing: string;
+  kitManual: string;
+  kit: string;
+  kitMode: "" | "manual" | "guided";
+  travelMiles: string;
+  travelRate: string;
+  travelCost: string;
+  parking: string;
+};
+
+const emptyBudgetForm: BudgetOverrideFormState = {
+  labourFilming: "",
+  labourEditing: "",
+  kitManual: "",
+  kit: "",
+  kitMode: "",
+  travelMiles: "",
+  travelRate: "",
+  travelCost: "",
+  parking: "",
+};
+
+const parseNumberInput = (value: string): number | undefined => {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const createBudgetForm = (
+  source?: ProductBudgetOverride | null
+): BudgetOverrideFormState => ({
+  labourFilming:
+    typeof source?.labourFilming === "number" &&
+    Number.isFinite(source.labourFilming)
+      ? String(source.labourFilming)
+      : "",
+  labourEditing:
+    typeof source?.labourEditing === "number" &&
+    Number.isFinite(source.labourEditing)
+      ? String(source.labourEditing)
+      : "",
+  kitManual:
+    typeof source?.kitManual === "number" && Number.isFinite(source.kitManual)
+      ? String(source.kitManual)
+      : "",
+  kit:
+    typeof source?.kit === "number" && Number.isFinite(source.kit)
+      ? String(source.kit)
+      : "",
+  kitMode:
+    source?.kitMode === "manual" || source?.kitMode === "guided"
+      ? source.kitMode
+      : "",
+  travelMiles:
+    typeof source?.travelMiles === "number" &&
+    Number.isFinite(source.travelMiles)
+      ? String(source.travelMiles)
+      : "",
+  travelRate:
+    typeof source?.travelRate === "number" && Number.isFinite(source.travelRate)
+      ? String(source.travelRate)
+      : "",
+  travelCost:
+    typeof source?.travelCost === "number" && Number.isFinite(source.travelCost)
+      ? String(source.travelCost)
+      : "",
+  parking:
+    typeof source?.parking === "number" && Number.isFinite(source.parking)
+      ? String(source.parking)
+      : "",
+});
+
+const parseBudgetFormToOverride = (
+  form: BudgetOverrideFormState
+): ProductBudgetOverride | undefined => {
+  const payload: ProductBudgetOverride = {};
+  const labourFilming = parseNumberInput(form.labourFilming);
+  if (labourFilming !== undefined) payload.labourFilming = labourFilming;
+  const labourEditing = parseNumberInput(form.labourEditing);
+  if (labourEditing !== undefined) payload.labourEditing = labourEditing;
+  const kitManual = parseNumberInput(form.kitManual);
+  if (kitManual !== undefined) payload.kitManual = kitManual;
+  const kit = parseNumberInput(form.kit);
+  if (kit !== undefined) payload.kit = kit;
+  if (form.kitMode === "manual" || form.kitMode === "guided") {
+    payload.kitMode = form.kitMode;
+  }
+  const travelMiles = parseNumberInput(form.travelMiles);
+  if (travelMiles !== undefined) payload.travelMiles = travelMiles;
+  const travelRate = parseNumberInput(form.travelRate);
+  if (travelRate !== undefined) payload.travelRate = travelRate;
+  const travelCost = parseNumberInput(form.travelCost);
+  if (travelCost !== undefined) payload.travelCost = travelCost;
+  const parking = parseNumberInput(form.parking);
+  if (parking !== undefined) payload.parking = parking;
+  return Object.keys(payload).length ? payload : undefined;
+};
+
+type CrewOverrideFormState = {
+  quantity: string;
+  unitRate: string;
+  includeInBudget: "inherit" | "include" | "exclude";
+};
+
+const defaultCrewOverrideForm: CrewOverrideFormState = {
+  quantity: "",
+  unitRate: "",
+  includeInBudget: "inherit",
+};
+
+const createCrewOverrideMap = (
+  crewRoles: CrewRoleFormState[],
+  overrides?: ProductCrewRoleOverride[] | null
+): Record<string, CrewOverrideFormState> => {
+  const map: Record<string, CrewOverrideFormState> = {};
+  const overrideLookup = new Map<string, ProductCrewRoleOverride>();
+  (overrides || []).forEach((entry) => {
+    if (entry && typeof entry.roleId === "string") {
+      overrideLookup.set(entry.roleId, entry);
+    }
+  });
+  crewRoles.forEach((role) => {
+    const existing = overrideLookup.get(role.id);
+    map[role.id] = {
+      quantity:
+        typeof existing?.quantity === "number" &&
+        Number.isFinite(existing.quantity)
+          ? String(existing.quantity)
+          : "",
+      unitRate:
+        typeof existing?.unitRate === "number" &&
+        Number.isFinite(existing.unitRate)
+          ? String(existing.unitRate)
+          : "",
+      includeInBudget:
+        existing?.includeInBudget === true
+          ? "include"
+          : existing?.includeInBudget === false
+          ? "exclude"
+          : "inherit",
+    };
+  });
+  return map;
+};
+
+const syncCrewOverrideMap = (
+  current: Record<string, CrewOverrideFormState>,
+  crewRoles: CrewRoleFormState[]
+): Record<string, CrewOverrideFormState> => {
+  const next: Record<string, CrewOverrideFormState> = {};
+  crewRoles.forEach((role) => {
+    next[role.id] = current[role.id]
+      ? current[role.id]
+      : { ...defaultCrewOverrideForm };
+  });
+  return next;
+};
+
+const parseCrewOverrideMap = (
+  map: Record<string, CrewOverrideFormState>
+): ProductCrewRoleOverride[] => {
+  return Object.entries(map)
+    .map(([roleId, entry]) => {
+      const quantity = parseNumberInput(entry.quantity);
+      const unitRate = parseNumberInput(entry.unitRate);
+      const include =
+        entry.includeInBudget === "inherit"
+          ? undefined
+          : entry.includeInBudget === "include";
+      if (
+        quantity === undefined &&
+        unitRate === undefined &&
+        include === undefined
+      ) {
+        return null;
+      }
+      const payload: ProductCrewRoleOverride = { roleId };
+      if (quantity !== undefined) payload.quantity = quantity;
+      if (unitRate !== undefined) payload.unitRate = unitRate;
+      if (include !== undefined) payload.includeInBudget = include;
+      return payload;
+    })
+    .filter(
+      (entry): entry is ProductCrewRoleOverride => entry !== null
+    );
+};
+
+const applyTemplateAdjustmentsToOverrides = (
+  overrides: Record<string, CrewOverrideFormState>,
+  crewRoles: CrewRoleFormState[],
+  adjustments: ModifierCrewAdjustment[]
+) => {
+  if (!Array.isArray(adjustments) || adjustments.length === 0) return;
+  const templateLookup = new Map<string, CrewRoleFormState>();
+  crewRoles.forEach((role) => {
+    if (role.templateId) templateLookup.set(role.templateId, role);
+  });
+  adjustments.forEach((adjustment) => {
+    if (!adjustment || typeof adjustment.templateId !== "string") return;
+    const role = templateLookup.get(adjustment.templateId);
+    if (!role) return;
+    const entry = overrides[role.id] || { ...defaultCrewOverrideForm };
+    overrides[role.id] = entry;
+    if (
+      !entry.quantity &&
+      typeof adjustment.quantity === "number" &&
+      Number.isFinite(adjustment.quantity)
+    ) {
+      entry.quantity = String(adjustment.quantity);
+    }
+    if (
+      !entry.unitRate &&
+      typeof adjustment.unitRate === "number" &&
+      Number.isFinite(adjustment.unitRate)
+    ) {
+      entry.unitRate = String(adjustment.unitRate);
+    }
+    if (
+      entry.includeInBudget === "inherit" &&
+      typeof adjustment.includeInBudget === "boolean"
+    ) {
+      entry.includeInBudget = adjustment.includeInBudget ? "include" : "exclude";
+    }
+  });
+};
+
+const computeMissingTemplates = (
+  crewRoles: CrewRoleFormState[],
+  adjustments: ModifierCrewAdjustment[]
+): string[] => {
+  if (!Array.isArray(adjustments) || adjustments.length === 0) return [];
+  const availableTemplates = new Set(
+    crewRoles
+      .map((role) => role.templateId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0)
+  );
+  return adjustments
+    .map((adj) => adj?.templateId)
+    .filter(
+      (templateId): templateId is string =>
+        typeof templateId === "string" && templateId.length > 0
+    )
+    .filter((templateId) => !availableTemplates.has(templateId));
+};
+
+type VariationFormState = {
+  id: string;
+  name: string;
+  price: string;
+  featuresText: string;
+  budgetOverrides: BudgetOverrideFormState;
+  crewOverrides: Record<string, CrewOverrideFormState>;
+};
+
+type ModifierSelectionFormState = {
+  groupId: string;
+  optionId: string;
+  price: string;
+  budgetOverrides: BudgetOverrideFormState;
+  crewOverrides: Record<string, CrewOverrideFormState>;
+  templateAdjustments: ModifierCrewAdjustment[];
+  missingTemplates: string[];
+};
+
 export default function EditProductPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -226,12 +504,8 @@ export default function EditProductPage() {
   const [deliverables, setDeliverables] = useState<
     (ProductDeliverable & { file?: File })[]
   >([]);
-  const [variations, setVariations] = useState<
-    (ProductVariation & { featuresText: string })[]
-  >([]);
-  const [modifiers, setModifiers] = useState<
-    { groupId: string; optionId: string; price: string }[]
-  >([]);
+  const [variations, setVariations] = useState<VariationFormState[]>([]);
+  const [modifiers, setModifiers] = useState<ModifierSelectionFormState[]>([]);
   const [enabledModifierGroups, setEnabledModifierGroups] = useState<string[]>([]);
   const [seo, setSeo] = useState<ProductSEO>({});
   const [seoImageFile, setSeoImageFile] = useState<File | null>(null);
@@ -281,6 +555,118 @@ export default function EditProductPage() {
     () => venues.find((v) => v.id === venueId) || null,
     [venues, venueId]
   );
+  const generateFormId = () =>
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+
+  const buildVariationForm = useCallback(
+    (
+      variation?: ProductVariation,
+      crewRoleState: CrewRoleFormState[] = crewRoles
+    ): VariationFormState => {
+      const features = Array.isArray(variation?.features)
+        ? variation!.features!
+        : [];
+      return {
+        id: variation?.id || generateFormId(),
+        name: variation?.name || "",
+        price:
+          variation && typeof variation.price === "number"
+            ? String(variation.price)
+            : "0",
+        featuresText: features.join("\n"),
+        budgetOverrides: createBudgetForm(variation?.budgetOverrides ?? null),
+        crewOverrides: createCrewOverrideMap(
+          crewRoleState,
+          variation?.crewOverrides ?? null
+        ),
+      };
+    },
+    [crewRoles]
+  );
+
+  const buildModifierFormFromSelection = useCallback(
+    (
+      selection: ProductModifierSelection,
+      option: ModifierOption | undefined,
+      crewRoleState: CrewRoleFormState[] = crewRoles
+    ): ModifierSelectionFormState => {
+      const templateAdjustments = Array.isArray(option?.crewAdjustments)
+        ? option!.crewAdjustments!.filter(
+            (adj): adj is ModifierCrewAdjustment =>
+              !!adj && typeof adj.templateId === "string"
+          )
+        : [];
+      const crewOverrideMap = createCrewOverrideMap(
+        crewRoleState,
+        selection.crewOverrides ?? null
+      );
+      applyTemplateAdjustmentsToOverrides(
+        crewOverrideMap,
+        crewRoleState,
+        templateAdjustments
+      );
+      const budgetSource = selection.budgetOverrides
+        ? selection.budgetOverrides
+        : option?.budgetAdjustments ?? null;
+      const priceString =
+        typeof selection.price === "number"
+          ? String(selection.price)
+          : option
+          ? String(option.price ?? 0)
+          : "";
+      return {
+        groupId: selection.groupId,
+        optionId: selection.optionId,
+        price: priceString,
+        budgetOverrides: createBudgetForm(budgetSource),
+        crewOverrides: crewOverrideMap,
+        templateAdjustments,
+        missingTemplates: computeMissingTemplates(
+          crewRoleState,
+          templateAdjustments
+        ),
+      };
+    },
+    [crewRoles]
+  );
+
+  const buildModifierFormFromOption = useCallback(
+    (
+      groupId: string,
+      option: ModifierOption,
+      crewRoleState: CrewRoleFormState[] = crewRoles
+    ): ModifierSelectionFormState => {
+      const templateAdjustments = Array.isArray(option.crewAdjustments)
+        ? option.crewAdjustments.filter(
+            (adj): adj is ModifierCrewAdjustment =>
+              !!adj && typeof adj.templateId === "string"
+          )
+        : [];
+      const crewOverrideMap = createCrewOverrideMap(crewRoleState, []);
+      applyTemplateAdjustmentsToOverrides(
+        crewOverrideMap,
+        crewRoleState,
+        templateAdjustments
+      );
+      return {
+        groupId,
+        optionId: option.id,
+        price: String(option.price ?? 0),
+        budgetOverrides: createBudgetForm(option.budgetAdjustments ?? null),
+        crewOverrides: crewOverrideMap,
+        templateAdjustments,
+        missingTemplates: computeMissingTemplates(
+          crewRoleState,
+          templateAdjustments
+        ),
+      };
+    },
+    [crewRoles]
+  );
+
   const parseMoney = (value: string, fallback = 0) => {
     const num = Number(value);
     return Number.isFinite(num) ? num : fallback;
@@ -294,6 +680,78 @@ export default function EditProductPage() {
     const rate = parseMoney(role.unitRate, 0);
     return qty * rate;
   };
+
+  useEffect(() => {
+    setVariations((prev) => {
+      if (!prev.length) return prev;
+      let changed = false;
+      const next = prev.map((variation) => {
+        const synced = syncCrewOverrideMap(variation.crewOverrides, crewRoles);
+        const prevKeys = Object.keys(variation.crewOverrides);
+        const nextKeys = Object.keys(synced);
+        const structureChanged =
+          prevKeys.length !== nextKeys.length ||
+          nextKeys.some((key) => variation.crewOverrides[key] !== synced[key]);
+        if (structureChanged) {
+          changed = true;
+          return { ...variation, crewOverrides: synced };
+        }
+        return variation;
+      });
+      return changed ? next : prev;
+    });
+
+    setModifiers((prev) => {
+      if (!prev.length) return prev;
+      let changed = false;
+      const next = prev.map((selection) => {
+        const synced = syncCrewOverrideMap(selection.crewOverrides, crewRoles);
+        const nextKeys = Object.keys(synced);
+        const prevKeys = Object.keys(selection.crewOverrides);
+        const structureChanged =
+          prevKeys.length !== nextKeys.length ||
+          nextKeys.some((key) => selection.crewOverrides[key] !== synced[key]);
+        const overridesClone: Record<string, CrewOverrideFormState> = {};
+        nextKeys.forEach((key) => {
+          overridesClone[key] = { ...synced[key] };
+        });
+        applyTemplateAdjustmentsToOverrides(
+          overridesClone,
+          crewRoles,
+          selection.templateAdjustments
+        );
+        const missingTemplates = computeMissingTemplates(
+          crewRoles,
+          selection.templateAdjustments
+        );
+        const defaultsChanged = nextKeys.some((key) => {
+          const prevEntry = selection.crewOverrides[key];
+          const nextEntry = overridesClone[key];
+          if (!prevEntry) return true;
+          return (
+            prevEntry.quantity !== nextEntry.quantity ||
+            prevEntry.unitRate !== nextEntry.unitRate ||
+            prevEntry.includeInBudget !== nextEntry.includeInBudget
+          );
+        });
+        const missingChanged =
+          missingTemplates.length !== selection.missingTemplates.length ||
+          missingTemplates.some(
+            (value, index) => selection.missingTemplates[index] !== value
+          );
+        if (structureChanged || defaultsChanged || missingChanged) {
+          changed = true;
+          return {
+            ...selection,
+            crewOverrides: overridesClone,
+            missingTemplates,
+          };
+        }
+        return selection;
+      });
+      return changed ? next : prev;
+    });
+  }, [crewRoles]);
 
   const addCrewRole = () => {
     setCrewRoles((prev) => [...prev, createCrewRoleInput()]);
@@ -496,6 +954,9 @@ export default function EditProductPage() {
       }
       let initialVenueId = "";
       let initialVenueName = "";
+      let variationEntries: ProductVariation[] = [];
+      let initialModifierSelections: ProductModifierSelection[] = [];
+      let crewRoleInputs: CrewRoleFormState[] = [];
       try {
         const prodSnap = await getDoc(doc(db, "products", id));
         if (prodSnap.exists()) {
@@ -532,19 +993,12 @@ export default function EditProductPage() {
           const idx = deliveryOptions.indexOf(p.deliveryTime || "");
           setDeliveryIndex(idx >= 0 ? idx : 0);
           setDeliverables((p.deliverables || []) as any);
-          setVariations(
-            (p.variations || []).map((v: any) => ({
-              ...v,
-              featuresText: (v.features || []).join("\n"),
-            })) as any
-          );
-          setModifiers(
-            (p.modifiers || []).map((m: any) => ({
-              groupId: m.groupId,
-              optionId: m.optionId,
-              price: m.price ? String(m.price) : "",
-            }))
-          );
+          variationEntries = Array.isArray(p.variations)
+            ? (p.variations as ProductVariation[])
+            : [];
+          initialModifierSelections = Array.isArray(p.modifiers)
+            ? (p.modifiers as ProductModifierSelection[])
+            : [];
           const initialGroups =
             Array.isArray((p as any).modifierGroups) &&
             (p as any).modifierGroups.length
@@ -665,39 +1119,44 @@ export default function EditProductPage() {
           const rawCrewRoles = Array.isArray((p as any).crewRoles)
             ? (p as any).crewRoles
             : [];
-          setCrewRoles(
-            rawCrewRoles.map((role: any) =>
-              createCrewRoleInput({
-                id:
-                  typeof role?.id === "string" && role.id.length > 0
-                    ? role.id
-                    : undefined,
-                templateId:
-                  typeof role?.roleId === "string"
-                    ? role.roleId
-                    : typeof role?.templateId === "string"
-                    ? role.templateId
-                    : null,
-                name:
-                  typeof role?.title === "string"
-                    ? role.title
-                    : typeof role?.name === "string"
-                    ? role.name
-                    : "",
-                description:
-                  typeof role?.description === "string" ? role.description : "",
-                instructions:
-                  typeof role?.instructions === "string"
-                    ? role.instructions
-                    : typeof role?.notes === "string"
-                    ? role.notes
-                    : "",
-                quantity: normaliseNumberString(role?.quantity, "1"),
-                unitRate: normaliseNumberString(role?.unitRate, ""),
-                includeInBudget:
-                  role?.includeInBudget === false ? false : true,
-              })
-            )
+          crewRoleInputs = rawCrewRoles.map((role: any) =>
+            createCrewRoleInput({
+              id:
+                typeof role?.id === "string" && role.id.length > 0
+                  ? role.id
+                  : undefined,
+              templateId:
+                typeof role?.roleId === "string"
+                  ? role.roleId
+                  : typeof role?.templateId === "string"
+                  ? role.templateId
+                  : null,
+              name:
+                typeof role?.title === "string"
+                  ? role.title
+                  : typeof role?.name === "string"
+                  ? role.name
+                  : "",
+              description:
+                typeof role?.description === "string" ? role.description : "",
+              instructions:
+                typeof role?.instructions === "string"
+                  ? role.instructions
+                  : typeof role?.notes === "string"
+                  ? role.notes
+                  : "",
+              quantity: normaliseNumberString(role?.quantity, "1"),
+              unitRate: normaliseNumberString(role?.unitRate, ""),
+              includeInBudget: role?.includeInBudget === false ? false : true,
+            })
+          );
+          setCrewRoles(crewRoleInputs);
+          setVariations(
+            variationEntries.length
+              ? variationEntries.map((variation) =>
+                  buildVariationForm(variation, crewRoleInputs)
+                )
+              : []
           );
         }
         const [
@@ -720,8 +1179,23 @@ export default function EditProductPage() {
           getDocs(collection(db, "crewRoleTemplates")),
         ]);
         setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
-        setAllModifiers(
-          modSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as any
+        const modifierGroups = modSnap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as any),
+        })) as ModifierGroup[];
+        setAllModifiers(modifierGroups);
+        setModifiers(
+          initialModifierSelections.length
+            ? initialModifierSelections.map((selection) =>
+                buildModifierFormFromSelection(
+                  selection,
+                  modifierGroups
+                    .find((group) => group.id === selection.groupId)
+                    ?.options.find((opt) => opt.id === selection.optionId),
+                  crewRoleInputs
+                )
+              )
+            : []
         );
         setWorkflows(wfSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setEquipmentList(
@@ -793,7 +1267,7 @@ export default function EditProductPage() {
         setLoading(false);
       }
     })();
-  }, [allowed, guardLoading, id]);
+  }, [allowed, guardLoading, id, buildModifierFormFromSelection, buildVariationForm]);
 
   useEffect(() => {
     if (selectedVenue) {
@@ -859,14 +1333,28 @@ export default function EditProductPage() {
       deliverableData.push(item);
     }
 
-    const variationData: ProductVariation[] = variations.map((v) => ({
-      id: v.id,
-      name: v.name,
-      price: Number(v.price) || 0,
-      features: v.featuresText
-        ? v.featuresText.split("\n").map((f) => f.trim()).filter(Boolean)
-        : [],
-    }));
+    const variationData: ProductVariation[] = variations.map((variation) => {
+      const name = variation.name.trim();
+      const features = variation.featuresText
+        ? variation.featuresText
+            .split("\n")
+            .map((f) => f.trim())
+            .filter(Boolean)
+        : [];
+      const entry: ProductVariation = {
+        id: variation.id,
+        name,
+        price: Number(variation.price) || 0,
+      };
+      if (features.length) entry.features = features;
+      const budgetOverrides = parseBudgetFormToOverride(
+        variation.budgetOverrides
+      );
+      if (budgetOverrides) entry.budgetOverrides = budgetOverrides;
+      const crewOverrides = parseCrewOverrideMap(variation.crewOverrides);
+      if (crewOverrides.length) entry.crewOverrides = crewOverrides;
+      return entry;
+    });
 
     const specPayload: ProductSpec = {};
     const specOverview = productSpec.overview.trim();
@@ -935,13 +1423,25 @@ export default function EditProductPage() {
     const parkingValue = parseMoney(parkingCost);
     const enabledGroups = enabledModifierGroups.filter((id) => typeof id === "string");
     const enabledSet = new Set(enabledGroups);
-    const modifierData = modifiers
+    const modifierData: ProductModifierSelection[] = modifiers
       .filter((m) => enabledSet.has(m.groupId))
-      .map((m) => ({
-        groupId: m.groupId,
-        optionId: m.optionId,
-        ...(m.price ? { price: Number(m.price) } : {}),
-      }));
+      .map((selection) => {
+        const entry: ProductModifierSelection = {
+          groupId: selection.groupId,
+          optionId: selection.optionId,
+        };
+        const priceValue = Number(selection.price);
+        if (selection.price && Number.isFinite(priceValue)) {
+          entry.price = priceValue;
+        }
+        const budgetOverrides = parseBudgetFormToOverride(
+          selection.budgetOverrides
+        );
+        if (budgetOverrides) entry.budgetOverrides = budgetOverrides;
+        const crewOverrides = parseCrewOverrideMap(selection.crewOverrides);
+        if (crewOverrides.length) entry.crewOverrides = crewOverrides;
+        return entry;
+      });
     const requiredStandards = Array.isArray(productStandards)
       ? Array.from(
           new Set(
@@ -1094,23 +1594,118 @@ export default function EditProductPage() {
   };
 
   const addVariation = () => {
-    setVariations((v) => [
-      ...v,
-      { id: crypto.randomUUID(), name: "", price: 0, featuresText: "" },
-    ]);
+    setVariations((prev) => [...prev, buildVariationForm(undefined, crewRoles)]);
   };
 
-  const updateVariation = (
-    index: number,
-    data: Partial<ProductVariation & { featuresText: string }>
-  ) => {
+  const updateVariation = (index: number, data: Partial<VariationFormState>) => {
     setVariations((prev) =>
-      prev.map((v, i) => (i === index ? { ...v, ...data } : v))
+      prev.map((variation, i) =>
+        i === index ? { ...variation, ...data } : variation
+      )
     );
   };
 
   const removeVariation = (index: number) => {
     setVariations((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const updateVariationBudget = (
+    index: number,
+    field: keyof BudgetOverrideFormState,
+    value: string
+  ) => {
+    setVariations((prev) =>
+      prev.map((variation, i) =>
+        i === index
+          ? {
+              ...variation,
+              budgetOverrides: { ...variation.budgetOverrides, [field]: value },
+            }
+          : variation
+      )
+    );
+  };
+
+  const updateVariationCrewOverride = (
+    index: number,
+    roleId: string,
+    patch: Partial<CrewOverrideFormState>
+  ) => {
+    setVariations((prev) =>
+      prev.map((variation, i) => {
+        if (i !== index) return variation;
+        const current = variation.crewOverrides[roleId] || {
+          ...defaultCrewOverrideForm,
+        };
+        return {
+          ...variation,
+          crewOverrides: {
+            ...variation.crewOverrides,
+            [roleId]: { ...current, ...patch },
+          },
+        };
+      })
+    );
+  };
+
+  const updateModifierSelection = (
+    groupId: string,
+    optionId: string,
+    patch: Partial<ModifierSelectionFormState>
+  ) => {
+    setModifiers((prev) =>
+      prev.map((selection) =>
+        selection.groupId === groupId && selection.optionId === optionId
+          ? { ...selection, ...patch }
+          : selection
+      )
+    );
+  };
+
+  const updateModifierBudget = (
+    groupId: string,
+    optionId: string,
+    field: keyof BudgetOverrideFormState,
+    value: string
+  ) => {
+    setModifiers((prev) =>
+      prev.map((selection) =>
+        selection.groupId === groupId && selection.optionId === optionId
+          ? {
+              ...selection,
+              budgetOverrides: {
+                ...selection.budgetOverrides,
+                [field]: value,
+              },
+            }
+          : selection
+      )
+    );
+  };
+
+  const updateModifierCrewOverride = (
+    groupId: string,
+    optionId: string,
+    roleId: string,
+    patch: Partial<CrewOverrideFormState>
+  ) => {
+    setModifiers((prev) =>
+      prev.map((selection) => {
+        if (selection.groupId !== groupId || selection.optionId !== optionId) {
+          return selection;
+        }
+        const current = selection.crewOverrides[roleId] || {
+          ...defaultCrewOverrideForm,
+        };
+        return {
+          ...selection,
+          crewOverrides: {
+            ...selection.crewOverrides,
+            [roleId]: { ...current, ...patch },
+          },
+        };
+      })
+    );
   };
 
   const handleSelectModifier = (
@@ -1125,21 +1720,32 @@ export default function EditProductPage() {
     }
     setModifiers((prev) => {
       if (checked) {
+        const already = prev.find(
+          (selection) =>
+            selection.groupId === groupId && selection.optionId === optionId
+        );
+        if (already) return prev;
         const group = allModifiers.find((g) => g.id === groupId);
+        const option = group?.options.find((opt) => opt.id === optionId);
+        if (!option) return prev;
+        const nextEntry = buildModifierFormFromOption(groupId, option, crewRoles);
         if (group && !group.multiple) {
           return [
-            ...prev.filter((m) => m.groupId !== groupId),
-            { groupId, optionId, price: "" },
+            ...prev.filter((selection) => selection.groupId !== groupId),
+            nextEntry,
           ];
         }
-        const exists = prev.find(
-          (m) => m.groupId === groupId && m.optionId === optionId
-        );
-        return exists ? prev : [...prev, { groupId, optionId, price: "" }];
+        return [...prev, nextEntry];
       }
-      return prev.filter(
+      const next = prev.filter(
         (m) => !(m.groupId === groupId && m.optionId === optionId)
       );
+      if (!next.some((entry) => entry.groupId === groupId)) {
+        setEnabledModifierGroups((groups) =>
+          groups.filter((id) => id !== groupId)
+        );
+      }
+      return next;
     });
   };
 
@@ -2097,46 +2703,379 @@ export default function EditProductPage() {
 
       {tab === "variations" && (
         <div className="grid gap-4">
-          {variations.map((v, i) => (
-            <div key={v.id} className="border p-4 rounded grid gap-2">
-              <input
-                className="input"
-                placeholder="Name"
-                value={v.name}
-                onChange={(e) => updateVariation(i, { name: e.target.value })}
-              />
-              <input
-                type="number"
-                className="input"
-                placeholder="Price"
-                value={v.price}
-                onChange={(e) =>
-                  updateVariation(i, { price: Number(e.target.value) })
-                }
-              />
-              <textarea
-                className="input"
-                placeholder="Features (one per line)"
-                value={v.featuresText}
-                onChange={(e) =>
-                  updateVariation(i, { featuresText: e.target.value })
-                }
-              />
-              <button
-                type="button"
-                className="btn btn-sm w-fit"
-                onClick={() => removeVariation(i)}
-              >
-                Remove
-              </button>
-            </div>
-          ))}
+          {variations.length === 0 ? (
+            <p className="text-sm text-gray-600">
+              No variations have been created yet. Use variations to offer
+              alternative package sizes or day rates while tailoring the
+              budgeting and crew requirements.
+            </p>
+          ) : (
+            variations.map((variation, index) => {
+              const budget = variation.budgetOverrides;
+              const budgetHasValues = Object.entries(budget).some(
+                ([key, value]) =>
+                  key === "kitMode" ? value !== "" : value.trim().length > 0
+              );
+              return (
+                <div
+                  key={variation.id}
+                  className="grid gap-3 rounded border bg-white p-4 shadow-sm"
+                >
+                  <div className="grid gap-2 md:grid-cols-2">
+                    <label className="grid gap-1">
+                      <span className="text-xs font-medium text-gray-600">
+                        Variation name
+                      </span>
+                      <input
+                        className="input"
+                        value={variation.name}
+                        onChange={(e) =>
+                          updateVariation(index, { name: e.target.value })
+                        }
+                        placeholder="e.g. Two day shoot"
+                      />
+                    </label>
+                    <label className="grid gap-1">
+                      <span className="text-xs font-medium text-gray-600">
+                        Customer price
+                      </span>
+                      <input
+                        type="number"
+                        className="input"
+                        value={variation.price}
+                        onChange={(e) =>
+                          updateVariation(index, { price: e.target.value })
+                        }
+                        placeholder="Defaults to the base product price"
+                      />
+                    </label>
+                  </div>
+                  <label className="grid gap-1">
+                    <span className="text-xs font-medium text-gray-600">
+                      Feature highlights
+                    </span>
+                    <textarea
+                      className="input min-h-[90px]"
+                      value={variation.featuresText}
+                      onChange={(e) =>
+                        updateVariation(index, { featuresText: e.target.value })
+                      }
+                      placeholder="List the differentiators for this package (one per line)."
+                    />
+                  </label>
+                  <details
+                    className="rounded border border-dashed p-3"
+                    open={budgetHasValues}
+                  >
+                    <summary className="cursor-pointer text-sm font-medium">
+                      Budget overrides
+                    </summary>
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          Labour (filming)
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          value={budget.labourFilming}
+                          onChange={(e) =>
+                            updateVariationBudget(
+                              index,
+                              "labourFilming",
+                              e.target.value
+                            )
+                          }
+                          placeholder="Inherit"
+                        />
+                      </label>
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          Labour (editing)
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          value={budget.labourEditing}
+                          onChange={(e) =>
+                            updateVariationBudget(
+                              index,
+                              "labourEditing",
+                              e.target.value
+                            )
+                          }
+                          placeholder="Inherit"
+                        />
+                      </label>
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          Kit total
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          value={budget.kit}
+                          onChange={(e) =>
+                            updateVariationBudget(index, "kit", e.target.value)
+                          }
+                          placeholder="Inherit"
+                        />
+                      </label>
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          Manual kit value
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          value={budget.kitManual}
+                          onChange={(e) =>
+                            updateVariationBudget(
+                              index,
+                              "kitManual",
+                              e.target.value
+                            )
+                          }
+                          placeholder="Inherit"
+                        />
+                      </label>
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          Kit mode override
+                        </span>
+                        <select
+                          className="input"
+                          value={budget.kitMode}
+                          onChange={(e) =>
+                            updateVariationBudget(
+                              index,
+                              "kitMode",
+                              e.target.value
+                            )
+                          }
+                        >
+                          <option value="">Inherit</option>
+                          <option value="manual">Manual</option>
+                          <option value="guided">Guided</option>
+                        </select>
+                      </label>
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          Travel miles
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          value={budget.travelMiles}
+                          onChange={(e) =>
+                            updateVariationBudget(
+                              index,
+                              "travelMiles",
+                              e.target.value
+                            )
+                          }
+                          placeholder="Inherit"
+                        />
+                      </label>
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          Travel rate
+                        </span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="input"
+                          value={budget.travelRate}
+                          onChange={(e) =>
+                            updateVariationBudget(
+                              index,
+                              "travelRate",
+                              e.target.value
+                            )
+                          }
+                          placeholder="Inherit"
+                        />
+                      </label>
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          Travel cost
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          value={budget.travelCost}
+                          onChange={(e) =>
+                            updateVariationBudget(
+                              index,
+                              "travelCost",
+                              e.target.value
+                            )
+                          }
+                          placeholder="Inherit"
+                        />
+                      </label>
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          Parking budget
+                        </span>
+                        <input
+                          type="number"
+                          className="input"
+                          value={budget.parking}
+                          onChange={(e) =>
+                            updateVariationBudget(
+                              index,
+                              "parking",
+                              e.target.value
+                            )
+                          }
+                          placeholder="Inherit"
+                        />
+                      </label>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="btn btn-xs"
+                        onClick={() =>
+                          updateVariation(index, {
+                            budgetOverrides: { ...emptyBudgetForm },
+                          })
+                        }
+                      >
+                        Clear budget overrides
+                      </button>
+                    </div>
+                  </details>
+                  <details
+                    className="rounded border border-dashed p-3"
+                    open={crewRoles.length > 0}
+                  >
+                    <summary className="cursor-pointer text-sm font-medium">
+                      Crew overrides
+                    </summary>
+                    {crewRoles.length === 0 ? (
+                      <p className="mt-2 text-xs text-gray-500">
+                        Add crew roles on the P&amp;L tab to override their
+                        quantity or rates for specific variations.
+                      </p>
+                    ) : (
+                      <div className="mt-3 grid gap-3">
+                        {crewRoles.map((role) => {
+                          const override =
+                            variation.crewOverrides[role.id] ||
+                            defaultCrewOverrideForm;
+                          return (
+                            <div
+                              key={role.id}
+                              className="grid gap-2 rounded border bg-white p-3"
+                            >
+                              <p className="text-sm font-semibold">
+                                {role.name || "Crew role"}
+                              </p>
+                              <div className="grid gap-2 md:grid-cols-3">
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Quantity override
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="input"
+                                    value={override.quantity}
+                                    onChange={(e) =>
+                                      updateVariationCrewOverride(
+                                        index,
+                                        role.id,
+                                        { quantity: e.target.value }
+                                      )
+                                    }
+                                    placeholder="Inherit"
+                                  />
+                                </label>
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Unit rate override
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="input"
+                                    value={override.unitRate}
+                                    onChange={(e) =>
+                                      updateVariationCrewOverride(
+                                        index,
+                                        role.id,
+                                        { unitRate: e.target.value }
+                                      )
+                                    }
+                                    placeholder="Inherit"
+                                  />
+                                </label>
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Budget inclusion
+                                  </span>
+                                  <select
+                                    className="input"
+                                    value={override.includeInBudget}
+                                    onChange={(e) =>
+                                      updateVariationCrewOverride(
+                                        index,
+                                        role.id,
+                                        {
+                                          includeInBudget: e.target
+                                            .value as CrewOverrideFormState["includeInBudget"],
+                                        }
+                                      )
+                                    }
+                                  >
+                                    <option value="inherit">Inherit</option>
+                                    <option value="include">Force include</option>
+                                    <option value="exclude">Force exclude</option>
+                                  </select>
+                                </label>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {crewRoles.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="btn btn-xs"
+                          onClick={() => {
+                            const cleared: Record<string, CrewOverrideFormState> = {};
+                            crewRoles.forEach((role) => {
+                              cleared[role.id] = { ...defaultCrewOverrideForm };
+                            });
+                            updateVariation(index, { crewOverrides: cleared });
+                          }}
+                        >
+                          Clear crew overrides
+                        </button>
+                      </div>
+                    )}
+                  </details>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-ghost"
+                      onClick={() => removeVariation(index)}
+                    >
+                      Remove variation
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )}
           <button
             type="button"
             className="btn btn-sm w-fit"
             onClick={addVariation}
           >
-            Add Variation
+            Add variation
           </button>
         </div>
       )}
@@ -2601,79 +3540,445 @@ export default function EditProductPage() {
 
       {tab === "modifiers" && (
         <div className="grid gap-4">
-          {allModifiers.map((g) => {
-            const enabled = enabledModifierGroups.includes(g.id);
+          {allModifiers.map((group) => {
+            const enabled = enabledModifierGroups.includes(group.id);
+            const selections = modifiers.filter(
+              (selection) => selection.groupId === group.id
+            );
             return (
-              <div key={g.id} className="border p-4 rounded grid gap-3">
-                <div className="flex items-center justify-between gap-4">
+              <div
+                key={group.id}
+                className="grid gap-3 rounded border bg-white p-4 shadow-sm"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-4">
                   <div>
-                    <p className="font-medium">{g.name}</p>
+                    <p className="font-medium">{group.name}</p>
                     <p className="text-xs text-gray-500">
-                      {g.multiple
-                        ? "Customers can select multiple options."
-                        : "Customers select a single option."}
+                      {group.multiple
+                        ? "Customers can combine multiple options."
+                        : "Customers may choose a single option."}
                     </p>
                   </div>
                   <label className="flex items-center gap-2 text-sm">
                     <input
                       type="checkbox"
                       checked={enabled}
-                      onChange={(e) => toggleModifierGroup(g.id, e.target.checked)}
+                      onChange={(e) => toggleModifierGroup(group.id, e.target.checked)}
                     />
                     <span>Enabled</span>
                   </label>
                 </div>
-                <div
-                  className={`grid gap-2 rounded border p-2 ${enabled ? "" : "opacity-50"}`}
-                >
-                  {g.options.map((o) => {
-                    const selected = modifiers.find(
-                      (m) => m.groupId === g.id && m.optionId === o.id
+                <div className={`grid gap-3 ${enabled ? "" : "opacity-50"}`}>
+                  {group.options.map((option) => {
+                    const selected = selections.find(
+                      (entry) => entry.optionId === option.id
                     );
+                    const budget = selected?.budgetOverrides ?? emptyBudgetForm;
+                    const budgetHasValues = Object.entries(budget).some(
+                      ([key, value]) =>
+                        key === "kitMode" ? value !== "" : value.trim().length > 0
+                    );
+                    const missingTemplates = selected?.missingTemplates ?? [];
                     return (
                       <div
-                        key={o.id}
-                        className="flex flex-wrap items-center gap-2 text-sm"
+                        key={option.id}
+                        className="grid gap-2 rounded border border-dashed bg-slate-50 p-3"
                       >
-                        <input
-                          type={g.multiple ? "checkbox" : "radio"}
-                          name={`mod-${g.id}`}
-                          checked={!!selected}
-                          disabled={!enabled}
-                          onChange={(e) =>
-                            handleSelectModifier(g.id, o.id, e.target.checked)
-                          }
-                        />
-                        <span className="flex-1 min-w-[120px]">{o.name}</span>
-                        {selected && (
+                        <div className="flex flex-wrap items-center gap-2 text-sm">
                           <input
-                            type="number"
-                            className="input w-24"
-                            value={selected.price}
+                            type={group.multiple ? "checkbox" : "radio"}
+                            name={`mod-${group.id}`}
+                            checked={!!selected}
                             disabled={!enabled}
                             onChange={(e) =>
-                              setModifiers((prev) =>
-                                prev.map((m) =>
-                                  m.groupId === g.id && m.optionId === o.id
-                                    ? { ...m, price: e.target.value }
-                                    : m
-                                )
+                              handleSelectModifier(
+                                group.id,
+                                option.id,
+                                e.target.checked
                               )
                             }
-                            placeholder={`£${o.price}`}
                           />
+                          <span className="flex-1 min-w-[160px] font-medium">
+                            {option.name}
+                          </span>
+                          <span className="text-xs text-gray-500">
+                            Default £{Number(option.price || 0).toFixed(2)}
+                          </span>
+                        </div>
+                        {selected && (
+                          <div className="grid gap-3 text-sm">
+                            <label className="grid gap-1">
+                              <span className="text-xs font-medium text-gray-600">
+                                Price override
+                              </span>
+                              <input
+                                type="number"
+                                className="input"
+                                value={selected.price}
+                                disabled={!enabled}
+                                onChange={(e) =>
+                                  updateModifierSelection(group.id, option.id, {
+                                    price: e.target.value,
+                                  })
+                                }
+                                placeholder={`Defaults to £${Number(option.price || 0).toFixed(2)}`}
+                              />
+                            </label>
+                            <details
+                              className="rounded border border-dashed p-3"
+                              open={budgetHasValues}
+                            >
+                              <summary className="cursor-pointer text-sm font-medium">
+                                Budget overrides
+                              </summary>
+                              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Labour (filming)
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="input"
+                                    value={budget.labourFilming}
+                                    disabled={!enabled}
+                                    onChange={(e) =>
+                                      updateModifierBudget(
+                                        group.id,
+                                        option.id,
+                                        "labourFilming",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="Inherit"
+                                  />
+                                </label>
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Labour (editing)
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="input"
+                                    value={budget.labourEditing}
+                                    disabled={!enabled}
+                                    onChange={(e) =>
+                                      updateModifierBudget(
+                                        group.id,
+                                        option.id,
+                                        "labourEditing",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="Inherit"
+                                  />
+                                </label>
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Kit total
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="input"
+                                    value={budget.kit}
+                                    disabled={!enabled}
+                                    onChange={(e) =>
+                                      updateModifierBudget(
+                                        group.id,
+                                        option.id,
+                                        "kit",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="Inherit"
+                                  />
+                                </label>
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Manual kit value
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="input"
+                                    value={budget.kitManual}
+                                    disabled={!enabled}
+                                    onChange={(e) =>
+                                      updateModifierBudget(
+                                        group.id,
+                                        option.id,
+                                        "kitManual",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="Inherit"
+                                  />
+                                </label>
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Kit mode override
+                                  </span>
+                                  <select
+                                    className="input"
+                                    value={budget.kitMode}
+                                    disabled={!enabled}
+                                    onChange={(e) =>
+                                      updateModifierBudget(
+                                        group.id,
+                                        option.id,
+                                        "kitMode",
+                                        e.target.value
+                                      )
+                                    }
+                                  >
+                                    <option value="">Inherit</option>
+                                    <option value="manual">Manual</option>
+                                    <option value="guided">Guided</option>
+                                  </select>
+                                </label>
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Travel miles
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="input"
+                                    value={budget.travelMiles}
+                                    disabled={!enabled}
+                                    onChange={(e) =>
+                                      updateModifierBudget(
+                                        group.id,
+                                        option.id,
+                                        "travelMiles",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="Inherit"
+                                  />
+                                </label>
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Travel rate
+                                  </span>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    className="input"
+                                    value={budget.travelRate}
+                                    disabled={!enabled}
+                                    onChange={(e) =>
+                                      updateModifierBudget(
+                                        group.id,
+                                        option.id,
+                                        "travelRate",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="Inherit"
+                                  />
+                                </label>
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Travel cost
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="input"
+                                    value={budget.travelCost}
+                                    disabled={!enabled}
+                                    onChange={(e) =>
+                                      updateModifierBudget(
+                                        group.id,
+                                        option.id,
+                                        "travelCost",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="Inherit"
+                                  />
+                                </label>
+                                <label className="grid gap-1">
+                                  <span className="text-xs font-medium text-gray-600">
+                                    Parking budget
+                                  </span>
+                                  <input
+                                    type="number"
+                                    className="input"
+                                    value={budget.parking}
+                                    disabled={!enabled}
+                                    onChange={(e) =>
+                                      updateModifierBudget(
+                                        group.id,
+                                        option.id,
+                                        "parking",
+                                        e.target.value
+                                      )
+                                    }
+                                    placeholder="Inherit"
+                                  />
+                                </label>
+                              </div>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  className="btn btn-xs"
+                                  disabled={!enabled}
+                                  onClick={() =>
+                                    updateModifierSelection(group.id, option.id, {
+                                      budgetOverrides: { ...emptyBudgetForm },
+                                    })
+                                  }
+                                >
+                                  Clear budget overrides
+                                </button>
+                              </div>
+                            </details>
+                            <details
+                              className="rounded border border-dashed p-3"
+                              open={crewRoles.length > 0}
+                            >
+                              <summary className="cursor-pointer text-sm font-medium">
+                                Crew overrides
+                              </summary>
+                              {crewRoles.length === 0 ? (
+                                <p className="mt-2 text-xs text-gray-500">
+                                  Add crew roles on the P&amp;L tab to adjust them for
+                                  selected modifiers.
+                                </p>
+                              ) : (
+                                <div className="mt-3 grid gap-3">
+                                  {crewRoles.map((role) => {
+                                    const override =
+                                      selected.crewOverrides[role.id] ||
+                                      defaultCrewOverrideForm;
+                                    return (
+                                      <div
+                                        key={role.id}
+                                        className="grid gap-2 rounded border bg-white p-3"
+                                      >
+                                        <p className="text-sm font-semibold">
+                                          {role.name || "Crew role"}
+                                        </p>
+                                        <div className="grid gap-2 md:grid-cols-3">
+                                          <label className="grid gap-1">
+                                            <span className="text-xs font-medium text-gray-600">
+                                              Quantity override
+                                            </span>
+                                            <input
+                                              type="number"
+                                              className="input"
+                                              value={override.quantity}
+                                              disabled={!enabled}
+                                              onChange={(e) =>
+                                                updateModifierCrewOverride(
+                                                  group.id,
+                                                  option.id,
+                                                  role.id,
+                                                  { quantity: e.target.value }
+                                                )
+                                              }
+                                              placeholder="Inherit"
+                                            />
+                                          </label>
+                                          <label className="grid gap-1">
+                                            <span className="text-xs font-medium text-gray-600">
+                                              Unit rate override
+                                            </span>
+                                            <input
+                                              type="number"
+                                              className="input"
+                                              value={override.unitRate}
+                                              disabled={!enabled}
+                                              onChange={(e) =>
+                                                updateModifierCrewOverride(
+                                                  group.id,
+                                                  option.id,
+                                                  role.id,
+                                                  { unitRate: e.target.value }
+                                                )
+                                              }
+                                              placeholder="Inherit"
+                                            />
+                                          </label>
+                                          <label className="grid gap-1">
+                                            <span className="text-xs font-medium text-gray-600">
+                                              Budget inclusion
+                                            </span>
+                                            <select
+                                              className="input"
+                                              value={override.includeInBudget}
+                                              disabled={!enabled}
+                                              onChange={(e) =>
+                                                updateModifierCrewOverride(
+                                                  group.id,
+                                                  option.id,
+                                                  role.id,
+                                                  {
+                                                    includeInBudget: e.target
+                                                      .value as CrewOverrideFormState["includeInBudget"],
+                                                  }
+                                                )
+                                              }
+                                            >
+                                              <option value="inherit">Inherit</option>
+                                              <option value="include">Force include</option>
+                                              <option value="exclude">Force exclude</option>
+                                            </select>
+                                          </label>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                              {crewRoles.length > 0 && (
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    className="btn btn-xs"
+                                    disabled={!enabled}
+                                    onClick={() => {
+                                      const cleared: Record<string, CrewOverrideFormState> = {};
+                                      crewRoles.forEach((role) => {
+                                        cleared[role.id] = { ...defaultCrewOverrideForm };
+                                      });
+                                      updateModifierSelection(group.id, option.id, {
+                                        crewOverrides: cleared,
+                                      });
+                                    }}
+                                  >
+                                    Clear crew overrides
+                                  </button>
+                                </div>
+                              )}
+                              {missingTemplates.length > 0 && (
+                                <p className="mt-3 text-xs text-amber-600">
+                                  Defaults referencing templates {missingTemplates.join(
+                                    ", "
+                                  )} could not find a matching crew role.
+                                </p>
+                              )}
+                            </details>
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                className="btn btn-xs btn-ghost"
+                                onClick={() => handleSelectModifier(group.id, option.id, false)}
+                              >
+                                Remove option
+                              </button>
+                            </div>
+                          </div>
                         )}
                       </div>
                     );
                   })}
-                  {g.options.length === 0 && (
+                  {group.options.length === 0 && (
                     <p className="text-sm text-gray-500">
                       This group does not have any options yet.
                     </p>
                   )}
                   {!enabled && (
                     <p className="text-xs text-gray-500">
-                      Enable the group to select which options apply to this product.
+                      Enable the group to choose which options apply to this product.
                     </p>
                   )}
                 </div>

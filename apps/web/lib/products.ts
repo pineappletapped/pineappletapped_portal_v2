@@ -95,10 +95,34 @@ export interface ProductDeliverable {
   thumbnailUrl?: string;
 }
 
+export interface ProductBudgetOverride {
+  labourFilming?: number | null;
+  labourEditing?: number | null;
+  labour?: number | null;
+  kitMode?: "manual" | "guided" | null;
+  kitManual?: number | null;
+  kitGuidance?: number | null;
+  kit?: number | null;
+  travelMiles?: number | null;
+  travelRate?: number | null;
+  travelCost?: number | null;
+  parking?: number | null;
+  labourCrew?: number | null;
+}
+
+export interface ProductCrewRoleOverride {
+  roleId: string;
+  quantity?: number | null;
+  unitRate?: number | null;
+  includeInBudget?: boolean | null;
+}
+
 export interface ProductModifierSelection {
   groupId: string;
   optionId: string;
   price?: number;
+  budgetOverrides?: ProductBudgetOverride;
+  crewOverrides?: ProductCrewRoleOverride[];
 }
 
 export interface ProductVariation {
@@ -106,6 +130,8 @@ export interface ProductVariation {
   name: string;
   price: number;
   features?: string[];
+  budgetOverrides?: ProductBudgetOverride;
+  crewOverrides?: ProductCrewRoleOverride[];
 }
 
 export interface ProductVideoLink {
