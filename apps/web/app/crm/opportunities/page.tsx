@@ -1,7 +1,9 @@
 "use client";
-import { useEffect, useState } from 'react';
-import { db, auth } from '@/lib/firebase';
-import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
+import { useEffect, useRef, useState } from 'react';
+import type { User } from 'firebase/auth';
+import { orderBy, where } from 'firebase/firestore';
+import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
+import { fetchOrgDocs, fetchUserOrgIds } from '@/lib/crm';
 
 /**
  * Opportunities page: lists leads marked as opportunities and orders in progress,
@@ -11,48 +13,118 @@ import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
 export default function OpportunitiesPage() {
   const [opportunities, setOpportunities] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const orgIdsRef = useRef<string[]>([]);
 
   useEffect(() => {
-    (async () => {
-      const user = auth.currentUser;
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+
+    const handleUserChange = async (user: User | null, db: any) => {
+      if (cancelled) {
+        return;
+      }
+
       if (!user) {
+        orgIdsRef.current = [];
+        setOpportunities([]);
         setLoading(false);
         return;
       }
-      const memSnap = await getDocs(query(collection(db, 'memberships'), where('userId', '==', user.uid)));
-      const orgIds = memSnap.docs.map((m) => (m.data() as any).orgId);
-      if (orgIds.length > 0) {
-        // Fetch opportunities tracked separately in the opportunities collection
-        const oppSnap = await getDocs(query(collection(db, 'opportunities'), where('orgId', 'in', orgIds)));
-        const opps = oppSnap.docs.map((d) => ({ id: d.id, ...d.data(), type: 'opportunity' }));
-        // Also include leads marked as opportunities and orders still in pipeline
-        const leadsSnap = await getDocs(query(collection(db, 'leads'), where('orgId', 'in', orgIds), where('status', '==', 'opportunity')));
-        const leads = leadsSnap.docs.map((d) => ({ id: d.id, ...d.data(), type: 'lead' }));
-        const ordersSnap = await getDocs(
-          query(
-            collection(db, 'orders'),
-            where('orgId', 'in', orgIds),
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const orgIds = await fetchUserOrgIds(db, user.uid);
+        orgIdsRef.current = orgIds;
+        if (orgIds.length === 0) {
+          setOpportunities([]);
+          return;
+        }
+
+        const [opps, leads, orders] = await Promise.all([
+          fetchOrgDocs(db, 'opportunities', orgIds),
+          fetchOrgDocs(db, 'leads', orgIds, [where('status', '==', 'opportunity')]),
+          fetchOrgDocs(db, 'orders', orgIds, [
             where('status', 'in', ['deposit_paid', 'in_progress', 'balance_due']),
-            orderBy('createdAt', 'desc')
-          )
-        );
-        const orders = ordersSnap.docs.map((d) => ({ id: d.id, ...d.data(), type: 'order' }));
-        const combined: any[] = [...opps, ...leads, ...orders];
+            orderBy('createdAt', 'desc'),
+          ]),
+        ]);
+
+        const combined: any[] = [
+          ...opps.map((item) => ({ ...item, type: 'opportunity' })),
+          ...leads.map((item) => ({ ...item, type: 'lead' })),
+          ...orders.map((item) => ({ ...item, type: 'order' })),
+        ];
+
         combined.sort((a, b) => {
           const aTime = a.createdAt?.toMillis ? a.createdAt.toMillis() : new Date(a.createdAt || 0).getTime();
           const bTime = b.createdAt?.toMillis ? b.createdAt.toMillis() : new Date(b.createdAt || 0).getTime();
           return bTime - aTime;
         });
+
         setOpportunities(combined);
+      } catch (err) {
+        console.error('Failed to load opportunities', err);
+        if (!cancelled) {
+          setError('Failed to load opportunities. Please try again.');
+          setOpportunities([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-      setLoading(false);
+    };
+
+    (async () => {
+      try {
+        const { auth, db } = await ensureFirebase();
+        if (cancelled) {
+          return;
+        }
+
+        if (!auth || !db) {
+          throw new Error('Firebase auth or database is unavailable.');
+        }
+
+        const { onAuthStateChanged } = await loadAuthModule();
+        if (cancelled) {
+          return;
+        }
+        if (typeof onAuthStateChanged !== 'function') {
+          throw new Error('Firebase auth listener helper is unavailable.');
+        }
+
+        unsubscribe = onAuthStateChanged(auth, (user: User | null) => handleUserChange(user, db));
+      } catch (err) {
+        console.error('Failed to initialise CRM opportunities view', err);
+        if (!cancelled) {
+          setError('Failed to initialise CRM. Please refresh the page.');
+          setOpportunities([]);
+          setLoading(false);
+        }
+      }
     })();
+
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
   }, []);
 
   if (loading) return <p>Loading…</p>;
   return (
     <div className="grid gap-6">
       <h1 className="text-xl font-semibold">Opportunities</h1>
+      {error && (
+        <p className="text-sm text-red-600" role="alert">
+          {error}
+        </p>
+      )}
       {opportunities.length === 0 ? <p>No active opportunities.</p> : (
         <table className="w-full text-sm">
           <thead>
