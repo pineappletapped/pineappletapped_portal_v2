@@ -1,4 +1,8 @@
-import type { Product, DeliverableType } from "@/lib/products";
+import type {
+  Product,
+  DeliverableType,
+  ProductDeliverable,
+} from "@/lib/products";
 import type { IconType } from "react-icons";
 import {
   FiVideo,
@@ -56,8 +60,10 @@ type DeliverableBadge = {
 };
 
 function normaliseDeliverables(
-  rawDeliverables: unknown
+  rawDeliverables: unknown,
+  options: { variationId?: string | null } = {}
 ): { title: string; type?: DeliverableType }[] {
+  const variationFilter = options.variationId ?? null;
   if (!rawDeliverables) return [];
 
   const entries = Array.isArray(rawDeliverables)
@@ -79,11 +85,10 @@ function normaliseDeliverables(
     }
 
     if (typeof entry === "object") {
-      const candidate = entry as Partial<{
-        title?: unknown;
-        name?: unknown;
-        type?: unknown;
-      }>;
+      const candidate = entry as Partial<ProductDeliverable> &
+        Partial<{
+          name?: unknown;
+        }>;
       const rawTitle =
         typeof candidate.title === "string"
           ? candidate.title
@@ -96,6 +101,19 @@ function normaliseDeliverables(
         typeof candidate.type === "string"
           ? (candidate.type as DeliverableType)
           : undefined;
+      const restrictedIds = Array.isArray(candidate.variationIds)
+        ? candidate.variationIds.filter(
+            (id): id is string => typeof id === "string" && id.trim().length > 0
+          )
+        : [];
+      if (restrictedIds.length > 0) {
+        if (!variationFilter) {
+          return [];
+        }
+        if (!restrictedIds.includes(variationFilter)) {
+          return [];
+        }
+      }
       return [
         {
           title,

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { functions } from '@/lib/firebase';
+import { functions, ensureFirebase } from '@/lib/firebase';
 import { httpsCallable } from 'firebase/functions';
 import { adminListUsers, adminUpdateUser } from '@/lib/admin';
 import {
@@ -15,6 +15,12 @@ import {
 } from '@/lib/roles';
 import { useRoleGate } from '@/hooks/useRoleGate';
 import CRMRecordForm from '@/components/CRMRecordForm';
+import { collection, getDocs } from 'firebase/firestore';
+
+interface ProductSummary {
+  id: string;
+  name: string;
+}
 
 /**
  * Admin Users Management
@@ -29,6 +35,7 @@ interface AdminUser {
   crmStatus?: string;
   discount?: number;
   roles?: UserRoles;
+  suggestedProductId?: string | null;
   [key: string]: any;
 }
 
@@ -39,6 +46,8 @@ export default function AdminUsersPage() {
   const [activeTab, setActiveTab] = useState<'client' | 'prospect' | 'outreach'>('client');
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [products, setProducts] = useState<ProductSummary[]>([]);
+  const [outreachProductFilter, setOutreachProductFilter] = useState('');
   const canEditRoles = useMemo(() => !!roles?.admin, [roles]);
 
   useEffect(() => {
@@ -63,6 +72,37 @@ export default function AdminUsersPage() {
       }
     })();
   }, [allowed, guardLoading]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { db } = await ensureFirebase();
+        if (!db) {
+          return;
+        }
+        const snapshot = await getDocs(collection(db, 'products'));
+        const list: ProductSummary[] = snapshot.docs
+          .map((docSnap) => {
+            const data = docSnap.data() as Record<string, any>;
+            const rawName = typeof data?.name === 'string' ? data.name.trim() : '';
+            return {
+              id: docSnap.id,
+              name: rawName.length > 0 ? rawName : 'Untitled product',
+            };
+          })
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setProducts(list);
+      } catch (err) {
+        console.error('Failed to load products for CRM outreach suggestions', err);
+      }
+    })();
+  }, []);
+
+  const productById = useMemo(() => {
+    const map = new Map<string, ProductSummary>();
+    products.forEach((product) => map.set(product.id, product));
+    return map;
+  }, [products]);
 
   const changeStatus = async (user: any, status: string) => {
     try {
@@ -99,6 +139,17 @@ export default function AdminUsersPage() {
     } catch (err: any) {
       console.error(err);
       alert(err.message || 'Error updating discount');
+    }
+  };
+
+  const updateSuggestedProduct = async (user: AdminUser, productId: string) => {
+    const value = productId || null;
+    try {
+      await adminUpdateUser({ userId: user.id, updates: { suggestedProductId: value } });
+      setUsers(users.map(u => (u.id === user.id ? { ...u, suggestedProductId: value } : u)));
+    } catch (err: any) {
+      console.error(err);
+      alert(err.message || 'Error updating suggested product');
     }
   };
 
@@ -179,7 +230,7 @@ export default function AdminUsersPage() {
     );
   };
 
-  const renderTable = (list: AdminUser[]) => (
+  const renderTable = (list: AdminUser[], status: 'client' | 'prospect' | 'outreach') => (
     list.length === 0 ? (
       <p>No records.</p>
     ) : (
@@ -191,6 +242,7 @@ export default function AdminUsersPage() {
             <th className="p-2">Stage</th>
             <th className="p-2">Roles</th>
             <th className="p-2">Discount%</th>
+            <th className="p-2">Suggested Product</th>
             <th className="p-2">Actions</th>
           </tr>
         </thead>
@@ -221,6 +273,24 @@ export default function AdminUsersPage() {
                   onChange={(e) => updateDiscount(user, parseFloat(e.target.value) || 0)}
                 />
               </td>
+              <td className="p-2">
+                {status === 'outreach' ? (
+                  <select
+                    className="border p-1 text-sm"
+                    value={user.suggestedProductId || ''}
+                    onChange={(e) => updateSuggestedProduct(user, e.target.value)}
+                  >
+                    <option value="">No suggestion</option>
+                    {products.map((product) => (
+                      <option key={product.id} value={product.id}>
+                        {product.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span>{productById.get(user.suggestedProductId || '')?.name || '-'}</span>
+                )}
+              </td>
               <td className="p-2 flex gap-2">
                 <Link className="btn-sm" href={`/admin/users/${user.id}`}>View</Link>
                 {user.email && (
@@ -241,12 +311,19 @@ export default function AdminUsersPage() {
   const clients = users.filter(u => (u.crmStatus || 'client') === 'client');
   const prospects = users.filter(u => u.crmStatus === 'prospect');
   const outreach = users.filter(u => u.crmStatus === 'outreach');
+  const filteredOutreach = outreachProductFilter
+    ? outreach.filter((u) => (u.suggestedProductId || '') === outreachProductFilter)
+    : outreach;
 
   const handleAddRecord = async (data: any) => {
     try {
       const id = crypto.randomUUID();
-      await adminUpdateUser({ userId: id, updates: { ...data, crmStatus: activeTab } });
-      setUsers([...users, { id, ...data, crmStatus: activeTab }]);
+      const payload: Record<string, any> = { ...data, crmStatus: activeTab };
+      if ('suggestedProductId' in payload && !payload.suggestedProductId) {
+        payload.suggestedProductId = null;
+      }
+      await adminUpdateUser({ userId: id, updates: payload });
+      setUsers([...users, { id, ...payload }]);
       setShowForm(false);
     } catch (err: any) {
       console.error(err);
@@ -272,12 +349,31 @@ export default function AdminUsersPage() {
       <div className="flex justify-end">
         <button className="btn" onClick={() => setShowForm(true)}>Add Record</button>
       </div>
-      {activeTab === 'client' && renderTable(clients)}
-      {activeTab === 'prospect' && renderTable(prospects)}
-      {activeTab === 'outreach' && renderTable(outreach)}
+      {activeTab === 'outreach' && (
+        <div className="flex items-center gap-2">
+          <label className="text-sm" htmlFor="outreach-product-filter">Filter by product:</label>
+          <select
+            id="outreach-product-filter"
+            className="border p-1 text-sm"
+            value={outreachProductFilter}
+            onChange={(e) => setOutreachProductFilter(e.target.value)}
+          >
+            <option value="">All products</option>
+            {products.map((product) => (
+              <option key={product.id} value={product.id}>
+                {product.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {activeTab === 'client' && renderTable(clients, 'client')}
+      {activeTab === 'prospect' && renderTable(prospects, 'prospect')}
+      {activeTab === 'outreach' && renderTable(filteredOutreach, 'outreach')}
       {showForm && (
         <CRMRecordForm
           status={activeTab}
+          products={products}
           onSave={handleAddRecord}
           onClose={() => setShowForm(false)}
         />

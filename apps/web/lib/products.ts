@@ -93,6 +93,8 @@ export interface ProductDeliverable {
   description?: string;
   /** Optional thumbnail image for visual deliverable previews. */
   thumbnailUrl?: string;
+  /** If provided, limits the deliverable to the matching variation IDs. */
+  variationIds?: string[];
 }
 
 export interface ProductBudgetOverride {
@@ -200,6 +202,8 @@ export interface Product {
   imageUrl?: string;
   requirements?: string;
   deliveryTime?: string;
+  /** Details about on-site operations shared with the customer. */
+  operationsInfo?: string;
   deliverables?: ProductDeliverable[];
   modifiers?: ProductModifierSelection[];
   /** Modifier group IDs enabled for this product. */
