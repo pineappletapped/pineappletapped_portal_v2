@@ -118,11 +118,6 @@ export default function ProductDetail({
   };
 
   const venueName = venue?.name || product.venue || "";
-  const hasMileage =
-    venue?.mileageFromWellingborough !== undefined &&
-    venue?.mileageFromWellingborough !== null;
-  const hasParkingRate =
-    venue?.parkingRate !== undefined && venue?.parkingRate !== null;
 
   return (
     <div className="space-y-12">
@@ -233,38 +228,6 @@ export default function ProductDetail({
             {venue.address && (
               <p>
                 <span className="font-medium">Address:</span> {venue.address}
-              </p>
-            )}
-            {hasMileage && (
-              <p>
-                <span className="font-medium">Distance from Wellingborough:</span>{" "}
-                {venue.mileageFromWellingborough} miles
-              </p>
-            )}
-            {hasParkingRate && (
-              <p>
-                <span className="font-medium">Fixed Parking Rate:</span> £
-                {Number(venue.parkingRate).toFixed(2)}
-              </p>
-            )}
-            {venue.parkingTips && (
-              <p className="whitespace-pre-line">
-                <span className="font-medium">Parking Tips:</span> {venue.parkingTips}
-              </p>
-            )}
-            {venue.accessInfo && (
-              <p className="whitespace-pre-line">
-                <span className="font-medium">Access Information:</span> {venue.accessInfo}
-              </p>
-            )}
-            {venue.internetInfo && (
-              <p className="whitespace-pre-line">
-                <span className="font-medium">Internet Details:</span> {venue.internetInfo}
-              </p>
-            )}
-            {venue.notes && (
-              <p className="whitespace-pre-line">
-                <span className="font-medium">Notes:</span> {venue.notes}
               </p>
             )}
             <VenueMap venue={venue} className="mt-2" />
