@@ -12,6 +12,7 @@ import {
   deleteDoc,
   collection,
   getDocs,
+  addDoc,
 } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
@@ -23,6 +24,9 @@ import type {
   ProductSEO,
   ProductVariation,
   ProductVideoLink,
+  ProductSpec,
+  ProductCrewRole,
+  CrewRoleTemplate,
 } from "@/lib/products";
 import type { Venue } from "@/lib/venues";
 import type { KitBag, EquipmentStandard } from "@/lib/equipment";
@@ -118,6 +122,75 @@ const createVideoInput = (defaults?: Partial<ExampleVideoInput>): ExampleVideoIn
   };
 };
 
+type CrewRoleFormState = {
+  id: string;
+  templateId: string | null;
+  name: string;
+  description: string;
+  instructions: string;
+  quantity: string;
+  unitRate: string;
+  includeInBudget: boolean;
+};
+
+type ProductSpecFormState = {
+  overview: string;
+  preparation: string;
+  filming: string;
+  editing: string;
+  delivery: string;
+  notes: string;
+};
+
+const createCrewRoleInput = (
+  defaults?: Partial<CrewRoleFormState>
+): CrewRoleFormState => {
+  const randomId =
+    typeof globalThis !== "undefined" &&
+    globalThis.crypto &&
+    typeof globalThis.crypto.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+  return {
+    id: defaults?.id ?? randomId,
+    templateId: defaults?.templateId ?? null,
+    name: defaults?.name ?? "",
+    description: defaults?.description ?? "",
+    instructions: defaults?.instructions ?? "",
+    quantity: defaults?.quantity ?? "1",
+    unitRate: defaults?.unitRate ?? "",
+    includeInBudget: defaults?.includeInBudget ?? true,
+  };
+};
+
+const normaliseNumberString = (value: unknown, fallback: string): string => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+  return fallback;
+};
+
+const toNumberOrUndefined = (value: unknown): number | undefined => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const num = Number(value);
+    if (Number.isFinite(num)) return num;
+  }
+  return undefined;
+};
+
+const parseRoleQuantity = (value: string): number => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 1;
+  const rounded = Math.round(parsed);
+  return rounded > 0 ? rounded : 1;
+};
+
 export default function EditProductPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -132,6 +205,7 @@ export default function EditProductPage() {
 
   const [tab, setTab] = useState<
     | "info"
+    | "spec"
     | "pnl"
     | "variations"
     | "deliverables"
@@ -179,6 +253,19 @@ export default function EditProductPage() {
   const [standards, setStandards] = useState<EquipmentStandard[]>([]);
   const [productStandards, setProductStandards] = useState<string[]>([]);
   const [exampleVideos, setExampleVideos] = useState<ExampleVideoInput[]>([]);
+  const [productSpec, setProductSpec] = useState<ProductSpecFormState>({
+    overview: "",
+    preparation: "",
+    filming: "",
+    editing: "",
+    delivery: "",
+    notes: "",
+  });
+  const [crewRoles, setCrewRoles] = useState<CrewRoleFormState[]>([]);
+  const [crewRoleTemplates, setCrewRoleTemplates] = useState<CrewRoleTemplate[]>([]);
+  const [roleLibraryMessage, setRoleLibraryMessage] = useState<
+    { tone: "success" | "error"; text: string } | null
+  >(null);
   const [labourFilmingRate, setLabourFilmingRate] = useState("0");
   const [labourEditingRate, setLabourEditingRate] = useState("0");
   const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
@@ -200,6 +287,196 @@ export default function EditProductPage() {
   };
   const formatCurrency = (value: number) =>
     `£${(Number.isFinite(value) ? value : 0).toFixed(2)}`;
+
+  const computeRoleCost = (role: CrewRoleFormState) => {
+    const quantity = Number(role.quantity);
+    const qty = Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
+    const rate = parseMoney(role.unitRate, 0);
+    return qty * rate;
+  };
+
+  const addCrewRole = () => {
+    setCrewRoles((prev) => [...prev, createCrewRoleInput()]);
+    setRoleLibraryMessage(null);
+  };
+
+  const updateCrewRole = (index: number, patch: Partial<CrewRoleFormState>) => {
+    setCrewRoles((prev) =>
+      prev.map((role, i) => (i === index ? { ...role, ...patch } : role))
+    );
+    setRoleLibraryMessage(null);
+  };
+
+  const removeCrewRole = (index: number) => {
+    setCrewRoles((prev) => prev.filter((_, i) => i !== index));
+    setRoleLibraryMessage(null);
+  };
+
+  const handleCrewRoleTemplateChange = (index: number, templateId: string) => {
+    setCrewRoles((prev) => {
+      const next = [...prev];
+      const current = next[index];
+      if (!current) return prev;
+      if (!templateId) {
+        next[index] = { ...current, templateId: null };
+        return next;
+      }
+      const template = crewRoleTemplates.find((t) => t.id === templateId);
+      if (!template) {
+        next[index] = { ...current, templateId: null };
+        return next;
+      }
+      next[index] = {
+        ...current,
+        templateId,
+        name: template.name,
+        description: template.description ?? "",
+        instructions: template.instructions ?? "",
+        quantity: normaliseNumberString(
+          template.defaultQuantity,
+          current.quantity || "1"
+        ),
+        unitRate: normaliseNumberString(
+          template.defaultRate,
+          current.unitRate || ""
+        ),
+        includeInBudget:
+          template.defaultIncludeInBudget === false ? false : true,
+      };
+      return next;
+    });
+    setRoleLibraryMessage(null);
+  };
+
+  const handleSaveRoleAsTemplate = async (index: number) => {
+    const role = crewRoles[index];
+    if (!role) return;
+    const name = role.name.trim();
+    if (!name) {
+      setRoleLibraryMessage({
+        tone: "error",
+        text: "Add a role name before saving it to the library.",
+      });
+      return;
+    }
+    try {
+      const quantity = parseRoleQuantity(role.quantity);
+      const rateInput = role.unitRate.trim();
+      const parsedRate = rateInput ? parseMoney(rateInput, 0) : 0;
+      const normalisedRate = rateInput
+        ? Number(parsedRate.toFixed(2))
+        : null;
+      const payload: Record<string, any> = {
+        name,
+        description: role.description.trim() || null,
+        instructions: role.instructions.trim() || null,
+        defaultQuantity: quantity,
+        defaultIncludeInBudget: role.includeInBudget !== false,
+      };
+      if (rateInput) payload.defaultRate = normalisedRate;
+      const docRef = await addDoc(collection(db, "crewRoleTemplates"), payload);
+      const template: CrewRoleTemplate = {
+        id: docRef.id,
+        name,
+        description:
+          typeof payload.description === "string"
+            ? payload.description
+            : undefined,
+        instructions:
+          typeof payload.instructions === "string"
+            ? payload.instructions
+            : undefined,
+        defaultQuantity: quantity,
+        defaultRate: rateInput ? normalisedRate ?? undefined : undefined,
+        defaultIncludeInBudget: role.includeInBudget !== false,
+      };
+      setCrewRoleTemplates((prev) =>
+        [...prev, template].sort((a, b) => a.name.localeCompare(b.name))
+      );
+      setCrewRoles((prev) =>
+        prev.map((item, i) =>
+          i === index ? { ...item, templateId: docRef.id } : item
+        )
+      );
+      setRoleLibraryMessage({
+        tone: "success",
+        text: `Saved "${name}" to the crew role library.`,
+      });
+    } catch (error) {
+      console.error("Failed to save crew role template", error);
+      setRoleLibraryMessage({
+        tone: "error",
+        text: "Failed to save role to the library. Please try again.",
+      });
+    }
+  };
+
+  const handleUpdateRoleTemplate = async (index: number) => {
+    const role = crewRoles[index];
+    if (!role?.templateId) return;
+    const name = role.name.trim();
+    if (!name) {
+      setRoleLibraryMessage({
+        tone: "error",
+        text: "Add a role name before updating the template.",
+      });
+      return;
+    }
+    try {
+      const quantity = parseRoleQuantity(role.quantity);
+      const rateInput = role.unitRate.trim();
+      const parsedRate = rateInput ? parseMoney(rateInput, 0) : 0;
+      const normalisedRate = rateInput
+        ? Number(parsedRate.toFixed(2))
+        : null;
+      const payload: Record<string, any> = {
+        name,
+        description: role.description.trim() || null,
+        instructions: role.instructions.trim() || null,
+        defaultQuantity: quantity,
+        defaultIncludeInBudget: role.includeInBudget !== false,
+      };
+      if (rateInput) payload.defaultRate = normalisedRate;
+      else payload.defaultRate = null;
+      await updateDoc(doc(db, "crewRoleTemplates", role.templateId), payload);
+      setCrewRoleTemplates((prev) =>
+        prev
+          .map((template) =>
+            template.id === role.templateId
+              ? {
+                  ...template,
+                  name,
+                  description:
+                    typeof payload.description === "string"
+                      ? payload.description
+                      : undefined,
+                  instructions:
+                    typeof payload.instructions === "string"
+                      ? payload.instructions
+                      : undefined,
+                  defaultQuantity: quantity,
+                  defaultRate:
+                    payload.defaultRate === null
+                      ? undefined
+                      : (payload.defaultRate as number),
+                  defaultIncludeInBudget: role.includeInBudget !== false,
+                }
+              : template
+          )
+          .sort((a, b) => a.name.localeCompare(b.name))
+      );
+      setRoleLibraryMessage({
+        tone: "success",
+        text: `Updated "${name}" in the crew role library.`,
+      });
+    } catch (error) {
+      console.error("Failed to update crew role template", error);
+      setRoleLibraryMessage({
+        tone: "error",
+        text: "Failed to update the role template. Please try again.",
+      });
+    }
+  };
 
   const toggleProductStandard = (standardId: string) => {
     setProductStandards((prev) => {
@@ -369,6 +646,59 @@ export default function EditProductPage() {
             }
           }
           setExampleVideos(normalisedVideos);
+          const specData = (p as any).productSpec || {};
+          setProductSpec({
+            overview:
+              typeof specData.overview === "string" ? specData.overview : "",
+            preparation:
+              typeof specData.preparation === "string"
+                ? specData.preparation
+                : "",
+            filming:
+              typeof specData.filming === "string" ? specData.filming : "",
+            editing:
+              typeof specData.editing === "string" ? specData.editing : "",
+            delivery:
+              typeof specData.delivery === "string" ? specData.delivery : "",
+            notes: typeof specData.notes === "string" ? specData.notes : "",
+          });
+          const rawCrewRoles = Array.isArray((p as any).crewRoles)
+            ? (p as any).crewRoles
+            : [];
+          setCrewRoles(
+            rawCrewRoles.map((role: any) =>
+              createCrewRoleInput({
+                id:
+                  typeof role?.id === "string" && role.id.length > 0
+                    ? role.id
+                    : undefined,
+                templateId:
+                  typeof role?.roleId === "string"
+                    ? role.roleId
+                    : typeof role?.templateId === "string"
+                    ? role.templateId
+                    : null,
+                name:
+                  typeof role?.title === "string"
+                    ? role.title
+                    : typeof role?.name === "string"
+                    ? role.name
+                    : "",
+                description:
+                  typeof role?.description === "string" ? role.description : "",
+                instructions:
+                  typeof role?.instructions === "string"
+                    ? role.instructions
+                    : typeof role?.notes === "string"
+                    ? role.notes
+                    : "",
+                quantity: normaliseNumberString(role?.quantity, "1"),
+                unitRate: normaliseNumberString(role?.unitRate, ""),
+                includeInBudget:
+                  role?.includeInBudget === false ? false : true,
+              })
+            )
+          );
         }
         const [
           catSnap,
@@ -378,6 +708,7 @@ export default function EditProductPage() {
           venueSnap,
           bagSnap,
           standardSnap,
+          crewRoleSnap,
         ] = await Promise.all([
           getDocs(collection(db, "categories")),
           getDocs(collection(db, "modifiers")),
@@ -386,6 +717,7 @@ export default function EditProductPage() {
           getDocs(collection(db, "venues")),
           getDocs(collection(db, "kitBags")),
           getDocs(collection(db, "equipmentStandards")),
+          getDocs(collection(db, "crewRoleTemplates")),
         ]);
         setCats(catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
         setAllModifiers(
@@ -421,6 +753,31 @@ export default function EditProductPage() {
                 } as EquipmentStandard)
             )
             .sort((a, b) => (a.title || "").localeCompare(b.title || ""))
+        );
+        setCrewRoleTemplates(
+          crewRoleSnap.docs
+            .map((d) => {
+              const data = d.data() as any;
+              const quantity = toNumberOrUndefined(data.defaultQuantity);
+              const rate = toNumberOrUndefined(data.defaultRate);
+              return {
+                id: d.id,
+                name: typeof data.name === "string" ? data.name : d.id,
+                description:
+                  typeof data.description === "string"
+                    ? data.description
+                    : undefined,
+                instructions:
+                  typeof data.instructions === "string"
+                    ? data.instructions
+                    : undefined,
+                defaultQuantity: quantity,
+                defaultRate: rate,
+                defaultIncludeInBudget:
+                  data.defaultIncludeInBudget === false ? false : true,
+              } as CrewRoleTemplate;
+            })
+            .sort((a, b) => a.name.localeCompare(b.name))
         );
         const venueList = venueSnap.docs
           .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
@@ -511,6 +868,46 @@ export default function EditProductPage() {
         : [],
     }));
 
+    const specPayload: ProductSpec = {};
+    const specOverview = productSpec.overview.trim();
+    if (specOverview) specPayload.overview = specOverview;
+    const specPreparation = productSpec.preparation.trim();
+    if (specPreparation) specPayload.preparation = specPreparation;
+    const specFilming = productSpec.filming.trim();
+    if (specFilming) specPayload.filming = specFilming;
+    const specEditing = productSpec.editing.trim();
+    if (specEditing) specPayload.editing = specEditing;
+    const specDelivery = productSpec.delivery.trim();
+    if (specDelivery) specPayload.delivery = specDelivery;
+    const specNotes = productSpec.notes.trim();
+    if (specNotes) specPayload.notes = specNotes;
+
+    const crewRoleData: ProductCrewRole[] = crewRoles
+      .map((role) => {
+        const name = role.name.trim();
+        if (!name) return null;
+        const quantity = parseRoleQuantity(role.quantity);
+        const description = role.description.trim();
+        const instructions = role.instructions.trim();
+        const rateInput = role.unitRate.trim();
+        const parsedRate = rateInput ? parseMoney(rateInput, 0) : 0;
+        const normalisedRate = rateInput
+          ? Number(parsedRate.toFixed(2))
+          : undefined;
+        const payload: ProductCrewRole = {
+          id: role.id,
+          title: name,
+          quantity,
+          includeInBudget: role.includeInBudget !== false,
+        };
+        if (role.templateId) payload.roleId = role.templateId;
+        if (description) payload.description = description;
+        if (instructions) payload.instructions = instructions;
+        if (normalisedRate !== undefined) payload.unitRate = normalisedRate;
+        return payload;
+      })
+      .filter((entry): entry is ProductCrewRole => entry !== null);
+
     let seoImage = seo.socialImageUrl;
     if (seoImageFile)
       seoImage = await upload(
@@ -521,7 +918,13 @@ export default function EditProductPage() {
     const venueLabel = venue || selectedVenue?.name || null;
     const labourFilmingValue = parseMoney(labourFilmingRate);
     const labourEditingValue = parseMoney(labourEditingRate);
-    const labourValue = labourFilmingValue + labourEditingValue;
+    const crewRolesTotal = crewRoleData.reduce((total, role) => {
+      if (role.includeInBudget === false) return total;
+      const qty = Number(role.quantity) || 0;
+      const rate = Number(role.unitRate) || 0;
+      return total + qty * rate;
+    }, 0);
+    const labourValue = labourFilmingValue + labourEditingValue + crewRolesTotal;
     const manualKitValue = parseMoney(manualKitCost);
     const kitValue = kitCostMode === "guided" ? kitGuidanceValue : manualKitValue;
     const travelMilesValue = parseMoney(travelMiles, 100);
@@ -569,6 +972,7 @@ export default function EditProductPage() {
       budget: {
         labourFilming: labourFilmingValue,
         labourEditing: labourEditingValue,
+        labourCrew: crewRolesTotal,
         labour: labourValue,
         kitMode: kitCostMode,
         kitManual: manualKitValue,
@@ -596,6 +1000,8 @@ export default function EditProductPage() {
       requiredKit: kitGroups,
       requiredStandards,
       defaultTasks: tasks,
+      productSpec: specPayload,
+      crewRoles: crewRoleData,
       seo: {
         title: seo.title || null,
         description: seo.description || null,
@@ -927,9 +1333,39 @@ export default function EditProductPage() {
       .map((id) => lookup.get(id) || id)
       .filter((name, index, array) => array.indexOf(name) === index);
   }, [productStandards, standards]);
+  const crewCostValue = useMemo(() => {
+    return crewRoles.reduce((total, role) => {
+      if (!role.includeInBudget) return total;
+      const quantity = Number(role.quantity);
+      const qty = Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
+      const rate = parseMoney(role.unitRate, 0);
+      return total + qty * rate;
+    }, 0);
+  }, [crewRoles]);
+  const crewRoleBreakdown = useMemo(
+    () =>
+      crewRoles.map((role) => {
+        const quantity = Number(role.quantity);
+        const qty = Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
+        const rate = parseMoney(role.unitRate, 0);
+        return {
+          id: role.id,
+          name: role.name.trim() || "Crew role",
+          quantity: qty,
+          rate,
+          total: qty * rate,
+          included: role.includeInBudget !== false,
+        };
+      }),
+    [crewRoles]
+  );
+  const includedCrewRoles = useMemo(
+    () => crewRoleBreakdown.filter((role) => role.included && role.total > 0),
+    [crewRoleBreakdown]
+  );
   const labourFilmingValue = parseMoney(labourFilmingRate);
   const labourEditingValue = parseMoney(labourEditingRate);
-  const labourValue = labourFilmingValue + labourEditingValue;
+  const labourValue = labourFilmingValue + labourEditingValue + crewCostValue;
   const manualKitValue = parseMoney(manualKitCost);
   const kitValue = kitCostMode === "guided" ? kitGuidanceValue : manualKitValue;
   const travelMilesValue = parseMoney(travelMiles, 100);
@@ -961,6 +1397,7 @@ export default function EditProductPage() {
       <nav className="flex gap-4 border-b">
         {[
           ["info", "Info"],
+          ["spec", "Product Spec"],
           ["pnl", "P&L"],
           ["variations", "Variations"],
           ["deliverables", "Deliverables"],
@@ -1189,6 +1626,266 @@ export default function EditProductPage() {
     </div>
   )}
 
+      {tab === "spec" && (
+        <div className="grid gap-6">
+          <section className="grid gap-2">
+            <h2 className="text-lg font-semibold">Production brief</h2>
+            <p className="text-sm text-gray-600">
+              Capture the filming standards, workflows, and delivery notes that
+              contractors receive when this product is assigned.
+            </p>
+            <label className="text-sm font-medium">Overview</label>
+            <textarea
+              className="input min-h-[120px]"
+              value={productSpec.overview}
+              onChange={(e) =>
+                setProductSpec((prev) => ({ ...prev, overview: e.target.value }))
+              }
+              placeholder="High-level summary of the customer outcome and tone."
+            />
+            <label className="text-sm font-medium">Pre-production / preparation</label>
+            <textarea
+              className="input min-h-[120px]"
+              value={productSpec.preparation}
+              onChange={(e) =>
+                setProductSpec((prev) => ({ ...prev, preparation: e.target.value }))
+              }
+              placeholder="Booking details, contacts, mandatory checks, and kit prep."
+            />
+            <label className="text-sm font-medium">Filming guidelines</label>
+            <textarea
+              className="input min-h-[120px]"
+              value={productSpec.filming}
+              onChange={(e) =>
+                setProductSpec((prev) => ({ ...prev, filming: e.target.value }))
+              }
+              placeholder="Shot list expectations, audio requirements, and on-site processes."
+            />
+            <label className="text-sm font-medium">Editing / post-production</label>
+            <textarea
+              className="input min-h-[120px]"
+              value={productSpec.editing}
+              onChange={(e) =>
+                setProductSpec((prev) => ({ ...prev, editing: e.target.value }))
+              }
+              placeholder="Editing approach, review milestones, and export specs."
+            />
+            <label className="text-sm font-medium">Delivery & handover</label>
+            <textarea
+              className="input min-h-[120px]"
+              value={productSpec.delivery}
+              onChange={(e) =>
+                setProductSpec((prev) => ({ ...prev, delivery: e.target.value }))
+              }
+              placeholder="Where to upload finals, portal messaging, and follow-up actions."
+            />
+            <label className="text-sm font-medium">Additional notes</label>
+            <textarea
+              className="input min-h-[120px]"
+              value={productSpec.notes}
+              onChange={(e) =>
+                setProductSpec((prev) => ({ ...prev, notes: e.target.value }))
+              }
+              placeholder="Health & safety, brand guardrails, or escalation info."
+            />
+          </section>
+
+          <section className="grid gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">Crew requirements</h2>
+                <p className="text-sm text-gray-600">
+                  Define the roles required to deliver this product, their
+                  instructions, and default budgeting.
+                </p>
+              </div>
+              <button type="button" className="btn btn-sm" onClick={addCrewRole}>
+                Add role
+              </button>
+            </div>
+            {roleLibraryMessage && (
+              <p
+                className={`text-sm ${
+                  roleLibraryMessage.tone === "error"
+                    ? "text-rose-600"
+                    : "text-emerald-700"
+                }`}
+              >
+                {roleLibraryMessage.text}
+              </p>
+            )}
+            {crewRoles.length === 0 ? (
+              <p className="text-sm text-gray-500">
+                No crew roles have been configured yet. Add the operators,
+                editors, or specialists required so their guidance is ready to
+                share with contractors.
+              </p>
+            ) : (
+              <div className="grid gap-4">
+                {crewRoles.map((role, index) => {
+                  const template = role.templateId
+                    ? crewRoleTemplates.find((t) => t.id === role.templateId)
+                    : null;
+                  const roleCost = computeRoleCost(role);
+                  const quantityValue = Number(role.quantity);
+                  const quantityDisplay =
+                    Number.isFinite(quantityValue) && quantityValue > 0
+                      ? quantityValue
+                      : 1;
+                  const rateValue = parseMoney(role.unitRate, 0);
+                  return (
+                    <div
+                      key={role.id}
+                      className="grid gap-3 rounded border bg-white p-4 shadow-sm"
+                    >
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-base font-semibold">Role {index + 1}</h3>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-xs"
+                          onClick={() => removeCrewRole(index)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      <label className="text-xs font-medium text-gray-600">
+                        Role template
+                      </label>
+                      <select
+                        className="input"
+                        value={role.templateId ?? ""}
+                        onChange={(e) =>
+                          handleCrewRoleTemplateChange(index, e.target.value)
+                        }
+                      >
+                        <option value="">Custom</option>
+                        {crewRoleTemplates.map((templateOption) => (
+                          <option key={templateOption.id} value={templateOption.id}>
+                            {templateOption.name}
+                          </option>
+                        ))}
+                      </select>
+                      {template?.description && (
+                        <p className="text-xs text-gray-500">
+                          {template.description}
+                        </p>
+                      )}
+                      <label className="text-xs font-medium text-gray-600">
+                        Role name
+                      </label>
+                      <input
+                        className="input"
+                        value={role.name}
+                        onChange={(e) =>
+                          updateCrewRole(index, { name: e.target.value })
+                        }
+                        placeholder="e.g. Lead Videographer"
+                      />
+                      <label className="text-xs font-medium text-gray-600">
+                        Role description
+                      </label>
+                      <textarea
+                        className="input min-h-[90px]"
+                        value={role.description}
+                        onChange={(e) =>
+                          updateCrewRole(index, { description: e.target.value })
+                        }
+                        placeholder="Summary of responsibilities, deliverables, or expectations."
+                      />
+                      <label className="text-xs font-medium text-gray-600">
+                        Instructions for assigned crew
+                      </label>
+                      <textarea
+                        className="input min-h-[120px]"
+                        value={role.instructions}
+                        onChange={(e) =>
+                          updateCrewRole(index, { instructions: e.target.value })
+                        }
+                        placeholder="Provide the checklist contractors receive when they accept this role."
+                      />
+                      <div className="grid gap-4 md:grid-cols-3">
+                        <div className="grid gap-1">
+                          <label className="text-xs font-medium text-gray-600">
+                            Quantity required
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            className="input"
+                            value={role.quantity}
+                            onChange={(e) =>
+                              updateCrewRole(index, { quantity: e.target.value })
+                            }
+                          />
+                        </div>
+                        <div className="grid gap-1">
+                          <label className="text-xs font-medium text-gray-600">
+                            Day rate / cost
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            className="input"
+                            value={role.unitRate}
+                            onChange={(e) =>
+                              updateCrewRole(index, { unitRate: e.target.value })
+                            }
+                            placeholder="250"
+                          />
+                          <p className="text-xs text-gray-500">
+                            Estimated cost: {formatCurrency(roleCost)} ({quantityDisplay}
+                            {" "}
+                            x £{rateValue.toFixed(2)})
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2 pt-6">
+                          <input
+                            type="checkbox"
+                            checked={role.includeInBudget}
+                            onChange={(e) =>
+                              updateCrewRole(index, {
+                                includeInBudget: e.target.checked,
+                              })
+                            }
+                          />
+                          <span className="text-xs font-medium text-gray-600">
+                            Include in P&L
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-500">
+                        {role.includeInBudget
+                          ? "Counted towards labour budgeting."
+                          : "Excluded from budgeting calculations."}
+                      </p>
+                      <div className="flex flex-wrap gap-2 pt-1 text-xs">
+                        <button
+                          type="button"
+                          className="btn btn-xs"
+                          onClick={() => handleSaveRoleAsTemplate(index)}
+                        >
+                          Save to library
+                        </button>
+                        {role.templateId && (
+                          <button
+                            type="button"
+                            className="btn btn-xs btn-ghost"
+                            onClick={() => handleUpdateRoleTemplate(index)}
+                          >
+                            Update template
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
       {tab === "pnl" && (
         <div className="grid gap-6">
           <div className="grid gap-2">
@@ -1342,6 +2039,22 @@ export default function EditProductPage() {
                 <span>Labour (editing)</span>
                 <span>{formatCurrency(labourEditingValue)}</span>
               </div>
+              <div className="flex justify-between">
+                <span>Labour (crew roles)</span>
+                <span>{formatCurrency(crewCostValue)}</span>
+              </div>
+              {includedCrewRoles.length > 0 && (
+                <div className="space-y-1 rounded bg-slate-50 p-2 text-xs text-gray-600">
+                  {includedCrewRoles.map((role) => (
+                    <div key={role.id} className="flex justify-between">
+                      <span className="truncate pr-2">
+                        {role.name} × {role.quantity}
+                      </span>
+                      <span>{formatCurrency(role.total)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="flex justify-between">
                 <span>Kit {kitCostMode === "guided" ? "(guided)" : "(manual)"}</span>
                 <span>{formatCurrency(kitValue)}</span>
