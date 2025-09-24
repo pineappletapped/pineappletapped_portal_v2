@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { db } from "@/lib/firebase";
 import { useRoleGate } from "@/hooks/useRoleGate";
 import {
@@ -20,6 +21,7 @@ import type { Category } from "@/lib/categories";
 
 export default function AdminProductsPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
+  const router = useRouter();
   const [products, setProducts] = useState<Product[]>([]);
   const [cats, setCats] = useState<Category[]>([]);
   const [search, setSearch] = useState("");
@@ -53,6 +55,27 @@ export default function AdminProductsPage() {
     if (!confirm("Delete this product?")) return;
     await deleteDoc(doc(db, "products", id));
     setProducts((prev) => prev.filter((p) => p.id !== id));
+  };
+
+  const duplicate = async (product: Product) => {
+    const { id: _id, ...data } = product;
+    const duplicatedName = `${product.name} (Copy)`;
+    try {
+      const ref = await addDoc(collection(db, "products"), {
+        ...data,
+        name: duplicatedName,
+      });
+      const newProduct: Product = {
+        ...product,
+        id: ref.id,
+        name: duplicatedName,
+      };
+      setProducts((prev) => [newProduct, ...prev]);
+      router.push(`/admin/products/${ref.id}`);
+    } catch (error) {
+      console.error("Failed to duplicate product", error);
+      alert("Failed to duplicate product. Please try again.");
+    }
   };
 
   const downloadCSV = () => {
@@ -214,6 +237,12 @@ export default function AdminProductsPage() {
                 <Link href={`/admin/products/${p.id}`} className="btn btn-sm">
                   Edit
                 </Link>
+                <button
+                  onClick={() => duplicate(p)}
+                  className="btn btn-sm"
+                >
+                  Duplicate
+                </button>
                 <button
                   onClick={() => remove(p.id)}
                   className="btn btn-sm bg-red-600 text-white"
