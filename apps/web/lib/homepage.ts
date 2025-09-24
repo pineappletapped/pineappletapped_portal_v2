@@ -129,4 +129,4 @@ export async function getHomepage(): Promise<HomepageContent> {
   }
 }
 
-export type { HomeCard, ProcessStage };
+export type { HomeCard };

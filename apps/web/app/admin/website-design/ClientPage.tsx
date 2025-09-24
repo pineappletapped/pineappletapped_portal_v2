@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { db, storage } from '@/lib/firebase';
 import {
+  addDoc,
   collection,
   getDocs,
   doc,

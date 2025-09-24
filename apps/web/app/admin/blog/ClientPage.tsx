@@ -4,7 +4,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ChangeEvent,
   type FormEvent,
@@ -188,9 +187,9 @@ export default function AdminBlogPage() {
   const [categoryDeleting, setCategoryDeleting] = useState<string | null>(null);
 
   const ReactQuill = dynamic(() => import("react-quill"), { ssr: false });
-  const quillRef = useRef<any>(null);
 
-  const handleImageUpload = useCallback(() => {
+  const handleImageUpload = useCallback(function (this: any) {
+    const quill = this?.quill;
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/*";
@@ -203,12 +202,11 @@ export default function AdminBlogPage() {
         const storageRef = ref(storage, path);
         await uploadBytes(storageRef, file, { contentType: file.type });
         const url = await getDownloadURL(storageRef);
-        const editor = quillRef.current?.getEditor?.();
-        if (editor) {
-          const selection = editor.getSelection(true);
-          const index = selection ? selection.index : editor.getLength();
-          editor.insertEmbed(index, "image", url, "user");
-          editor.setSelection(index + 1);
+        if (quill) {
+          const selection = quill.getSelection(true);
+          const index = selection ? selection.index : quill.getLength();
+          quill.insertEmbed(index, "image", url, "user");
+          quill.setSelection(index + 1);
         }
       } catch (error) {
         console.error("Failed to upload image", error);
@@ -1037,7 +1035,6 @@ export default function AdminBlogPage() {
               <div className="grid gap-1">
                 <label className="text-sm font-medium">Content</label>
                 <ReactQuill
-                  ref={quillRef}
                   value={form.content}
                   onChange={(value) => setForm((prev) => ({ ...prev, content: value }))}
                   modules={quillModules}
