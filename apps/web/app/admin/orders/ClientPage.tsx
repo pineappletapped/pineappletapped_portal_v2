@@ -15,6 +15,7 @@ import {
   updateDoc,
 } from "firebase/firestore";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import { describeLeadSource } from "@/lib/lead-source";
 
 export default function AdminOrdersPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
@@ -291,6 +292,9 @@ export default function AdminOrdersPage() {
                 (o.leadSource as string | undefined) ||
                 'hq';
               const royaltyLabel = royaltySource === 'franchisee' ? 'Franchise-sourced' : 'HQ-sourced';
+              const leadSourceDescription = describeLeadSource(
+                (o.leadSource as string | undefined) || royaltySource
+              );
               const royaltyPercentage =
                 typeof royalty?.percentage === 'number'
                   ? royalty.percentage
@@ -370,6 +374,9 @@ export default function AdminOrdersPage() {
                         {assignmentMatchType ? ` · ${assignmentMatchType}` : ""}
                       </div>
                     )}
+                    <div className="mt-2 text-xs text-gray-500">
+                      Lead source: {leadSourceDescription}
+                    </div>
                     {(royaltyPercentage !== null || royaltyOrderIndex !== null) && (
                       <div className="mt-2 text-xs text-gray-500">
                         Royalty: {royaltyPercentage !== null ? `${royaltyPercentage}%` : '—'} · {royaltyLabel}

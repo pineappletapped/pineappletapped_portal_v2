@@ -82,6 +82,123 @@ const ONBOARDING_STATUS_OPTIONS: {
 const onboardingStatusLabel = (value: FranchiseOnboardingStatus) =>
   ONBOARDING_STATUS_OPTIONS.find((option) => option.value === value)?.label || "Not started";
 
+const normalisePostalCode = (value: string): string | null => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const cleaned = trimmed.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return cleaned || null;
+};
+
+const normalisePostalCodeList = (values: string[]): string[] => {
+  const results: string[] = [];
+  const seen = new Set<string>();
+  values.forEach((value) => {
+    const normalised = normalisePostalCode(value);
+    if (!normalised || seen.has(normalised)) {
+      return;
+    }
+    seen.add(normalised);
+    results.push(normalised);
+  });
+  return results;
+};
+
+const haversineDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const R = 6371; // Earth radius in km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distance = R * c;
+  return Number.isFinite(distance) ? distance : Number.NaN;
+};
+
+type ExclusiveTerritoryCandidate = Pick<
+  FranchiseTerritory,
+  "type" | "postalCodes" | "radiusKm" | "centerLat" | "centerLng" | "exclusive"
+> & {
+  id?: string | null;
+};
+
+const findExclusiveTerritoryConflicts = (
+  candidate: ExclusiveTerritoryCandidate,
+  existing: FranchiseTerritory[]
+): FranchiseTerritory[] => {
+  if (!candidate.exclusive) {
+    return [];
+  }
+
+  const conflicts: FranchiseTerritory[] = [];
+  const candidateId = candidate.id ?? null;
+
+  const candidatePostalCodes = normalisePostalCodeList(candidate.postalCodes ?? []);
+  const candidateHasRadius =
+    candidate.type === "radius" &&
+    typeof candidate.radiusKm === "number" &&
+    candidate.radiusKm > 0 &&
+    typeof candidate.centerLat === "number" &&
+    typeof candidate.centerLng === "number";
+
+  for (const territory of existing) {
+    if (!territory.exclusive) {
+      continue;
+    }
+    if (territory.id === candidateId) {
+      continue;
+    }
+
+    if (candidate.type === "postal" && territory.type === "postal") {
+      const territoryCodes = normalisePostalCodeList(territory.postalCodes ?? []);
+      if (territoryCodes.length === 0 || candidatePostalCodes.length === 0) {
+        continue;
+      }
+      const hasOverlap = candidatePostalCodes.some((candidateCode) =>
+        territoryCodes.some(
+          (existingCode) =>
+            candidateCode === existingCode ||
+            candidateCode.startsWith(existingCode) ||
+            existingCode.startsWith(candidateCode)
+        )
+      );
+      if (hasOverlap) {
+        conflicts.push(territory);
+        continue;
+      }
+    }
+
+    if (candidate.type === "radius" && territory.type === "radius" && candidateHasRadius) {
+      const territoryHasRadius =
+        typeof territory.radiusKm === "number" &&
+        territory.radiusKm > 0 &&
+        typeof territory.centerLat === "number" &&
+        typeof territory.centerLng === "number";
+      if (!territoryHasRadius) {
+        continue;
+      }
+      const distance = haversineDistanceKm(
+        candidate.centerLat as number,
+        candidate.centerLng as number,
+        territory.centerLat as number,
+        territory.centerLng as number
+      );
+      if (!Number.isFinite(distance)) {
+        continue;
+      }
+      if (distance <= (candidate.radiusKm as number) + (territory.radiusKm as number)) {
+        conflicts.push(territory);
+        continue;
+      }
+    }
+  }
+
+  return conflicts;
+};
+
 function createOnboardingState() {
   return { ...defaultFranchiseOnboarding() };
 }
@@ -603,6 +720,31 @@ export default function AdminFranchisesPage() {
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
+      const conflicts = findExclusiveTerritoryConflicts(
+        {
+          id: null,
+          type: payload.type,
+          postalCodes: payload.postalCodes,
+          exclusive: payload.exclusive,
+          radiusKm: payload.radiusKm,
+          centerLat: payload.centerLat,
+          centerLng: payload.centerLng,
+        },
+        territories
+      );
+      if (conflicts.length > 0) {
+        const message = conflicts
+          .map((territory) => {
+            const franchise = franchiseMap.get(territory.franchiseId);
+            const franchiseLabel = franchise?.name?.trim() ? franchise.name : territory.franchiseId;
+            return `${territory.label} (${franchiseLabel})`;
+          })
+          .join("\n");
+        alert(
+          `Exclusive territories cannot overlap with other exclusive territories.\nConflicts:\n${message}`
+        );
+        return;
+      }
       await addDoc(collection(db, "franchiseTerritories"), payload);
       resetTerritoryForm();
       setShowCreateTerritory(false);
@@ -685,6 +827,31 @@ export default function AdminFranchisesPage() {
         notes: editingTerritory.notes.trim() || null,
         updatedAt: serverTimestamp(),
       };
+      const conflicts = findExclusiveTerritoryConflicts(
+        {
+          id: editingTerritoryId,
+          type: payload.type,
+          postalCodes: payload.postalCodes,
+          exclusive: payload.exclusive,
+          radiusKm: payload.radiusKm,
+          centerLat: payload.centerLat,
+          centerLng: payload.centerLng,
+        },
+        territories
+      );
+      if (conflicts.length > 0) {
+        const message = conflicts
+          .map((territory) => {
+            const franchise = franchiseMap.get(territory.franchiseId);
+            const franchiseLabel = franchise?.name?.trim() ? franchise.name : territory.franchiseId;
+            return `${territory.label} (${franchiseLabel})`;
+          })
+          .join("\n");
+        alert(
+          `Exclusive territories cannot overlap with other exclusive territories.\nConflicts:\n${message}`
+        );
+        return;
+      }
       await updateDoc(doc(db, "franchiseTerritories", editingTerritoryId), payload);
       cancelEditTerritory();
       await refreshData();

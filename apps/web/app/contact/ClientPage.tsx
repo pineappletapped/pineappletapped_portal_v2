@@ -4,8 +4,10 @@ import { useId, useState } from 'react';
 import { httpsCallable } from 'firebase/functions';
 import { functions } from '@/lib/firebase';
 import Link from 'next/link';
+import { useLeadSourceTag } from '@/hooks/useLeadSourceTag';
 
 export default function ContactClientPage() {
+  const { value: leadSource } = useLeadSourceTag(null);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [company, setCompany] = useState('');
@@ -62,7 +64,13 @@ export default function ContactClientPage() {
     setErrorMessage(null);
     setStatus('sending');
     try {
-      await callable({ name: name.trim(), email: email.trim(), company, message: message.trim() });
+      await callable({
+        name: name.trim(),
+        email: email.trim(),
+        company,
+        message: message.trim(),
+        leadSource,
+      });
       setStatus('sent');
       setName('');
       setEmail('');

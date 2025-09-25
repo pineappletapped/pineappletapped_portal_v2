@@ -5,6 +5,7 @@ import { collection, getDocs } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions } from '@/lib/firebase';
 import { getProductKit } from '@/lib/equipment';
+import { useLeadSourceTag } from '@/hooks/useLeadSourceTag';
 
 interface SelectedItem {
   id: string;
@@ -14,6 +15,7 @@ interface SelectedItem {
 }
 
 export default function RequestQuotePage() {
+  const { value: leadSource } = useLeadSourceTag(null);
   const [products, setProducts] = useState<any[]>([]);
   const [selected, setSelected] = useState<SelectedItem[]>([]);
   const [projectName, setProjectName] = useState('');
@@ -72,6 +74,7 @@ export default function RequestQuotePage() {
           productionPeriod === 'Specific date'
             ? productionDate || null
             : productionPeriod || null,
+        leadSource,
       });
       setStatus('sent');
       setName('');

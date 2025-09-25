@@ -2,6 +2,12 @@
 
 import { useCart } from "@/lib/cart";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
+import { useLeadSourceTag } from "@/hooks/useLeadSourceTag";
+import {
+  leadSourceDetailPlaceholder,
+  leadSourceKindLabel,
+  type LeadSourceKind,
+} from "@/lib/lead-source";
 import { VAT_RATE } from "@/lib/vat";
 import { httpsCallable, type Functions } from "firebase/functions";
 import { doc, getDoc } from "firebase/firestore";
@@ -18,6 +24,14 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import CheckoutPaymentForm from "./CheckoutPaymentForm";
+
+const LEAD_SOURCE_OPTIONS: LeadSourceKind[] = [
+  "hq",
+  "franchise_referral",
+  "franchise_affiliate",
+  "franchise_voucher",
+  "other",
+];
 
 export default function CheckoutPage() {
   const { items, clear } = useCart();
@@ -45,6 +59,11 @@ export default function CheckoutPage() {
   const [postalCode, setPostalCode] = useState("");
   const [projectName, setProjectName] = useState("");
   const [voucher, setVoucher] = useState("");
+  const {
+    state: leadSourceState,
+    setState: setLeadSourceState,
+    value: leadSourceValue,
+  } = useLeadSourceTag(voucher || null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [orderId, setOrderId] = useState<string | null>(null);
@@ -74,7 +93,7 @@ export default function CheckoutPage() {
       postalCode: postalCode || null,
       projectName: projectName || null,
       voucher: voucher || null,
-      leadSource: "hq" as const,
+      leadSource: leadSourceValue,
     };
   }, [
     items,
@@ -87,6 +106,7 @@ export default function CheckoutPage() {
     postalCode,
     projectName,
     voucher,
+    leadSourceValue,
   ]);
   const currentIntentPayload = useMemo(
     () =>
@@ -330,6 +350,18 @@ export default function CheckoutPage() {
     [clear, router]
   );
 
+  const handleLeadSourceKindChange = (kind: LeadSourceKind) => {
+    setLeadSourceState((prev) => {
+      const nextDetail =
+        kind === "hq"
+          ? ""
+          : kind === "franchise_voucher"
+            ? prev.detail || voucher
+            : prev.detail;
+      return { kind, detail: nextDetail ?? "" };
+    });
+  };
+
   return (
     <div className="max-w-5xl mx-auto grid md:grid-cols-2 gap-8">
       <div className="space-y-6">
@@ -401,6 +433,40 @@ export default function CheckoutPage() {
             value={projectName}
             onChange={(e) => setProjectName(e.target.value)}
           />
+          <fieldset className="space-y-3 rounded border p-4">
+            <legend className="text-sm font-semibold">Lead Source</legend>
+            <p className="text-xs text-gray-600">
+              Tag the lead before checkout so franchise royalties and commissions
+              are allocated correctly.
+            </p>
+            <div className="grid gap-2">
+              {LEAD_SOURCE_OPTIONS.map((option) => (
+                <label key={option} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="radio"
+                    name="leadSource"
+                    value={option}
+                    checked={leadSourceState.kind === option}
+                    onChange={() => handleLeadSourceKindChange(option)}
+                  />
+                  {leadSourceKindLabel(option)}
+                </label>
+              ))}
+            </div>
+            {leadSourceState.kind !== "hq" && (
+              <input
+                className="input input-bordered w-full"
+                placeholder={leadSourceDetailPlaceholder(leadSourceState.kind)}
+                value={leadSourceState.detail}
+                onChange={(e) =>
+                  setLeadSourceState((prev) => ({
+                    ...prev,
+                    detail: e.target.value,
+                  }))
+                }
+              />
+            )}
+          </fieldset>
         </div>
       </div>
 

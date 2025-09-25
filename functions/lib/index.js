@@ -6,6 +6,7 @@ import sharp from 'sharp';
 import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import ColorThief from 'color-thief-node';
@@ -115,6 +116,394 @@ function resolveRoyaltyTier(config, source, orderIndex) {
     const lastTier = tiers[tiers.length - 1] ?? fallback.hqTiers[fallback.hqTiers.length - 1];
     return { percentage: lastTier.percentage, tier: lastTier };
 }
+function normaliseDriveId(input) {
+    if (typeof input === 'string') {
+        const trimmed = input.trim();
+        return trimmed.length > 0 ? trimmed : null;
+    }
+    return null;
+}
+function sanitiseDriveName(name, fallback) {
+    const raw = typeof name === 'string' ? name.trim() : '';
+    const base = raw.length > 0 ? raw : fallback;
+    const cleaned = base.replace(/[\\/:*?"<>|]/g, '-').replace(/\s{2,}/g, ' ').trim();
+    if (!cleaned) {
+        return fallback;
+    }
+    return cleaned.slice(0, 120);
+}
+function toClientDocId(key) {
+    const trimmed = key.trim().toLowerCase();
+    if (!trimmed) {
+        return `client-${uuidv4()}`;
+    }
+    const slug = trimmed.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (slug.length >= 6 && slug.length <= 100) {
+        return slug;
+    }
+    const hash = crypto.createHash('sha1').update(trimmed).digest('hex').slice(0, 24);
+    return `client-${hash}`;
+}
+function buildClientFolderName(context) {
+    const fallback = `Client ${context.orderId.slice(-6).toUpperCase()}`;
+    if (context.companyName) {
+        return sanitiseDriveName(context.companyName, fallback);
+    }
+    if (context.customerName) {
+        return sanitiseDriveName(context.customerName, fallback);
+    }
+    const firstEmail = context.emails.find((value) => value.length > 0);
+    if (firstEmail) {
+        const prefix = firstEmail.split('@')[0] || firstEmail;
+        return sanitiseDriveName(prefix, fallback);
+    }
+    return fallback;
+}
+function buildOrderFolderName(context) {
+    const suffix = context.orderId.slice(-6).toUpperCase();
+    if (context.projectName) {
+        return sanitiseDriveName(`${context.projectName} (${suffix})`, `Order ${suffix}`);
+    }
+    if (context.products.length === 1) {
+        return sanitiseDriveName(`${context.products[0].name} (${suffix})`, `Order ${suffix}`);
+    }
+    return `Order ${suffix}`;
+}
+function buildProductFolderName(product, index, total) {
+    const base = sanitiseDriveName(product.folderName ?? product.name, product.name || `Product ${index + 1}`);
+    if (total > 1) {
+        return `${base} #${index + 1}`;
+    }
+    return base;
+}
+async function createDriveService() {
+    const keyB64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64;
+    if (!keyB64) {
+        console.warn('Missing Google service account credentials for Drive automation');
+        return null;
+    }
+    try {
+        const keyJson = JSON.parse(Buffer.from(keyB64, 'base64').toString());
+        const auth = new google.auth.JWT(keyJson.client_email, undefined, keyJson.private_key, ['https://www.googleapis.com/auth/drive']);
+        await auth.authorize();
+        return google.drive({ version: 'v3', auth });
+    }
+    catch (error) {
+        console.error('Failed to initialise Drive service', error);
+        return null;
+    }
+}
+async function resolveExistingFolder(drive, folderId) {
+    if (!folderId) {
+        return null;
+    }
+    try {
+        const res = await drive.files.get({
+            fileId: folderId,
+            fields: 'id, trashed',
+            supportsAllDrives: true,
+        });
+        if (res.data?.trashed) {
+            return null;
+        }
+        return res.data?.id ?? folderId;
+    }
+    catch {
+        return null;
+    }
+}
+async function createDriveFolder(drive, name, parentId) {
+    try {
+        const metadata = {
+            name,
+            mimeType: 'application/vnd.google-apps.folder',
+        };
+        if (parentId) {
+            metadata.parents = [parentId];
+        }
+        const res = await drive.files.create({
+            requestBody: metadata,
+            fields: 'id',
+            supportsAllDrives: true,
+        });
+        return res.data.id ?? null;
+    }
+    catch (error) {
+        console.error('Failed to create Drive folder', name, error);
+        return null;
+    }
+}
+async function listDriveChildren(drive, parentId) {
+    const files = [];
+    let pageToken;
+    do {
+        const res = await drive.files.list({
+            q: `'${parentId}' in parents and trashed = false`,
+            fields: 'nextPageToken, files(id, name, mimeType)',
+            pageSize: 100,
+            pageToken,
+            includeItemsFromAllDrives: true,
+            supportsAllDrives: true,
+        });
+        if (res.data.files) {
+            files.push(...res.data.files);
+        }
+        pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+    return files;
+}
+async function copyDriveContents(drive, sourceFolderId, destinationFolderId) {
+    const children = await listDriveChildren(drive, sourceFolderId);
+    for (const child of children) {
+        if (!child.id)
+            continue;
+        if (child.mimeType === 'application/vnd.google-apps.folder') {
+            const folderName = sanitiseDriveName(child.name ?? 'Folder', 'Folder');
+            const newFolderId = await createDriveFolder(drive, folderName, destinationFolderId);
+            if (newFolderId) {
+                await copyDriveContents(drive, child.id, newFolderId);
+            }
+        }
+        else {
+            try {
+                await drive.files.copy({
+                    fileId: child.id,
+                    requestBody: {
+                        name: child.name ?? undefined,
+                        parents: [destinationFolderId],
+                    },
+                    supportsAllDrives: true,
+                });
+            }
+            catch (error) {
+                console.error('Failed to copy Drive file', child.id, error);
+            }
+        }
+    }
+}
+async function ensureChildFolder(drive, parentId, desiredName, existingFolderId, templateFolderId) {
+    const existing = await resolveExistingFolder(drive, normaliseDriveId(existingFolderId));
+    if (existing) {
+        return { id: existing, created: false };
+    }
+    try {
+        const escapedName = desiredName.replace(/'/g, "\\'");
+        const search = await drive.files.list({
+            q: `mimeType = 'application/vnd.google-apps.folder' and trashed = false and '${parentId}' in parents and name = '${escapedName}'`,
+            fields: 'files(id, name)',
+            pageSize: 1,
+            includeItemsFromAllDrives: true,
+            supportsAllDrives: true,
+        });
+        const matchId = search.data.files?.[0]?.id ?? null;
+        if (matchId) {
+            return { id: matchId, created: false };
+        }
+    }
+    catch (error) {
+        console.warn('Failed to look up Drive folder by name', error);
+    }
+    const folderId = await createDriveFolder(drive, desiredName, parentId);
+    if (folderId && templateFolderId) {
+        try {
+            await copyDriveContents(drive, templateFolderId, folderId);
+        }
+        catch (error) {
+            console.error('Failed to copy Drive template into folder', error);
+        }
+    }
+    return { id: folderId, created: true };
+}
+async function shareDriveFolder(drive, folderId, emails) {
+    const seen = new Set();
+    for (const email of emails) {
+        const trimmed = typeof email === 'string' ? email.trim().toLowerCase() : '';
+        if (!trimmed || seen.has(trimmed)) {
+            continue;
+        }
+        seen.add(trimmed);
+        try {
+            await drive.permissions.create({
+                fileId: folderId,
+                supportsAllDrives: true,
+                sendNotificationEmail: false,
+                requestBody: {
+                    type: 'user',
+                    role: 'writer',
+                    emailAddress: trimmed,
+                },
+            });
+        }
+        catch (error) {
+            if (error?.code === 409) {
+                continue;
+            }
+            console.warn('Failed to apply Drive permission', folderId, trimmed, error);
+        }
+    }
+}
+async function setupClientDriveStructure(context) {
+    const drive = await createDriveService();
+    if (!drive) {
+        await context.orderRef.set({
+            drive: {
+                status: 'pending_credentials',
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+        }, { merge: true });
+        return;
+    }
+    const settingsSnap = await db.collection('settings').doc('clientDrive').get();
+    const settings = settingsSnap.data() || {};
+    const rootFolderId = normaliseDriveId(settings.clientRootFolderId);
+    if (!rootFolderId) {
+        await context.orderRef.set({
+            drive: {
+                status: 'pending_configuration',
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+        }, { merge: true });
+        return;
+    }
+    const brandingName = sanitiseDriveName(settings.brandingFolderName ?? null, 'Branding Assets');
+    const ordersName = sanitiseDriveName(settings.ordersFolderName ?? null, 'Projects');
+    const brandingTemplateId = normaliseDriveId(settings.brandingTemplateFolderId);
+    const clientEmails = Array.from(new Set(context.emails
+        .map((value) => value.trim().toLowerCase())
+        .filter((value) => value.length > 0)));
+    const franchiseEmails = context.franchise.emails
+        .map((value) => value.trim().toLowerCase())
+        .filter((value) => value.length > 0);
+    const hqEmails = Array.isArray(settings.hqEmails)
+        ? settings.hqEmails
+            .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+            .filter((value) => value.length > 0)
+        : [];
+    const shareEmails = [...hqEmails, ...franchiseEmails];
+    const clientsCollection = db.collection('clients');
+    let clientDocRef = null;
+    let existingSnap = null;
+    if (context.clientKey) {
+        const candidateRef = clientsCollection.doc(toClientDocId(context.clientKey));
+        const candidateSnap = await candidateRef.get();
+        if (candidateSnap.exists) {
+            clientDocRef = candidateRef;
+            existingSnap = candidateSnap;
+        }
+        else {
+            const keyQuery = await clientsCollection.where('key', '==', context.clientKey).limit(1).get();
+            if (!keyQuery.empty) {
+                existingSnap = keyQuery.docs[0];
+                clientDocRef = existingSnap.ref;
+            }
+        }
+    }
+    if (!clientDocRef && clientEmails.length > 0) {
+        const emailQuery = await clientsCollection
+            .where('emails', 'array-contains-any', clientEmails.slice(0, 10))
+            .limit(1)
+            .get();
+        if (!emailQuery.empty) {
+            existingSnap = emailQuery.docs[0];
+            clientDocRef = existingSnap.ref;
+        }
+    }
+    if (!clientDocRef) {
+        const fallbackId = toClientDocId(`order:${context.orderId}`);
+        clientDocRef = clientsCollection.doc(fallbackId);
+    }
+    const existingData = existingSnap?.data() || {};
+    const driveInfo = existingData.drive || {};
+    const clientFolderName = buildClientFolderName(context);
+    let clientFolderId = (await resolveExistingFolder(drive, normaliseDriveId(driveInfo.rootFolderId ?? driveInfo.clientFolderId))) ?? null;
+    let clientFolderCreated = false;
+    if (!clientFolderId) {
+        clientFolderId = await createDriveFolder(drive, clientFolderName, rootFolderId);
+        clientFolderCreated = true;
+    }
+    if (!clientFolderId) {
+        throw new Error('Unable to create client Drive folder');
+    }
+    const branding = await ensureChildFolder(drive, clientFolderId, brandingName, driveInfo.brandingFolderId, brandingTemplateId);
+    const orders = await ensureChildFolder(drive, clientFolderId, ordersName, driveInfo.ordersRootFolderId);
+    const ordersRootFolderId = orders.id ?? clientFolderId;
+    const orderFolderName = buildOrderFolderName(context);
+    const orderFolderId = await createDriveFolder(drive, orderFolderName, ordersRootFolderId);
+    if (!orderFolderId) {
+        throw new Error('Unable to create order Drive folder');
+    }
+    const productFolders = [];
+    for (const product of context.products) {
+        const count = product.quantity > 0 ? product.quantity : 1;
+        for (let i = 0; i < count; i += 1) {
+            const folderName = buildProductFolderName(product, i, count);
+            const folderId = await createDriveFolder(drive, folderName, orderFolderId);
+            if (!folderId) {
+                continue;
+            }
+            if (product.templateFolderId) {
+                await copyDriveContents(drive, product.templateFolderId, folderId);
+            }
+            productFolders.push({
+                productId: product.productId,
+                folderId,
+                folderName,
+                templateFolderId: product.templateFolderId,
+                quantity: count,
+                sequence: i + 1,
+            });
+        }
+    }
+    if (clientFolderCreated || shareEmails.length > 0) {
+        await shareDriveFolder(drive, clientFolderId, shareEmails);
+    }
+    const clientUpdate = {
+        key: context.clientKey ?? null,
+        keyType: context.clientKeyType ?? null,
+        companyName: context.companyName ?? null,
+        customerName: context.customerName ?? null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        drive: {
+            rootFolderId: clientFolderId,
+            rootFolderName: clientFolderName,
+            brandingFolderId: branding.id ?? null,
+            brandingFolderName: brandingName,
+            ordersRootFolderId,
+            ordersFolderName: ordersName,
+            lastOrderId: context.orderId,
+            lastUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+    };
+    if (!existingSnap?.exists) {
+        clientUpdate.createdAt = admin.firestore.FieldValue.serverTimestamp();
+    }
+    if (clientEmails.length > 0) {
+        clientUpdate.emails = admin.firestore.FieldValue.arrayUnion(...clientEmails);
+    }
+    if (context.franchise.id) {
+        clientUpdate.lastFranchiseId = context.franchise.id;
+    }
+    if (franchiseEmails.length > 0) {
+        clientUpdate.franchiseEmails = admin.firestore.FieldValue.arrayUnion(...franchiseEmails);
+    }
+    await clientDocRef.set(clientUpdate, { merge: true });
+    await context.orderRef.set({
+        clientId: clientDocRef.id,
+        drive: {
+            status: 'ready',
+            clientFolderId,
+            clientFolderName,
+            brandingFolderId: branding.id ?? null,
+            brandingFolderName: brandingName,
+            ordersRootFolderId,
+            ordersFolderName: ordersName,
+            orderFolderId,
+            orderFolderName,
+            productFolders,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+    }, { merge: true });
+}
 function normalisePostalCode(value) {
     if (typeof value !== 'string') {
         return null;
@@ -157,6 +546,73 @@ function extractTerritoryPostalCodes(data) {
     })
         .filter((item) => item !== null);
 }
+const POSTAL_CODE_GEO_CACHE_TTL_MS = 86_400_000; // 24 hours
+const postalCodeGeoCache = new Map();
+function haversineDistanceKm(lat1, lon1, lat2, lon2) {
+    const toRad = (value) => (value * Math.PI) / 180;
+    const R = 6371; // Earth radius in km
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const distance = R * c;
+    return Number.isFinite(distance) ? distance : Number.NaN;
+}
+async function geocodePostalCodeLocation(postalCode) {
+    const key = postalCode.trim().toUpperCase();
+    if (!key) {
+        return null;
+    }
+    const now = Date.now();
+    const cached = postalCodeGeoCache.get(key);
+    if (cached && cached.expiresAt > now) {
+        return { lat: cached.lat, lng: cached.lng };
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    try {
+        const response = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(key)}`, {
+            headers: { Accept: 'application/json' },
+            signal: controller.signal,
+        });
+        if (!response.ok) {
+            if (response.status !== 404) {
+                console.warn('Postal code geocode lookup failed', key, response.status, response.statusText);
+            }
+            if (cached) {
+                return { lat: cached.lat, lng: cached.lng };
+            }
+            return null;
+        }
+        const payload = (await response.json());
+        const latitude = Number(payload?.result?.latitude);
+        const longitude = Number(payload?.result?.longitude);
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+            console.warn('Postal code geocode response missing coordinates', key, payload?.result);
+            if (cached) {
+                return { lat: cached.lat, lng: cached.lng };
+            }
+            return null;
+        }
+        postalCodeGeoCache.set(key, {
+            lat: latitude,
+            lng: longitude,
+            expiresAt: now + POSTAL_CODE_GEO_CACHE_TTL_MS,
+        });
+        return { lat: latitude, lng: longitude };
+    }
+    catch (error) {
+        console.warn('Postal code geocode lookup error', key, error);
+        if (cached) {
+            return { lat: cached.lat, lng: cached.lng };
+        }
+        return null;
+    }
+    finally {
+        clearTimeout(timeoutId);
+    }
+}
 async function resolveTerritoryForPostalCode(postalCode) {
     const normalisedInput = normalisePostalCode(postalCode);
     if (!normalisedInput) {
@@ -164,54 +620,104 @@ async function resolveTerritoryForPostalCode(postalCode) {
     }
     const territoriesSnap = await db.collection('franchiseTerritories').get();
     let best = null;
+    let geocodedLocation = null;
+    let attemptedGeocode = false;
     for (const territoryDoc of territoriesSnap.docs) {
         const data = territoryDoc.data();
         if (!data?.franchiseId) {
             continue;
         }
-        if (data.type && data.type !== 'postal') {
-            // Radius-based routing requires geospatial inputs; skip for postal-only auto routing.
+        const type = typeof data.type === 'string' && data.type.toLowerCase() === 'radius' ? 'radius' : 'postal';
+        if (type === 'postal') {
+            const codes = extractTerritoryPostalCodes(data);
+            for (const code of codes) {
+                if (!code.normalised) {
+                    continue;
+                }
+                let matchType = null;
+                let score = 0;
+                if (code.normalised === normalisedInput) {
+                    matchType = 'exact';
+                    score = 2000 + code.normalised.length;
+                }
+                else if (normalisedInput.startsWith(code.normalised)) {
+                    matchType = 'prefix';
+                    score = 1200 + code.normalised.length;
+                }
+                else if (code.normalised.startsWith(normalisedInput)) {
+                    // Allow territories defined with full codes while customer provided a broader area.
+                    matchType = 'superset';
+                    score = 800 + normalisedInput.length;
+                }
+                if (!matchType) {
+                    continue;
+                }
+                if (data.exclusive !== false) {
+                    score += 50;
+                }
+                if (!best || score > best.score) {
+                    best = {
+                        score,
+                        result: {
+                            franchiseId: data.franchiseId,
+                            territoryId: territoryDoc.id,
+                            territoryLabel: typeof data.label === 'string' ? data.label : null,
+                            territoryPostalCode: code.normalised,
+                            matchType,
+                            exclusive: data.exclusive !== false,
+                            radiusMatch: null,
+                        },
+                    };
+                }
+            }
             continue;
         }
-        const codes = extractTerritoryPostalCodes(data);
-        for (const code of codes) {
-            if (!code.normalised) {
-                continue;
-            }
-            let matchType = null;
-            let score = 0;
-            if (code.normalised === normalisedInput) {
-                matchType = 'exact';
-                score = 2000 + code.normalised.length;
-            }
-            else if (normalisedInput.startsWith(code.normalised)) {
-                matchType = 'prefix';
-                score = 1200 + code.normalised.length;
-            }
-            else if (code.normalised.startsWith(normalisedInput)) {
-                // Allow territories defined with full codes while customer provided a broader area.
-                matchType = 'superset';
-                score = 800 + normalisedInput.length;
-            }
-            if (!matchType) {
-                continue;
-            }
-            if (data.exclusive !== false) {
-                score += 50;
-            }
-            if (!best || score > best.score) {
-                best = {
-                    score,
-                    result: {
-                        franchiseId: data.franchiseId,
-                        territoryId: territoryDoc.id,
-                        territoryLabel: typeof data.label === 'string' ? data.label : null,
-                        territoryPostalCode: code.normalised,
-                        matchType,
-                        exclusive: data.exclusive !== false,
+        if (attemptedGeocode && !geocodedLocation) {
+            continue;
+        }
+        if (!attemptedGeocode) {
+            attemptedGeocode = true;
+            geocodedLocation = await geocodePostalCodeLocation(normalisedInput);
+        }
+        if (!geocodedLocation) {
+            continue;
+        }
+        const radiusKm = Number(data.radiusKm);
+        const centerLat = Number(data.centerLat);
+        const centerLng = Number(data.centerLng);
+        if (!Number.isFinite(radiusKm) || radiusKm <= 0) {
+            continue;
+        }
+        if (!Number.isFinite(centerLat) || !Number.isFinite(centerLng)) {
+            continue;
+        }
+        const distanceKm = haversineDistanceKm(geocodedLocation.lat, geocodedLocation.lng, centerLat, centerLng);
+        if (!Number.isFinite(distanceKm) || distanceKm > radiusKm * 1.01) {
+            continue;
+        }
+        const coverageRatio = Math.min(Math.max(1 - distanceKm / radiusKm, 0), 1);
+        let score = 1500 + Math.round(coverageRatio * 400);
+        if (data.exclusive !== false) {
+            score += 50;
+        }
+        if (!best || score > best.score) {
+            best = {
+                score,
+                result: {
+                    franchiseId: data.franchiseId,
+                    territoryId: territoryDoc.id,
+                    territoryLabel: typeof data.label === 'string' ? data.label : null,
+                    territoryPostalCode: normalisedInput,
+                    matchType: 'radius',
+                    exclusive: data.exclusive !== false,
+                    radiusMatch: {
+                        distanceKm,
+                        radiusKm,
+                        centerLat,
+                        centerLng,
                     },
-                };
-            }
+                },
+            };
         }
     }
     if (!best) {
@@ -970,6 +1476,32 @@ function parseMoney(value, fallback = 0) {
     }
     return Math.max(0, Math.round(numeric * 100) / 100);
 }
+function toCurrencyCents(value) {
+    if (value === undefined || value === null) {
+        return 0;
+    }
+    const numeric = typeof value === 'string' ? Number(value) : Number(value);
+    if (!Number.isFinite(numeric) || Number.isNaN(numeric)) {
+        return 0;
+    }
+    return Math.max(0, Math.round(numeric * 100));
+}
+function fromCurrencyCents(value) {
+    if (!Number.isFinite(value) || Number.isNaN(value)) {
+        return 0;
+    }
+    return Math.round(value) / 100;
+}
+function normaliseCurrency(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const trimmed = value.trim();
+    if (trimmed.length < 3) {
+        return null;
+    }
+    return trimmed.slice(0, 3).toUpperCase();
+}
 function assertPositive(value, field) {
     if (value < 0) {
         throw new functions.https.HttpsError('invalid-argument', `${field} must be zero or positive.`);
@@ -1460,6 +1992,8 @@ async function sendEmail(to, subject, body) {
 }
 export const contact_send = functions.https.onCall(async (data) => {
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const leadSourceRaw = typeof data.leadSource === 'string' ? data.leadSource.trim() : '';
+    const leadSourceTag = leadSourceRaw || 'hq';
     const msg = {
         kind: 'contact',
         fromName: data.name || null,
@@ -1472,6 +2006,8 @@ export const contact_send = functions.https.onCall(async (data) => {
         createdAt: timestamp,
         updatedAt: timestamp,
         lastStatusAt: timestamp,
+        leadSource: leadSourceTag,
+        leadSourceCapturedAt: timestamp,
     };
     await db.collection('messages').add(msg);
     await sendEmail('info@pineapple.local', `Contact form: ${data.name || 'Message'}`, `From: ${data.name} <${data.email}>\\n\\n${data.message}`);
@@ -1485,15 +2021,228 @@ export const contact_send = functions.https.onCall(async (data) => {
                 company: data.company || null,
                 status: 'new',
                 source: 'contact',
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                createdAt: timestamp,
+                leadSource: leadSourceTag,
+                leadSourceCapturedAt: timestamp,
             });
         }
         else {
-            await existing.docs[0].ref.set({ name: data.name || null, company: data.company || null }, { merge: true });
+            const leadUpdate = {
+                name: data.name || null,
+                company: data.company || null,
+            };
+            if (leadSourceRaw) {
+                leadUpdate.leadSource = leadSourceTag;
+                leadUpdate.leadSourceCapturedAt = timestamp;
+            }
+            await existing.docs[0].ref.set(leadUpdate, { merge: true });
         }
     }
     catch (err) {
         console.error('Failed to log contact lead', err);
+    }
+    return { ok: true };
+});
+export const franchise_expo_request = functions.https.onCall(async (data, context) => {
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const franchiseId = typeof data.franchiseId === 'string' ? data.franchiseId.trim() : '';
+    if (!franchiseId) {
+        throw new functions.https.HttpsError('invalid-argument', 'franchiseId is required.');
+    }
+    const eventName = typeof data.eventName === 'string' ? data.eventName.trim() : '';
+    if (!eventName) {
+        throw new functions.https.HttpsError('invalid-argument', 'eventName is required.');
+    }
+    const location = typeof data.location === 'string' ? data.location.trim() : '';
+    if (!location) {
+        throw new functions.https.HttpsError('invalid-argument', 'location is required.');
+    }
+    const eventDateInput = typeof data.eventDate === 'string' ? data.eventDate.trim() : '';
+    let eventDateIso = null;
+    let eventDateTimestamp = null;
+    if (eventDateInput) {
+        const parsedDate = new Date(eventDateInput);
+        if (!Number.isNaN(parsedDate.getTime())) {
+            eventDateIso = parsedDate.toISOString();
+            eventDateTimestamp = admin.firestore.Timestamp.fromDate(parsedDate);
+        }
+    }
+    const standCostRaw = Number(data.standCost);
+    const standCost = Number.isFinite(standCostRaw) && standCostRaw >= 0 ? Math.round(standCostRaw * 100) / 100 : null;
+    const expectedFootfallRaw = Number(data.expectedFootfall);
+    const expectedFootfall = Number.isFinite(expectedFootfallRaw) && expectedFootfallRaw >= 0 ? Math.round(expectedFootfallRaw) : null;
+    const marketingFocus = typeof data.marketingFocus === 'string' ? data.marketingFocus.trim() : '';
+    const supportNotes = typeof data.supportNotes === 'string' ? data.supportNotes.trim() : '';
+    const standCurrency = typeof data.standCurrency === 'string' && data.standCurrency.trim()
+        ? data.standCurrency.trim().toUpperCase()
+        : 'GBP';
+    const payload = {
+        franchiseId,
+        franchiseName: typeof data.franchiseName === 'string' ? data.franchiseName.trim() || null : null,
+        eventName,
+        eventDate: eventDateIso,
+        eventDateTimestamp,
+        location,
+        standCost,
+        standCurrency,
+        expectedFootfall,
+        marketingFocus: marketingFocus || null,
+        supportNotes: supportNotes || null,
+        requestedByUid: context.auth?.uid ?? (typeof data.requestedByUid === 'string' ? data.requestedByUid.trim() || null : null),
+        requestedByEmail: typeof data.requestedByEmail === 'string' && data.requestedByEmail.trim()
+            ? data.requestedByEmail.trim()
+            : null,
+        status: 'new',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+    };
+    const docRef = await db.collection('franchiseExpoRequests').add(payload);
+    try {
+        const lines = [
+            `Franchise: ${payload.franchiseName || franchiseId}`,
+            `Event: ${eventName}`,
+            `Date: ${eventDateIso ? new Date(eventDateIso).toLocaleDateString('en-GB') : 'TBC'}`,
+            `Location: ${location}`,
+            standCost !== null ? `Stand cost: ${standCurrency} ${standCost.toFixed(2)}` : 'Stand cost: —',
+            expectedFootfall !== null ? `Expected footfall: ${expectedFootfall}` : 'Expected footfall: —',
+            marketingFocus ? `Goals: ${marketingFocus}` : null,
+            supportNotes ? `Notes: ${supportNotes}` : null,
+            payload.requestedByEmail ? `Requested by: ${payload.requestedByEmail}` : null,
+            `Request ID: ${docRef.id}`,
+        ].filter((line) => Boolean(line));
+        await sendEmail('info@pineapple.local', `Expo support request: ${eventName}`, lines.join('\n'));
+    }
+    catch (err) {
+        console.error('Failed to send expo request notification', err);
+    }
+    return { ok: true };
+});
+export const expo_lead_submit = functions.https.onCall(async (data) => {
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const pageIdInput = typeof data.pageId === 'string' ? data.pageId.trim() : '';
+    const slugInput = typeof data.slug === 'string' ? data.slug.trim() : '';
+    if (!pageIdInput && !slugInput) {
+        throw new functions.https.HttpsError('invalid-argument', 'pageId or slug is required.');
+    }
+    let pageDoc = null;
+    if (pageIdInput) {
+        const docSnap = await db.collection('expoLeadPages').doc(pageIdInput).get();
+        if (docSnap.exists) {
+            pageDoc = docSnap;
+        }
+    }
+    if (!pageDoc && slugInput) {
+        const snap = await db
+            .collection('expoLeadPages')
+            .where('slug', '==', slugInput)
+            .limit(1)
+            .get();
+        if (!snap.empty) {
+            pageDoc = snap.docs[0];
+        }
+    }
+    if (!pageDoc || !pageDoc.exists) {
+        throw new functions.https.HttpsError('not-found', 'Expo lead page not found.');
+    }
+    const pageData = pageDoc.data() || {};
+    if (pageData.isActive === false) {
+        throw new functions.https.HttpsError('failed-precondition', 'This expo page is no longer active.');
+    }
+    const firstName = typeof data.firstName === 'string' ? data.firstName.trim() : '';
+    const lastName = typeof data.lastName === 'string' ? data.lastName.trim() : '';
+    const email = typeof data.email === 'string' ? data.email.trim() : '';
+    const phone = typeof data.phone === 'string' ? data.phone.trim() : '';
+    const company = typeof data.company === 'string' ? data.company.trim() : '';
+    const consent = data.consent !== false;
+    if (!firstName) {
+        throw new functions.https.HttpsError('invalid-argument', 'firstName is required.');
+    }
+    if (!email) {
+        throw new functions.https.HttpsError('invalid-argument', 'email is required.');
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new functions.https.HttpsError('invalid-argument', 'email must be valid.');
+    }
+    if (!consent) {
+        throw new functions.https.HttpsError('failed-precondition', 'Consent must be provided.');
+    }
+    const leadDoc = {
+        pageId: pageDoc.id,
+        slug: pageData.slug || slugInput,
+        eventName: pageData.eventName || null,
+        firstName,
+        lastName: lastName || null,
+        email,
+        phone: phone || null,
+        company: company || null,
+        consented: true,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+    };
+    await db.collection('expoLeads').add(leadDoc);
+    try {
+        const existingLead = await db.collection('leads').where('email', '==', email).limit(1).get();
+        const leadBase = {
+            name: `${firstName} ${lastName}`.trim(),
+            email,
+            company: company || null,
+            status: 'new',
+            source: 'expo',
+            leadSource: pageData.slug || slugInput || 'expo',
+            updatedAt: timestamp,
+        };
+        if (existingLead.empty) {
+            await db.collection('leads').add({ ...leadBase, createdAt: timestamp });
+        }
+        else {
+            await existingLead.docs[0].ref.set(leadBase, { merge: true });
+        }
+    }
+    catch (err) {
+        console.error('Failed to sync expo lead to CRM', err);
+    }
+    const replacements = {
+        firstName,
+        lastName,
+        eventName: pageData.eventName || '',
+    };
+    const replaceTokens = (input) => input.replace(/{{\s*(firstName|lastName|eventName)\s*}}/gi, (_, key) => {
+        const normalised = String(key).replace(/\s+/g, '').toLowerCase();
+        return replacements[normalised] ?? '';
+    });
+    const subject = replaceTokens(pageData.emailSubject || 'Thanks for visiting Pineapple Tapped');
+    let body = replaceTokens(pageData.emailBody || 'Thanks for visiting our stand!');
+    const onePagerUrl = typeof pageData.onePagerUrl === 'string' ? pageData.onePagerUrl.trim() : '';
+    if (onePagerUrl) {
+        body = `${body}\n\nDownload our one-pager: ${onePagerUrl}`;
+    }
+    try {
+        await sendEmail(email, subject, body);
+    }
+    catch (err) {
+        console.error('Failed to send expo lead autoresponse', err);
+    }
+    const notificationEmails = Array.isArray(pageData.notificationEmails)
+        ? pageData.notificationEmails
+        : [];
+    if (notificationEmails.length > 0) {
+        const summary = [
+            `New expo lead captured for ${pageData.eventName || 'Expo'}`,
+            '',
+            `Name: ${firstName} ${lastName}`.trim(),
+            `Email: ${email}`,
+            phone ? `Phone: ${phone}` : null,
+            company ? `Company: ${company}` : null,
+            `Page: ${pageData.slug || slugInput}`,
+        ]
+            .filter((line) => Boolean(line))
+            .join('\n');
+        await Promise.all(notificationEmails
+            .map((address) => (typeof address === 'string' ? address.trim() : ''))
+            .filter((address) => address.length > 3 && address.includes('@'))
+            .map((address) => sendEmail(address, `Expo lead captured: ${pageData.eventName || 'Expo'}`, summary).catch((err) => {
+            console.error('Failed to send expo lead notification', address, err);
+        })));
     }
     return { ok: true };
 });
@@ -1563,6 +2312,9 @@ export const messages_onWrite = functions.firestore
     await Promise.all(notifications);
 });
 export const quote_request_public = functions.https.onCall(async (data) => {
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const leadSourceRaw = typeof data.leadSource === 'string' ? data.leadSource.trim() : '';
+    const leadSourceTag = leadSourceRaw || 'hq';
     const record = {
         userId: null,
         contactName: data.name,
@@ -1572,8 +2324,10 @@ export const quote_request_public = functions.https.onCall(async (data) => {
         items: data.items || [],
         customRequest: data.customRequest || null,
         productionPeriod: data.productionPeriod || null,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: timestamp,
         status: 'pending',
+        leadSource: leadSourceTag,
+        leadSourceCapturedAt: timestamp,
     };
     const ref = await db.collection('quoteRequests').add(record);
     await sendEmail('info@pineapple.local', `Quote request from ${data.name}`, `${data.projectName ? `Project: ${data.projectName}\n` : ''}${data.productionPeriod ? `Production: ${data.productionPeriod}\n` : ''}Email: ${data.email}\n\n${data.customRequest || ''}`);
@@ -1587,11 +2341,21 @@ export const quote_request_public = functions.https.onCall(async (data) => {
                 company: data.company || null,
                 status: 'new',
                 source: 'quote',
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                createdAt: timestamp,
+                leadSource: leadSourceTag,
+                leadSourceCapturedAt: timestamp,
             });
         }
         else {
-            await existing.docs[0].ref.set({ name: data.name || null, company: data.company || null }, { merge: true });
+            const leadUpdate = {
+                name: data.name || null,
+                company: data.company || null,
+            };
+            if (leadSourceRaw) {
+                leadUpdate.leadSource = leadSourceTag;
+                leadUpdate.leadSourceCapturedAt = timestamp;
+            }
+            await existing.docs[0].ref.set(leadUpdate, { merge: true });
         }
     }
     catch (err) {
@@ -2390,7 +3154,10 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         throw new functions.https.HttpsError('invalid-argument', 'items are required');
     }
     const productRefs = items.map((i) => db.collection('products').doc(i.id));
-    const leadSourceNormalised = typeof leadSourceInput === 'string' && leadSourceInput.toLowerCase().includes('franchise')
+    const leadSourceRaw = typeof leadSourceInput === 'string' ? leadSourceInput.trim() : '';
+    const leadSourceTag = leadSourceRaw || 'hq';
+    const leadSourceLower = leadSourceTag.toLowerCase();
+    const leadSourceNormalised = ['franchise', 'affiliate', 'partner', 'referral', 'territory'].some((indicator) => leadSourceLower.includes(indicator))
         ? 'franchisee'
         : 'hq';
     const authEmail = typeof context.auth?.token.email === 'string' ? context.auth.token.email : null;
@@ -2417,6 +3184,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     }
     const productSnaps = await db.getAll(...productRefs);
     const orderItems = [];
+    const driveProducts = [];
     let productSubtotal = 0;
     let labourSubtotal = 0;
     let kitSubtotal = 0;
@@ -2483,6 +3251,23 @@ export const createOrder = functions.https.onCall(async (data, context) => {
                     totalCost: perUnitBudgetTotal * qty,
                 },
             },
+        });
+        const templateFolderIdRaw = typeof prod.driveTemplateFolderId === 'string'
+            ? prod.driveTemplateFolderId
+            : '';
+        const folderNameOverrideRaw = typeof prod.driveFolderName === 'string'
+            ? prod.driveFolderName
+            : '';
+        driveProducts.push({
+            productId: snap.id,
+            name: typeof prod.name === 'string' ? prod.name : `Product ${idx + 1}`,
+            quantity: qty > 0 ? qty : 1,
+            templateFolderId: templateFolderIdRaw && templateFolderIdRaw.trim().length > 0
+                ? templateFolderIdRaw.trim()
+                : null,
+            folderName: folderNameOverrideRaw && folderNameOverrideRaw.trim().length > 0
+                ? folderNameOverrideRaw.trim()
+                : null,
         });
         productSubtotal += price * qty;
         labourSubtotal += labour * qty;
@@ -2607,6 +3392,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             console.warn('Failed to resolve royalty configuration', royaltyErr);
         }
     }
+    const createdAt = admin.firestore.FieldValue.serverTimestamp();
     const orderData = {
         userId: context.auth?.uid || null,
         userEmail: context.auth?.token.email || userEmail || null,
@@ -2635,9 +3421,11 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         price,
         profit,
         status: 'pending',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt,
         franchiseAssignment: assignmentMeta,
         royaltySource: leadSourceNormalised,
+        leadSource: leadSourceTag,
+        leadSourceCapturedAt: createdAt,
         clientRoyaltyKey: clientRoyaltyKey || null,
         clientRoyaltyKeyType: clientRoyaltyKeyType || null,
         clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
@@ -2651,6 +3439,17 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         assignmentMeta.territoryPostalCode = assignmentResult.territoryPostalCode;
         assignmentMeta.territoryLabel = assignmentResult.territoryLabel;
         assignmentMeta.exclusive = assignmentResult.exclusive;
+        if (assignmentResult.matchType === 'radius') {
+            assignmentMeta.strategy = 'radius_auto_route';
+            assignmentMeta.radiusMatch = assignmentResult.radiusMatch
+                ? {
+                    distanceKm: assignmentResult.radiusMatch.distanceKm,
+                    radiusKm: assignmentResult.radiusMatch.radiusKm,
+                    centerLat: assignmentResult.radiusMatch.centerLat,
+                    centerLng: assignmentResult.radiusMatch.centerLng,
+                }
+                : null;
+        }
     }
     else {
         orderData.franchiseId = null;
@@ -2689,7 +3488,347 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         orderData.royaltyPercentage = null;
     }
     const orderRef = await db.collection('orders').add(orderData);
+    const driveClientKeyBase = clientRoyaltyKey ?? (normalisedEmail ? `email:${normalisedEmail}` : null);
+    const driveClientKey = driveClientKeyBase ?? `order:${orderRef.id}`;
+    const driveClientKeyType = clientRoyaltyKeyType ?? (driveClientKeyBase && driveClientKeyBase.startsWith('email:') ? 'email' : null);
+    const driveEmailSet = new Set();
+    if (normalisedEmail) {
+        driveEmailSet.add(normalisedEmail);
+    }
+    if (requestEmail) {
+        const trimmedRequestEmail = requestEmail.trim().toLowerCase();
+        if (trimmedRequestEmail && (!normalisedEmail || trimmedRequestEmail !== normalisedEmail)) {
+            driveEmailSet.add(trimmedRequestEmail);
+        }
+    }
+    if (typeof orderData.userEmail === 'string') {
+        const trimmedOrderEmail = orderData.userEmail.trim().toLowerCase();
+        if (trimmedOrderEmail) {
+            driveEmailSet.add(trimmedOrderEmail);
+        }
+    }
+    try {
+        await setupClientDriveStructure({
+            orderId: orderRef.id,
+            orderRef,
+            clientKey: driveClientKey,
+            clientKeyType: driveClientKeyType,
+            companyName: typeof companyName === 'string' && companyName.trim().length > 0
+                ? companyName.trim()
+                : null,
+            customerName: typeof customerName === 'string' && customerName.trim().length > 0
+                ? customerName.trim()
+                : null,
+            projectName: typeof projectName === 'string' && projectName.trim().length > 0
+                ? projectName.trim()
+                : null,
+            emails: Array.from(driveEmailSet),
+            franchise: {
+                id: assignmentResult?.franchiseId ?? null,
+                label: assignmentResult?.territoryLabel ?? null,
+                emails: assignmentMember?.userProfile?.email && typeof assignmentMember.userProfile.email === 'string'
+                    ? [assignmentMember.userProfile.email.trim()]
+                    : [],
+            },
+            products: driveProducts,
+        });
+    }
+    catch (driveError) {
+        console.error('Failed to set up Drive structure for order', orderRef.id, driveError);
+        await orderRef.set({
+            drive: {
+                status: 'error',
+                errorMessage: driveError instanceof Error ? driveError.message : 'drive_setup_failed',
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+        }, { merge: true });
+    }
     return { orderId: orderRef.id };
+});
+export const orders_refund = functions.https.onCall(async (data, context) => {
+    const roles = await assertStaff(context, ['finance', 'admin']);
+    const orderId = typeof data?.orderId === 'string' ? data.orderId.trim() : '';
+    if (!orderId) {
+        throw new functions.https.HttpsError('invalid-argument', 'orderId is required.');
+    }
+    const amountInput = data?.amount ?? data?.grossAmount;
+    const amount = parseMoney(amountInput);
+    if (amount <= 0) {
+        throw new functions.https.HttpsError('invalid-argument', 'Refund amount must be greater than zero.');
+    }
+    const reasonRaw = typeof data?.reason === 'string' ? data.reason.trim() : '';
+    const reason = reasonRaw ? reasonRaw.slice(0, 500) : null;
+    const notesSource = data?.notes ?? data?.memo ?? data?.comment ?? data?.description ?? data?.details ?? null;
+    const notesRaw = typeof notesSource === 'string' ? notesSource.trim() : '';
+    const notes = notesRaw ? notesRaw.slice(0, 2000) : null;
+    const processedAtIso = new Date().toISOString();
+    const roleList = Array.from(roles);
+    const processor = {
+        uid: context.auth.uid,
+        email: typeof context.auth?.token?.email === 'string'
+            ? context.auth.token.email
+            : null,
+        displayName: typeof context.auth?.token?.name === 'string'
+            ? context.auth.token.name
+            : null,
+        roles: roleList,
+    };
+    const orderRef = db.collection('orders').doc(orderId);
+    let auditBeforeSummary = null;
+    let auditAfterSummary = null;
+    const { record: responseRecord, summary: responseSummary } = await db.runTransaction(async (txn) => {
+        const snap = await txn.get(orderRef);
+        if (!snap.exists) {
+            throw new functions.https.HttpsError('not-found', 'Order not found');
+        }
+        const order = snap.data();
+        const requestedCurrency = normaliseCurrency(data?.currency);
+        const orderCurrency = normaliseCurrency(order?.currency) ?? normaliseCurrency(order?.currencyCode) ?? null;
+        const refundsArray = Array.isArray(order?.refunds) ? order.refunds : [];
+        let fallbackGrossCents = 0;
+        let fallbackNetCents = 0;
+        let fallbackVatCents = 0;
+        let fallbackHqCents = 0;
+        let fallbackFranchiseCents = 0;
+        for (const entry of refundsArray) {
+            fallbackGrossCents += toCurrencyCents(entry?.amount);
+            fallbackNetCents += toCurrencyCents(entry?.netAmount ?? entry?.net);
+            fallbackVatCents += toCurrencyCents(entry?.vatAmount ?? entry?.vat);
+            const royaltyEntry = entry?.royalty;
+            if (royaltyEntry) {
+                fallbackHqCents += toCurrencyCents(royaltyEntry?.hqShare ?? royaltyEntry?.hqAmount);
+                fallbackFranchiseCents += toCurrencyCents(royaltyEntry?.franchiseShare ?? royaltyEntry?.franchiseAmount);
+            }
+        }
+        const summaryData = order?.refundSummary || {};
+        const summaryCurrency = normaliseCurrency(summaryData?.currency);
+        let currencyCode = requestedCurrency ?? summaryCurrency ?? orderCurrency ?? null;
+        if (!currencyCode) {
+            currencyCode = 'GBP';
+        }
+        if (requestedCurrency && currencyCode !== requestedCurrency) {
+            throw new functions.https.HttpsError('invalid-argument', 'Refund currency mismatch for the requested refund.');
+        }
+        if (summaryCurrency && currencyCode !== summaryCurrency) {
+            throw new functions.https.HttpsError('failed-precondition', 'Existing refund currency does not match the requested currency.');
+        }
+        if (orderCurrency && currencyCode !== orderCurrency) {
+            throw new functions.https.HttpsError('invalid-argument', 'Refund currency must match the order currency.');
+        }
+        const existingGrossCents = summaryData?.totalGross != null ? toCurrencyCents(summaryData.totalGross) : fallbackGrossCents;
+        const existingNetCents = summaryData?.totalNet != null ? toCurrencyCents(summaryData.totalNet) : fallbackNetCents;
+        const existingVatCents = summaryData?.totalVat != null ? toCurrencyCents(summaryData.totalVat) : fallbackVatCents;
+        const existingHqCents = summaryData?.totalHqClawback != null
+            ? toCurrencyCents(summaryData.totalHqClawback)
+            : fallbackHqCents;
+        const existingFranchiseCents = summaryData?.totalFranchiseClawback != null
+            ? toCurrencyCents(summaryData.totalFranchiseClawback)
+            : fallbackFranchiseCents;
+        const existingCount = typeof summaryData?.totalCount === 'number' && Number.isFinite(summaryData.totalCount)
+            ? Math.max(0, Math.floor(summaryData.totalCount))
+            : refundsArray.length;
+        const orderGrossCents = toCurrencyCents(order?.price ?? order?.totalPrice ?? order?.grossTotal ?? 0);
+        const fallbackNetFromVatCents = orderGrossCents > 0 ? Math.max(orderGrossCents - toCurrencyCents(order?.vat ?? 0), 0) : 0;
+        let orderNetCents = toCurrencyCents(order?.netTotal ?? order?.net ?? order?.subtotal ?? order?.total ?? 0);
+        if (orderNetCents === 0 && fallbackNetFromVatCents > 0) {
+            orderNetCents = fallbackNetFromVatCents;
+        }
+        if (orderGrossCents > 0 && orderNetCents > orderGrossCents) {
+            orderNetCents = orderGrossCents;
+        }
+        if (orderGrossCents === 0 && orderNetCents === 0) {
+            throw new functions.https.HttpsError('failed-precondition', 'Order has no recorded value available for refunds.');
+        }
+        const amountCents = Math.round(amount * 100);
+        if (amountCents <= 0) {
+            throw new functions.https.HttpsError('invalid-argument', 'Refund amount must be greater than zero.');
+        }
+        const remainingGrossCents = orderGrossCents > 0 ? Math.max(orderGrossCents - existingGrossCents, 0) : null;
+        const remainingNetCents = orderNetCents > 0 ? Math.max(orderNetCents - existingNetCents, 0) : null;
+        if (remainingGrossCents !== null && amountCents > remainingGrossCents + 1) {
+            throw new functions.https.HttpsError('failed-precondition', 'Refund exceeds the remaining gross balance for this order.');
+        }
+        if (remainingGrossCents === null && remainingNetCents !== null && amountCents > remainingNetCents + 1) {
+            throw new functions.https.HttpsError('failed-precondition', 'Refund exceeds the remaining net balance for this order.');
+        }
+        let netRefundCents = 0;
+        if (orderGrossCents > 0 && orderNetCents > 0) {
+            netRefundCents = Math.round((amountCents * orderNetCents) / orderGrossCents);
+        }
+        else if (orderNetCents > 0) {
+            netRefundCents = Math.min(amountCents, orderNetCents);
+        }
+        else {
+            netRefundCents = amountCents;
+        }
+        if (remainingNetCents !== null && netRefundCents > remainingNetCents) {
+            netRefundCents = remainingNetCents;
+        }
+        if (netRefundCents < 0) {
+            netRefundCents = 0;
+        }
+        let vatRefundCents = amountCents - netRefundCents;
+        if (vatRefundCents < 0) {
+            vatRefundCents = 0;
+            netRefundCents = amountCents;
+        }
+        const royaltyData = order?.royalty || {};
+        const royaltySource = typeof royaltyData?.source === 'string'
+            ? royaltyData.source
+            : typeof order?.royaltySource === 'string'
+                ? order.royaltySource
+                : 'hq';
+        let royaltyPercentage = Number(royaltyData?.percentage ?? order?.royaltyPercentage ?? 0);
+        if (!Number.isFinite(royaltyPercentage) || royaltyPercentage < 0) {
+            royaltyPercentage = 0;
+        }
+        if (royaltyPercentage > 100) {
+            royaltyPercentage = 100;
+        }
+        const royaltyFraction = royaltyPercentage / 100;
+        const hasFranchise = typeof order?.franchiseId === 'string' && order.franchiseId.trim().length > 0;
+        let hqClawbackCents = hasFranchise
+            ? Math.round(netRefundCents * royaltyFraction)
+            : netRefundCents;
+        if (hqClawbackCents < 0) {
+            hqClawbackCents = 0;
+        }
+        if (hqClawbackCents > netRefundCents) {
+            hqClawbackCents = netRefundCents;
+        }
+        let franchiseClawbackCents = hasFranchise ? netRefundCents - hqClawbackCents : 0;
+        if (franchiseClawbackCents < 0) {
+            franchiseClawbackCents = 0;
+            hqClawbackCents = netRefundCents;
+        }
+        const clawbackDelta = netRefundCents - (hqClawbackCents + franchiseClawbackCents);
+        if (clawbackDelta !== 0) {
+            if (hasFranchise) {
+                franchiseClawbackCents += clawbackDelta;
+            }
+            else {
+                hqClawbackCents += clawbackDelta;
+            }
+        }
+        const newTotalGrossCents = existingGrossCents + amountCents;
+        const newTotalNetCents = existingNetCents + netRefundCents;
+        const newTotalVatCents = existingVatCents + vatRefundCents;
+        const newTotalHqCents = existingHqCents + hqClawbackCents;
+        const newTotalFranchiseCents = existingFranchiseCents + franchiseClawbackCents;
+        const newCount = existingCount + 1;
+        const fullyRefunded = (orderGrossCents > 0 && newTotalGrossCents >= orderGrossCents - 1) ||
+            (orderGrossCents === 0 && orderNetCents > 0 && newTotalNetCents >= orderNetCents - 1);
+        const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
+        const refundId = uuidv4();
+        const storedRecord = {
+            id: refundId,
+            amount: fromCurrencyCents(amountCents),
+            netAmount: fromCurrencyCents(netRefundCents),
+            vatAmount: fromCurrencyCents(vatRefundCents),
+            currency: currencyCode,
+            reason,
+            notes,
+            createdAt: serverTimestamp,
+            processedBy: processor,
+            royalty: {
+                source: royaltySource,
+                percentage: royaltyPercentage,
+                hqShare: fromCurrencyCents(hqClawbackCents),
+                franchiseShare: fromCurrencyCents(franchiseClawbackCents),
+                franchiseId: hasFranchise ? String(order.franchiseId) : null,
+            },
+        };
+        const updatedSummary = {
+            currency: currencyCode,
+            totalCount: newCount,
+            totalGross: fromCurrencyCents(newTotalGrossCents),
+            totalNet: fromCurrencyCents(newTotalNetCents),
+            totalVat: fromCurrencyCents(newTotalVatCents),
+            totalHqClawback: fromCurrencyCents(newTotalHqCents),
+            totalFranchiseClawback: fromCurrencyCents(newTotalFranchiseCents),
+            remainingGross: orderGrossCents > 0
+                ? fromCurrencyCents(Math.max(orderGrossCents - newTotalGrossCents, 0))
+                : null,
+            remainingNet: orderNetCents > 0
+                ? fromCurrencyCents(Math.max(orderNetCents - newTotalNetCents, 0))
+                : null,
+            fullyRefunded,
+            lastRefundId: refundId,
+            lastRefundByUid: processor.uid,
+            lastRefundByEmail: processor.email ?? null,
+            lastRefundByName: processor.displayName ?? null,
+            lastRefundByRoles: processor.roles,
+            lastRefundAt: serverTimestamp,
+            updatedAt: serverTimestamp,
+        };
+        auditBeforeSummary = summaryData && Object.keys(summaryData).length ? summaryData : null;
+        auditAfterSummary = {
+            currency: updatedSummary.currency,
+            totalCount: updatedSummary.totalCount,
+            totalGross: updatedSummary.totalGross,
+            totalNet: updatedSummary.totalNet,
+            totalVat: updatedSummary.totalVat,
+            totalHqClawback: updatedSummary.totalHqClawback,
+            totalFranchiseClawback: updatedSummary.totalFranchiseClawback,
+            remainingGross: updatedSummary.remainingGross,
+            remainingNet: updatedSummary.remainingNet,
+            fullyRefunded,
+            lastRefundId: refundId,
+            lastRefundByUid: processor.uid,
+            lastRefundByEmail: processor.email ?? null,
+            lastRefundByName: processor.displayName ?? null,
+            lastRefundByRoles: processor.roles,
+            lastRefundAt: processedAtIso,
+        };
+        txn.update(orderRef, {
+            refunds: admin.firestore.FieldValue.arrayUnion(storedRecord),
+            refundSummary: updatedSummary,
+            updatedAt: serverTimestamp,
+        });
+        const responseRecord = {
+            id: refundId,
+            amount: storedRecord.amount,
+            netAmount: storedRecord.netAmount,
+            vatAmount: storedRecord.vatAmount,
+            currency: storedRecord.currency,
+            reason: storedRecord.reason,
+            notes: storedRecord.notes,
+            createdAt: processedAtIso,
+            processedBy: processor,
+            royalty: storedRecord.royalty,
+        };
+        const responseSummary = {
+            currency: updatedSummary.currency,
+            totalCount: updatedSummary.totalCount,
+            totalGross: updatedSummary.totalGross,
+            totalNet: updatedSummary.totalNet,
+            totalVat: updatedSummary.totalVat,
+            totalHqClawback: updatedSummary.totalHqClawback,
+            totalFranchiseClawback: updatedSummary.totalFranchiseClawback,
+            remainingGross: updatedSummary.remainingGross,
+            remainingNet: updatedSummary.remainingNet,
+            fullyRefunded,
+        };
+        return { record: responseRecord, summary: responseSummary };
+    });
+    const changes = {
+        refundSummary: {
+            before: auditBeforeSummary ? serializeForAudit(auditBeforeSummary) : null,
+            after: serializeForAudit(auditAfterSummary ?? {}),
+        },
+    };
+    await writeAuditLog({
+        actorUid: context.auth.uid,
+        action: 'order_refund',
+        entityType: 'order',
+        entityId: orderId,
+        changes,
+        metadata: {
+            refund: responseRecord,
+            summary: responseSummary,
+        },
+    });
+    return { refund: responseRecord, summary: responseSummary };
 });
 /**
  * Create a Stripe PaymentIntent for either the deposit or balance payment of an order. This callable
