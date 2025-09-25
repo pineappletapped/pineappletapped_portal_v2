@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import PortalContainer from "@/components/PortalContainer";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import type { User } from "firebase/auth";
+import { httpsCallable, type Functions } from "firebase/functions";
 import {
   addDoc,
   collection,
@@ -40,6 +41,24 @@ interface ProjectRecord {
 interface UploadRecord {
   id: string;
   [key: string]: any;
+}
+
+interface ExpoRequestRecord {
+  id: string;
+  franchiseId: string;
+  eventName: string | null;
+  eventDate?: any;
+  location?: string | null;
+  standCost?: number | null;
+  expectedFootfall?: number | null;
+  marketingFocus?: string | null;
+  supportNotes?: string | null;
+  status?: string | null;
+  createdAt?: any;
+  updatedAt?: any;
+  requestedBy?: string | null;
+  contactEmail?: string | null;
+  standCurrency?: string | null;
 }
 
 interface ClientSummary {
@@ -140,6 +159,41 @@ const formatPercentage = (value: number | null | undefined) => {
   return `${safeNumber.toFixed(Math.floor(safeNumber) === safeNumber ? 0 : 1)}%`;
 };
 
+const formatStatusLabel = (value: string | null | undefined) => {
+  if (!value || typeof value !== "string") {
+    return "New";
+  }
+  return value
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+};
+
+const formatCurrencyValue = (
+  value: number | null | undefined,
+  currency: string | null | undefined,
+  fallbackCurrency: string
+) => {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "—";
+  }
+  const code =
+    typeof currency === "string" && currency.trim()
+      ? currency.trim().toUpperCase()
+      : fallbackCurrency;
+  try {
+    return new Intl.NumberFormat("en-GB", { style: "currency", currency: code }).format(numeric);
+  } catch (error) {
+    console.warn("Failed to format currency", code, error);
+    return `${code} ${numeric.toFixed(2)}`;
+  }
+};
+
 export default function FranchisePortalPage() {
   const [initialising, setInitialising] = useState(true);
   const [dataLoading, setDataLoading] = useState(false);
@@ -150,12 +204,28 @@ export default function FranchisePortalPage() {
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [uploads, setUploads] = useState<UploadRecord[]>([]);
+  const [expoRequests, setExpoRequests] = useState<ExpoRequestRecord[]>([]);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadName, setUploadName] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [expoForm, setExpoForm] = useState({
+    eventName: "",
+    eventDate: "",
+    location: "",
+    standCost: "",
+    standCurrency: "GBP",
+    expectedFootfall: "",
+    marketingFocus: "",
+    supportNotes: "",
+  });
+  const [expoSubmitting, setExpoSubmitting] = useState(false);
+  const [expoSubmitStatus, setExpoSubmitStatus] = useState<"idle" | "success" | "error">("idle");
+  const [expoSubmitErrors, setExpoSubmitErrors] = useState<string[]>([]);
+  const [expoSubmitMessage, setExpoSubmitMessage] = useState<string | null>(null);
   const dbRef = useRef<Firestore | null>(null);
   const storageRef = useRef<any>(null);
+  const functionsRef = useRef<Functions | null>(null);
 
   const currencyCode = useMemo(() => {
     for (const order of orders) {
@@ -316,6 +386,25 @@ export default function FranchisePortalPage() {
     setUploadError(null);
   }, []);
 
+  const resetExpoFeedback = useCallback(() => {
+    setExpoSubmitStatus("idle");
+    setExpoSubmitErrors([]);
+    setExpoSubmitMessage(null);
+  }, []);
+
+  const resetExpoForm = useCallback(() => {
+    setExpoForm({
+      eventName: "",
+      eventDate: "",
+      location: "",
+      standCost: "",
+      standCurrency: "GBP",
+      expectedFootfall: "",
+      marketingFocus: "",
+      supportNotes: "",
+    });
+  }, []);
+
   const loadFranchiseMembership = useCallback(
     async (nextUser: User, database: Firestore) => {
       setInitialising(true);
@@ -344,6 +433,7 @@ export default function FranchisePortalPage() {
           setOrders([]);
           setProjects([]);
           setUploads([]);
+          setExpoRequests([]);
           setError("No franchise membership found for your account yet.");
           return;
         }
@@ -407,6 +497,7 @@ export default function FranchisePortalPage() {
         setOrders([]);
         setProjects([]);
         setUploads([]);
+        setExpoRequests([]);
         setError("Unable to load franchise membership information. Please try again.");
       } finally {
         setInitialising(false);
@@ -454,12 +545,29 @@ export default function FranchisePortalPage() {
             return bTime - aTime;
           });
         setUploads(loadedUploads);
+
+        const expoSnap = await getDocs(
+          query(
+            collection(database, "franchiseExpoRequests"),
+            where("franchiseId", "==", franchiseId),
+            limit(50)
+          )
+        );
+        const loadedExpoRequests = expoSnap.docs
+          .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as any) }))
+          .sort((a, b) => {
+            const aTime = toDate(a.createdAt)?.getTime() ?? 0;
+            const bTime = toDate(b.createdAt)?.getTime() ?? 0;
+            return bTime - aTime;
+          });
+        setExpoRequests(loadedExpoRequests as ExpoRequestRecord[]);
       } catch (err) {
         console.error("Failed to load franchise data", err);
         setError("Unable to load franchise data. Please refresh the page.");
         setOrders([]);
         setProjects([]);
         setUploads([]);
+        setExpoRequests([]);
       } finally {
         setDataLoading(false);
       }
@@ -473,12 +581,13 @@ export default function FranchisePortalPage() {
 
     (async () => {
       try {
-        const { auth, db, storage } = await ensureFirebase();
+        const { auth, db, storage, functions } = await ensureFirebase();
         if (cancelled) {
           return;
         }
         dbRef.current = db;
         storageRef.current = storage ?? null;
+        functionsRef.current = functions ?? null;
 
         const { onAuthStateChanged } = await loadAuthModule();
         if (cancelled) {
@@ -499,6 +608,7 @@ export default function FranchisePortalPage() {
             setOrders([]);
             setProjects([]);
             setUploads([]);
+            setExpoRequests([]);
             setInitialising(false);
             setDataLoading(false);
             setError("Sign in to access the franchise portal.");
@@ -540,6 +650,121 @@ export default function FranchisePortalPage() {
       cancelled = true;
     };
   }, [activeFranchiseId, loadFranchiseCollections]);
+
+  const handleExpoRequestSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      resetExpoFeedback();
+
+      if (!activeFranchiseId) {
+        setExpoSubmitErrors([
+          "Select a franchise from the switcher before requesting expo support.",
+        ]);
+        setExpoSubmitStatus("error");
+        return;
+      }
+
+      const problems: string[] = [];
+      const trimmedName = expoForm.eventName.trim();
+      if (!trimmedName) {
+        problems.push("Add the expo or event name so HQ knows what to plan for.");
+      }
+      const trimmedDate = expoForm.eventDate.trim();
+      if (!trimmedDate) {
+        problems.push("Choose the show date to check availability.");
+      }
+      const trimmedLocation = expoForm.location.trim();
+      if (!trimmedLocation) {
+        problems.push("Tell us where the expo is taking place.");
+      }
+
+      let standCostNumber: number | null = null;
+      if (expoForm.standCost.trim()) {
+        const cleaned = expoForm.standCost.replace(/[^0-9.,-]/g, "").replace(/,/g, "");
+        const parsed = Number(cleaned);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          problems.push("Stand cost must be a positive number (or leave blank).");
+        } else {
+          standCostNumber = Math.round(parsed * 100) / 100;
+        }
+      }
+
+      let expectedFootfallNumber: number | null = null;
+      if (expoForm.expectedFootfall.trim()) {
+        const cleaned = expoForm.expectedFootfall.replace(/[^0-9]/g, "");
+        const parsed = Number(cleaned);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          problems.push("Expected footfall should be a whole number (or leave blank).");
+        } else {
+          expectedFootfallNumber = Math.round(parsed);
+        }
+      }
+
+      if (problems.length > 0) {
+        setExpoSubmitErrors(problems);
+        setExpoSubmitStatus("error");
+        return;
+      }
+
+      const callableFunctions = functionsRef.current;
+      const database = dbRef.current;
+
+      if (!callableFunctions) {
+        setExpoSubmitStatus("error");
+        setExpoSubmitMessage(
+          "Expo support requests cannot be sent right now. Please refresh the page and try again."
+        );
+        return;
+      }
+
+      setExpoSubmitting(true);
+      try {
+        const callable = httpsCallable(callableFunctions, "franchise_expo_request");
+        const marketingFocus = expoForm.marketingFocus.trim() || null;
+        const supportNotes = expoForm.supportNotes.trim() || null;
+        const standCurrency = expoForm.standCurrency.trim() || "GBP";
+        await callable({
+          franchiseId: activeFranchiseId,
+          franchiseName: activeFranchise?.name ?? null,
+          eventName: trimmedName,
+          eventDate: trimmedDate,
+          location: trimmedLocation,
+          standCost: standCostNumber,
+          standCurrency,
+          expectedFootfall: expectedFootfallNumber,
+          marketingFocus,
+          supportNotes,
+          requestedByUid: user?.uid ?? null,
+          requestedByEmail: user?.email ?? activeFranchise?.contactEmail ?? null,
+        });
+        setExpoSubmitStatus("success");
+        setExpoSubmitMessage("Thanks! HQ will review the expo request and get in touch.");
+        resetExpoForm();
+        if (database) {
+          await loadFranchiseCollections(activeFranchiseId, database);
+        }
+      } catch (err: any) {
+        console.error("Failed to submit expo support request", err);
+        const message =
+          err?.message && typeof err.message === "string"
+            ? err.message
+            : "We couldn't send that request just now. Please try again shortly.";
+        setExpoSubmitStatus("error");
+        setExpoSubmitMessage(message);
+      } finally {
+        setExpoSubmitting(false);
+      }
+    },
+    [
+      activeFranchiseId,
+      activeFranchise,
+      expoForm,
+      loadFranchiseCollections,
+      resetExpoFeedback,
+      resetExpoForm,
+      user,
+    ]
+  );
 
   const handleUpload = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -768,6 +993,191 @@ export default function FranchisePortalPage() {
                       <p className="text-sm text-gray-600">{event.project.title || "Untitled project"}</p>
                     </div>
                   ))}
+                </div>
+              )}
+            </section>
+
+            <section className="card border border-slate-200 p-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-semibold">Head Office expo support</h2>
+                  <p className="text-sm text-gray-600">
+                    Request the HQ team to co-host your local expo, bring banners, capture content, and follow up
+                    prize draw leads.
+                  </p>
+                </div>
+              </div>
+              {expoSubmitStatus !== "idle" && (
+                <div
+                  className={`mb-4 rounded-md border p-4 text-sm ${
+                    expoSubmitStatus === "success"
+                      ? "border-green-200 bg-green-50 text-green-800"
+                      : "border-amber-200 bg-amber-50 text-amber-800"
+                  }`}
+                >
+                  {expoSubmitStatus === "success" && expoSubmitMessage && <p className="font-medium">{expoSubmitMessage}</p>}
+                  {expoSubmitStatus === "error" && (
+                    <div className="grid gap-2">
+                      {expoSubmitMessage && <p className="font-medium">{expoSubmitMessage}</p>}
+                      {expoSubmitErrors.length > 0 && (
+                        <ul className="list-disc space-y-1 pl-5">
+                          {expoSubmitErrors.map((msg) => (
+                            <li key={msg}>{msg}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+              <form onSubmit={handleExpoRequestSubmit} className="grid gap-3 mb-6">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <input
+                    className="input"
+                    placeholder="Expo or event name"
+                    value={expoForm.eventName}
+                    onChange={(event) => {
+                      resetExpoFeedback();
+                      setExpoForm((prev) => ({ ...prev, eventName: event.target.value }));
+                    }}
+                    required
+                  />
+                  <input
+                    className="input"
+                    type="date"
+                    value={expoForm.eventDate}
+                    onChange={(event) => {
+                      resetExpoFeedback();
+                      setExpoForm((prev) => ({ ...prev, eventDate: event.target.value }));
+                    }}
+                    required
+                  />
+                </div>
+                <input
+                  className="input"
+                  placeholder="Venue or town"
+                  value={expoForm.location}
+                  onChange={(event) => {
+                    resetExpoFeedback();
+                    setExpoForm((prev) => ({ ...prev, location: event.target.value }));
+                  }}
+                  required
+                />
+                <div className="grid gap-3 sm:grid-cols-[2fr_1fr]">
+                  <div className="grid gap-3 sm:grid-cols-[2fr_1fr]">
+                    <input
+                      className="input"
+                      placeholder="Stand cost"
+                      value={expoForm.standCost}
+                      onChange={(event) => {
+                        resetExpoFeedback();
+                        setExpoForm((prev) => ({ ...prev, standCost: event.target.value }));
+                      }}
+                    />
+                    <select
+                      className="select select-bordered"
+                      value={expoForm.standCurrency}
+                      onChange={(event) => {
+                        resetExpoFeedback();
+                        setExpoForm((prev) => ({ ...prev, standCurrency: event.target.value }));
+                      }}
+                    >
+                      {[
+                        { code: "GBP", label: "GBP" },
+                        { code: "EUR", label: "EUR" },
+                        { code: "USD", label: "USD" },
+                        { code: "AUD", label: "AUD" },
+                      ].map((option) => (
+                        <option key={option.code} value={option.code}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    step={1}
+                    placeholder="Expected footfall"
+                    value={expoForm.expectedFootfall}
+                    onChange={(event) => {
+                      resetExpoFeedback();
+                      setExpoForm((prev) => ({ ...prev, expectedFootfall: event.target.value }));
+                    }}
+                  />
+                </div>
+                <textarea
+                  className="input"
+                  rows={3}
+                  placeholder="What should we focus on at the expo?"
+                  value={expoForm.marketingFocus}
+                  onChange={(event) => {
+                    resetExpoFeedback();
+                    setExpoForm((prev) => ({ ...prev, marketingFocus: event.target.value }));
+                  }}
+                />
+                <textarea
+                  className="input"
+                  rows={3}
+                  placeholder="Any other notes, schedules, or support you need?"
+                  value={expoForm.supportNotes}
+                  onChange={(event) => {
+                    resetExpoFeedback();
+                    setExpoForm((prev) => ({ ...prev, supportNotes: event.target.value }));
+                  }}
+                />
+                <button type="submit" className="btn btn-primary" disabled={expoSubmitting}>
+                  {expoSubmitting ? "Sending request…" : "Request HQ support"}
+                </button>
+              </form>
+              {expoRequests.length === 0 ? (
+                <p className="text-sm text-gray-600">
+                  You haven&apos;t logged an expo collaboration yet. Submit the form above to coordinate with HQ.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="table table-compact w-full">
+                    <thead>
+                      <tr>
+                        <th>Submitted</th>
+                        <th>Event</th>
+                        <th>Date</th>
+                        <th>Status</th>
+                        <th className="text-right">Stand cost</th>
+                        <th className="text-right">Expected footfall</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {expoRequests.map((request) => (
+                        <tr key={request.id}>
+                          <td>{formatDate(request.createdAt)}</td>
+                          <td>
+                            <div className="flex flex-col">
+                              <span className="font-medium">{request.eventName || "Expo"}</span>
+                              {request.location && (
+                                <span className="text-xs text-gray-500">{request.location as string}</span>
+                              )}
+                            </div>
+                          </td>
+                          <td>{formatDate(request.eventDate)}</td>
+                          <td>{formatStatusLabel(request.status as string)}</td>
+                          <td className="text-right">
+                            {formatCurrencyValue(
+                              typeof request.standCost === "number" ? request.standCost : null,
+                              (request.standCurrency as string) || null,
+                              currencyCode
+                            )}
+                          </td>
+                          <td className="text-right">
+                            {typeof request.expectedFootfall === "number" && Number.isFinite(request.expectedFootfall)
+                              ? request.expectedFootfall.toLocaleString("en-GB")
+                              : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </section>

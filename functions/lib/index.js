@@ -2043,6 +2043,209 @@ export const contact_send = functions.https.onCall(async (data) => {
     }
     return { ok: true };
 });
+export const franchise_expo_request = functions.https.onCall(async (data, context) => {
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const franchiseId = typeof data.franchiseId === 'string' ? data.franchiseId.trim() : '';
+    if (!franchiseId) {
+        throw new functions.https.HttpsError('invalid-argument', 'franchiseId is required.');
+    }
+    const eventName = typeof data.eventName === 'string' ? data.eventName.trim() : '';
+    if (!eventName) {
+        throw new functions.https.HttpsError('invalid-argument', 'eventName is required.');
+    }
+    const location = typeof data.location === 'string' ? data.location.trim() : '';
+    if (!location) {
+        throw new functions.https.HttpsError('invalid-argument', 'location is required.');
+    }
+    const eventDateInput = typeof data.eventDate === 'string' ? data.eventDate.trim() : '';
+    let eventDateIso = null;
+    let eventDateTimestamp = null;
+    if (eventDateInput) {
+        const parsedDate = new Date(eventDateInput);
+        if (!Number.isNaN(parsedDate.getTime())) {
+            eventDateIso = parsedDate.toISOString();
+            eventDateTimestamp = admin.firestore.Timestamp.fromDate(parsedDate);
+        }
+    }
+    const standCostRaw = Number(data.standCost);
+    const standCost = Number.isFinite(standCostRaw) && standCostRaw >= 0 ? Math.round(standCostRaw * 100) / 100 : null;
+    const expectedFootfallRaw = Number(data.expectedFootfall);
+    const expectedFootfall = Number.isFinite(expectedFootfallRaw) && expectedFootfallRaw >= 0 ? Math.round(expectedFootfallRaw) : null;
+    const marketingFocus = typeof data.marketingFocus === 'string' ? data.marketingFocus.trim() : '';
+    const supportNotes = typeof data.supportNotes === 'string' ? data.supportNotes.trim() : '';
+    const standCurrency = typeof data.standCurrency === 'string' && data.standCurrency.trim()
+        ? data.standCurrency.trim().toUpperCase()
+        : 'GBP';
+    const payload = {
+        franchiseId,
+        franchiseName: typeof data.franchiseName === 'string' ? data.franchiseName.trim() || null : null,
+        eventName,
+        eventDate: eventDateIso,
+        eventDateTimestamp,
+        location,
+        standCost,
+        standCurrency,
+        expectedFootfall,
+        marketingFocus: marketingFocus || null,
+        supportNotes: supportNotes || null,
+        requestedByUid: context.auth?.uid ?? (typeof data.requestedByUid === 'string' ? data.requestedByUid.trim() || null : null),
+        requestedByEmail: typeof data.requestedByEmail === 'string' && data.requestedByEmail.trim()
+            ? data.requestedByEmail.trim()
+            : null,
+        status: 'new',
+        createdAt: timestamp,
+        updatedAt: timestamp,
+    };
+    const docRef = await db.collection('franchiseExpoRequests').add(payload);
+    try {
+        const lines = [
+            `Franchise: ${payload.franchiseName || franchiseId}`,
+            `Event: ${eventName}`,
+            `Date: ${eventDateIso ? new Date(eventDateIso).toLocaleDateString('en-GB') : 'TBC'}`,
+            `Location: ${location}`,
+            standCost !== null ? `Stand cost: ${standCurrency} ${standCost.toFixed(2)}` : 'Stand cost: —',
+            expectedFootfall !== null ? `Expected footfall: ${expectedFootfall}` : 'Expected footfall: —',
+            marketingFocus ? `Goals: ${marketingFocus}` : null,
+            supportNotes ? `Notes: ${supportNotes}` : null,
+            payload.requestedByEmail ? `Requested by: ${payload.requestedByEmail}` : null,
+            `Request ID: ${docRef.id}`,
+        ].filter((line) => Boolean(line));
+        await sendEmail('info@pineapple.local', `Expo support request: ${eventName}`, lines.join('\n'));
+    }
+    catch (err) {
+        console.error('Failed to send expo request notification', err);
+    }
+    return { ok: true };
+});
+export const expo_lead_submit = functions.https.onCall(async (data) => {
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const pageIdInput = typeof data.pageId === 'string' ? data.pageId.trim() : '';
+    const slugInput = typeof data.slug === 'string' ? data.slug.trim() : '';
+    if (!pageIdInput && !slugInput) {
+        throw new functions.https.HttpsError('invalid-argument', 'pageId or slug is required.');
+    }
+    let pageDoc = null;
+    if (pageIdInput) {
+        const docSnap = await db.collection('expoLeadPages').doc(pageIdInput).get();
+        if (docSnap.exists) {
+            pageDoc = docSnap;
+        }
+    }
+    if (!pageDoc && slugInput) {
+        const snap = await db
+            .collection('expoLeadPages')
+            .where('slug', '==', slugInput)
+            .limit(1)
+            .get();
+        if (!snap.empty) {
+            pageDoc = snap.docs[0];
+        }
+    }
+    if (!pageDoc || !pageDoc.exists) {
+        throw new functions.https.HttpsError('not-found', 'Expo lead page not found.');
+    }
+    const pageData = pageDoc.data() || {};
+    if (pageData.isActive === false) {
+        throw new functions.https.HttpsError('failed-precondition', 'This expo page is no longer active.');
+    }
+    const firstName = typeof data.firstName === 'string' ? data.firstName.trim() : '';
+    const lastName = typeof data.lastName === 'string' ? data.lastName.trim() : '';
+    const email = typeof data.email === 'string' ? data.email.trim() : '';
+    const phone = typeof data.phone === 'string' ? data.phone.trim() : '';
+    const company = typeof data.company === 'string' ? data.company.trim() : '';
+    const consent = data.consent !== false;
+    if (!firstName) {
+        throw new functions.https.HttpsError('invalid-argument', 'firstName is required.');
+    }
+    if (!email) {
+        throw new functions.https.HttpsError('invalid-argument', 'email is required.');
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new functions.https.HttpsError('invalid-argument', 'email must be valid.');
+    }
+    if (!consent) {
+        throw new functions.https.HttpsError('failed-precondition', 'Consent must be provided.');
+    }
+    const leadDoc = {
+        pageId: pageDoc.id,
+        slug: pageData.slug || slugInput,
+        eventName: pageData.eventName || null,
+        firstName,
+        lastName: lastName || null,
+        email,
+        phone: phone || null,
+        company: company || null,
+        consented: true,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+    };
+    await db.collection('expoLeads').add(leadDoc);
+    try {
+        const existingLead = await db.collection('leads').where('email', '==', email).limit(1).get();
+        const leadBase = {
+            name: `${firstName} ${lastName}`.trim(),
+            email,
+            company: company || null,
+            status: 'new',
+            source: 'expo',
+            leadSource: pageData.slug || slugInput || 'expo',
+            updatedAt: timestamp,
+        };
+        if (existingLead.empty) {
+            await db.collection('leads').add({ ...leadBase, createdAt: timestamp });
+        }
+        else {
+            await existingLead.docs[0].ref.set(leadBase, { merge: true });
+        }
+    }
+    catch (err) {
+        console.error('Failed to sync expo lead to CRM', err);
+    }
+    const replacements = {
+        firstName,
+        lastName,
+        eventName: pageData.eventName || '',
+    };
+    const replaceTokens = (input) => input.replace(/{{\s*(firstName|lastName|eventName)\s*}}/gi, (_, key) => {
+        const normalised = String(key).replace(/\s+/g, '').toLowerCase();
+        return replacements[normalised] ?? '';
+    });
+    const subject = replaceTokens(pageData.emailSubject || 'Thanks for visiting Pineapple Tapped');
+    let body = replaceTokens(pageData.emailBody || 'Thanks for visiting our stand!');
+    const onePagerUrl = typeof pageData.onePagerUrl === 'string' ? pageData.onePagerUrl.trim() : '';
+    if (onePagerUrl) {
+        body = `${body}\n\nDownload our one-pager: ${onePagerUrl}`;
+    }
+    try {
+        await sendEmail(email, subject, body);
+    }
+    catch (err) {
+        console.error('Failed to send expo lead autoresponse', err);
+    }
+    const notificationEmails = Array.isArray(pageData.notificationEmails)
+        ? pageData.notificationEmails
+        : [];
+    if (notificationEmails.length > 0) {
+        const summary = [
+            `New expo lead captured for ${pageData.eventName || 'Expo'}`,
+            '',
+            `Name: ${firstName} ${lastName}`.trim(),
+            `Email: ${email}`,
+            phone ? `Phone: ${phone}` : null,
+            company ? `Company: ${company}` : null,
+            `Page: ${pageData.slug || slugInput}`,
+        ]
+            .filter((line) => Boolean(line))
+            .join('\n');
+        await Promise.all(notificationEmails
+            .map((address) => (typeof address === 'string' ? address.trim() : ''))
+            .filter((address) => address.length > 3 && address.includes('@'))
+            .map((address) => sendEmail(address, `Expo lead captured: ${pageData.eventName || 'Expo'}`, summary).catch((err) => {
+            console.error('Failed to send expo lead notification', address, err);
+        })));
+    }
+    return { ok: true };
+});
 export const messages_onWrite = functions.firestore
     .document('messages/{messageId}')
     .onWrite(async (change) => {
