@@ -20,6 +20,19 @@ export interface FranchiseOnboardingChecklist {
   activatedAt?: Timestamp | null;
 }
 
+export type RoyaltySource = 'hq' | 'franchisee';
+
+export interface FranchiseRoyaltyTier {
+  minOrder: number;
+  maxOrder?: number | null;
+  percentage: number;
+}
+
+export interface FranchiseRoyaltyConfig {
+  hqTiers: FranchiseRoyaltyTier[];
+  franchiseSourcedPercentage: number;
+}
+
 export interface Franchise {
   id: string;
   name: string;
@@ -31,6 +44,7 @@ export interface Franchise {
   platformFee?: number | null;
   notes?: string | null;
   onboarding: FranchiseOnboardingChecklist;
+  royalty: FranchiseRoyaltyConfig;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
 }
@@ -91,6 +105,107 @@ function parseOnboardingChecklist(data: Record<string, unknown> | null | undefin
   } satisfies FranchiseOnboardingChecklist;
 }
 
+function parseRoyaltyTier(input: unknown): FranchiseRoyaltyTier | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+  const data = input as Record<string, unknown>;
+  const rawMin = data.minOrder ?? data.orderFrom ?? data.start ?? data.from;
+  const rawMax = data.maxOrder ?? data.orderThrough ?? data.end ?? data.to;
+  const rawPercentage = data.percentage ?? data.rate ?? data.percent ?? data.value;
+  const minOrder = Number(rawMin);
+  if (!Number.isFinite(minOrder) || minOrder <= 0) {
+    return null;
+  }
+  const maxOrder = rawMax == null || rawMax === '' ? null : Number(rawMax);
+  const percentage = Number(rawPercentage);
+  if (!Number.isFinite(percentage)) {
+    return null;
+  }
+  const tier: FranchiseRoyaltyTier = {
+    minOrder: Math.max(1, Math.floor(minOrder)),
+    percentage,
+  };
+  if (Number.isFinite(maxOrder)) {
+    tier.maxOrder = Math.max(Math.floor(Number(maxOrder)), tier.minOrder);
+  } else {
+    tier.maxOrder = null;
+  }
+  return tier;
+}
+
+function parseRoyaltyConfig(raw: unknown): FranchiseRoyaltyConfig {
+  const defaultConfig = defaultFranchiseRoyaltyConfig();
+  if (!raw || typeof raw !== 'object') {
+    return defaultConfig;
+  }
+  const data = raw as Record<string, unknown>;
+  const tierValues: unknown = data.hqTiers ?? data.hq ?? data.slidingScale;
+  const tiers: FranchiseRoyaltyTier[] = Array.isArray(tierValues)
+    ? tierValues
+        .map((item) => parseRoyaltyTier(item))
+        .filter((item): item is FranchiseRoyaltyTier => item !== null)
+    : [];
+  const franchiseValue = data.franchiseSourcedPercentage ?? data.franchise ?? data.local ?? data.direct;
+  const parsedFranchise = Number(franchiseValue);
+  const franchisePercentage = Number.isFinite(parsedFranchise)
+    ? parsedFranchise
+    : defaultConfig.franchiseSourcedPercentage;
+  if (tiers.length === 0) {
+    return { ...defaultConfig, franchiseSourcedPercentage: franchisePercentage };
+  }
+  const sortedTiers = tiers.sort((a, b) => a.minOrder - b.minOrder);
+  return {
+    hqTiers: sortedTiers,
+    franchiseSourcedPercentage: franchisePercentage,
+  } satisfies FranchiseRoyaltyConfig;
+}
+
+export function defaultFranchiseRoyaltyConfig(): FranchiseRoyaltyConfig {
+  return {
+    hqTiers: [
+      { minOrder: 1, maxOrder: 1, percentage: 20 },
+      { minOrder: 2, maxOrder: 2, percentage: 15 },
+      { minOrder: 3, maxOrder: 5, percentage: 10 },
+      { minOrder: 6, maxOrder: null, percentage: 6 },
+    ],
+    franchiseSourcedPercentage: 6,
+  };
+}
+
+export function resolveRoyaltyPercentage(
+  config: FranchiseRoyaltyConfig | null | undefined,
+  source: RoyaltySource,
+  orderIndex: number
+): { percentage: number; tier: FranchiseRoyaltyTier | null } {
+  const fallback = defaultFranchiseRoyaltyConfig();
+  const activeConfig = config ?? fallback;
+  if (source === 'franchisee') {
+    return {
+      percentage:
+        typeof activeConfig.franchiseSourcedPercentage === 'number'
+          ? activeConfig.franchiseSourcedPercentage
+          : fallback.franchiseSourcedPercentage,
+      tier: null,
+    };
+  }
+  const tiers = (activeConfig.hqTiers?.length ? activeConfig.hqTiers : fallback.hqTiers).slice();
+  tiers.sort((a, b) => a.minOrder - b.minOrder);
+  const index = Number(orderIndex);
+  if (!Number.isFinite(index) || index <= 0) {
+    return { percentage: tiers[0]?.percentage ?? fallback.hqTiers[0].percentage, tier: tiers[0] ?? fallback.hqTiers[0] };
+  }
+  for (const tier of tiers) {
+    const withinLower = index >= tier.minOrder;
+    const withinUpper = tier.maxOrder == null || index <= tier.maxOrder;
+    if (withinLower && withinUpper) {
+      return { percentage: tier.percentage, tier };
+    }
+  }
+  const lastTier = tiers[tiers.length - 1] ?? fallback.hqTiers[fallback.hqTiers.length - 1];
+  return { percentage: lastTier.percentage, tier: lastTier };
+}
+
 export function defaultFranchiseOnboarding(): FranchiseOnboardingChecklist {
   return {
     kycStatus: 'not_started',
@@ -121,6 +236,7 @@ export function parseFranchise(doc: SnapshotWithId): Franchise {
     platformFee: typeof data.platformFee === 'number' ? (data.platformFee as number) : null,
     notes: (data.notes as string) ?? null,
     onboarding: parseOnboardingChecklist(onboardingData),
+    royalty: parseRoyaltyConfig(data.royalty),
     createdAt: (data.createdAt as Timestamp) ?? null,
     updatedAt: (data.updatedAt as Timestamp) ?? null,
   };

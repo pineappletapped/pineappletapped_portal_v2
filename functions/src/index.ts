@@ -53,6 +53,109 @@ type FranchiseMemberDoc = {
   primary?: boolean;
 };
 
+type RoyaltySource = 'hq' | 'franchisee';
+
+interface FranchiseRoyaltyTierConfig {
+  minOrder: number;
+  maxOrder: number | null;
+  percentage: number;
+}
+
+interface FranchiseRoyaltyConfigDoc {
+  hqTiers: FranchiseRoyaltyTierConfig[];
+  franchiseSourcedPercentage: number;
+}
+
+function defaultRoyaltyConfig(): FranchiseRoyaltyConfigDoc {
+  return {
+    hqTiers: [
+      { minOrder: 1, maxOrder: 1, percentage: 20 },
+      { minOrder: 2, maxOrder: 2, percentage: 15 },
+      { minOrder: 3, maxOrder: 5, percentage: 10 },
+      { minOrder: 6, maxOrder: null, percentage: 6 },
+    ],
+    franchiseSourcedPercentage: 6,
+  };
+}
+
+function parseRoyaltyTierDoc(input: unknown): FranchiseRoyaltyTierConfig | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+  const data = input as Record<string, unknown>;
+  const min = Number(data.minOrder ?? data.orderFrom ?? data.start ?? data.from);
+  const maxValue = data.maxOrder ?? data.orderThrough ?? data.end ?? data.to;
+  const percentage = Number(data.percentage ?? data.rate ?? data.percent ?? data.value);
+  if (!Number.isFinite(min) || min <= 0 || !Number.isFinite(percentage)) {
+    return null;
+  }
+  const parsedMax = maxValue == null || maxValue === '' ? null : Number(maxValue);
+  const tier: FranchiseRoyaltyTierConfig = {
+    minOrder: Math.max(1, Math.floor(min)),
+    maxOrder: null,
+    percentage,
+  };
+  if (parsedMax !== null && Number.isFinite(parsedMax)) {
+    const normalisedMax = Math.floor(Number(parsedMax));
+    tier.maxOrder = Math.max(normalisedMax, tier.minOrder);
+  }
+  return tier;
+}
+
+function parseRoyaltyConfigDoc(raw: unknown): FranchiseRoyaltyConfigDoc {
+  const fallback = defaultRoyaltyConfig();
+  if (!raw || typeof raw !== 'object') {
+    return fallback;
+  }
+  const data = raw as Record<string, unknown>;
+  const tierValues: unknown = data.hqTiers ?? data.hq ?? data.slidingScale;
+  const tiers = Array.isArray(tierValues)
+    ? tierValues
+        .map((value) => parseRoyaltyTierDoc(value))
+        .filter((value): value is FranchiseRoyaltyTierConfig => value !== null)
+        .sort((a, b) => a.minOrder - b.minOrder)
+    : [];
+  const franchiseValue = Number(
+    data.franchiseSourcedPercentage ?? data.franchise ?? data.local ?? data.direct
+  );
+  const franchisePercentage = Number.isFinite(franchiseValue)
+    ? franchiseValue
+    : fallback.franchiseSourcedPercentage;
+  return {
+    hqTiers: tiers.length > 0 ? tiers : fallback.hqTiers,
+    franchiseSourcedPercentage: franchisePercentage,
+  };
+}
+
+function resolveRoyaltyTier(
+  config: FranchiseRoyaltyConfigDoc,
+  source: RoyaltySource,
+  orderIndex: number
+): { percentage: number; tier: FranchiseRoyaltyTierConfig | null } {
+  const fallback = defaultRoyaltyConfig();
+  if (source === 'franchisee') {
+    return {
+      percentage: config.franchiseSourcedPercentage ?? fallback.franchiseSourcedPercentage,
+      tier: null,
+    };
+  }
+  const tiers = (config.hqTiers?.length ? config.hqTiers : fallback.hqTiers).slice().sort((a, b) => a.minOrder - b.minOrder);
+  const index = Number(orderIndex);
+  if (!Number.isFinite(index) || index <= 0) {
+    const first = tiers[0] ?? fallback.hqTiers[0];
+    return { percentage: first.percentage, tier: first };
+  }
+  for (const tier of tiers) {
+    const withinLower = index >= tier.minOrder;
+    const withinUpper = tier.maxOrder == null || index <= tier.maxOrder;
+    if (withinLower && withinUpper) {
+      return { percentage: tier.percentage, tier };
+    }
+  }
+  const lastTier = tiers[tiers.length - 1] ?? fallback.hqTiers[fallback.hqTiers.length - 1];
+  return { percentage: lastTier.percentage, tier: lastTier };
+}
+
 type FranchiseAssignmentMatchType = 'exact' | 'prefix' | 'superset';
 
 interface FranchiseAssignmentResult {
@@ -1831,12 +1934,41 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     voucher,
     kitItems = [],
     rentalSubtotal = 0,
+    leadSource: leadSourceInput,
   } = data;
   if (!items || !Array.isArray(items) || items.length === 0) {
     throw new functions.https.HttpsError('invalid-argument', 'items are required');
   }
 
   const productRefs = items.map((i: any) => db.collection('products').doc(i.id));
+  const leadSourceNormalised: RoyaltySource =
+    typeof leadSourceInput === 'string' && leadSourceInput.toLowerCase().includes('franchise')
+      ? 'franchisee'
+      : 'hq';
+  const authEmail =
+    typeof context.auth?.token.email === 'string' ? (context.auth.token.email as string) : null;
+  const requestEmail = typeof userEmail === 'string' ? (userEmail as string) : null;
+  const preferredEmail = authEmail || requestEmail;
+  const normalisedEmail = preferredEmail ? preferredEmail.trim().toLowerCase() : null;
+  const clientRoyaltyKeyType: 'user_id' | 'email' | null = context.auth?.uid
+    ? 'user_id'
+    : normalisedEmail
+      ? 'email'
+      : null;
+  const clientRoyaltyKey =
+    clientRoyaltyKeyType === 'user_id'
+      ? `uid:${context.auth?.uid as string}`
+      : clientRoyaltyKeyType === 'email' && normalisedEmail
+        ? `email:${normalisedEmail}`
+        : null;
+  let clientRoyaltyOrderIndex: number | null = null;
+  if (clientRoyaltyKey) {
+    const priorOrdersSnap = await db
+      .collection('orders')
+      .where('clientRoyaltyKey', '==', clientRoyaltyKey)
+      .get();
+    clientRoyaltyOrderIndex = priorOrdersSnap.size + 1;
+  }
   const productSnaps = await db.getAll(...productRefs);
   const orderItems: any[] = [];
   let productSubtotal = 0;
@@ -2002,6 +2134,45 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     resolvedAt: admin.firestore.FieldValue.serverTimestamp(),
   };
 
+  let royaltyAssessment: Record<string, any> | null = null;
+  if (assignmentResult?.franchiseId) {
+    try {
+      const franchiseDoc = await db.collection('franchises').doc(assignmentResult.franchiseId).get();
+      if (franchiseDoc.exists) {
+        const franchiseData = franchiseDoc.data() as any;
+        const royaltyConfig = parseRoyaltyConfigDoc(franchiseData?.royalty);
+        const orderIndexForRoyalty = clientRoyaltyOrderIndex ?? 1;
+        const resolution = resolveRoyaltyTier(royaltyConfig, leadSourceNormalised, orderIndexForRoyalty);
+        royaltyAssessment = {
+          source: leadSourceNormalised,
+          orderIndex: orderIndexForRoyalty,
+          previousOrdersCount: orderIndexForRoyalty > 0 ? orderIndexForRoyalty - 1 : 0,
+          percentage: resolution.percentage,
+          tier: resolution.tier
+            ? {
+                minOrder: resolution.tier.minOrder,
+                maxOrder: resolution.tier.maxOrder,
+                percentage: resolution.tier.percentage,
+              }
+            : null,
+          configSnapshot: {
+            hqTiers: royaltyConfig.hqTiers.map((tier) => ({
+              minOrder: tier.minOrder,
+              maxOrder: tier.maxOrder,
+              percentage: tier.percentage,
+            })),
+            franchiseSourcedPercentage: royaltyConfig.franchiseSourcedPercentage,
+          },
+          clientKey: clientRoyaltyKey,
+          clientKeyType: clientRoyaltyKeyType,
+          computedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+      }
+    } catch (royaltyErr) {
+      console.warn('Failed to resolve royalty configuration', royaltyErr);
+    }
+  }
+
   const orderData: Record<string, any> = {
     userId: context.auth?.uid || null,
     userEmail: context.auth?.token.email || userEmail || null,
@@ -2032,6 +2203,10 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     status: 'pending',
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     franchiseAssignment: assignmentMeta,
+    royaltySource: leadSourceNormalised,
+    clientRoyaltyKey: clientRoyaltyKey || null,
+    clientRoyaltyKeyType: clientRoyaltyKeyType || null,
+    clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
   };
 
   if (assignmentResult) {
@@ -2070,6 +2245,14 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     orderData.franchiseAssignedRole = null;
     orderData.franchiseAssignedIsPrimary = false;
     orderData.franchiseAssignedUser = null;
+  }
+
+  if (royaltyAssessment) {
+    orderData.royalty = royaltyAssessment;
+    orderData.royaltyPercentage = royaltyAssessment.percentage;
+  } else {
+    orderData.royalty = null;
+    orderData.royaltyPercentage = null;
   }
 
   const orderRef = await db.collection('orders').add(orderData);

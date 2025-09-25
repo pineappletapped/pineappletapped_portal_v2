@@ -74,6 +74,7 @@ export default function CheckoutPage() {
       postalCode: postalCode || null,
       projectName: projectName || null,
       voucher: voucher || null,
+      leadSource: "hq" as const,
     };
   }, [
     items,

@@ -284,6 +284,28 @@ export default function AdminOrdersPage() {
                 assignment?.inputPostalCode ||
                 assignment?.normalizedPostalCode ||
                 null;
+              const royalty = (o.royalty as any) || null;
+              const royaltySource =
+                (royalty?.source as string | undefined) ||
+                (o.royaltySource as string | undefined) ||
+                (o.leadSource as string | undefined) ||
+                'hq';
+              const royaltyLabel = royaltySource === 'franchisee' ? 'Franchise-sourced' : 'HQ-sourced';
+              const royaltyPercentage =
+                typeof royalty?.percentage === 'number'
+                  ? royalty.percentage
+                  : typeof o.royaltyPercentage === 'number'
+                    ? o.royaltyPercentage
+                    : null;
+              const royaltyOrderIndex =
+                typeof royalty?.orderIndex === 'number'
+                  ? royalty.orderIndex
+                  : typeof o.clientRoyaltyOrderIndex === 'number'
+                    ? o.clientRoyaltyOrderIndex
+                    : null;
+              const royaltyTier = royalty?.tier as
+                | { minOrder?: number | null; maxOrder?: number | null }
+                | undefined;
               return (
                 <tr key={o.id} className="border-t">
                   <td className="p-2">{o.id}</td>
@@ -346,6 +368,17 @@ export default function AdminOrdersPage() {
                       <div className="text-[10px] uppercase text-gray-400">
                         {assignmentStatus}
                         {assignmentMatchType ? ` · ${assignmentMatchType}` : ""}
+                      </div>
+                    )}
+                    {(royaltyPercentage !== null || royaltyOrderIndex !== null) && (
+                      <div className="mt-2 text-xs text-gray-500">
+                        Royalty: {royaltyPercentage !== null ? `${royaltyPercentage}%` : '—'} · {royaltyLabel}
+                        {royaltyOrderIndex ? ` · order #${royaltyOrderIndex}` : ''}
+                        {royaltyTier?.minOrder
+                          ? royaltyTier.maxOrder != null
+                            ? ` · tier ${royaltyTier.minOrder}-${royaltyTier.maxOrder}`
+                            : ` · tier ${royaltyTier.minOrder}+`
+                          : ''}
                       </div>
                     )}
                   </td>

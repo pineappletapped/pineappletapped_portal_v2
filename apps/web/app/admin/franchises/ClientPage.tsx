@@ -19,8 +19,10 @@ import {
   type FranchiseMemberRole,
   type FranchiseStatus,
   type FranchiseTerritory,
+  type FranchiseRoyaltyConfig,
   canActivateFranchise,
   defaultFranchiseOnboarding,
+  defaultFranchiseRoyaltyConfig,
   parseFranchise,
   parseMember,
   parseTerritory,
@@ -79,6 +81,110 @@ function createOnboardingState() {
 
 type OnboardingState = ReturnType<typeof createOnboardingState>;
 
+type RoyaltyTierState = {
+  id: string;
+  minOrder: string;
+  maxOrder: string;
+  percentage: string;
+};
+
+type RoyaltyState = {
+  hqTiers: RoyaltyTierState[];
+  franchisePercentage: string;
+};
+
+const ordinal = (value: number) => {
+  const remainder = value % 10;
+  const isTeen = value % 100 >= 11 && value % 100 <= 13;
+  if (isTeen) return `${value}th`;
+  if (remainder === 1) return `${value}st`;
+  if (remainder === 2) return `${value}nd`;
+  if (remainder === 3) return `${value}rd`;
+  return `${value}th`;
+};
+
+const createRoyaltyState = (config?: FranchiseRoyaltyConfig | null): RoyaltyState => {
+  const base = config && config.hqTiers?.length > 0 ? config : defaultFranchiseRoyaltyConfig();
+  const tiers = (base.hqTiers?.length ? base.hqTiers : defaultFranchiseRoyaltyConfig().hqTiers).map(
+    (tier, index) => ({
+      id: `${tier.minOrder}-${tier.maxOrder ?? 'open'}-${index}`,
+      minOrder: String(tier.minOrder),
+      maxOrder: tier.maxOrder == null ? "" : String(tier.maxOrder),
+      percentage: String(tier.percentage),
+    })
+  );
+  return {
+    hqTiers: tiers,
+    franchisePercentage: String(base.franchiseSourcedPercentage ?? defaultFranchiseRoyaltyConfig().franchiseSourcedPercentage),
+  };
+};
+
+const serializeRoyaltyState = (state: RoyaltyState): FranchiseRoyaltyConfig => {
+  const defaults = defaultFranchiseRoyaltyConfig();
+  const tiers = state.hqTiers
+    .map((tier) => {
+      const min = Number.parseInt(tier.minOrder, 10);
+      const percentage = Number.parseFloat(tier.percentage);
+      if (!Number.isFinite(min) || min <= 0 || !Number.isFinite(percentage)) {
+        return null;
+      }
+      const cleanMin = Math.max(1, Math.floor(min));
+      const max = tier.maxOrder.trim().length === 0 ? null : Number.parseInt(tier.maxOrder, 10);
+      const cleanedMax =
+        max == null || !Number.isFinite(max)
+          ? null
+          : Math.max(cleanMin, Math.floor(max));
+      return {
+        minOrder: cleanMin,
+        maxOrder: cleanedMax,
+        percentage,
+      };
+    })
+    .filter((value): value is { minOrder: number; maxOrder: number | null; percentage: number } => value !== null)
+    .sort((a, b) => a.minOrder - b.minOrder);
+  const franchisePct = Number.parseFloat(state.franchisePercentage);
+  const franchisePercentage = Number.isFinite(franchisePct) && franchisePct >= 0
+    ? franchisePct
+    : defaults.franchiseSourcedPercentage;
+  return {
+    hqTiers: tiers.length > 0 ? tiers : defaults.hqTiers,
+    franchiseSourcedPercentage: franchisePercentage,
+  };
+};
+
+const appendRoyaltyTier = (state: RoyaltyState): RoyaltyState => {
+  const nextTiers = state.hqTiers.slice();
+  const last = nextTiers[nextTiers.length - 1];
+  const fallbackMin = last ? Number.parseInt(last.minOrder, 10) || 0 : 0;
+  const lastMax = last ? Number.parseInt(last.maxOrder, 10) : NaN;
+  const nextMin = Number.isFinite(lastMax) ? lastMax + 1 : fallbackMin + 1;
+  nextTiers.push({
+    id: `tier-${Date.now()}`,
+    minOrder: String(Math.max(1, nextMin)),
+    maxOrder: "",
+    percentage: last ? last.percentage : String(defaultFranchiseRoyaltyConfig().hqTiers[0].percentage),
+  });
+  return { ...state, hqTiers: nextTiers };
+};
+
+const removeRoyaltyTier = (state: RoyaltyState, index: number): RoyaltyState => {
+  if (state.hqTiers.length <= 1) {
+    return state;
+  }
+  const tiers = state.hqTiers.filter((_, idx) => idx !== index);
+  return { ...state, hqTiers: tiers };
+};
+
+const describeRoyaltyTier = (tier: { minOrder: number; maxOrder: number | null; percentage: number }) => {
+  if (tier.maxOrder == null) {
+    return `${tier.percentage}% ${ordinal(tier.minOrder)}+`;
+  }
+  if (tier.minOrder === tier.maxOrder) {
+    return `${tier.percentage}% ${ordinal(tier.minOrder)}`;
+  }
+  return `${tier.percentage}% ${ordinal(tier.minOrder)}–${ordinal(tier.maxOrder)}`;
+};
+
 export default function AdminFranchisesPage() {
   const { allowed, loading: guardLoading } = useRoleGate("admin");
   const [loading, setLoading] = useState(true);
@@ -99,6 +205,7 @@ export default function AdminFranchisesPage() {
     platformFee: "",
     notes: "",
     onboarding: createOnboardingState(),
+    royalty: createRoyaltyState(),
   });
   const [editingFranchiseId, setEditingFranchiseId] = useState<string | null>(null);
   const [editingFranchise, setEditingFranchise] = useState({
@@ -111,6 +218,7 @@ export default function AdminFranchisesPage() {
     platformFee: "",
     notes: "",
     onboarding: createOnboardingState(),
+    royalty: createRoyaltyState(),
   });
 
   const [showCreateTerritory, setShowCreateTerritory] = useState(false);
@@ -281,6 +389,7 @@ export default function AdminFranchisesPage() {
       platformFee: "",
       notes: "",
       onboarding: createOnboardingState(),
+      royalty: createRoyaltyState(),
     });
   };
 
@@ -294,6 +403,7 @@ export default function AdminFranchisesPage() {
         ...newFranchise.onboarding,
         notes: onboardingNotes.length > 0 ? onboardingNotes : null,
       };
+      const royaltyConfig = serializeRoyaltyState(newFranchise.royalty);
       const payload = {
         name: newFranchise.name.trim(),
         code: (newFranchise.code || newFranchise.name || "").trim().replace(/\s+/g, "-").toLowerCase(),
@@ -307,6 +417,7 @@ export default function AdminFranchisesPage() {
             : null,
         notes: newFranchise.notes.trim() || null,
         onboarding: onboardingPayload,
+        royalty: royaltyConfig,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
@@ -335,6 +446,7 @@ export default function AdminFranchisesPage() {
         ...createOnboardingState(),
         ...franchise.onboarding,
       },
+      royalty: createRoyaltyState(franchise.royalty),
     });
   };
 
@@ -350,6 +462,7 @@ export default function AdminFranchisesPage() {
       platformFee: "",
       notes: "",
       onboarding: createOnboardingState(),
+      royalty: createRoyaltyState(),
     });
   };
 
@@ -364,6 +477,7 @@ export default function AdminFranchisesPage() {
         ...editingFranchise.onboarding,
         notes: onboardingNotes.length > 0 ? onboardingNotes : null,
       };
+      const royaltyConfig = serializeRoyaltyState(editingFranchise.royalty);
       const activationReady = canActivateFranchise(onboardingPayload);
       if (editingFranchise.status === "active" && !activationReady) {
         alert(
@@ -384,6 +498,7 @@ export default function AdminFranchisesPage() {
             : null,
         notes: editingFranchise.notes.trim() || null,
         onboarding: onboardingPayload,
+        royalty: royaltyConfig,
         updatedAt: serverTimestamp(),
       };
       await updateDoc(doc(db, "franchises", editingFranchiseId), payload);
@@ -706,6 +821,133 @@ export default function AdminFranchisesPage() {
               </label>
             </div>
             <div className="grid gap-3 rounded border border-dashed border-gray-200 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-medium">Royalty configuration</div>
+                  <p className="text-xs text-gray-500">
+                    Define how royalties are split between HQ and the franchisee for HQ-sourced and franchise-sourced orders.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-xs"
+                  onClick={() =>
+                    setNewFranchise((prev) => ({
+                      ...prev,
+                      royalty: appendRoyaltyTier(prev.royalty),
+                    }))
+                  }
+                >
+                  Add HQ tier
+                </button>
+              </div>
+              <div className="grid gap-3">
+                {newFranchise.royalty.hqTiers.map((tier, index) => (
+                  <div key={tier.id} className="grid gap-2 rounded border border-gray-200 p-3 sm:grid-cols-4">
+                    <label className="grid gap-1 text-sm">
+                      <span className="font-medium">From order #</span>
+                      <input
+                        className="input"
+                        inputMode="numeric"
+                        value={tier.minOrder}
+                        onChange={(event) =>
+                          setNewFranchise((prev) => ({
+                            ...prev,
+                            royalty: {
+                              ...prev.royalty,
+                              hqTiers: prev.royalty.hqTiers.map((item, idx) =>
+                                idx === index ? { ...item, minOrder: event.target.value } : item
+                              ),
+                            },
+                          }))
+                        }
+                        required
+                      />
+                    </label>
+                    <label className="grid gap-1 text-sm">
+                      <span className="font-medium">Through order #</span>
+                      <input
+                        className="input"
+                        inputMode="numeric"
+                        value={tier.maxOrder}
+                        onChange={(event) =>
+                          setNewFranchise((prev) => ({
+                            ...prev,
+                            royalty: {
+                              ...prev.royalty,
+                              hqTiers: prev.royalty.hqTiers.map((item, idx) =>
+                                idx === index ? { ...item, maxOrder: event.target.value } : item
+                              ),
+                            },
+                          }))
+                        }
+                        placeholder="Leave blank for 6th+"
+                      />
+                    </label>
+                    <label className="grid gap-1 text-sm">
+                      <span className="font-medium">Royalty %</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={tier.percentage}
+                        onChange={(event) =>
+                          setNewFranchise((prev) => ({
+                            ...prev,
+                            royalty: {
+                              ...prev.royalty,
+                              hqTiers: prev.royalty.hqTiers.map((item, idx) =>
+                                idx === index ? { ...item, percentage: event.target.value } : item
+                              ),
+                            },
+                          }))
+                        }
+                        required
+                      />
+                    </label>
+                    <div className="flex items-end justify-end">
+                      <button
+                        type="button"
+                        className="btn btn-xs btn-outline"
+                        onClick={() =>
+                          setNewFranchise((prev) => ({
+                            ...prev,
+                            royalty: removeRoyaltyTier(prev.royalty, index),
+                          }))
+                        }
+                        disabled={newFranchise.royalty.hqTiers.length <= 1}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">Franchise-sourced royalty (%)</span>
+                <input
+                  className="input"
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={newFranchise.royalty.franchisePercentage}
+                  onChange={(event) =>
+                    setNewFranchise((prev) => ({
+                      ...prev,
+                      royalty: {
+                        ...prev.royalty,
+                        franchisePercentage: event.target.value,
+                      },
+                    }))
+                  }
+                />
+                <span className="text-xs text-gray-500">
+                  Applied to deals sourced directly by the franchisee (e.g. referrals, local marketing).
+                </span>
+              </label>
+            </div>
+            <div className="grid gap-3 rounded border border-dashed border-gray-200 p-3">
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-sm font-medium">Onboarding checklist</div>
@@ -887,6 +1129,15 @@ export default function AdminFranchisesPage() {
                     franchise.onboarding.legalStatus === "completed" ? null : "Legal",
                     franchise.onboarding.chargesEnabled ? null : "Charges",
                   ].filter(Boolean) as string[];
+                  const royaltyConfig = franchise.royalty?.hqTiers?.length
+                    ? franchise.royalty
+                    : defaultFranchiseRoyaltyConfig();
+                  const hqScale = royaltyConfig.hqTiers
+                    .map((tier) => describeRoyaltyTier(tier))
+                    .join(" → ");
+                  const franchiseDirect = typeof royaltyConfig.franchiseSourcedPercentage === "number"
+                    ? royaltyConfig.franchiseSourcedPercentage
+                    : defaultFranchiseRoyaltyConfig().franchiseSourcedPercentage;
                   return (
                     <tr key={franchise.id} className="border-t align-top">
                       <td className="p-2 font-medium">
@@ -909,6 +1160,10 @@ export default function AdminFranchisesPage() {
                         {typeof franchise.platformFee === "number" && (
                           <div className="text-xs text-gray-500">Platform fee: {franchise.platformFee}%</div>
                         )}
+                        {hqScale && (
+                          <div className="text-xs text-gray-500">HQ: {hqScale}</div>
+                        )}
+                        <div className="text-xs text-gray-500">Franchise-sourced: {franchiseDirect}%</div>
                       </td>
                       <td className="p-2 text-xs">
                         <div>KYC: {onboardingStatusLabel(franchise.onboarding.kycStatus)}</div>
@@ -1045,6 +1300,123 @@ export default function AdminFranchisesPage() {
                                 }
                               />
                             </label>
+                            <div className="grid gap-2 rounded border border-dashed border-gray-200 p-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-[11px] font-semibold uppercase tracking-wide">Royalty configuration</span>
+                                <button
+                                  type="button"
+                                  className="btn btn-xs"
+                                  onClick={() =>
+                                    setEditingFranchise((prev) => ({
+                                      ...prev,
+                                      royalty: appendRoyaltyTier(prev.royalty),
+                                    }))
+                                  }
+                                >
+                                  Add HQ tier
+                                </button>
+                              </div>
+                              <div className="grid gap-2">
+                                {editingFranchise.royalty.hqTiers.map((tier, index) => (
+                                  <div key={tier.id} className="grid gap-2 rounded border border-gray-200 p-2 sm:grid-cols-4">
+                                    <label className="grid gap-1 text-xs">
+                                      <span className="font-medium">From order #</span>
+                                      <input
+                                        className="input"
+                                        inputMode="numeric"
+                                        value={tier.minOrder}
+                                        onChange={(event) =>
+                                          setEditingFranchise((prev) => ({
+                                            ...prev,
+                                            royalty: {
+                                              ...prev.royalty,
+                                              hqTiers: prev.royalty.hqTiers.map((item, idx) =>
+                                                idx === index ? { ...item, minOrder: event.target.value } : item
+                                              ),
+                                            },
+                                          }))
+                                        }
+                                      />
+                                    </label>
+                                    <label className="grid gap-1 text-xs">
+                                      <span className="font-medium">Through order #</span>
+                                      <input
+                                        className="input"
+                                        inputMode="numeric"
+                                        value={tier.maxOrder}
+                                        onChange={(event) =>
+                                          setEditingFranchise((prev) => ({
+                                            ...prev,
+                                            royalty: {
+                                              ...prev.royalty,
+                                              hqTiers: prev.royalty.hqTiers.map((item, idx) =>
+                                                idx === index ? { ...item, maxOrder: event.target.value } : item
+                                              ),
+                                            },
+                                          }))
+                                        }
+                                        placeholder="Leave blank for 6th+"
+                                      />
+                                    </label>
+                                    <label className="grid gap-1 text-xs">
+                                      <span className="font-medium">Royalty %</span>
+                                      <input
+                                        className="input"
+                                        type="number"
+                                        min="0"
+                                        step="0.1"
+                                        value={tier.percentage}
+                                        onChange={(event) =>
+                                          setEditingFranchise((prev) => ({
+                                            ...prev,
+                                            royalty: {
+                                              ...prev.royalty,
+                                              hqTiers: prev.royalty.hqTiers.map((item, idx) =>
+                                                idx === index ? { ...item, percentage: event.target.value } : item
+                                              ),
+                                            },
+                                          }))
+                                        }
+                                      />
+                                    </label>
+                                    <div className="flex items-end justify-end">
+                                      <button
+                                        type="button"
+                                        className="btn btn-xs btn-outline"
+                                        onClick={() =>
+                                          setEditingFranchise((prev) => ({
+                                            ...prev,
+                                            royalty: removeRoyaltyTier(prev.royalty, index),
+                                          }))
+                                        }
+                                        disabled={editingFranchise.royalty.hqTiers.length <= 1}
+                                      >
+                                        Remove
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                              <label className="grid gap-1 text-xs">
+                                <span className="font-medium">Franchise-sourced royalty (%)</span>
+                                <input
+                                  className="input"
+                                  type="number"
+                                  min="0"
+                                  step="0.1"
+                                  value={editingFranchise.royalty.franchisePercentage}
+                                  onChange={(event) =>
+                                    setEditingFranchise((prev) => ({
+                                      ...prev,
+                                      royalty: {
+                                        ...prev.royalty,
+                                        franchisePercentage: event.target.value,
+                                      },
+                                    }))
+                                  }
+                                />
+                              </label>
+                            </div>
                             <div className="grid gap-2 rounded border border-dashed border-gray-200 p-2">
                               <div className="flex items-center justify-between">
                                 <span className="text-[11px] font-semibold uppercase tracking-wide">Onboarding</span>
