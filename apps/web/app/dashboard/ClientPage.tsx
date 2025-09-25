@@ -16,6 +16,7 @@ import {
 import { db, auth, functions, httpsCallable } from '@/lib/firebase';
 import Link from 'next/link';
 import PortalContainer from '@/components/PortalContainer';
+import ContentPlanPanel from '@/components/ContentPlanPanel';
 
 /**
  * Enhanced dashboard showing a unified overview of projects, orders, bookings,
@@ -182,6 +183,7 @@ export default function DashboardPage() {
           <div className="font-medium">View Projects</div>
         </Link>
       </div>
+      <ContentPlanPanel />
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
       {/* Customer Tasks */}
       <section className="card p-4">
