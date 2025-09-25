@@ -540,6 +540,8 @@ export default function EditProductPage() {
   const [venueId, setVenueId] = useState("");
   const [venue, setVenue] = useState("");
   const [hidden, setHidden] = useState(false);
+  const [driveTemplateFolderId, setDriveTemplateFolderId] = useState("");
+  const [driveFolderName, setDriveFolderName] = useState("");
   const [tasks, setTasks] = useState<ProductTask[]>([]);
   const [taskTitle, setTaskTitle] = useState("");
   const [taskForCustomer, setTaskForCustomer] = useState(false);
@@ -1047,6 +1049,16 @@ export default function EditProductPage() {
           setVenueId(initialVenueId);
           setVenue(initialVenueName);
           setHidden(p.hidden || false);
+          setDriveTemplateFolderId(
+            typeof (p as any).driveTemplateFolderId === "string"
+              ? (p as any).driveTemplateFolderId
+              : ""
+          );
+          setDriveFolderName(
+            typeof (p as any).driveFolderName === "string"
+              ? (p as any).driveFolderName
+              : ""
+          );
           setTasks(p.defaultTasks || []);
           setWorkflowId((p as any).workflowId || "");
           const requiredKit = Array.isArray((p as any).requiredKit)
@@ -1531,6 +1543,9 @@ export default function EditProductPage() {
       venue: venueLabel,
       venueId: venueId || null,
       hidden,
+      driveTemplateFolderId:
+        driveTemplateFolderId.trim().length > 0 ? driveTemplateFolderId.trim() : null,
+      driveFolderName: driveFolderName.trim().length > 0 ? driveFolderName.trim() : null,
       requiredKit: kitGroups,
       requiredStandards,
       defaultTasks: tasks,
@@ -2066,8 +2081,9 @@ export default function EditProductPage() {
     <form onSubmit={save} className="grid gap-6 max-w-2xl">
       <h1 className="text-xl font-semibold">Edit Product</h1>
       <nav className="flex gap-4 border-b">
-        {[
+        {[ 
           ["info", "Info"],
+          ["drive", "Drive & Folders"],
           ["spec", "Product Spec"],
           ["pnl", "P&L"],
           ["variations", "Variations"],
@@ -2087,6 +2103,50 @@ export default function EditProductPage() {
           </button>
         ))}
       </nav>
+
+      {tab === "drive" && (
+        <div className="grid gap-4">
+          <div className="rounded border bg-slate-50 p-4">
+            <h2 className="text-sm font-semibold">Deliverable template folder</h2>
+            <p className="text-xs text-gray-600">
+              Provide the Google Drive folder ID that should be cloned whenever an
+              order for this product is created. Leave blank to start with an empty
+              folder.
+            </p>
+            <input
+              className="input mt-3"
+              placeholder="1AbCdEfGhIjKlMnOp"
+              value={driveTemplateFolderId}
+              onChange={(event) => setDriveTemplateFolderId(event.target.value)}
+            />
+            {driveTemplateFolderId.trim().length > 0 && (
+              <a
+                className="text-xs text-blue-600 underline"
+                href={`https://drive.google.com/drive/folders/${encodeURIComponent(
+                  driveTemplateFolderId.trim()
+                )}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open template in Drive
+              </a>
+            )}
+          </div>
+          <div className="rounded border bg-slate-50 p-4">
+            <h2 className="text-sm font-semibold">Default folder name</h2>
+            <p className="text-xs text-gray-600">
+              Override the folder name that is created for this product inside each
+              client&apos;s project. Leave blank to use the product name.
+            </p>
+            <input
+              className="input mt-3"
+              placeholder="eg. Divine Resolve Project Files"
+              value={driveFolderName}
+              onChange={(event) => setDriveFolderName(event.target.value)}
+            />
+          </div>
+        </div>
+      )}
 
       {tab === "info" && (
         <div className="grid gap-2">

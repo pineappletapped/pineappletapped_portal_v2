@@ -204,6 +204,10 @@ export interface Product {
   deliveryTime?: string;
   /** Details about on-site operations shared with the customer. */
   operationsInfo?: string;
+  /** Optional Google Drive folder ID used as the template when provisioning client deliverables. */
+  driveTemplateFolderId?: string;
+  /** Optional override for the deliverables folder name created per order. Defaults to the product name. */
+  driveFolderName?: string;
   deliverables?: ProductDeliverable[];
   modifiers?: ProductModifierSelection[];
   /** Modifier group IDs enabled for this product. */

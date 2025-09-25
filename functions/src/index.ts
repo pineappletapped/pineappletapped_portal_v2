@@ -7,10 +7,12 @@ import sharp from 'sharp';
 import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import ColorThief from 'color-thief-node';
 import { google } from 'googleapis';
+import type { drive_v3 } from 'googleapis';
 import { Readable } from 'stream';
 import fetch from 'node-fetch';
 import * as cors from 'cors';
@@ -164,6 +166,526 @@ function resolveRoyaltyTier(
   }
   const lastTier = tiers[tiers.length - 1] ?? fallback.hqTiers[fallback.hqTiers.length - 1];
   return { percentage: lastTier.percentage, tier: lastTier };
+}
+
+type ClientDriveSettingsDoc = {
+  clientRootFolderId?: string | null;
+  brandingFolderName?: string | null;
+  ordersFolderName?: string | null;
+  brandingTemplateFolderId?: string | null;
+  hqEmails?: string[];
+};
+
+interface DriveOrderProductContext {
+  productId: string;
+  name: string;
+  quantity: number;
+  templateFolderId: string | null;
+  folderName: string | null;
+}
+
+interface DriveSetupContext {
+  orderId: string;
+  orderRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
+  clientKey: string;
+  clientKeyType: 'user_id' | 'email' | null;
+  companyName: string | null;
+  customerName: string | null;
+  projectName: string | null;
+  emails: string[];
+  franchise: {
+    id: string | null;
+    label: string | null;
+    emails: string[];
+  };
+  products: DriveOrderProductContext[];
+}
+
+function normaliseDriveId(input: unknown): string | null {
+  if (typeof input === 'string') {
+    const trimmed = input.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  return null;
+}
+
+function sanitiseDriveName(name: string | null | undefined, fallback: string): string {
+  const raw = typeof name === 'string' ? name.trim() : '';
+  const base = raw.length > 0 ? raw : fallback;
+  const cleaned = base.replace(/[\\/:*?"<>|]/g, '-').replace(/\s{2,}/g, ' ').trim();
+  if (!cleaned) {
+    return fallback;
+  }
+  return cleaned.slice(0, 120);
+}
+
+function toClientDocId(key: string): string {
+  const trimmed = key.trim().toLowerCase();
+  if (!trimmed) {
+    return `client-${uuidv4()}`;
+  }
+  const slug = trimmed.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (slug.length >= 6 && slug.length <= 100) {
+    return slug;
+  }
+  const hash = crypto.createHash('sha1').update(trimmed).digest('hex').slice(0, 24);
+  return `client-${hash}`;
+}
+
+function buildClientFolderName(context: DriveSetupContext): string {
+  const fallback = `Client ${context.orderId.slice(-6).toUpperCase()}`;
+  if (context.companyName) {
+    return sanitiseDriveName(context.companyName, fallback);
+  }
+  if (context.customerName) {
+    return sanitiseDriveName(context.customerName, fallback);
+  }
+  const firstEmail = context.emails.find((value) => value.length > 0);
+  if (firstEmail) {
+    const prefix = firstEmail.split('@')[0] || firstEmail;
+    return sanitiseDriveName(prefix, fallback);
+  }
+  return fallback;
+}
+
+function buildOrderFolderName(context: DriveSetupContext): string {
+  const suffix = context.orderId.slice(-6).toUpperCase();
+  if (context.projectName) {
+    return sanitiseDriveName(`${context.projectName} (${suffix})`, `Order ${suffix}`);
+  }
+  if (context.products.length === 1) {
+    return sanitiseDriveName(`${context.products[0].name} (${suffix})`, `Order ${suffix}`);
+  }
+  return `Order ${suffix}`;
+}
+
+function buildProductFolderName(
+  product: DriveOrderProductContext,
+  index: number,
+  total: number
+): string {
+  const base = sanitiseDriveName(
+    product.folderName ?? product.name,
+    product.name || `Product ${index + 1}`
+  );
+  if (total > 1) {
+    return `${base} #${index + 1}`;
+  }
+  return base;
+}
+
+async function createDriveService(): Promise<drive_v3.Drive | null> {
+  const keyB64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64;
+  if (!keyB64) {
+    console.warn('Missing Google service account credentials for Drive automation');
+    return null;
+  }
+  try {
+    const keyJson = JSON.parse(Buffer.from(keyB64, 'base64').toString());
+    const auth = new google.auth.JWT(
+      keyJson.client_email,
+      undefined,
+      keyJson.private_key,
+      ['https://www.googleapis.com/auth/drive']
+    );
+    await auth.authorize();
+    return google.drive({ version: 'v3', auth });
+  } catch (error) {
+    console.error('Failed to initialise Drive service', error);
+    return null;
+  }
+}
+
+async function resolveExistingFolder(
+  drive: drive_v3.Drive,
+  folderId: string | null
+): Promise<string | null> {
+  if (!folderId) {
+    return null;
+  }
+  try {
+    const res = await drive.files.get({
+      fileId: folderId,
+      fields: 'id, trashed',
+      supportsAllDrives: true,
+    });
+    if (res.data?.trashed) {
+      return null;
+    }
+    return res.data?.id ?? folderId;
+  } catch {
+    return null;
+  }
+}
+
+async function createDriveFolder(
+  drive: drive_v3.Drive,
+  name: string,
+  parentId: string | null
+): Promise<string | null> {
+  try {
+    const metadata: drive_v3.Schema$File = {
+      name,
+      mimeType: 'application/vnd.google-apps.folder',
+    };
+    if (parentId) {
+      metadata.parents = [parentId];
+    }
+    const res = await drive.files.create({
+      requestBody: metadata,
+      fields: 'id',
+      supportsAllDrives: true,
+    });
+    return res.data.id ?? null;
+  } catch (error) {
+    console.error('Failed to create Drive folder', name, error);
+    return null;
+  }
+}
+
+async function listDriveChildren(
+  drive: drive_v3.Drive,
+  parentId: string
+): Promise<drive_v3.Schema$File[]> {
+  const files: drive_v3.Schema$File[] = [];
+  let pageToken: string | undefined;
+  do {
+    const res = await drive.files.list({
+      q: `'${parentId}' in parents and trashed = false`,
+      fields: 'nextPageToken, files(id, name, mimeType)',
+      pageSize: 100,
+      pageToken,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+    });
+    if (res.data.files) {
+      files.push(...res.data.files);
+    }
+    pageToken = res.data.nextPageToken ?? undefined;
+  } while (pageToken);
+  return files;
+}
+
+async function copyDriveContents(
+  drive: drive_v3.Drive,
+  sourceFolderId: string,
+  destinationFolderId: string
+): Promise<void> {
+  const children = await listDriveChildren(drive, sourceFolderId);
+  for (const child of children) {
+    if (!child.id) continue;
+    if (child.mimeType === 'application/vnd.google-apps.folder') {
+      const folderName = sanitiseDriveName(child.name ?? 'Folder', 'Folder');
+      const newFolderId = await createDriveFolder(drive, folderName, destinationFolderId);
+      if (newFolderId) {
+        await copyDriveContents(drive, child.id, newFolderId);
+      }
+    } else {
+      try {
+        await drive.files.copy({
+          fileId: child.id,
+          requestBody: {
+            name: child.name ?? undefined,
+            parents: [destinationFolderId],
+          },
+          supportsAllDrives: true,
+        });
+      } catch (error) {
+        console.error('Failed to copy Drive file', child.id, error);
+      }
+    }
+  }
+}
+
+async function ensureChildFolder(
+  drive: drive_v3.Drive,
+  parentId: string,
+  desiredName: string,
+  existingFolderId?: string | null,
+  templateFolderId?: string | null
+): Promise<{ id: string | null; created: boolean }> {
+  const existing = await resolveExistingFolder(
+    drive,
+    normaliseDriveId(existingFolderId)
+  );
+  if (existing) {
+    return { id: existing, created: false };
+  }
+  try {
+    const escapedName = desiredName.replace(/'/g, "\\'");
+    const search = await drive.files.list({
+      q: `mimeType = 'application/vnd.google-apps.folder' and trashed = false and '${parentId}' in parents and name = '${escapedName}'`,
+      fields: 'files(id, name)',
+      pageSize: 1,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+    });
+    const matchId = search.data.files?.[0]?.id ?? null;
+    if (matchId) {
+      return { id: matchId, created: false };
+    }
+  } catch (error) {
+    console.warn('Failed to look up Drive folder by name', error);
+  }
+  const folderId = await createDriveFolder(drive, desiredName, parentId);
+  if (folderId && templateFolderId) {
+    try {
+      await copyDriveContents(drive, templateFolderId, folderId);
+    } catch (error) {
+      console.error('Failed to copy Drive template into folder', error);
+    }
+  }
+  return { id: folderId, created: true };
+}
+
+async function shareDriveFolder(
+  drive: drive_v3.Drive,
+  folderId: string,
+  emails: string[]
+): Promise<void> {
+  const seen = new Set<string>();
+  for (const email of emails) {
+    const trimmed = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    try {
+      await drive.permissions.create({
+        fileId: folderId,
+        supportsAllDrives: true,
+        sendNotificationEmail: false,
+        requestBody: {
+          type: 'user',
+          role: 'writer',
+          emailAddress: trimmed,
+        },
+      });
+    } catch (error: any) {
+      if (error?.code === 409) {
+        continue;
+      }
+      console.warn('Failed to apply Drive permission', folderId, trimmed, error);
+    }
+  }
+}
+
+async function setupClientDriveStructure(context: DriveSetupContext): Promise<void> {
+  const drive = await createDriveService();
+  if (!drive) {
+    await context.orderRef.set(
+      {
+        drive: {
+          status: 'pending_credentials',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+      },
+      { merge: true }
+    );
+    return;
+  }
+
+  const settingsSnap = await db.collection('settings').doc('clientDrive').get();
+  const settings = (settingsSnap.data() as ClientDriveSettingsDoc) || {};
+  const rootFolderId = normaliseDriveId(settings.clientRootFolderId);
+  if (!rootFolderId) {
+    await context.orderRef.set(
+      {
+        drive: {
+          status: 'pending_configuration',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+      },
+      { merge: true }
+    );
+    return;
+  }
+
+  const brandingName = sanitiseDriveName(settings.brandingFolderName ?? null, 'Branding Assets');
+  const ordersName = sanitiseDriveName(settings.ordersFolderName ?? null, 'Projects');
+  const brandingTemplateId = normaliseDriveId(settings.brandingTemplateFolderId);
+
+  const clientEmails = Array.from(
+    new Set(
+      context.emails
+        .map((value) => value.trim().toLowerCase())
+        .filter((value) => value.length > 0)
+    )
+  );
+  const franchiseEmails = context.franchise.emails
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+  const hqEmails = Array.isArray(settings.hqEmails)
+    ? settings.hqEmails
+        .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+        .filter((value) => value.length > 0)
+    : [];
+  const shareEmails = [...hqEmails, ...franchiseEmails];
+
+  const clientsCollection = db.collection('clients');
+  let clientDocRef:
+    | FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>
+    | null = null;
+  let existingSnap:
+    | FirebaseFirestore.DocumentSnapshot<FirebaseFirestore.DocumentData>
+    | null = null;
+
+  if (context.clientKey) {
+    const candidateRef = clientsCollection.doc(toClientDocId(context.clientKey));
+    const candidateSnap = await candidateRef.get();
+    if (candidateSnap.exists) {
+      clientDocRef = candidateRef;
+      existingSnap = candidateSnap;
+    } else {
+      const keyQuery = await clientsCollection.where('key', '==', context.clientKey).limit(1).get();
+      if (!keyQuery.empty) {
+        existingSnap = keyQuery.docs[0];
+        clientDocRef = existingSnap.ref;
+      }
+    }
+  }
+
+  if (!clientDocRef && clientEmails.length > 0) {
+    const emailQuery = await clientsCollection
+      .where('emails', 'array-contains-any', clientEmails.slice(0, 10))
+      .limit(1)
+      .get();
+    if (!emailQuery.empty) {
+      existingSnap = emailQuery.docs[0];
+      clientDocRef = existingSnap.ref;
+    }
+  }
+
+  if (!clientDocRef) {
+    const fallbackId = toClientDocId(`order:${context.orderId}`);
+    clientDocRef = clientsCollection.doc(fallbackId);
+  }
+
+  const existingData = (existingSnap?.data() as any) || {};
+  const driveInfo = existingData.drive || {};
+
+  const clientFolderName = buildClientFolderName(context);
+  let clientFolderId =
+    (await resolveExistingFolder(
+      drive,
+      normaliseDriveId(driveInfo.rootFolderId ?? driveInfo.clientFolderId)
+    )) ?? null;
+  let clientFolderCreated = false;
+  if (!clientFolderId) {
+    clientFolderId = await createDriveFolder(drive, clientFolderName, rootFolderId);
+    clientFolderCreated = true;
+  }
+  if (!clientFolderId) {
+    throw new Error('Unable to create client Drive folder');
+  }
+
+  const branding = await ensureChildFolder(
+    drive,
+    clientFolderId,
+    brandingName,
+    driveInfo.brandingFolderId,
+    brandingTemplateId
+  );
+  const orders = await ensureChildFolder(
+    drive,
+    clientFolderId,
+    ordersName,
+    driveInfo.ordersRootFolderId
+  );
+  const ordersRootFolderId = orders.id ?? clientFolderId;
+  const orderFolderName = buildOrderFolderName(context);
+  const orderFolderId = await createDriveFolder(drive, orderFolderName, ordersRootFolderId);
+  if (!orderFolderId) {
+    throw new Error('Unable to create order Drive folder');
+  }
+
+  const productFolders: {
+    productId: string;
+    folderId: string;
+    folderName: string;
+    templateFolderId: string | null;
+    quantity: number;
+    sequence: number;
+  }[] = [];
+
+  for (const product of context.products) {
+    const count = product.quantity > 0 ? product.quantity : 1;
+    for (let i = 0; i < count; i += 1) {
+      const folderName = buildProductFolderName(product, i, count);
+      const folderId = await createDriveFolder(drive, folderName, orderFolderId);
+      if (!folderId) {
+        continue;
+      }
+      if (product.templateFolderId) {
+        await copyDriveContents(drive, product.templateFolderId, folderId);
+      }
+      productFolders.push({
+        productId: product.productId,
+        folderId,
+        folderName,
+        templateFolderId: product.templateFolderId,
+        quantity: count,
+        sequence: i + 1,
+      });
+    }
+  }
+
+  if (clientFolderCreated || shareEmails.length > 0) {
+    await shareDriveFolder(drive, clientFolderId, shareEmails);
+  }
+
+  const clientUpdate: Record<string, any> = {
+    key: context.clientKey ?? null,
+    keyType: context.clientKeyType ?? null,
+    companyName: context.companyName ?? null,
+    customerName: context.customerName ?? null,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    drive: {
+      rootFolderId: clientFolderId,
+      rootFolderName: clientFolderName,
+      brandingFolderId: branding.id ?? null,
+      brandingFolderName: brandingName,
+      ordersRootFolderId,
+      ordersFolderName: ordersName,
+      lastOrderId: context.orderId,
+      lastUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+  };
+
+  if (!existingSnap?.exists) {
+    clientUpdate.createdAt = admin.firestore.FieldValue.serverTimestamp();
+  }
+  if (clientEmails.length > 0) {
+    clientUpdate.emails = admin.firestore.FieldValue.arrayUnion(...clientEmails);
+  }
+  if (context.franchise.id) {
+    clientUpdate.lastFranchiseId = context.franchise.id;
+  }
+  if (franchiseEmails.length > 0) {
+    clientUpdate.franchiseEmails = admin.firestore.FieldValue.arrayUnion(...franchiseEmails);
+  }
+
+  await clientDocRef.set(clientUpdate, { merge: true });
+
+  await context.orderRef.set(
+    {
+      clientId: clientDocRef.id,
+      drive: {
+        status: 'ready',
+        clientFolderId,
+        clientFolderName,
+        brandingFolderId: branding.id ?? null,
+        brandingFolderName: brandingName,
+        ordersRootFolderId,
+        ordersFolderName: ordersName,
+        orderFolderId,
+        orderFolderName,
+        productFolders,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+    },
+    { merge: true }
+  );
 }
 
 type FranchiseAssignmentMatchType = 'exact' | 'prefix' | 'superset' | 'radius';
@@ -2915,6 +3437,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   }
   const productSnaps = await db.getAll(...productRefs);
   const orderItems: any[] = [];
+  const driveProducts: DriveOrderProductContext[] = [];
   let productSubtotal = 0;
   let labourSubtotal = 0;
   let kitSubtotal = 0;
@@ -2986,6 +3509,27 @@ export const createOrder = functions.https.onCall(async (data, context) => {
           totalCost: perUnitBudgetTotal * qty,
         },
       },
+    });
+    const templateFolderIdRaw =
+      typeof (prod as any).driveTemplateFolderId === 'string'
+        ? ((prod as any).driveTemplateFolderId as string)
+        : '';
+    const folderNameOverrideRaw =
+      typeof (prod as any).driveFolderName === 'string'
+        ? ((prod as any).driveFolderName as string)
+        : '';
+    driveProducts.push({
+      productId: snap.id,
+      name: typeof prod.name === 'string' ? (prod.name as string) : `Product ${idx + 1}`,
+      quantity: qty > 0 ? qty : 1,
+      templateFolderId:
+        templateFolderIdRaw && templateFolderIdRaw.trim().length > 0
+          ? templateFolderIdRaw.trim()
+          : null,
+      folderName:
+        folderNameOverrideRaw && folderNameOverrideRaw.trim().length > 0
+          ? folderNameOverrideRaw.trim()
+          : null,
     });
     productSubtotal += price * qty;
     labourSubtotal += labour * qty;
@@ -3214,6 +3758,70 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   }
 
   const orderRef = await db.collection('orders').add(orderData);
+
+  const driveClientKeyBase = clientRoyaltyKey ?? (normalisedEmail ? `email:${normalisedEmail}` : null);
+  const driveClientKey = driveClientKeyBase ?? `order:${orderRef.id}`;
+  const driveClientKeyType: 'user_id' | 'email' | null =
+    clientRoyaltyKeyType ?? (driveClientKeyBase && driveClientKeyBase.startsWith('email:') ? 'email' : null);
+  const driveEmailSet = new Set<string>();
+  if (normalisedEmail) {
+    driveEmailSet.add(normalisedEmail);
+  }
+  if (requestEmail) {
+    const trimmedRequestEmail = requestEmail.trim().toLowerCase();
+    if (trimmedRequestEmail && (!normalisedEmail || trimmedRequestEmail !== normalisedEmail)) {
+      driveEmailSet.add(trimmedRequestEmail);
+    }
+  }
+  if (typeof orderData.userEmail === 'string') {
+    const trimmedOrderEmail = (orderData.userEmail as string).trim().toLowerCase();
+    if (trimmedOrderEmail) {
+      driveEmailSet.add(trimmedOrderEmail);
+    }
+  }
+  try {
+    await setupClientDriveStructure({
+      orderId: orderRef.id,
+      orderRef,
+      clientKey: driveClientKey,
+      clientKeyType: driveClientKeyType,
+      companyName:
+        typeof companyName === 'string' && companyName.trim().length > 0
+          ? companyName.trim()
+          : null,
+      customerName:
+        typeof customerName === 'string' && customerName.trim().length > 0
+          ? customerName.trim()
+          : null,
+      projectName:
+        typeof projectName === 'string' && projectName.trim().length > 0
+          ? projectName.trim()
+          : null,
+      emails: Array.from(driveEmailSet),
+      franchise: {
+        id: assignmentResult?.franchiseId ?? null,
+        label: assignmentResult?.territoryLabel ?? null,
+        emails:
+          assignmentMember?.userProfile?.email && typeof assignmentMember.userProfile.email === 'string'
+            ? [assignmentMember.userProfile.email.trim()]
+            : [],
+      },
+      products: driveProducts,
+    });
+  } catch (driveError) {
+    console.error('Failed to set up Drive structure for order', orderRef.id, driveError);
+    await orderRef.set(
+      {
+        drive: {
+          status: 'error',
+          errorMessage:
+            driveError instanceof Error ? driveError.message : 'drive_setup_failed',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+      },
+      { merge: true }
+    );
+  }
 
   return { orderId: orderRef.id };
 });
