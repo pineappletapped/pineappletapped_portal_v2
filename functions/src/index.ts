@@ -1301,6 +1301,35 @@ function parseMoney(value: unknown, fallback = 0): number {
   return Math.max(0, Math.round(numeric * 100) / 100);
 }
 
+function toCurrencyCents(value: unknown): number {
+  if (value === undefined || value === null) {
+    return 0;
+  }
+  const numeric = typeof value === 'string' ? Number(value) : Number(value);
+  if (!Number.isFinite(numeric) || Number.isNaN(numeric)) {
+    return 0;
+  }
+  return Math.max(0, Math.round(numeric * 100));
+}
+
+function fromCurrencyCents(value: number): number {
+  if (!Number.isFinite(value) || Number.isNaN(value)) {
+    return 0;
+  }
+  return Math.round(value) / 100;
+}
+
+function normaliseCurrency(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length < 3) {
+    return null;
+  }
+  return trimmed.slice(0, 3).toUpperCase();
+}
+
 function assertPositive(value: number, field: string) {
   if (value < 0) {
     throw new functions.https.HttpsError('invalid-argument', `${field} must be zero or positive.`);
@@ -3187,6 +3216,365 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   const orderRef = await db.collection('orders').add(orderData);
 
   return { orderId: orderRef.id };
+});
+
+export const orders_refund = functions.https.onCall(async (data, context) => {
+  const roles = await assertStaff(context, ['finance', 'admin']);
+  const orderId = typeof data?.orderId === 'string' ? data.orderId.trim() : '';
+  if (!orderId) {
+    throw new functions.https.HttpsError('invalid-argument', 'orderId is required.');
+  }
+  const amountInput = data?.amount ?? data?.grossAmount;
+  const amount = parseMoney(amountInput);
+  if (amount <= 0) {
+    throw new functions.https.HttpsError('invalid-argument', 'Refund amount must be greater than zero.');
+  }
+  const reasonRaw = typeof data?.reason === 'string' ? data.reason.trim() : '';
+  const reason = reasonRaw ? reasonRaw.slice(0, 500) : null;
+  const notesSource =
+    data?.notes ?? data?.memo ?? data?.comment ?? data?.description ?? data?.details ?? null;
+  const notesRaw = typeof notesSource === 'string' ? notesSource.trim() : '';
+  const notes = notesRaw ? notesRaw.slice(0, 2000) : null;
+  const processedAtIso = new Date().toISOString();
+  const roleList = Array.from(roles);
+  const processor = {
+    uid: context.auth!.uid,
+    email:
+      typeof context.auth?.token?.email === 'string'
+        ? context.auth.token.email
+        : null,
+    displayName:
+      typeof context.auth?.token?.name === 'string'
+        ? context.auth.token.name
+        : null,
+    roles: roleList,
+  };
+
+  const orderRef = db.collection('orders').doc(orderId);
+  let auditBeforeSummary: Record<string, any> | null = null;
+  let auditAfterSummary: Record<string, any> | null = null;
+
+  const { record: responseRecord, summary: responseSummary } = await db.runTransaction(
+    async (txn) => {
+      const snap = await txn.get(orderRef);
+      if (!snap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Order not found');
+      }
+      const order = snap.data() as any;
+
+      const requestedCurrency = normaliseCurrency(data?.currency);
+      const orderCurrency =
+        normaliseCurrency(order?.currency) ?? normaliseCurrency(order?.currencyCode) ?? null;
+
+      const refundsArray = Array.isArray(order?.refunds) ? order.refunds : [];
+      let fallbackGrossCents = 0;
+      let fallbackNetCents = 0;
+      let fallbackVatCents = 0;
+      let fallbackHqCents = 0;
+      let fallbackFranchiseCents = 0;
+      for (const entry of refundsArray) {
+        fallbackGrossCents += toCurrencyCents((entry as any)?.amount);
+        fallbackNetCents += toCurrencyCents((entry as any)?.netAmount ?? (entry as any)?.net);
+        fallbackVatCents += toCurrencyCents((entry as any)?.vatAmount ?? (entry as any)?.vat);
+        const royaltyEntry = (entry as any)?.royalty;
+        if (royaltyEntry) {
+          fallbackHqCents += toCurrencyCents(
+            (royaltyEntry as any)?.hqShare ?? (royaltyEntry as any)?.hqAmount
+          );
+          fallbackFranchiseCents += toCurrencyCents(
+            (royaltyEntry as any)?.franchiseShare ?? (royaltyEntry as any)?.franchiseAmount
+          );
+        }
+      }
+
+      const summaryData = (order?.refundSummary as any) || {};
+      const summaryCurrency = normaliseCurrency(summaryData?.currency);
+      let currencyCode = requestedCurrency ?? summaryCurrency ?? orderCurrency ?? null;
+      if (!currencyCode) {
+        currencyCode = 'GBP';
+      }
+      if (requestedCurrency && currencyCode !== requestedCurrency) {
+        throw new functions.https.HttpsError(
+          'invalid-argument',
+          'Refund currency mismatch for the requested refund.'
+        );
+      }
+      if (summaryCurrency && currencyCode !== summaryCurrency) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'Existing refund currency does not match the requested currency.'
+        );
+      }
+      if (orderCurrency && currencyCode !== orderCurrency) {
+        throw new functions.https.HttpsError(
+          'invalid-argument',
+          'Refund currency must match the order currency.'
+        );
+      }
+
+      const existingGrossCents =
+        summaryData?.totalGross != null ? toCurrencyCents(summaryData.totalGross) : fallbackGrossCents;
+      const existingNetCents =
+        summaryData?.totalNet != null ? toCurrencyCents(summaryData.totalNet) : fallbackNetCents;
+      const existingVatCents =
+        summaryData?.totalVat != null ? toCurrencyCents(summaryData.totalVat) : fallbackVatCents;
+      const existingHqCents =
+        summaryData?.totalHqClawback != null
+          ? toCurrencyCents(summaryData.totalHqClawback)
+          : fallbackHqCents;
+      const existingFranchiseCents =
+        summaryData?.totalFranchiseClawback != null
+          ? toCurrencyCents(summaryData.totalFranchiseClawback)
+          : fallbackFranchiseCents;
+      const existingCount =
+        typeof summaryData?.totalCount === 'number' && Number.isFinite(summaryData.totalCount)
+          ? Math.max(0, Math.floor(summaryData.totalCount))
+          : refundsArray.length;
+
+      const orderGrossCents = toCurrencyCents(
+        order?.price ?? order?.totalPrice ?? order?.grossTotal ?? 0
+      );
+      const fallbackNetFromVatCents =
+        orderGrossCents > 0 ? Math.max(orderGrossCents - toCurrencyCents(order?.vat ?? 0), 0) : 0;
+      let orderNetCents = toCurrencyCents(
+        order?.netTotal ?? order?.net ?? order?.subtotal ?? order?.total ?? 0
+      );
+      if (orderNetCents === 0 && fallbackNetFromVatCents > 0) {
+        orderNetCents = fallbackNetFromVatCents;
+      }
+      if (orderGrossCents > 0 && orderNetCents > orderGrossCents) {
+        orderNetCents = orderGrossCents;
+      }
+
+      if (orderGrossCents === 0 && orderNetCents === 0) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'Order has no recorded value available for refunds.'
+        );
+      }
+
+      const amountCents = Math.round(amount * 100);
+      if (amountCents <= 0) {
+        throw new functions.https.HttpsError(
+          'invalid-argument',
+          'Refund amount must be greater than zero.'
+        );
+      }
+
+      const remainingGrossCents =
+        orderGrossCents > 0 ? Math.max(orderGrossCents - existingGrossCents, 0) : null;
+      const remainingNetCents =
+        orderNetCents > 0 ? Math.max(orderNetCents - existingNetCents, 0) : null;
+
+      if (remainingGrossCents !== null && amountCents > remainingGrossCents + 1) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'Refund exceeds the remaining gross balance for this order.'
+        );
+      }
+      if (remainingGrossCents === null && remainingNetCents !== null && amountCents > remainingNetCents + 1) {
+        throw new functions.https.HttpsError(
+          'failed-precondition',
+          'Refund exceeds the remaining net balance for this order.'
+        );
+      }
+
+      let netRefundCents = 0;
+      if (orderGrossCents > 0 && orderNetCents > 0) {
+        netRefundCents = Math.round((amountCents * orderNetCents) / orderGrossCents);
+      } else if (orderNetCents > 0) {
+        netRefundCents = Math.min(amountCents, orderNetCents);
+      } else {
+        netRefundCents = amountCents;
+      }
+      if (remainingNetCents !== null && netRefundCents > remainingNetCents) {
+        netRefundCents = remainingNetCents;
+      }
+      if (netRefundCents < 0) {
+        netRefundCents = 0;
+      }
+      let vatRefundCents = amountCents - netRefundCents;
+      if (vatRefundCents < 0) {
+        vatRefundCents = 0;
+        netRefundCents = amountCents;
+      }
+
+      const royaltyData = (order?.royalty as any) || {};
+      const royaltySource: RoyaltySource =
+        typeof royaltyData?.source === 'string'
+          ? (royaltyData.source as RoyaltySource)
+          : typeof order?.royaltySource === 'string'
+            ? (order.royaltySource as RoyaltySource)
+            : 'hq';
+      let royaltyPercentage = Number(
+        royaltyData?.percentage ?? order?.royaltyPercentage ?? 0
+      );
+      if (!Number.isFinite(royaltyPercentage) || royaltyPercentage < 0) {
+        royaltyPercentage = 0;
+      }
+      if (royaltyPercentage > 100) {
+        royaltyPercentage = 100;
+      }
+      const royaltyFraction = royaltyPercentage / 100;
+      const hasFranchise = typeof order?.franchiseId === 'string' && order.franchiseId.trim().length > 0;
+      let hqClawbackCents = hasFranchise
+        ? Math.round(netRefundCents * royaltyFraction)
+        : netRefundCents;
+      if (hqClawbackCents < 0) {
+        hqClawbackCents = 0;
+      }
+      if (hqClawbackCents > netRefundCents) {
+        hqClawbackCents = netRefundCents;
+      }
+      let franchiseClawbackCents = hasFranchise ? netRefundCents - hqClawbackCents : 0;
+      if (franchiseClawbackCents < 0) {
+        franchiseClawbackCents = 0;
+        hqClawbackCents = netRefundCents;
+      }
+      const clawbackDelta = netRefundCents - (hqClawbackCents + franchiseClawbackCents);
+      if (clawbackDelta !== 0) {
+        if (hasFranchise) {
+          franchiseClawbackCents += clawbackDelta;
+        } else {
+          hqClawbackCents += clawbackDelta;
+        }
+      }
+
+      const newTotalGrossCents = existingGrossCents + amountCents;
+      const newTotalNetCents = existingNetCents + netRefundCents;
+      const newTotalVatCents = existingVatCents + vatRefundCents;
+      const newTotalHqCents = existingHqCents + hqClawbackCents;
+      const newTotalFranchiseCents = existingFranchiseCents + franchiseClawbackCents;
+      const newCount = existingCount + 1;
+
+      const fullyRefunded =
+        (orderGrossCents > 0 && newTotalGrossCents >= orderGrossCents - 1) ||
+        (orderGrossCents === 0 && orderNetCents > 0 && newTotalNetCents >= orderNetCents - 1);
+
+      const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
+      const refundId = uuidv4();
+
+      const storedRecord = {
+        id: refundId,
+        amount: fromCurrencyCents(amountCents),
+        netAmount: fromCurrencyCents(netRefundCents),
+        vatAmount: fromCurrencyCents(vatRefundCents),
+        currency: currencyCode,
+        reason,
+        notes,
+        createdAt: serverTimestamp,
+        processedBy: processor,
+        royalty: {
+          source: royaltySource,
+          percentage: royaltyPercentage,
+          hqShare: fromCurrencyCents(hqClawbackCents),
+          franchiseShare: fromCurrencyCents(franchiseClawbackCents),
+          franchiseId: hasFranchise ? String(order.franchiseId) : null,
+        },
+      };
+
+      const updatedSummary: Record<string, any> = {
+        currency: currencyCode,
+        totalCount: newCount,
+        totalGross: fromCurrencyCents(newTotalGrossCents),
+        totalNet: fromCurrencyCents(newTotalNetCents),
+        totalVat: fromCurrencyCents(newTotalVatCents),
+        totalHqClawback: fromCurrencyCents(newTotalHqCents),
+        totalFranchiseClawback: fromCurrencyCents(newTotalFranchiseCents),
+        remainingGross:
+          orderGrossCents > 0
+            ? fromCurrencyCents(Math.max(orderGrossCents - newTotalGrossCents, 0))
+            : null,
+        remainingNet:
+          orderNetCents > 0
+            ? fromCurrencyCents(Math.max(orderNetCents - newTotalNetCents, 0))
+            : null,
+        fullyRefunded,
+        lastRefundId: refundId,
+        lastRefundByUid: processor.uid,
+        lastRefundByEmail: processor.email ?? null,
+        lastRefundByName: processor.displayName ?? null,
+        lastRefundByRoles: processor.roles,
+        lastRefundAt: serverTimestamp,
+        updatedAt: serverTimestamp,
+      };
+
+      auditBeforeSummary = summaryData && Object.keys(summaryData).length ? summaryData : null;
+      auditAfterSummary = {
+        currency: updatedSummary.currency,
+        totalCount: updatedSummary.totalCount,
+        totalGross: updatedSummary.totalGross,
+        totalNet: updatedSummary.totalNet,
+        totalVat: updatedSummary.totalVat,
+        totalHqClawback: updatedSummary.totalHqClawback,
+        totalFranchiseClawback: updatedSummary.totalFranchiseClawback,
+        remainingGross: updatedSummary.remainingGross,
+        remainingNet: updatedSummary.remainingNet,
+        fullyRefunded,
+        lastRefundId: refundId,
+        lastRefundByUid: processor.uid,
+        lastRefundByEmail: processor.email ?? null,
+        lastRefundByName: processor.displayName ?? null,
+        lastRefundByRoles: processor.roles,
+        lastRefundAt: processedAtIso,
+      };
+
+      txn.update(orderRef, {
+        refunds: admin.firestore.FieldValue.arrayUnion(storedRecord),
+        refundSummary: updatedSummary,
+        updatedAt: serverTimestamp,
+      });
+
+      const responseRecord = {
+        id: refundId,
+        amount: storedRecord.amount,
+        netAmount: storedRecord.netAmount,
+        vatAmount: storedRecord.vatAmount,
+        currency: storedRecord.currency,
+        reason: storedRecord.reason,
+        notes: storedRecord.notes,
+        createdAt: processedAtIso,
+        processedBy: processor,
+        royalty: storedRecord.royalty,
+      };
+
+      const responseSummary = {
+        currency: updatedSummary.currency,
+        totalCount: updatedSummary.totalCount,
+        totalGross: updatedSummary.totalGross,
+        totalNet: updatedSummary.totalNet,
+        totalVat: updatedSummary.totalVat,
+        totalHqClawback: updatedSummary.totalHqClawback,
+        totalFranchiseClawback: updatedSummary.totalFranchiseClawback,
+        remainingGross: updatedSummary.remainingGross,
+        remainingNet: updatedSummary.remainingNet,
+        fullyRefunded,
+      };
+
+      return { record: responseRecord, summary: responseSummary };
+    }
+  );
+
+  const changes: AuditLogChanges = {
+    refundSummary: {
+      before: auditBeforeSummary ? serializeForAudit(auditBeforeSummary) : null,
+      after: serializeForAudit(auditAfterSummary ?? {}),
+    },
+  };
+
+  await writeAuditLog({
+    actorUid: context.auth!.uid,
+    action: 'order_refund',
+    entityType: 'order',
+    entityId: orderId,
+    changes,
+    metadata: {
+      refund: responseRecord,
+      summary: responseSummary,
+    },
+  });
+
+  return { refund: responseRecord, summary: responseSummary };
 });
 
 /**
