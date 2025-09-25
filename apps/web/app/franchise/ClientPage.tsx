@@ -129,6 +129,17 @@ const formatBytes = (size: number | null | undefined) => {
   return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 };
 
+const formatPercentage = (value: number | null | undefined) => {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+  const safeNumber = Number(value);
+  if (!Number.isFinite(safeNumber)) {
+    return "—";
+  }
+  return `${safeNumber.toFixed(Math.floor(safeNumber) === safeNumber ? 0 : 1)}%`;
+};
+
 export default function FranchisePortalPage() {
   const [initialising, setInitialising] = useState(true);
   const [dataLoading, setDataLoading] = useState(false);
@@ -693,6 +704,7 @@ export default function FranchisePortalPage() {
                         <th>Status</th>
                         <th className="text-right">Net total</th>
                         <th className="text-right">Franchise share</th>
+                        <th className="text-right">Royalty</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -716,6 +728,14 @@ export default function FranchisePortalPage() {
                             <td className="capitalize">{order.status || "pending"}</td>
                             <td className="text-right">{currencyFormatter.format(share.net)}</td>
                             <td className="text-right">{currencyFormatter.format(share.franchiseShare)}</td>
+                            <td className="text-right">
+                              <div className="flex flex-col items-end">
+                                <span>{formatPercentage(share.percentage)}</span>
+                                <span className="text-xs text-gray-500">
+                                  HQ {currencyFormatter.format(share.hqShare)}
+                                </span>
+                              </div>
+                            </td>
                           </tr>
                         );
                       })}
