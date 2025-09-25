@@ -38,6 +38,292 @@ admin.initializeApp({
 const db = admin.firestore();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' });
 const VAT_RATE = 0.2;
+const DAY_IN_MS = 86_400_000;
+const DEFAULT_FILMING_SLA_DAYS = 7;
+const DEFAULT_EDITING_SLA_DAYS = 14;
+
+type FranchiseTerritoryDoc = {
+  franchiseId?: string;
+  label?: string;
+  type?: string;
+  postalCodes?: unknown;
+  exclusive?: boolean;
+  categories?: unknown;
+  licenseFee?: number;
+};
+
+type FranchiseMemberDoc = {
+  userId?: string;
+  role?: string;
+  primary?: boolean;
+};
+
+type RoyaltySource = 'hq' | 'franchisee';
+
+interface FranchiseRoyaltyTierConfig {
+  minOrder: number;
+  maxOrder: number | null;
+  percentage: number;
+}
+
+interface FranchiseRoyaltyConfigDoc {
+  hqTiers: FranchiseRoyaltyTierConfig[];
+  franchiseSourcedPercentage: number;
+}
+
+function defaultRoyaltyConfig(): FranchiseRoyaltyConfigDoc {
+  return {
+    hqTiers: [
+      { minOrder: 1, maxOrder: 1, percentage: 20 },
+      { minOrder: 2, maxOrder: 2, percentage: 15 },
+      { minOrder: 3, maxOrder: 5, percentage: 10 },
+      { minOrder: 6, maxOrder: null, percentage: 6 },
+    ],
+    franchiseSourcedPercentage: 6,
+  };
+}
+
+function parseRoyaltyTierDoc(input: unknown): FranchiseRoyaltyTierConfig | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+  const data = input as Record<string, unknown>;
+  const min = Number(data.minOrder ?? data.orderFrom ?? data.start ?? data.from);
+  const maxValue = data.maxOrder ?? data.orderThrough ?? data.end ?? data.to;
+  const percentage = Number(data.percentage ?? data.rate ?? data.percent ?? data.value);
+  if (!Number.isFinite(min) || min <= 0 || !Number.isFinite(percentage)) {
+    return null;
+  }
+  const parsedMax = maxValue == null || maxValue === '' ? null : Number(maxValue);
+  const tier: FranchiseRoyaltyTierConfig = {
+    minOrder: Math.max(1, Math.floor(min)),
+    maxOrder: null,
+    percentage,
+  };
+  if (parsedMax !== null && Number.isFinite(parsedMax)) {
+    const normalisedMax = Math.floor(Number(parsedMax));
+    tier.maxOrder = Math.max(normalisedMax, tier.minOrder);
+  }
+  return tier;
+}
+
+function parseRoyaltyConfigDoc(raw: unknown): FranchiseRoyaltyConfigDoc {
+  const fallback = defaultRoyaltyConfig();
+  if (!raw || typeof raw !== 'object') {
+    return fallback;
+  }
+  const data = raw as Record<string, unknown>;
+  const tierValues: unknown = data.hqTiers ?? data.hq ?? data.slidingScale;
+  const tiers = Array.isArray(tierValues)
+    ? tierValues
+        .map((value) => parseRoyaltyTierDoc(value))
+        .filter((value): value is FranchiseRoyaltyTierConfig => value !== null)
+        .sort((a, b) => a.minOrder - b.minOrder)
+    : [];
+  const franchiseValue = Number(
+    data.franchiseSourcedPercentage ?? data.franchise ?? data.local ?? data.direct
+  );
+  const franchisePercentage = Number.isFinite(franchiseValue)
+    ? franchiseValue
+    : fallback.franchiseSourcedPercentage;
+  return {
+    hqTiers: tiers.length > 0 ? tiers : fallback.hqTiers,
+    franchiseSourcedPercentage: franchisePercentage,
+  };
+}
+
+function resolveRoyaltyTier(
+  config: FranchiseRoyaltyConfigDoc,
+  source: RoyaltySource,
+  orderIndex: number
+): { percentage: number; tier: FranchiseRoyaltyTierConfig | null } {
+  const fallback = defaultRoyaltyConfig();
+  if (source === 'franchisee') {
+    return {
+      percentage: config.franchiseSourcedPercentage ?? fallback.franchiseSourcedPercentage,
+      tier: null,
+    };
+  }
+  const tiers = (config.hqTiers?.length ? config.hqTiers : fallback.hqTiers).slice().sort((a, b) => a.minOrder - b.minOrder);
+  const index = Number(orderIndex);
+  if (!Number.isFinite(index) || index <= 0) {
+    const first = tiers[0] ?? fallback.hqTiers[0];
+    return { percentage: first.percentage, tier: first };
+  }
+  for (const tier of tiers) {
+    const withinLower = index >= tier.minOrder;
+    const withinUpper = tier.maxOrder == null || index <= tier.maxOrder;
+    if (withinLower && withinUpper) {
+      return { percentage: tier.percentage, tier };
+    }
+  }
+  const lastTier = tiers[tiers.length - 1] ?? fallback.hqTiers[fallback.hqTiers.length - 1];
+  return { percentage: lastTier.percentage, tier: lastTier };
+}
+
+type FranchiseAssignmentMatchType = 'exact' | 'prefix' | 'superset';
+
+interface FranchiseAssignmentResult {
+  franchiseId: string;
+  territoryId: string;
+  territoryLabel: string | null;
+  territoryPostalCode: string;
+  matchType: FranchiseAssignmentMatchType;
+  exclusive: boolean;
+}
+
+interface FranchiseAssignmentMember {
+  memberId: string;
+  userId: string;
+  role: string | null;
+  primary: boolean;
+  userProfile: { displayName?: string | null; email?: string | null } | null;
+}
+
+function normalisePostalCode(value?: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const cleaned = trimmed.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!cleaned) {
+    return null;
+  }
+  return cleaned;
+}
+
+function extractTerritoryPostalCodes(data: FranchiseTerritoryDoc): Array<{ raw: string; normalised: string }> {
+  const raw = data.postalCodes;
+  const list: string[] = [];
+  if (Array.isArray(raw)) {
+    raw.forEach((value) => {
+      if (value == null) {
+        return;
+      }
+      list.push(String(value));
+    });
+  } else if (typeof raw === 'string') {
+    raw
+      .split(/\r?\n|,/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .forEach((item) => list.push(item));
+  }
+  return list
+    .map((value) => {
+      const normalised = normalisePostalCode(value);
+      if (!normalised) {
+        return null;
+      }
+      return { raw: value, normalised };
+    })
+    .filter((item): item is { raw: string; normalised: string } => item !== null);
+}
+
+async function resolveTerritoryForPostalCode(postalCode: string): Promise<FranchiseAssignmentResult | null> {
+  const normalisedInput = normalisePostalCode(postalCode);
+  if (!normalisedInput) {
+    return null;
+  }
+  const territoriesSnap = await db.collection('franchiseTerritories').get();
+  let best: { score: number; result: FranchiseAssignmentResult } | null = null;
+  for (const territoryDoc of territoriesSnap.docs) {
+    const data = territoryDoc.data() as FranchiseTerritoryDoc;
+    if (!data?.franchiseId) {
+      continue;
+    }
+    if (data.type && data.type !== 'postal') {
+      // Radius-based routing requires geospatial inputs; skip for postal-only auto routing.
+      continue;
+    }
+    const codes = extractTerritoryPostalCodes(data);
+    for (const code of codes) {
+      if (!code.normalised) {
+        continue;
+      }
+      let matchType: FranchiseAssignmentMatchType | null = null;
+      let score = 0;
+      if (code.normalised === normalisedInput) {
+        matchType = 'exact';
+        score = 2000 + code.normalised.length;
+      } else if (normalisedInput.startsWith(code.normalised)) {
+        matchType = 'prefix';
+        score = 1200 + code.normalised.length;
+      } else if (code.normalised.startsWith(normalisedInput)) {
+        // Allow territories defined with full codes while customer provided a broader area.
+        matchType = 'superset';
+        score = 800 + normalisedInput.length;
+      }
+      if (!matchType) {
+        continue;
+      }
+      if (data.exclusive !== false) {
+        score += 50;
+      }
+      if (!best || score > best.score) {
+        best = {
+          score,
+          result: {
+            franchiseId: data.franchiseId as string,
+            territoryId: territoryDoc.id,
+            territoryLabel: typeof data.label === 'string' ? data.label : null,
+            territoryPostalCode: code.normalised,
+            matchType,
+            exclusive: data.exclusive !== false,
+          },
+        };
+      }
+    }
+  }
+  if (!best) {
+    return null;
+  }
+  return best.result;
+}
+
+async function resolvePrimaryFranchiseMember(franchiseId: string): Promise<FranchiseAssignmentMember | null> {
+  const membersSnap = await db
+    .collection('franchiseMembers')
+    .where('franchiseId', '==', franchiseId)
+    .get();
+  if (membersSnap.empty) {
+    return null;
+  }
+  const members = membersSnap.docs.map((doc) => {
+    const data = doc.data() as FranchiseMemberDoc;
+    return {
+      memberId: doc.id,
+      userId: data.userId ? String(data.userId) : '',
+      role: data.role ? String(data.role) : null,
+      primary: data.primary === true,
+    };
+  });
+  const prioritised =
+    members.find((member) => member.primary && member.userId) ||
+    members.find((member) => member.role === 'franchisee' && member.userId) ||
+    members.find((member) => member.userId) ||
+    null;
+  if (!prioritised) {
+    return null;
+  }
+  const userSnap = await db.collection('users').doc(prioritised.userId).get();
+  const profile = userSnap.exists
+    ? {
+        displayName: (userSnap.data()?.displayName as string) ?? null,
+        email: (userSnap.data()?.email as string) ?? null,
+      }
+    : null;
+  return {
+    memberId: prioritised.memberId,
+    userId: prioritised.userId,
+    role: prioritised.role,
+    primary: prioritised.primary,
+    userProfile: profile,
+  };
+}
 
 type RoleKey = 'admin' | 'operations' | 'finance' | 'projects' | 'sales' | 'marketing';
 
@@ -301,18 +587,43 @@ export const onOrderCreated = functions.firestore
 
     await snap.ref.set({ projectId: projRef.id }, { merge: true });
 
-    const projectBudgetData: Record<string, any> = {};
-    if (order.budgetTotals) projectBudgetData.budgetTotals = order.budgetTotals;
+    const filmingDueDate = new Date(Date.now() + DEFAULT_FILMING_SLA_DAYS * DAY_IN_MS);
+    const editingDueDate = new Date(Date.now() + DEFAULT_EDITING_SLA_DAYS * DAY_IN_MS);
+    const filmingDueAt = admin.firestore.Timestamp.fromDate(filmingDueDate);
+    const editingDueAt = admin.firestore.Timestamp.fromDate(editingDueDate);
+
+    const projectUpdates: Record<string, any> = {
+      kickoffDate: admin.firestore.FieldValue.serverTimestamp(),
+      dueDate: editingDueAt,
+      filmingDueDate: filmingDueAt,
+    };
+    if (order.budgetTotals) projectUpdates.budgetTotals = order.budgetTotals;
     const budgetItems = (order.items || []).map((item: any) => ({
       id: item.id,
       name: item.name,
       quantity: item.quantity,
       budget: item.budget || null,
     }));
-    if (budgetItems.length > 0) projectBudgetData.budgetItems = budgetItems;
-    if (Object.keys(projectBudgetData).length > 0) {
-      await projRef.set(projectBudgetData, { merge: true });
-    }
+    if (budgetItems.length > 0) projectUpdates.budgetItems = budgetItems;
+
+    projectUpdates.franchiseId = order.franchiseId || null;
+    projectUpdates.franchiseTerritoryId = order.franchiseTerritoryId || null;
+    projectUpdates.franchiseAssignment = order.franchiseAssignment || null;
+    projectUpdates.franchiseAssignedMemberId = order.franchiseAssignedMemberId || null;
+    projectUpdates.franchiseAssignedUserId = order.franchiseAssignedUserId || null;
+    projectUpdates.franchiseAssignedRole = order.franchiseAssignedRole || null;
+    projectUpdates.franchiseAssignedIsPrimary = order.franchiseAssignedIsPrimary === true;
+    projectUpdates.franchiseAssignedUser =
+      order.franchiseAssignedUser && typeof order.franchiseAssignedUser === 'object'
+        ? order.franchiseAssignedUser
+        : null;
+    projectUpdates.clientPostalCode = order.clientPostalCode || null;
+    projectUpdates.royalty = order.royalty || null;
+    projectUpdates.royaltyPercentage =
+      typeof order.royaltyPercentage === 'number' ? order.royaltyPercentage : null;
+    projectUpdates.royaltySource = order.royaltySource || null;
+
+    await projRef.set(projectUpdates, { merge: true });
 
     // Populate workflow/default tasks from the ordered product
     if (order.serviceId) {
@@ -320,6 +631,17 @@ export const onOrderCreated = functions.firestore
         const prodDoc = await db.collection('products').doc(order.serviceId).get();
         const prod = prodDoc.data() as any;
         const taskDocs: any[] = [];
+
+        const franchiseOperatorId =
+          typeof order.franchiseAssignedUserId === 'string'
+            ? String(order.franchiseAssignedUserId)
+            : null;
+        const franchiseOperatorName =
+          order.franchiseAssignedUser && typeof order.franchiseAssignedUser === 'object'
+            ? (order.franchiseAssignedUser.displayName as string | undefined) ||
+              (order.franchiseAssignedUser.email as string | undefined) ||
+              null
+            : null;
 
         // If the product references a workflow, load its tasks
         if (prod?.workflowId) {
@@ -402,6 +724,7 @@ export const onOrderCreated = functions.firestore
                 dependsOn,
                 workflowTaskId: typeof t.id === 'string' ? t.id : null,
                 dueAt,
+                dueDate: dueAt,
                 forCustomer: !!t.forCustomer,
                 status: 'todo',
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -427,6 +750,58 @@ export const onOrderCreated = functions.firestore
               assigneeName: null,
             });
           }
+        }
+
+        const filmingTaskTitle = 'Filming & Capture';
+        const hasFilmingTask = taskDocs.some((task) => {
+          const title = typeof task.title === 'string' ? task.title.toLowerCase() : '';
+          return title.includes('film');
+        });
+        if (!hasFilmingTask) {
+          taskDocs.push({
+            title: filmingTaskTitle,
+            description: 'Coordinate and complete the on-site shoot within the agreed SLA.',
+            subtasks: [
+              'Confirm shoot date, time, and location with the client.',
+              'Prepare kit, crew, and travel logistics for the territory.',
+              'Capture footage and upload raw files to the project workspace within 24 hours.',
+            ],
+            slaDays: DEFAULT_FILMING_SLA_DAYS,
+            dueAt: filmingDueAt,
+            dueDate: filmingDueAt,
+            forCustomer: false,
+            status: 'todo',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            assignedTo: franchiseOperatorId,
+            assigneeName: franchiseOperatorName,
+            assignmentScope: franchiseOperatorId ? 'franchise' : null,
+          });
+        }
+
+        const editingTaskTitle = 'Editing & Delivery';
+        const hasEditingTask = taskDocs.some((task) => {
+          const title = typeof task.title === 'string' ? task.title.toLowerCase() : '';
+          return title.includes('edit');
+        });
+        if (!hasEditingTask) {
+          taskDocs.push({
+            title: editingTaskTitle,
+            description: 'Ingest footage and deliver the first cut to HQ standards.',
+            subtasks: [
+              'Ingest and organise all footage in the project workspace.',
+              'Produce the first cut following Pineapple Tapped brand guidelines.',
+              'Submit edit for HQ quality check and client delivery.',
+            ],
+            slaDays: DEFAULT_EDITING_SLA_DAYS,
+            dueAt: editingDueAt,
+            dueDate: editingDueAt,
+            forCustomer: false,
+            status: 'todo',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            assignedTo: null,
+            assigneeName: null,
+            assignmentScope: null,
+          });
         }
 
         if (taskDocs.length) {
@@ -664,6 +1039,650 @@ export const reserveKit = functions.https.onCall(async (data) => {
   }
   await batch.commit();
   return { conflicts: [], kitItems, rentalTotal };
+});
+
+type NormalisedRoles = Record<string, boolean>;
+
+interface UserContext {
+  uid: string;
+  displayName: string | null;
+  email: string | null;
+  isStaff: boolean;
+  roles: NormalisedRoles;
+  franchiseIds: string[];
+  primaryFranchiseId: string | null;
+}
+
+function normaliseRoles(raw: unknown): NormalisedRoles {
+  if (!raw || typeof raw !== 'object') {
+    return {};
+  }
+  const roles: NormalisedRoles = {};
+  Object.entries(raw as Record<string, unknown>).forEach(([key, value]) => {
+    if (value === true) {
+      roles[key] = true;
+    }
+  });
+  return roles;
+}
+
+async function loadUserContext(uid: string): Promise<UserContext> {
+  const snap = await db.collection('users').doc(uid).get();
+  const data = (snap.data() as Record<string, unknown> | undefined) ?? {};
+  const roles = normaliseRoles(data.roles);
+  const displayName =
+    typeof data.displayName === 'string' && data.displayName.trim().length
+      ? data.displayName.trim()
+      : typeof data.fullName === 'string' && data.fullName.trim().length
+        ? data.fullName.trim()
+        : null;
+  const email = typeof data.email === 'string' && data.email.includes('@') ? data.email : null;
+  const rawPrimary =
+    typeof data.primaryFranchiseId === 'string' && data.primaryFranchiseId.trim().length
+      ? data.primaryFranchiseId.trim()
+      : null;
+  const rawFranchise =
+    typeof data.franchiseId === 'string' && data.franchiseId.trim().length
+      ? data.franchiseId.trim()
+      : null;
+  const franchiseIds = new Set<string>();
+  if (rawPrimary) {
+    franchiseIds.add(rawPrimary);
+  }
+  if (rawFranchise) {
+    franchiseIds.add(rawFranchise);
+  }
+  const extra = Array.isArray(data.franchiseIds)
+    ? (data.franchiseIds as unknown[]).filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : [];
+  extra.forEach((value) => franchiseIds.add(value.trim()));
+  const isStaff = data.isStaff === true || roles.admin === true || roles.operations === true || roles.projects === true;
+  return {
+    uid,
+    displayName,
+    email,
+    isStaff,
+    roles,
+    franchiseIds: Array.from(franchiseIds),
+    primaryFranchiseId: rawPrimary || rawFranchise || null,
+  };
+}
+
+type TaskOfferStatus = 'pending' | 'countered' | 'accepted' | 'rejected' | 'withdrawn';
+
+interface TaskOfferTerms {
+  currency: string;
+  totalAmount: number;
+  depositAmount: number;
+  balanceAmount: number;
+  paymentMode: 'deposit_balance' | 'balance_on_completion';
+  notes: string | null;
+}
+
+interface TaskOfferDoc extends TaskOfferTerms {
+  projectId: string;
+  taskId: string;
+  role: string | null;
+  status: TaskOfferStatus;
+  requesterUid: string;
+  requesterFranchiseId: string | null;
+  requesterName: string | null;
+  targetType: 'hq' | 'franchise';
+  targetFranchiseId: string | null;
+  targetUserId: string | null;
+  createdAt: FirebaseFirestore.FieldValue | FirebaseFirestore.Timestamp | null;
+  updatedAt: FirebaseFirestore.FieldValue | FirebaseFirestore.Timestamp | null;
+  respondedAt?: FirebaseFirestore.FieldValue | FirebaseFirestore.Timestamp | null;
+  respondedByUid?: string | null;
+  responseNotes?: string | null;
+  counterProposal?: TaskOfferTerms & {
+    proposedByUid: string;
+    proposedAt: FirebaseFirestore.FieldValue | FirebaseFirestore.Timestamp | null;
+  };
+  acceptedTerms?: TaskOfferTerms & {
+    acceptedByUid: string;
+    acceptedAt: FirebaseFirestore.FieldValue | FirebaseFirestore.Timestamp | null;
+  };
+}
+
+function parseCurrency(value: unknown): string {
+  if (typeof value === 'string' && value.trim().length >= 3) {
+    return value.trim().slice(0, 3).toUpperCase();
+  }
+  return 'GBP';
+}
+
+function parseMoney(value: unknown, fallback = 0): number {
+  const numeric = typeof value === 'string' ? Number(value) : Number(value);
+  if (!Number.isFinite(numeric) || Number.isNaN(numeric)) {
+    return fallback;
+  }
+  return Math.max(0, Math.round(numeric * 100) / 100);
+}
+
+function assertPositive(value: number, field: string) {
+  if (value < 0) {
+    throw new functions.https.HttpsError('invalid-argument', `${field} must be zero or positive.`);
+  }
+}
+
+async function assertFranchiseMembership(uid: string, franchiseId: string): Promise<boolean> {
+  const snap = await db
+    .collection('franchiseMembers')
+    .where('userId', '==', uid)
+    .where('franchiseId', '==', franchiseId)
+    .limit(1)
+    .get();
+  return !snap.empty;
+}
+
+export const taskOffers_create = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+  }
+  const uid = context.auth.uid;
+  const projectId = typeof data?.projectId === 'string' ? data.projectId.trim() : '';
+  const taskId = typeof data?.taskId === 'string' ? data.taskId.trim() : '';
+  if (!projectId || !taskId) {
+    throw new functions.https.HttpsError('invalid-argument', 'projectId and taskId are required');
+  }
+  const targetTypeRaw = typeof data?.targetType === 'string' ? data.targetType.trim().toLowerCase() : '';
+  if (targetTypeRaw !== 'hq' && targetTypeRaw !== 'franchise') {
+    throw new functions.https.HttpsError('invalid-argument', 'targetType must be "hq" or "franchise"');
+  }
+  const targetType = targetTypeRaw as 'hq' | 'franchise';
+  const targetFranchiseIdRaw = typeof data?.targetFranchiseId === 'string' ? data.targetFranchiseId.trim() : '';
+  const targetFranchiseId = targetType === 'franchise' ? targetFranchiseIdRaw : '';
+  if (targetType === 'franchise' && !targetFranchiseId) {
+    throw new functions.https.HttpsError('invalid-argument', 'targetFranchiseId is required for franchise offers');
+  }
+  const targetUserId = typeof data?.targetUserId === 'string' && data.targetUserId.trim().length
+    ? data.targetUserId.trim()
+    : null;
+  const role = typeof data?.role === 'string' && data.role.trim().length ? data.role.trim() : null;
+  const currency = parseCurrency(data?.currency);
+  const totalAmount = parseMoney(data?.totalAmount ?? data?.total ?? data?.feeTotal, NaN);
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+    throw new functions.https.HttpsError('invalid-argument', 'totalAmount must be greater than zero');
+  }
+  let paymentMode: 'deposit_balance' | 'balance_on_completion' =
+    data?.paymentMode === 'balance_on_completion' ? 'balance_on_completion' : 'deposit_balance';
+  let depositAmount = parseMoney(data?.depositAmount ?? data?.deposit, 0);
+  assertPositive(depositAmount, 'depositAmount');
+  if (paymentMode === 'balance_on_completion') {
+    depositAmount = 0;
+  }
+  if (depositAmount > totalAmount) {
+    throw new functions.https.HttpsError('invalid-argument', 'depositAmount cannot exceed totalAmount');
+  }
+  let balanceAmount = parseMoney(data?.balanceAmount ?? data?.balance, totalAmount - depositAmount);
+  if (paymentMode === 'deposit_balance') {
+    balanceAmount = Math.max(0, Math.round((totalAmount - depositAmount) * 100) / 100);
+  } else {
+    balanceAmount = totalAmount;
+  }
+  assertPositive(balanceAmount, 'balanceAmount');
+  const notes = typeof data?.notes === 'string' && data.notes.trim().length ? data.notes.trim() : null;
+
+  const [userContext, projectSnap, taskSnap] = await Promise.all([
+    loadUserContext(uid),
+    db.collection('projects').doc(projectId).get(),
+    db.collection('projects').doc(projectId).collection('tasks').doc(taskId).get(),
+  ]);
+
+  if (!projectSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'Project not found');
+  }
+  if (!taskSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'Task not found');
+  }
+
+  if (!userContext.isStaff && userContext.franchiseIds.length === 0) {
+    throw new functions.https.HttpsError('permission-denied', 'Franchise membership required to outsource tasks');
+  }
+
+  const proposerFranchiseId = userContext.primaryFranchiseId || userContext.franchiseIds[0] || null;
+  const projectData = projectSnap.data() as Record<string, unknown>;
+  const projectFranchiseId = typeof projectData.franchiseId === 'string' ? projectData.franchiseId : null;
+  if (!userContext.isStaff && projectFranchiseId && !userContext.franchiseIds.includes(projectFranchiseId)) {
+    // Ensure the proposer belongs to the franchise that owns the project
+    const hasMembership = await assertFranchiseMembership(uid, projectFranchiseId);
+    if (!hasMembership) {
+      throw new functions.https.HttpsError('permission-denied', 'You are not assigned to this franchise project');
+    }
+  }
+
+  const taskRef = db.collection('projects').doc(projectId).collection('tasks').doc(taskId);
+  const offerRef = taskRef.collection('offers').doc();
+  const timestamp = admin.firestore.FieldValue.serverTimestamp();
+  const offerDoc: TaskOfferDoc = {
+    projectId,
+    taskId,
+    role,
+    status: 'pending',
+    requesterUid: uid,
+    requesterFranchiseId: proposerFranchiseId,
+    requesterName: userContext.displayName || userContext.email || uid,
+    targetType,
+    targetFranchiseId: targetType === 'franchise' ? targetFranchiseId : null,
+    targetUserId,
+    currency,
+    totalAmount,
+    depositAmount,
+    balanceAmount,
+    paymentMode,
+    notes,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+
+  await offerRef.set(offerDoc);
+
+  const existingProposal = (taskSnap.data() as Record<string, unknown> | undefined)?.outsourcingProposal as
+    | Record<string, unknown>
+    | undefined;
+  const proposalPayload = {
+    ...existingProposal,
+    offerId: offerRef.id,
+    status: 'pending',
+    proposedByUid: uid,
+    proposedByFranchiseId: proposerFranchiseId,
+    proposedByName: userContext.displayName || userContext.email || uid,
+    targetType,
+    targetFranchiseId: targetType === 'franchise' ? targetFranchiseId : null,
+    targetUserId,
+    role,
+    currency,
+    totalAmount,
+    depositAmount,
+    balanceAmount,
+    paymentMode,
+    notes,
+    createdAt: existingProposal?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    respondedAt: null,
+    respondedByUid: null,
+    responseNotes: null,
+    counter: null,
+  };
+
+  await taskRef.set(
+    {
+      outsourcingProposal: proposalPayload,
+      outsourcingStatus: 'pending',
+    },
+    { merge: true }
+  );
+
+  await db.collection('taskHistory').add({
+    projectId,
+    taskId,
+    action: 'outsourcing_offer_created',
+    uid,
+    metadata: {
+      offerId: offerRef.id,
+      targetType,
+      targetFranchiseId: proposalPayload.targetFranchiseId,
+      targetUserId,
+      totalAmount,
+      currency,
+      paymentMode,
+    },
+    createdAt: timestamp,
+  });
+
+  return { offerId: offerRef.id };
+});
+
+export const taskOffers_respond = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+  }
+  const uid = context.auth.uid;
+  const projectId = typeof data?.projectId === 'string' ? data.projectId.trim() : '';
+  const taskId = typeof data?.taskId === 'string' ? data.taskId.trim() : '';
+  const offerId = typeof data?.offerId === 'string' ? data.offerId.trim() : '';
+  if (!projectId || !taskId || !offerId) {
+    throw new functions.https.HttpsError('invalid-argument', 'projectId, taskId, and offerId are required');
+  }
+  const actionRaw = typeof data?.action === 'string' ? data.action.trim().toLowerCase() : '';
+  if (!['accept', 'reject', 'counter', 'withdraw'].includes(actionRaw)) {
+    throw new functions.https.HttpsError('invalid-argument', 'Unsupported action');
+  }
+  const action = actionRaw as 'accept' | 'reject' | 'counter' | 'withdraw';
+  const notes = typeof data?.notes === 'string' && data.notes.trim().length ? data.notes.trim() : null;
+
+  const taskRef = db.collection('projects').doc(projectId).collection('tasks').doc(taskId);
+  const offerRef = taskRef.collection('offers').doc(offerId);
+
+  const [userContext, offerSnap, taskSnap] = await Promise.all([
+    loadUserContext(uid),
+    offerRef.get(),
+    taskRef.get(),
+  ]);
+
+  if (!offerSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'Offer not found');
+  }
+  const offer = offerSnap.data() as TaskOfferDoc;
+  if (offer.projectId !== projectId || offer.taskId !== taskId) {
+    throw new functions.https.HttpsError('failed-precondition', 'Offer does not match project/task');
+  }
+  const proposal = (taskSnap.data() as Record<string, unknown> | undefined)?.outsourcingProposal as
+    | Record<string, unknown>
+    | undefined;
+
+  const isRequester = offer.requesterUid === uid;
+  let isTargetFranchise =
+    offer.targetType === 'franchise' && offer.targetFranchiseId
+      ? userContext.franchiseIds.includes(offer.targetFranchiseId)
+      : false;
+  const isTargetHq = offer.targetType === 'hq' ? userContext.isStaff : false;
+
+  if (offer.targetType === 'franchise' && !isTargetFranchise && offer.targetFranchiseId) {
+    const hasMembership = await assertFranchiseMembership(uid, offer.targetFranchiseId);
+    if (hasMembership) {
+      userContext.franchiseIds.push(offer.targetFranchiseId);
+      isTargetFranchise = true;
+    }
+  }
+
+  const isTarget = isTargetFranchise || isTargetHq;
+
+  const timestamp = admin.firestore.FieldValue.serverTimestamp();
+
+  if (action === 'withdraw') {
+    if (!isRequester) {
+      throw new functions.https.HttpsError('permission-denied', 'Only the requester can withdraw an offer');
+    }
+    if (offer.status !== 'pending' && offer.status !== 'countered') {
+      throw new functions.https.HttpsError('failed-precondition', 'Only pending offers can be withdrawn');
+    }
+    await offerRef.set(
+      {
+        status: 'withdrawn',
+        respondedByUid: uid,
+        respondedAt: timestamp,
+        responseNotes: notes ?? null,
+        updatedAt: timestamp,
+      },
+      { merge: true }
+    );
+    if (proposal) {
+      await taskRef.set(
+        {
+          outsourcingProposal: {
+            ...proposal,
+            status: 'withdrawn',
+            respondedByUid: uid,
+            respondedAt: timestamp,
+            responseNotes: notes ?? null,
+            updatedAt: timestamp,
+          },
+          outsourcingStatus: 'withdrawn',
+        },
+        { merge: true }
+      );
+    }
+    await db.collection('taskHistory').add({
+      projectId,
+      taskId,
+      action: 'outsourcing_offer_withdrawn',
+      uid,
+      metadata: { offerId },
+      createdAt: timestamp,
+    });
+    return { status: 'withdrawn' };
+  }
+
+  if (action === 'counter') {
+    if (!isTarget) {
+      throw new functions.https.HttpsError('permission-denied', 'Only the recipient can counter an offer');
+    }
+    if (offer.status !== 'pending') {
+      throw new functions.https.HttpsError('failed-precondition', 'Only pending offers can be countered');
+    }
+    const counterCurrency = parseCurrency(data?.currency ?? offer.currency);
+    const counterTotal = parseMoney(data?.totalAmount ?? data?.total ?? offer.totalAmount, offer.totalAmount);
+    if (counterTotal <= 0) {
+      throw new functions.https.HttpsError('invalid-argument', 'Counter total must be greater than zero');
+    }
+    const counterMode: 'deposit_balance' | 'balance_on_completion' =
+      data?.paymentMode === 'balance_on_completion' ? 'balance_on_completion' : 'deposit_balance';
+    let counterDeposit = parseMoney(data?.depositAmount ?? data?.deposit, offer.depositAmount);
+    if (counterMode === 'balance_on_completion') {
+      counterDeposit = 0;
+    }
+    if (counterDeposit > counterTotal) {
+      throw new functions.https.HttpsError('invalid-argument', 'Counter deposit cannot exceed total');
+    }
+    let counterBalance = parseMoney(
+      data?.balanceAmount ?? data?.balance,
+      counterMode === 'deposit_balance' ? counterTotal - counterDeposit : counterTotal
+    );
+    if (counterMode === 'deposit_balance') {
+      counterBalance = Math.max(0, Math.round((counterTotal - counterDeposit) * 100) / 100);
+    } else {
+      counterBalance = counterTotal;
+    }
+    await offerRef.set(
+      {
+        status: 'countered',
+        counterProposal: {
+          currency: counterCurrency,
+          totalAmount: counterTotal,
+          depositAmount: counterDeposit,
+          balanceAmount: counterBalance,
+          paymentMode: counterMode,
+          notes,
+          proposedByUid: uid,
+          proposedAt: timestamp,
+        },
+        respondedByUid: uid,
+        respondedAt: timestamp,
+        responseNotes: notes ?? null,
+        updatedAt: timestamp,
+      },
+      { merge: true }
+    );
+    if (proposal) {
+      await taskRef.set(
+        {
+          outsourcingProposal: {
+            ...proposal,
+            status: 'countered',
+            counter: {
+              currency: counterCurrency,
+              totalAmount: counterTotal,
+              depositAmount: counterDeposit,
+              balanceAmount: counterBalance,
+              paymentMode: counterMode,
+              notes,
+              proposedByUid: uid,
+              proposedAt: timestamp,
+            },
+            respondedByUid: uid,
+            respondedAt: timestamp,
+            responseNotes: notes ?? null,
+            updatedAt: timestamp,
+          },
+          outsourcingStatus: 'countered',
+        },
+        { merge: true }
+      );
+    }
+    await db.collection('taskHistory').add({
+      projectId,
+      taskId,
+      action: 'outsourcing_offer_countered',
+      uid,
+      metadata: { offerId, totalAmount: counterTotal, currency: counterCurrency },
+      createdAt: timestamp,
+    });
+    return { status: 'countered' };
+  }
+
+  if (action === 'reject') {
+    const canRejectTarget = isTarget && offer.status === 'pending';
+    const canRejectRequester = isRequester && offer.status === 'countered';
+    if (!canRejectTarget && !canRejectRequester) {
+      throw new functions.https.HttpsError('permission-denied', 'You cannot reject this offer');
+    }
+    await offerRef.set(
+      {
+        status: 'rejected',
+        respondedByUid: uid,
+        respondedAt: timestamp,
+        responseNotes: notes ?? null,
+        updatedAt: timestamp,
+      },
+      { merge: true }
+    );
+    if (proposal) {
+      await taskRef.set(
+        {
+          outsourcingProposal: {
+            ...proposal,
+            status: 'rejected',
+            respondedByUid: uid,
+            respondedAt: timestamp,
+            responseNotes: notes ?? null,
+            updatedAt: timestamp,
+          },
+          outsourcingStatus: 'rejected',
+        },
+        { merge: true }
+      );
+    }
+    await db.collection('taskHistory').add({
+      projectId,
+      taskId,
+      action: 'outsourcing_offer_rejected',
+      uid,
+      metadata: { offerId },
+      createdAt: timestamp,
+    });
+    return { status: 'rejected' };
+  }
+
+  if (action === 'accept') {
+    const acceptingTarget = isTarget && offer.status === 'pending';
+    const acceptingRequester = isRequester && offer.status === 'countered';
+    if (!acceptingTarget && !acceptingRequester) {
+      throw new functions.https.HttpsError('permission-denied', 'You cannot accept this offer');
+    }
+    const terms = offer.status === 'countered' && offer.counterProposal
+      ? {
+          currency: offer.counterProposal.currency,
+          totalAmount: offer.counterProposal.totalAmount,
+          depositAmount: offer.counterProposal.depositAmount,
+          balanceAmount: offer.counterProposal.balanceAmount,
+          paymentMode: offer.counterProposal.paymentMode,
+          notes: offer.counterProposal.notes ?? null,
+        }
+      : {
+          currency: offer.currency,
+          totalAmount: offer.totalAmount,
+          depositAmount: offer.depositAmount,
+          balanceAmount: offer.balanceAmount,
+          paymentMode: offer.paymentMode,
+          notes: offer.notes ?? null,
+        };
+
+    await offerRef.set(
+      {
+        status: 'accepted',
+        acceptedTerms: {
+          ...terms,
+          acceptedByUid: uid,
+          acceptedAt: timestamp,
+        },
+        respondedByUid: uid,
+        respondedAt: timestamp,
+        responseNotes: notes ?? null,
+        updatedAt: timestamp,
+      },
+      { merge: true }
+    );
+
+    let assigneeName: string | null = null;
+    const assignmentScope = offer.targetType === 'franchise' ? 'franchise' : 'hq';
+    const assignedTo = offer.targetUserId || null;
+    if (assignedTo) {
+      const assigneeSnap = await db.collection('users').doc(assignedTo).get();
+      const assigneeData = assigneeSnap.data() as Record<string, unknown> | undefined;
+      if (assigneeData) {
+        assigneeName =
+          (typeof assigneeData.displayName === 'string' && assigneeData.displayName.trim().length
+            ? assigneeData.displayName.trim()
+            : null) ||
+          (typeof assigneeData.fullName === 'string' && assigneeData.fullName.trim().length
+            ? assigneeData.fullName.trim()
+            : null) ||
+          (typeof assigneeData.email === 'string' ? assigneeData.email : null);
+      }
+    }
+
+    const agreement = {
+      offerId,
+      providerType: offer.targetType,
+      providerFranchiseId: offer.targetType === 'franchise' ? offer.targetFranchiseId ?? null : null,
+      providerUserId: offer.targetUserId || null,
+      currency: terms.currency,
+      totalAmount: terms.totalAmount,
+      depositAmount: terms.depositAmount,
+      balanceAmount: terms.balanceAmount,
+      paymentMode: terms.paymentMode,
+      notes: terms.notes ?? null,
+      acceptedAt: timestamp,
+      acceptedByUid: uid,
+      responseNotes: notes ?? null,
+    };
+
+    const taskUpdate: Record<string, unknown> = {
+      outsourcingAgreement: agreement,
+      outsourcingStatus: 'accepted',
+      assignmentScope,
+      updatedAt: timestamp,
+    };
+    if (assignedTo || offer.targetType === 'hq') {
+      taskUpdate.assignedTo = assignedTo;
+      taskUpdate.assigneeName = assigneeName;
+    }
+    if (proposal) {
+      taskUpdate.outsourcingProposal = {
+        ...proposal,
+        status: 'accepted',
+        respondedByUid: uid,
+        respondedAt: timestamp,
+        responseNotes: notes ?? null,
+        updatedAt: timestamp,
+        acceptedTerms: agreement,
+      };
+    }
+
+    await taskRef.set(taskUpdate, { merge: true });
+
+    await db.collection('taskHistory').add({
+      projectId,
+      taskId,
+      action: 'outsourcing_offer_accepted',
+      uid,
+      metadata: {
+        offerId,
+        providerType: offer.targetType,
+        providerFranchiseId: agreement.providerFranchiseId,
+        providerUserId: agreement.providerUserId,
+        totalAmount: terms.totalAmount,
+        currency: terms.currency,
+      },
+      createdAt: timestamp,
+    });
+
+    return { status: 'accepted' };
+  }
+
+  throw new functions.https.HttpsError('internal', 'Unhandled action');
 });
 
 async function sendEmail(to: string, subject: string, body: string) {
@@ -1648,16 +2667,46 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     customerName,
     companyName,
     location,
+    postalCode,
     projectName,
     voucher,
     kitItems = [],
     rentalSubtotal = 0,
+    leadSource: leadSourceInput,
   } = data;
   if (!items || !Array.isArray(items) || items.length === 0) {
     throw new functions.https.HttpsError('invalid-argument', 'items are required');
   }
 
   const productRefs = items.map((i: any) => db.collection('products').doc(i.id));
+  const leadSourceNormalised: RoyaltySource =
+    typeof leadSourceInput === 'string' && leadSourceInput.toLowerCase().includes('franchise')
+      ? 'franchisee'
+      : 'hq';
+  const authEmail =
+    typeof context.auth?.token.email === 'string' ? (context.auth.token.email as string) : null;
+  const requestEmail = typeof userEmail === 'string' ? (userEmail as string) : null;
+  const preferredEmail = authEmail || requestEmail;
+  const normalisedEmail = preferredEmail ? preferredEmail.trim().toLowerCase() : null;
+  const clientRoyaltyKeyType: 'user_id' | 'email' | null = context.auth?.uid
+    ? 'user_id'
+    : normalisedEmail
+      ? 'email'
+      : null;
+  const clientRoyaltyKey =
+    clientRoyaltyKeyType === 'user_id'
+      ? `uid:${context.auth?.uid as string}`
+      : clientRoyaltyKeyType === 'email' && normalisedEmail
+        ? `email:${normalisedEmail}`
+        : null;
+  let clientRoyaltyOrderIndex: number | null = null;
+  if (clientRoyaltyKey) {
+    const priorOrdersSnap = await db
+      .collection('orders')
+      .where('clientRoyaltyKey', '==', clientRoyaltyKey)
+      .get();
+    clientRoyaltyOrderIndex = priorOrdersSnap.size + 1;
+  }
   const productSnaps = await db.getAll(...productRefs);
   const orderItems: any[] = [];
   let productSubtotal = 0;
@@ -1802,12 +2851,74 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     profit,
   };
 
-  const orderRef = await db.collection('orders').add({
+  const postalCodeValue = typeof postalCode === 'string' ? postalCode : null;
+  const normalisedPostalCode = normalisePostalCode(postalCodeValue);
+  const assignmentResult = normalisedPostalCode
+    ? await resolveTerritoryForPostalCode(normalisedPostalCode)
+    : null;
+  const assignmentMember = assignmentResult
+    ? await resolvePrimaryFranchiseMember(assignmentResult.franchiseId)
+    : null;
+
+  const assignmentMeta: Record<string, any> = {
+    strategy: 'postal_code_auto_route',
+    inputPostalCode: postalCodeValue || null,
+    normalizedPostalCode: normalisedPostalCode || null,
+    status: assignmentResult
+      ? 'matched'
+      : normalisedPostalCode
+        ? 'unmatched'
+        : 'skipped',
+    resolvedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+
+  let royaltyAssessment: Record<string, any> | null = null;
+  if (assignmentResult?.franchiseId) {
+    try {
+      const franchiseDoc = await db.collection('franchises').doc(assignmentResult.franchiseId).get();
+      if (franchiseDoc.exists) {
+        const franchiseData = franchiseDoc.data() as any;
+        const royaltyConfig = parseRoyaltyConfigDoc(franchiseData?.royalty);
+        const orderIndexForRoyalty = clientRoyaltyOrderIndex ?? 1;
+        const resolution = resolveRoyaltyTier(royaltyConfig, leadSourceNormalised, orderIndexForRoyalty);
+        royaltyAssessment = {
+          source: leadSourceNormalised,
+          orderIndex: orderIndexForRoyalty,
+          previousOrdersCount: orderIndexForRoyalty > 0 ? orderIndexForRoyalty - 1 : 0,
+          percentage: resolution.percentage,
+          tier: resolution.tier
+            ? {
+                minOrder: resolution.tier.minOrder,
+                maxOrder: resolution.tier.maxOrder,
+                percentage: resolution.tier.percentage,
+              }
+            : null,
+          configSnapshot: {
+            hqTiers: royaltyConfig.hqTiers.map((tier) => ({
+              minOrder: tier.minOrder,
+              maxOrder: tier.maxOrder,
+              percentage: tier.percentage,
+            })),
+            franchiseSourcedPercentage: royaltyConfig.franchiseSourcedPercentage,
+          },
+          clientKey: clientRoyaltyKey,
+          clientKeyType: clientRoyaltyKeyType,
+          computedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+      }
+    } catch (royaltyErr) {
+      console.warn('Failed to resolve royalty configuration', royaltyErr);
+    }
+  }
+
+  const orderData: Record<string, any> = {
     userId: context.auth?.uid || null,
     userEmail: context.auth?.token.email || userEmail || null,
     customerName,
     companyName: companyName || null,
     location: location || null,
+    clientPostalCode: postalCodeValue || null,
+    clientPostalCodeNormalised: normalisedPostalCode || null,
     projectName: projectName || null,
     voucher: voucherCode,
     items: orderItems,
@@ -1829,7 +2940,60 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     profit,
     status: 'pending',
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+    franchiseAssignment: assignmentMeta,
+    royaltySource: leadSourceNormalised,
+    clientRoyaltyKey: clientRoyaltyKey || null,
+    clientRoyaltyKeyType: clientRoyaltyKeyType || null,
+    clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
+  };
+
+  if (assignmentResult) {
+    orderData.franchiseId = assignmentResult.franchiseId;
+    orderData.franchiseTerritoryId = assignmentResult.territoryId;
+    assignmentMeta.matchType = assignmentResult.matchType;
+    assignmentMeta.franchiseId = assignmentResult.franchiseId;
+    assignmentMeta.territoryId = assignmentResult.territoryId;
+    assignmentMeta.territoryPostalCode = assignmentResult.territoryPostalCode;
+    assignmentMeta.territoryLabel = assignmentResult.territoryLabel;
+    assignmentMeta.exclusive = assignmentResult.exclusive;
+  } else {
+    orderData.franchiseId = null;
+    orderData.franchiseTerritoryId = null;
+  }
+
+  if (assignmentMember) {
+    orderData.franchiseAssignedMemberId = assignmentMember.memberId;
+    orderData.franchiseAssignedUserId = assignmentMember.userId;
+    orderData.franchiseAssignedRole = assignmentMember.role || null;
+    orderData.franchiseAssignedIsPrimary = assignmentMember.primary;
+    orderData.franchiseAssignedUser = assignmentMember.userProfile
+      ? {
+          uid: assignmentMember.userId,
+          displayName: assignmentMember.userProfile.displayName || null,
+          email: assignmentMember.userProfile.email || null,
+        }
+      : {
+          uid: assignmentMember.userId,
+          displayName: null,
+          email: null,
+        };
+  } else {
+    orderData.franchiseAssignedMemberId = null;
+    orderData.franchiseAssignedUserId = null;
+    orderData.franchiseAssignedRole = null;
+    orderData.franchiseAssignedIsPrimary = false;
+    orderData.franchiseAssignedUser = null;
+  }
+
+  if (royaltyAssessment) {
+    orderData.royalty = royaltyAssessment;
+    orderData.royaltyPercentage = royaltyAssessment.percentage;
+  } else {
+    orderData.royalty = null;
+    orderData.royaltyPercentage = null;
+  }
+
+  const orderRef = await db.collection('orders').add(orderData);
 
   return { orderId: orderRef.id };
 });

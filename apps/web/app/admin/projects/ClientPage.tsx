@@ -14,6 +14,12 @@ interface StaffOption {
   email?: string | null;
 }
 
+interface FranchiseOption {
+  id: string;
+  name: string;
+  code?: string | null;
+}
+
 type ProjectPriority = 'low' | 'medium' | 'high' | '';
 
 interface ProjectRecord {
@@ -28,6 +34,23 @@ interface ProjectRecord {
   kickoffDate?: Timestamp | Date | null;
   dueDate?: Timestamp | Date | null;
   priority?: ProjectPriority | string | null;
+  franchiseId?: string | null;
+  franchiseTerritoryId?: string | null;
+  franchiseAssignment?: {
+    territoryLabel?: string | null;
+    territoryPostalCode?: string | null;
+    [key: string]: any;
+  } | null;
+  franchiseAssignedUserId?: string | null;
+  franchiseAssignedMemberId?: string | null;
+  franchiseAssignedRole?: string | null;
+  franchiseAssignedIsPrimary?: boolean | null;
+  franchiseAssignedUser?: {
+    displayName?: string | null;
+    email?: string | null;
+    [key: string]: any;
+  } | null;
+  clientPostalCode?: string | null;
   [key: string]: any;
 }
 
@@ -84,11 +107,13 @@ export default function AdminProjectsPage() {
   const { allowed, loading: guardLoading } = useRoleGate(['admin', 'projects']);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [staff, setStaff] = useState<StaffOption[]>([]);
+  const [franchises, setFranchises] = useState<FranchiseOption[]>([]);
   const [view, setView] = useState<'kanban' | 'list'>('kanban');
   const [filter, setFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [ownerFilter, setOwnerFilter] = useState('');
   const [dueFilter, setDueFilter] = useState<'all' | 'overdue' | 'week' | 'month' | 'none'>('all');
+  const [franchiseFilter, setFranchiseFilter] = useState<'all' | '__unassigned' | string>('all');
   const [groupBy, setGroupBy] = useState<'status' | 'owner' | 'due'>('status');
 
   useEffect(() => {
@@ -163,9 +188,48 @@ export default function AdminProjectsPage() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+
+    (async () => {
+      if (guardLoading || !allowed) return;
+      try {
+        const { db } = await ensureFirebase();
+        if (!db) {
+          throw new Error('Firestore is unavailable');
+        }
+        const snap = await getDocs(collection(db, 'franchises'));
+        if (!active) return;
+        const items = snap.docs
+          .map((doc) => {
+            const data = doc.data() as Record<string, any>;
+            const rawName = typeof data.name === 'string' ? data.name.trim() : '';
+            const rawCode = typeof data.code === 'string' ? data.code.trim() : '';
+            return {
+              id: doc.id,
+              name: rawName || rawCode || doc.id,
+              code: rawCode || null,
+            } satisfies FranchiseOption;
+          })
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setFranchises(items);
+      } catch (err) {
+        console.error('Failed to load franchises', err);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [allowed, guardLoading]);
+
   const staffMap = useMemo(() => {
     return new Map(staff.map((member) => [member.uid, member] as const));
   }, [staff]);
+
+  const franchiseMap = useMemo(() => {
+    return new Map(franchises.map((franchise) => [franchise.id, franchise] as const));
+  }, [franchises]);
 
   const resolveDb = useCallback(async () => {
     const { db } = await ensureFirebase();
@@ -236,6 +300,28 @@ export default function AdminProjectsPage() {
     [updateProject]
   );
 
+  const resolveFranchiseContext = useCallback(
+    (project: ProjectRecord) => {
+      const franchise = project.franchiseId ? franchiseMap.get(project.franchiseId) : undefined;
+      const assignment = project.franchiseAssignment || null;
+      const territoryLabel =
+        assignment && typeof assignment === 'object'
+          ? (assignment.territoryLabel as string | undefined) ||
+            (assignment.territoryPostalCode as string | undefined) ||
+            null
+          : null;
+      const operator =
+        (project.franchiseAssignedUser && typeof project.franchiseAssignedUser === 'object'
+          ? (project.franchiseAssignedUser.displayName as string | undefined) ||
+            (project.franchiseAssignedUser.email as string | undefined)
+          : null) ||
+        (typeof project.franchiseAssignedUserId === 'string' ? project.franchiseAssignedUserId : null);
+      const franchiseLabel = franchise?.name || (project.franchiseId ? String(project.franchiseId) : null);
+      return { franchise, franchiseLabel, territoryLabel, operator };
+    },
+    [franchiseMap]
+  );
+
   const resolveDueBucket = useCallback((project: ProjectRecord) => {
     const due = coerceDate(project.dueDate);
     const today = new Date();
@@ -284,9 +370,15 @@ export default function AdminProjectsPage() {
           matchesDue = bucket === 'week' || bucket === 'month';
         }
       }
-      return matchesText && matchesStatus && matchesOwner && matchesDue;
+      const matchesFranchise =
+        franchiseFilter === 'all'
+          ? true
+          : franchiseFilter === '__unassigned'
+            ? !project.franchiseId
+            : project.franchiseId === franchiseFilter;
+      return matchesText && matchesStatus && matchesOwner && matchesDue && matchesFranchise;
     });
-  }, [projects, filter, statusFilter, ownerFilter, dueFilter, resolveDueBucket]);
+  }, [projects, filter, statusFilter, ownerFilter, dueFilter, resolveDueBucket, franchiseFilter]);
 
   const groupedColumns = useMemo(() => {
     if (groupBy === 'owner') {
@@ -384,6 +476,19 @@ export default function AdminProjectsPage() {
           ))}
         </select>
         <select
+          value={franchiseFilter}
+          onChange={(e) => setFranchiseFilter(e.target.value)}
+          className="input max-w-xs"
+        >
+          <option value="all">All franchises</option>
+          <option value="__unassigned">Unassigned</option>
+          {franchises.map((franchise) => (
+            <option key={franchise.id} value={franchise.id}>
+              {franchise.name}
+            </option>
+          ))}
+        </select>
+        <select
           value={dueFilter}
           onChange={(e) => setDueFilter(e.target.value as typeof dueFilter)}
           className="input max-w-xs"
@@ -419,6 +524,7 @@ export default function AdminProjectsPage() {
               <tr className="bg-gray-100 text-left">
                 <th className="p-2">Title</th>
                 <th className="p-2">Client</th>
+                <th className="p-2">Franchise</th>
                 <th className="p-2">Assignee</th>
                 <th className="p-2">Kickoff</th>
                 <th className="p-2">Due</th>
@@ -433,6 +539,25 @@ export default function AdminProjectsPage() {
                 <tr key={p.id} className="border-t">
                   <td className="p-2 align-top">{p.title || 'Untitled'}</td>
                   <td className="p-2 align-top">{p.userEmail || '-'}</td>
+                  <td className="p-2 align-top">
+                    {(() => {
+                      const { franchiseLabel, territoryLabel, operator } = resolveFranchiseContext(p);
+                      if (!franchiseLabel) {
+                        return <span className="text-xs text-gray-500">Unassigned</span>;
+                      }
+                      return (
+                        <div className="grid gap-1">
+                          <span className="font-medium text-sm">{franchiseLabel}</span>
+                          {territoryLabel && (
+                            <span className="text-xs text-gray-500">Territory: {territoryLabel}</span>
+                          )}
+                          {operator && (
+                            <span className="text-xs text-gray-500">Operator: {operator}</span>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </td>
                   <td className="p-2 align-top">
                     <select
                       value={p.ownerUid || ''}
@@ -550,6 +675,18 @@ export default function AdminProjectsPage() {
                           {formatDateDisplay(project.dueDate)}
                         </span>
                       </div>
+                      {(() => {
+                        const { franchiseLabel, territoryLabel, operator } = resolveFranchiseContext(project);
+                        return (
+                          <div className="grid gap-1 text-xs text-gray-600">
+                            <span className={franchiseLabel ? 'font-medium text-gray-700' : 'text-gray-400'}>
+                              Franchise: {franchiseLabel || 'Unassigned'}
+                            </span>
+                            {territoryLabel && <span>Territory: {territoryLabel}</span>}
+                            {operator && <span>Operator: {operator}</span>}
+                          </div>
+                        );
+                      })()}
                       <div className="flex flex-wrap gap-2 text-xs text-gray-600">
                         {project.ownerUid && staffMap.get(project.ownerUid)?.label && (
                           <span className="rounded-full bg-gray-100 px-2 py-1">

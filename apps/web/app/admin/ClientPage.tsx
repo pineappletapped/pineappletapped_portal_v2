@@ -269,6 +269,7 @@ export default function AdminPage() {
                 { href: '/admin/users', label: 'CRM' },
                 { href: '/admin/team', label: 'Manage Team' },
                 { href: '/admin/join-team-steps', label: 'Join Team Form' },
+                { href: '/admin/franchises', label: 'Franchise Network' },
               ],
             },
             {

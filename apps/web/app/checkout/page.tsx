@@ -42,6 +42,7 @@ export default function CheckoutPage() {
   const [name, setName] = useState("");
   const [company, setCompany] = useState("");
   const [location, setLocation] = useState("");
+  const [postalCode, setPostalCode] = useState("");
   const [projectName, setProjectName] = useState("");
   const [voucher, setVoucher] = useState("");
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -70,8 +71,10 @@ export default function CheckoutPage() {
       customerName: name,
       companyName: company || null,
       location: location || null,
+      postalCode: postalCode || null,
       projectName: projectName || null,
       voucher: voucher || null,
+      leadSource: "hq" as const,
     };
   }, [
     items,
@@ -81,6 +84,7 @@ export default function CheckoutPage() {
     name,
     company,
     location,
+    postalCode,
     projectName,
     voucher,
   ]);
@@ -228,6 +232,10 @@ export default function CheckoutPage() {
     }
     if (!orderInput.customerName) {
       setPaymentError("Please enter your name before continuing.");
+      return false;
+    }
+    if (!orderInput.postalCode) {
+      setPaymentError("Please provide a postcode for the shoot location.");
       return false;
     }
     if (!stripePromise) {
@@ -379,6 +387,13 @@ export default function CheckoutPage() {
             placeholder="Shooting Location"
             value={location}
             onChange={(e) => setLocation(e.target.value)}
+          />
+          <input
+            className="input input-bordered w-full"
+            placeholder="Postcode"
+            value={postalCode}
+            onChange={(e) => setPostalCode(e.target.value.toUpperCase())}
+            required
           />
           <input
             className="input input-bordered w-full"
