@@ -42,14 +42,19 @@ const DAY_IN_MS = 86_400_000;
 const DEFAULT_FILMING_SLA_DAYS = 7;
 const DEFAULT_EDITING_SLA_DAYS = 14;
 
+type FranchiseTerritoryType = 'postal' | 'radius';
+
 type FranchiseTerritoryDoc = {
   franchiseId?: string;
   label?: string;
-  type?: string;
+  type?: FranchiseTerritoryType | string;
   postalCodes?: unknown;
   exclusive?: boolean;
   categories?: unknown;
   licenseFee?: number;
+  radiusKm?: number;
+  centerLat?: number;
+  centerLng?: number;
 };
 
 type FranchiseMemberDoc = {
@@ -161,7 +166,7 @@ function resolveRoyaltyTier(
   return { percentage: lastTier.percentage, tier: lastTier };
 }
 
-type FranchiseAssignmentMatchType = 'exact' | 'prefix' | 'superset';
+type FranchiseAssignmentMatchType = 'exact' | 'prefix' | 'superset' | 'radius';
 
 interface FranchiseAssignmentResult {
   franchiseId: string;
@@ -170,6 +175,12 @@ interface FranchiseAssignmentResult {
   territoryPostalCode: string;
   matchType: FranchiseAssignmentMatchType;
   exclusive: boolean;
+  radiusMatch?: {
+    distanceKm: number;
+    radiusKm: number;
+    centerLat: number;
+    centerLng: number;
+  } | null;
 }
 
 interface FranchiseAssignmentMember {
@@ -223,6 +234,79 @@ function extractTerritoryPostalCodes(data: FranchiseTerritoryDoc): Array<{ raw: 
     .filter((item): item is { raw: string; normalised: string } => item !== null);
 }
 
+const POSTAL_CODE_GEO_CACHE_TTL_MS = 86_400_000; // 24 hours
+const postalCodeGeoCache = new Map<string, { lat: number; lng: number; expiresAt: number }>();
+
+function haversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const R = 6371; // Earth radius in km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distance = R * c;
+  return Number.isFinite(distance) ? distance : Number.NaN;
+}
+
+async function geocodePostalCodeLocation(postalCode: string): Promise<{ lat: number; lng: number } | null> {
+  const key = postalCode.trim().toUpperCase();
+  if (!key) {
+    return null;
+  }
+  const now = Date.now();
+  const cached = postalCodeGeoCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return { lat: cached.lat, lng: cached.lng };
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(
+      `https://api.postcodes.io/postcodes/${encodeURIComponent(key)}`,
+      {
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      }
+    );
+    if (!response.ok) {
+      if (response.status !== 404) {
+        console.warn('Postal code geocode lookup failed', key, response.status, response.statusText);
+      }
+      if (cached) {
+        return { lat: cached.lat, lng: cached.lng };
+      }
+      return null;
+    }
+    const payload = (await response.json()) as any;
+    const latitude = Number(payload?.result?.latitude);
+    const longitude = Number(payload?.result?.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      console.warn('Postal code geocode response missing coordinates', key, payload?.result);
+      if (cached) {
+        return { lat: cached.lat, lng: cached.lng };
+      }
+      return null;
+    }
+    postalCodeGeoCache.set(key, {
+      lat: latitude,
+      lng: longitude,
+      expiresAt: now + POSTAL_CODE_GEO_CACHE_TTL_MS,
+    });
+    return { lat: latitude, lng: longitude };
+  } catch (error) {
+    console.warn('Postal code geocode lookup error', key, error);
+    if (cached) {
+      return { lat: cached.lat, lng: cached.lng };
+    }
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function resolveTerritoryForPostalCode(postalCode: string): Promise<FranchiseAssignmentResult | null> {
   const normalisedInput = normalisePostalCode(postalCode);
   if (!normalisedInput) {
@@ -230,52 +314,109 @@ async function resolveTerritoryForPostalCode(postalCode: string): Promise<Franch
   }
   const territoriesSnap = await db.collection('franchiseTerritories').get();
   let best: { score: number; result: FranchiseAssignmentResult } | null = null;
+  let geocodedLocation: { lat: number; lng: number } | null = null;
+  let attemptedGeocode = false;
   for (const territoryDoc of territoriesSnap.docs) {
     const data = territoryDoc.data() as FranchiseTerritoryDoc;
     if (!data?.franchiseId) {
       continue;
     }
-    if (data.type && data.type !== 'postal') {
-      // Radius-based routing requires geospatial inputs; skip for postal-only auto routing.
+    const type: FranchiseTerritoryType =
+      typeof data.type === 'string' && data.type.toLowerCase() === 'radius' ? 'radius' : 'postal';
+    if (type === 'postal') {
+      const codes = extractTerritoryPostalCodes(data);
+      for (const code of codes) {
+        if (!code.normalised) {
+          continue;
+        }
+        let matchType: FranchiseAssignmentMatchType | null = null;
+        let score = 0;
+        if (code.normalised === normalisedInput) {
+          matchType = 'exact';
+          score = 2000 + code.normalised.length;
+        } else if (normalisedInput.startsWith(code.normalised)) {
+          matchType = 'prefix';
+          score = 1200 + code.normalised.length;
+        } else if (code.normalised.startsWith(normalisedInput)) {
+          // Allow territories defined with full codes while customer provided a broader area.
+          matchType = 'superset';
+          score = 800 + normalisedInput.length;
+        }
+        if (!matchType) {
+          continue;
+        }
+        if (data.exclusive !== false) {
+          score += 50;
+        }
+        if (!best || score > best.score) {
+          best = {
+            score,
+            result: {
+              franchiseId: data.franchiseId as string,
+              territoryId: territoryDoc.id,
+              territoryLabel: typeof data.label === 'string' ? data.label : null,
+              territoryPostalCode: code.normalised,
+              matchType,
+              exclusive: data.exclusive !== false,
+              radiusMatch: null,
+            },
+          };
+        }
+      }
       continue;
     }
-    const codes = extractTerritoryPostalCodes(data);
-    for (const code of codes) {
-      if (!code.normalised) {
-        continue;
-      }
-      let matchType: FranchiseAssignmentMatchType | null = null;
-      let score = 0;
-      if (code.normalised === normalisedInput) {
-        matchType = 'exact';
-        score = 2000 + code.normalised.length;
-      } else if (normalisedInput.startsWith(code.normalised)) {
-        matchType = 'prefix';
-        score = 1200 + code.normalised.length;
-      } else if (code.normalised.startsWith(normalisedInput)) {
-        // Allow territories defined with full codes while customer provided a broader area.
-        matchType = 'superset';
-        score = 800 + normalisedInput.length;
-      }
-      if (!matchType) {
-        continue;
-      }
-      if (data.exclusive !== false) {
-        score += 50;
-      }
-      if (!best || score > best.score) {
-        best = {
-          score,
-          result: {
-            franchiseId: data.franchiseId as string,
-            territoryId: territoryDoc.id,
-            territoryLabel: typeof data.label === 'string' ? data.label : null,
-            territoryPostalCode: code.normalised,
-            matchType,
-            exclusive: data.exclusive !== false,
+
+    if (attemptedGeocode && !geocodedLocation) {
+      continue;
+    }
+    if (!attemptedGeocode) {
+      attemptedGeocode = true;
+      geocodedLocation = await geocodePostalCodeLocation(normalisedInput);
+    }
+    if (!geocodedLocation) {
+      continue;
+    }
+    const radiusKm = Number(data.radiusKm);
+    const centerLat = Number(data.centerLat);
+    const centerLng = Number(data.centerLng);
+    if (!Number.isFinite(radiusKm) || radiusKm <= 0) {
+      continue;
+    }
+    if (!Number.isFinite(centerLat) || !Number.isFinite(centerLng)) {
+      continue;
+    }
+    const distanceKm = haversineDistanceKm(
+      geocodedLocation.lat,
+      geocodedLocation.lng,
+      centerLat,
+      centerLng
+    );
+    if (!Number.isFinite(distanceKm) || distanceKm > radiusKm * 1.01) {
+      continue;
+    }
+    const coverageRatio = Math.min(Math.max(1 - distanceKm / radiusKm, 0), 1);
+    let score = 1500 + Math.round(coverageRatio * 400);
+    if (data.exclusive !== false) {
+      score += 50;
+    }
+    if (!best || score > best.score) {
+      best = {
+        score,
+        result: {
+          franchiseId: data.franchiseId as string,
+          territoryId: territoryDoc.id,
+          territoryLabel: typeof data.label === 'string' ? data.label : null,
+          territoryPostalCode: normalisedInput,
+          matchType: 'radius',
+          exclusive: data.exclusive !== false,
+          radiusMatch: {
+            distanceKm,
+            radiusKm,
+            centerLat,
+            centerLng,
           },
-        };
-      }
+        },
+      };
     }
   }
   if (!best) {
@@ -2956,6 +3097,17 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     assignmentMeta.territoryPostalCode = assignmentResult.territoryPostalCode;
     assignmentMeta.territoryLabel = assignmentResult.territoryLabel;
     assignmentMeta.exclusive = assignmentResult.exclusive;
+    if (assignmentResult.matchType === 'radius') {
+      assignmentMeta.strategy = 'radius_auto_route';
+      assignmentMeta.radiusMatch = assignmentResult.radiusMatch
+        ? {
+            distanceKm: assignmentResult.radiusMatch.distanceKm,
+            radiusKm: assignmentResult.radiusMatch.radiusKm,
+            centerLat: assignmentResult.radiusMatch.centerLat,
+            centerLng: assignmentResult.radiusMatch.centerLng,
+          }
+        : null;
+    }
   } else {
     orderData.franchiseId = null;
     orderData.franchiseTerritoryId = null;
