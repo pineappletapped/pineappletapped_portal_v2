@@ -1,10 +1,62 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { auth, db } from '@/lib/firebase';
+import { auth, db, ensureFirebase, functions, httpsCallable } from '@/lib/firebase';
 import { collection, getDoc, doc, getDocs, addDoc, updateDoc, serverTimestamp, query, where, orderBy } from 'firebase/firestore';
 import { extractUserRoles, hasRole } from '@/lib/roles';
+
+type PaymentMode = 'deposit_balance' | 'balance_on_completion';
+
+interface OfferFormState {
+  role: string;
+  targetType: 'hq' | 'franchise';
+  targetFranchiseId: string;
+  targetUserId: string;
+  totalAmount: string;
+  depositAmount: string;
+  paymentMode: PaymentMode;
+  currency: string;
+  notes: string;
+}
+
+interface CounterFormState {
+  taskId: string | null;
+  totalAmount: string;
+  depositAmount: string;
+  paymentMode: PaymentMode;
+  currency: string;
+  notes: string;
+}
+
+interface UserContextState {
+  uid: string | null;
+  franchiseIds: string[];
+  canManage: boolean;
+  canOutsource: boolean;
+  isHq: boolean;
+}
+
+const OFFER_FORM_DEFAULTS: OfferFormState = {
+  role: '',
+  targetType: 'hq',
+  targetFranchiseId: '',
+  targetUserId: '',
+  totalAmount: '',
+  depositAmount: '',
+  paymentMode: 'deposit_balance',
+  currency: 'GBP',
+  notes: '',
+};
+
+const COUNTER_FORM_DEFAULTS: CounterFormState = {
+  taskId: null,
+  totalAmount: '',
+  depositAmount: '',
+  paymentMode: 'deposit_balance',
+  currency: 'GBP',
+  notes: '',
+};
 
 /**
  * Project Tasks Board
@@ -25,55 +77,206 @@ export default function ProjectTasksPage() {
   const [assignedTo, setAssignedTo] = useState('');
   const [members, setMembers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [franchises, setFranchises] = useState<any[]>([]);
+  const [userContext, setUserContext] = useState<UserContextState>({
+    uid: null,
+    franchiseIds: [],
+    canManage: false,
+    canOutsource: false,
+    isHq: false,
+  });
+  const [activeOfferTaskId, setActiveOfferTaskId] = useState<string | null>(null);
+  const [offerForm, setOfferForm] = useState<OfferFormState>({ ...OFFER_FORM_DEFAULTS });
+  const [offerSubmitting, setOfferSubmitting] = useState(false);
+  const [actionState, setActionState] = useState<string | null>(null);
+  const [counterState, setCounterState] = useState<CounterFormState>({ ...COUNTER_FORM_DEFAULTS });
+
+  const franchiseMap = useMemo(() => {
+    const map = new Map<string, any>();
+    franchises.forEach((item) => {
+      if (item?.id) {
+        map.set(item.id, item);
+      }
+    });
+    return map;
+  }, [franchises]);
+
+  const formatCurrency = useCallback((value: unknown, currency?: string | null) => {
+    const numeric = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(numeric)) {
+      return '';
+    }
+    const safeCurrency = currency && typeof currency === 'string' ? currency : 'GBP';
+    try {
+      return new Intl.NumberFormat(undefined, { style: 'currency', currency: safeCurrency }).format(numeric);
+    } catch (err) {
+      console.warn('Unable to format currency', err);
+      return `${safeCurrency} ${numeric.toFixed(2)}`;
+    }
+  }, []);
+
+  const formatMoney = useCallback(
+    (amount: unknown, currency?: string | null) => {
+      const formatted = formatCurrency(amount, currency);
+      if (formatted) {
+        return formatted;
+      }
+      if (typeof amount === 'number' && Number.isFinite(amount)) {
+        return `${currency || 'GBP'} ${amount.toFixed(2)}`;
+      }
+      if (typeof amount === 'string' && amount.trim()) {
+        return `${currency || 'GBP'} ${amount.trim()}`;
+      }
+      return '';
+    },
+    [formatCurrency]
+  );
+
+  const reloadTasks = useCallback(async () => {
+    if (!projectId) return;
+    const tSnap = await getDocs(
+      query(collection(db, 'projects', projectId, 'tasks'), orderBy('createdAt', 'desc'))
+    );
+    setTasks(tSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  }, [projectId]);
+
+  const primaryActionClasses =
+    'rounded bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50';
+  const dangerActionClasses =
+    'rounded bg-rose-600 px-3 py-1 text-xs font-semibold text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50';
+  const secondaryActionClasses =
+    'rounded border border-gray-300 px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50';
 
   // Load project and tasks
   useEffect(() => {
+    let active = true;
     (async () => {
       if (!projectId) return;
-      const pDoc = await getDoc(doc(db, 'projects', projectId));
-      if (!pDoc.exists()) { setProject(null); setLoading(false); return; }
-      const proj = pDoc.data() as any;
-      setProject(proj);
-      // Determine if user is staff or client_admin of the org
-      const user = auth.currentUser;
-      if (!user) { setIsStaffOrAdmin(false); } else {
-        const uSnap = await getDoc(doc(db, 'users', user.uid));
-        const me = uSnap.data() as any;
-        const roles = extractUserRoles(me);
-        let canEdit = hasRole(roles, ['admin', 'projects']);
-        // Check membership role
-        const memDoc = await getDoc(doc(db, 'memberships', proj.orgId + '_' + user.uid));
-        if (memDoc.exists()) {
-          const mem = memDoc.data() as any;
-          if (mem.role === 'client_admin') canEdit = true;
+      try {
+        const projectSnap = await getDoc(doc(db, 'projects', projectId));
+        if (!active) return;
+        if (!projectSnap.exists()) {
+          setProject(null);
+          setTasks([]);
+          setMembers([]);
+          setIsStaffOrAdmin(false);
+          setUserContext({ uid: null, franchiseIds: [], canManage: false, canOutsource: false, isHq: false });
+          setLoading(false);
+          return;
         }
-        setIsStaffOrAdmin(canEdit);
+
+        const proj = projectSnap.data() as any;
+        setProject(proj);
+
+        const user = auth.currentUser;
+        if (!user) {
+          setIsStaffOrAdmin(false);
+          setUserContext({ uid: null, franchiseIds: [], canManage: false, canOutsource: false, isHq: false });
+        } else {
+          const userSnap = await getDoc(doc(db, 'users', user.uid));
+          if (!active) return;
+          const me = userSnap.data() as any;
+          const roles = extractUserRoles(me);
+          let canEdit = hasRole(roles, ['admin', 'projects']);
+          if (proj?.orgId) {
+            const membershipSnap = await getDoc(doc(db, 'memberships', `${proj.orgId}_${user.uid}`));
+            if (!active) return;
+            if (membershipSnap.exists()) {
+              const membership = membershipSnap.data() as any;
+              if (membership?.role === 'client_admin') {
+                canEdit = true;
+              }
+            }
+          }
+          setIsStaffOrAdmin(canEdit);
+          const franchiseIds = new Set<string>();
+          if (typeof me?.primaryFranchiseId === 'string' && me.primaryFranchiseId.trim()) {
+            franchiseIds.add(me.primaryFranchiseId.trim());
+          }
+          if (typeof me?.franchiseId === 'string' && me.franchiseId.trim()) {
+            franchiseIds.add(me.franchiseId.trim());
+          }
+          if (Array.isArray(me?.franchiseIds)) {
+            me.franchiseIds.forEach((value: unknown) => {
+              if (typeof value === 'string' && value.trim()) {
+                franchiseIds.add(value.trim());
+              }
+            });
+          }
+          setUserContext({
+            uid: user.uid,
+            franchiseIds: Array.from(franchiseIds),
+            canManage: canEdit,
+            canOutsource: canEdit || franchiseIds.size > 0,
+            isHq: canEdit,
+          });
+        }
+
+        await reloadTasks();
+        if (!active) return;
+
+        if (proj?.orgId) {
+          const memSnap = await getDocs(query(collection(db, 'memberships'), where('orgId', '==', proj.orgId)));
+          if (!active) return;
+          const mems = memSnap.docs.map((d) => d.data() as any);
+          const userSnaps = await Promise.all(mems.map((m) => getDoc(doc(db, 'users', m.userId))));
+          if (!active) return;
+          setMembers(
+            mems.map((m, i) => {
+              const userSnap = userSnaps[i];
+              const data = userSnap.data() as any;
+              return {
+                uid: m.userId,
+                name: data?.displayName || data?.email || 'Unnamed',
+              };
+            })
+          );
+        } else {
+          setMembers([]);
+        }
+      } catch (err) {
+        console.error('Failed to load project tasks', err);
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
       }
-      // Load tasks
-      const tSnap = await getDocs(
-        query(collection(db, 'projects', projectId, 'tasks'), orderBy('createdAt', 'desc'))
-      );
-      setTasks(tSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      // Load members for assignment
-      const memSnap = await getDocs(query(collection(db, 'memberships'), where('orgId', '==', proj.orgId)));
-      const mems = memSnap.docs.map((d) => d.data() as any);
-      const userSnaps = await Promise.all(mems.map((m) => getDoc(doc(db, 'users', m.userId))));
-      setMembers(
-        mems.map((m, i) => {
-          const u = userSnaps[i];
-          const data = u.data() as any;
-          return {
-            uid: m.userId,
-            name: data?.displayName || data?.email || 'Unnamed',
-          };
-        })
-      );
-      setLoading(false);
     })();
-  }, [projectId]);
+
+    return () => {
+      active = false;
+    };
+  }, [projectId, reloadTasks]);
+
+  useEffect(() => {
+    if (!projectId || !userContext.canOutsource) return;
+    let active = true;
+    (async () => {
+      try {
+        const snap = await getDocs(collection(db, 'franchises'));
+        if (!active) return;
+        const items = snap.docs.map((docSnap) => {
+          const data = docSnap.data() as any;
+          return {
+            id: docSnap.id,
+            name: data?.name || docSnap.id,
+            code: data?.code || null,
+          };
+        });
+        setFranchises(items);
+      } catch (err) {
+        console.error('Failed to load franchises', err);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [projectId, userContext.canOutsource]);
 
   const addTask = async () => {
     if (!title.trim()) { alert('Task title is required'); return; }
+    if (!projectId) { alert('Project is unavailable.'); return; }
     try {
       // Create the task doc
       const taskRef = await addDoc(collection(db, 'projects', projectId, 'tasks'), {
@@ -96,11 +299,11 @@ export default function ProjectTasksPage() {
         uid: user ? user.uid : null,
         createdAt: serverTimestamp(),
       });
-      const snap = await getDocs(
-        query(collection(db, 'projects', projectId, 'tasks'), orderBy('createdAt', 'desc'))
-      );
-      setTasks(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      setTitle(''); setDescription(''); setDueDate(''); setAssignedTo('');
+      await reloadTasks();
+      setTitle('');
+      setDescription('');
+      setDueDate('');
+      setAssignedTo('');
     } catch (err: any) {
       console.error(err);
       alert(err.message || 'Error creating task');
@@ -108,6 +311,7 @@ export default function ProjectTasksPage() {
   };
 
   const updateTaskStatus = async (taskId: string, newStatus: string) => {
+    if (!projectId) { alert('Project is unavailable.'); return; }
     try {
       // Read current status to record history
       const current = tasks.find((t) => t.id === taskId);
@@ -124,7 +328,7 @@ export default function ProjectTasksPage() {
         uid: user ? user.uid : null,
         createdAt: serverTimestamp(),
       });
-      setTasks(tasks.map((t) => t.id === taskId ? { ...t, status: newStatus } : t));
+      await reloadTasks();
     } catch (err: any) {
       console.error(err);
       alert(err.message || 'Error updating task');
@@ -132,21 +336,157 @@ export default function ProjectTasksPage() {
   };
 
   const updateTaskAssignee = async (taskId: string, uid: string) => {
+    if (!projectId) { alert('Project is unavailable.'); return; }
     try {
       const member = members.find((m) => m.uid === uid);
       await updateDoc(doc(db, 'projects', projectId, 'tasks', taskId), {
         assignedTo: uid || null,
         assigneeName: member?.name || null,
       });
-      setTasks(
-        tasks.map((t) =>
-          t.id === taskId ? { ...t, assignedTo: uid || null, assigneeName: member?.name || null } : t
-        )
-      );
+      await reloadTasks();
     } catch (err: any) {
       console.error(err);
       alert(err.message || 'Error assigning task');
     }
+  };
+
+  const openOfferForm = (taskId: string) => {
+    setActiveOfferTaskId(taskId);
+    setOfferForm({ ...OFFER_FORM_DEFAULTS });
+  };
+
+  const closeOfferForm = () => {
+    setActiveOfferTaskId(null);
+    setOfferForm({ ...OFFER_FORM_DEFAULTS });
+  };
+
+  const submitOffer = async (taskId: string) => {
+    if (!projectId) { alert('Project is unavailable.'); return; }
+    if (!offerForm.totalAmount.trim()) {
+      alert('Enter a total amount for the outsourced work.');
+      return;
+    }
+    if (offerForm.targetType === 'franchise' && !offerForm.targetFranchiseId) {
+      alert('Select a franchise to send the offer to.');
+      return;
+    }
+    setOfferSubmitting(true);
+    try {
+      await ensureFirebase();
+      const callable = httpsCallable(functions, 'taskOffers_create');
+      await callable({
+        projectId,
+        taskId,
+        role: offerForm.role || null,
+        targetType: offerForm.targetType,
+        targetFranchiseId: offerForm.targetType === 'franchise' ? offerForm.targetFranchiseId : null,
+        targetUserId: offerForm.targetUserId || null,
+        totalAmount: offerForm.totalAmount,
+        depositAmount:
+          offerForm.paymentMode === 'deposit_balance' ? offerForm.depositAmount || '0' : '0',
+        paymentMode: offerForm.paymentMode,
+        currency: offerForm.currency || 'GBP',
+        notes: offerForm.notes || null,
+      });
+      await reloadTasks();
+      closeOfferForm();
+    } catch (err: any) {
+      console.error('Failed to submit outsourcing offer', err);
+      alert(err?.message || 'Unable to submit outsourcing offer.');
+    } finally {
+      setOfferSubmitting(false);
+    }
+  };
+
+  const respondToOffer = async (
+    taskId: string,
+    offerId: string,
+    action: 'accept' | 'reject' | 'withdraw' | 'counter',
+    payload: Record<string, unknown> = {}
+  ) => {
+    if (!projectId) { alert('Project is unavailable.'); return; }
+    setActionState(`${taskId}:${action}`);
+    try {
+      await ensureFirebase();
+      const callable = httpsCallable(functions, 'taskOffers_respond');
+      await callable({
+        projectId,
+        taskId,
+        offerId,
+        action,
+        ...payload,
+      });
+      await reloadTasks();
+      if (action === 'counter') {
+        setCounterState({ ...COUNTER_FORM_DEFAULTS });
+      }
+    } catch (err: any) {
+      console.error('Failed to update outsourcing offer', err);
+      alert(err?.message || 'Unable to update offer.');
+    } finally {
+      setActionState(null);
+    }
+  };
+
+  const openCounterForm = (taskId: string, proposal: any) => {
+    const baseCurrency =
+      typeof proposal?.counter?.currency === 'string' && proposal.counter.currency
+        ? proposal.counter.currency
+        : typeof proposal?.currency === 'string' && proposal.currency
+          ? proposal.currency
+          : 'GBP';
+    const defaultModeValue =
+      (proposal?.counter?.paymentMode ?? proposal?.paymentMode) === 'balance_on_completion'
+        ? 'balance_on_completion'
+        : 'deposit_balance';
+    const defaultTotal =
+      typeof proposal?.counter?.totalAmount === 'number'
+        ? String(proposal.counter.totalAmount)
+        : typeof proposal?.totalAmount === 'number'
+          ? String(proposal.totalAmount)
+          : '';
+    const defaultDeposit =
+      defaultModeValue === 'deposit_balance'
+        ? typeof (proposal?.counter?.depositAmount ?? proposal?.depositAmount) === 'number'
+          ? String(proposal?.counter?.depositAmount ?? proposal?.depositAmount)
+          : ''
+        : '';
+    setCounterState({
+      taskId,
+      totalAmount: defaultTotal,
+      depositAmount: defaultDeposit,
+      paymentMode: defaultModeValue as PaymentMode,
+      currency: baseCurrency,
+      notes: '',
+    });
+  };
+
+  const cancelCounterForm = () => {
+    setCounterState({ ...COUNTER_FORM_DEFAULTS });
+  };
+
+  const submitCounter = async () => {
+    if (!projectId) { alert('Project is unavailable.'); return; }
+    if (!counterState.taskId) { alert('No task selected for counter offer.'); return; }
+    if (!counterState.totalAmount.trim()) {
+      alert('Enter a counter total amount.');
+      return;
+    }
+    const task = tasks.find((t) => t.id === counterState.taskId);
+    const proposal = task?.outsourcingProposal as any;
+    const offerId = proposal?.offerId;
+    if (!offerId) {
+      alert('Unable to find the active offer to counter.');
+      return;
+    }
+    await respondToOffer(counterState.taskId, offerId, 'counter', {
+      totalAmount: counterState.totalAmount,
+      depositAmount:
+        counterState.paymentMode === 'deposit_balance' ? counterState.depositAmount || '0' : '0',
+      paymentMode: counterState.paymentMode,
+      currency: counterState.currency || proposal?.currency || 'GBP',
+      notes: counterState.notes || null,
+    });
   };
 
   if (loading) return <p>Loading…</p>;
@@ -177,30 +517,552 @@ export default function ProjectTasksPage() {
               <p className="text-sm text-gray-500">No tasks</p>
             ) : (
               <div className="flex flex-col gap-2">
-                {tasks.filter((t) => t.status === status).map((task) => (
-                  <div key={task.id} className="card p-2 grid gap-1">
-                    <p className="font-medium text-sm">{task.title}</p>
-                    {task.description && <p className="text-xs text-gray-600">{task.description}</p>}
-                    {task.dueDate && <p className="text-xs text-gray-500">Due: {task.dueDate}</p>}
-                    <p className="text-xs text-gray-600">Assigned: {task.assigneeName || 'Unassigned'}</p>
-                    {isStaffOrAdmin && (
-                      <>
-                        <select className="input mt-1" value={task.status} onChange={(e) => updateTaskStatus(task.id, e.target.value)}>
-                          <option value="todo">To Do</option>
-                          <option value="in_progress">In Progress</option>
-                          <option value="review">Review</option>
-                          <option value="done">Done</option>
-                        </select>
-                        <select className="input mt-1" value={task.assignedTo || ''} onChange={(e) => updateTaskAssignee(task.id, e.target.value)}>
-                          <option value="">Unassigned</option>
-                          {members.map((m) => (
-                            <option key={m.uid} value={m.uid}>{m.name}</option>
-                          ))}
-                        </select>
-                      </>
-                    )}
-                  </div>
-                ))}
+                {tasks
+                  .filter((t) => t.status === status)
+                  .map((task) => {
+                    const proposal = task.outsourcingProposal as any;
+                    const agreement = task.outsourcingAgreement as any;
+                    const offerId = typeof proposal?.offerId === 'string' ? proposal.offerId : null;
+                    const offerStatus = typeof proposal?.status === 'string' ? proposal.status : null;
+                    const hasOpenOffer = offerStatus === 'pending' || offerStatus === 'countered';
+                    const allowNewOffer =
+                      userContext.canOutsource &&
+                      (!proposal || offerStatus === 'rejected' || offerStatus === 'withdrawn') &&
+                      !agreement;
+                    const userFranchiseIds = userContext.franchiseIds || [];
+                    const userIsRequester = proposal?.proposedByUid === userContext.uid;
+                    const userIsTarget =
+                      proposal?.targetType === 'hq'
+                        ? userContext.isHq
+                        : proposal?.targetFranchiseId
+                          ? userFranchiseIds.includes(proposal.targetFranchiseId)
+                          : false;
+                    const awaitingTargetDecision = offerStatus === 'pending' && userIsTarget;
+                    const awaitingRequesterDecision = offerStatus === 'countered' && userIsRequester;
+                    const canWithdraw =
+                      userIsRequester &&
+                      offerId &&
+                      (offerStatus === 'pending' || offerStatus === 'countered');
+                    const showCounterForm =
+                      counterState.taskId === task.id &&
+                      (awaitingTargetDecision || awaitingRequesterDecision);
+                    const franchiseLabel =
+                      proposal?.targetType === 'franchise'
+                        ? franchiseMap.get(proposal.targetFranchiseId)?.name || proposal.targetFranchiseId
+                        : 'Head Office';
+                    const statusLabel = offerStatus ? offerStatus.replace(/_/g, ' ') : 'pending';
+
+                    return (
+                      <div key={task.id} className="card grid gap-2 p-3">
+                        <p className="font-medium text-sm">{task.title}</p>
+                        {task.description && (
+                          <p className="text-xs text-gray-600">{task.description}</p>
+                        )}
+                        {task.dueDate && (
+                          <p className="text-xs text-gray-500">Due: {task.dueDate}</p>
+                        )}
+                        <p className="text-xs text-gray-600">
+                          Assigned: {task.assigneeName || 'Unassigned'}
+                        </p>
+                        {isStaffOrAdmin && (
+                          <div className="grid gap-2">
+                            <select
+                              className="input mt-1"
+                              value={task.status}
+                              onChange={(event) => updateTaskStatus(task.id, event.target.value)}
+                            >
+                              <option value="todo">To Do</option>
+                              <option value="in_progress">In Progress</option>
+                              <option value="review">Review</option>
+                              <option value="done">Done</option>
+                            </select>
+                            <select
+                              className="input"
+                              value={task.assignedTo || ''}
+                              onChange={(event) => updateTaskAssignee(task.id, event.target.value)}
+                            >
+                              <option value="">Unassigned</option>
+                              {members.map((m) => (
+                                <option key={m.uid} value={m.uid}>
+                                  {m.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+
+                        {proposal && (
+                          <div className="mt-2 space-y-2 rounded border border-dashed border-gray-300 p-2 text-xs text-gray-600">
+                            <div className="flex items-center justify-between">
+                              <span className="font-semibold uppercase tracking-wide text-gray-500">
+                                Outsourcing offer
+                              </span>
+                              <span className="text-[11px] font-semibold uppercase text-gray-700">
+                                {statusLabel}
+                              </span>
+                            </div>
+                            <div className="space-y-1">
+                              <p>Target: {franchiseLabel}</p>
+                              {proposal.role && <p>Role: {proposal.role}</p>}
+                              <p>Fee: {formatMoney(proposal.totalAmount, proposal.currency) || '—'}</p>
+                              {proposal.paymentMode === 'deposit_balance' ? (
+                                <p>
+                                  Deposit: {formatMoney(proposal.depositAmount, proposal.currency) || '—'} ·
+                                  Balance: {formatMoney(proposal.balanceAmount, proposal.currency) || '—'}
+                                </p>
+                              ) : (
+                                <p>Payment: Balance on completion</p>
+                              )}
+                              {proposal.notes && (
+                                <p className="text-gray-500">Notes: {proposal.notes}</p>
+                              )}
+                            </div>
+                            {proposal.counter && offerStatus === 'countered' && (
+                              <div className="rounded bg-amber-50 p-2 text-amber-700">
+                                <p className="font-semibold">Counter offer pending review</p>
+                                <p>
+                                  Total:{' '}
+                                  {formatMoney(
+                                    proposal.counter.totalAmount,
+                                    proposal.counter.currency
+                                  ) || '—'}
+                                </p>
+                                {proposal.counter.paymentMode === 'deposit_balance' ? (
+                                  <p>
+                                    Deposit:{' '}
+                                    {formatMoney(
+                                      proposal.counter.depositAmount,
+                                      proposal.counter.currency
+                                    ) || '—'}
+                                    {' · '}Balance:{' '}
+                                    {formatMoney(
+                                      proposal.counter.balanceAmount,
+                                      proposal.counter.currency
+                                    ) || '—'}
+                                  </p>
+                                ) : (
+                                  <p>Payment: Balance on completion</p>
+                                )}
+                                {proposal.counter.notes && (
+                                  <p className="text-amber-800">Notes: {proposal.counter.notes}</p>
+                                )}
+                              </div>
+                            )}
+                            {agreement && (
+                              <div className="rounded bg-emerald-50 p-2 text-emerald-700">
+                                <p className="font-semibold">Accepted outsourcing agreement</p>
+                                <p>
+                                  Total: {formatMoney(agreement.totalAmount, agreement.currency) || '—'}
+                                </p>
+                                {agreement.paymentMode === 'deposit_balance' ? (
+                                  <p>
+                                    Deposit:{' '}
+                                    {formatMoney(agreement.depositAmount, agreement.currency) || '—'}
+                                    {' · '}Balance:{' '}
+                                    {formatMoney(agreement.balanceAmount, agreement.currency) || '—'}
+                                  </p>
+                                ) : (
+                                  <p>Payment: Balance on completion</p>
+                                )}
+                              </div>
+                            )}
+                            {(awaitingTargetDecision || awaitingRequesterDecision || canWithdraw) && offerId && (
+                              <div className="flex flex-wrap gap-2">
+                                {awaitingTargetDecision && (
+                                  <>
+                                    <button
+                                      className={primaryActionClasses}
+                                      onClick={() => respondToOffer(task.id, offerId, 'accept')}
+                                      disabled={actionState === `${task.id}:accept`}
+                                    >
+                                      {actionState === `${task.id}:accept` ? 'Accepting…' : 'Accept'}
+                                    </button>
+                                    <button
+                                      className={dangerActionClasses}
+                                      onClick={() => respondToOffer(task.id, offerId, 'reject')}
+                                      disabled={actionState === `${task.id}:reject`}
+                                    >
+                                      {actionState === `${task.id}:reject` ? 'Rejecting…' : 'Reject'}
+                                    </button>
+                                    <button
+                                      className={secondaryActionClasses}
+                                      onClick={() => openCounterForm(task.id, proposal)}
+                                      disabled={showCounterForm && actionState === `${task.id}:counter`}
+                                    >
+                                      Counter
+                                    </button>
+                                  </>
+                                )}
+                                {awaitingRequesterDecision && (
+                                  <>
+                                    <button
+                                      className={primaryActionClasses}
+                                      onClick={() => respondToOffer(task.id, offerId, 'accept')}
+                                      disabled={actionState === `${task.id}:accept`}
+                                    >
+                                      {actionState === `${task.id}:accept`
+                                        ? 'Accepting…'
+                                        : 'Accept counter'}
+                                    </button>
+                                    <button
+                                      className={dangerActionClasses}
+                                      onClick={() => respondToOffer(task.id, offerId, 'reject')}
+                                      disabled={actionState === `${task.id}:reject`}
+                                    >
+                                      {actionState === `${task.id}:reject`
+                                        ? 'Rejecting…'
+                                        : 'Decline counter'}
+                                    </button>
+                                    <button
+                                      className={secondaryActionClasses}
+                                      onClick={() =>
+                                        openCounterForm(task.id, proposal.counter ?? proposal)
+                                      }
+                                      disabled={showCounterForm && actionState === `${task.id}:counter`}
+                                    >
+                                      Counter again
+                                    </button>
+                                  </>
+                                )}
+                                {canWithdraw && (
+                                  <button
+                                    className={secondaryActionClasses}
+                                    onClick={() => respondToOffer(task.id, offerId, 'withdraw')}
+                                    disabled={actionState === `${task.id}:withdraw`}
+                                  >
+                                    {actionState === `${task.id}:withdraw`
+                                      ? 'Withdrawing…'
+                                      : 'Withdraw offer'}
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                            {showCounterForm && (
+                              <div className="space-y-2 rounded border border-amber-200 bg-amber-50 p-3 text-amber-800">
+                                <div className="grid gap-2">
+                                  <div>
+                                    <label className="block text-[11px] font-semibold uppercase">
+                                      Counter total
+                                    </label>
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      className="input mt-1"
+                                      value={counterState.totalAmount}
+                                      onChange={(event) =>
+                                        setCounterState((prev) => ({
+                                          ...prev,
+                                          totalAmount: event.target.value,
+                                        }))
+                                      }
+                                    />
+                                  </div>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label className="block text-[11px] font-semibold uppercase">
+                                        Currency
+                                      </label>
+                                      <input
+                                        type="text"
+                                        className="input mt-1"
+                                        value={counterState.currency}
+                                        onChange={(event) =>
+                                          setCounterState((prev) => ({
+                                            ...prev,
+                                            currency: event.target.value,
+                                          }))
+                                        }
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-[11px] font-semibold uppercase">
+                                        Payment schedule
+                                      </label>
+                                      <select
+                                        className="input mt-1"
+                                        value={counterState.paymentMode}
+                                        onChange={(event) => {
+                                          const mode = event.target.value as PaymentMode;
+                                          setCounterState((prev) => ({
+                                            ...prev,
+                                            paymentMode: mode,
+                                            depositAmount:
+                                              mode === 'deposit_balance' ? prev.depositAmount : '',
+                                          }));
+                                        }}
+                                      >
+                                        <option value="deposit_balance">Deposit + balance</option>
+                                        <option value="balance_on_completion">Balance on completion</option>
+                                      </select>
+                                    </div>
+                                  </div>
+                                  {counterState.paymentMode === 'deposit_balance' && (
+                                    <div>
+                                      <label className="block text-[11px] font-semibold uppercase">
+                                        Deposit amount
+                                      </label>
+                                      <input
+                                        type="number"
+                                        step="0.01"
+                                        className="input mt-1"
+                                        value={counterState.depositAmount}
+                                        onChange={(event) =>
+                                          setCounterState((prev) => ({
+                                            ...prev,
+                                            depositAmount: event.target.value,
+                                          }))
+                                        }
+                                      />
+                                    </div>
+                                  )}
+                                  <div>
+                                    <label className="block text-[11px] font-semibold uppercase">
+                                      Notes (optional)
+                                    </label>
+                                    <textarea
+                                      className="input mt-1"
+                                      rows={2}
+                                      value={counterState.notes}
+                                      onChange={(event) =>
+                                        setCounterState((prev) => ({
+                                          ...prev,
+                                          notes: event.target.value,
+                                        }))
+                                      }
+                                    />
+                                  </div>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    className={primaryActionClasses}
+                                    onClick={submitCounter}
+                                    disabled={actionState === `${task.id}:counter`}
+                                  >
+                                    {actionState === `${task.id}:counter`
+                                      ? 'Sending…'
+                                      : 'Send counter'}
+                                  </button>
+                                  <button
+                                    className={secondaryActionClasses}
+                                    onClick={cancelCounterForm}
+                                    disabled={actionState === `${task.id}:counter`}
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {allowNewOffer && (
+                          activeOfferTaskId === task.id ? (
+                            <div className="mt-2 space-y-2 rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+                              <div className="grid gap-2">
+                                <div>
+                                  <label className="block text-[11px] font-semibold uppercase">
+                                    Role / service
+                                  </label>
+                                  <input
+                                    type="text"
+                                    className="input mt-1"
+                                    value={offerForm.role}
+                                    onChange={(event) =>
+                                      setOfferForm((prev) => ({
+                                        ...prev,
+                                        role: event.target.value,
+                                      }))
+                                    }
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-semibold uppercase">
+                                    Send to
+                                  </label>
+                                  <select
+                                    className="input mt-1"
+                                    value={offerForm.targetType}
+                                    onChange={(event) => {
+                                      const target = event.target.value as 'hq' | 'franchise';
+                                      setOfferForm((prev) => ({
+                                        ...prev,
+                                        targetType: target,
+                                        targetFranchiseId:
+                                          target === 'franchise' ? prev.targetFranchiseId : '',
+                                      }));
+                                    }}
+                                  >
+                                    <option value="hq">Head Office</option>
+                                    <option value="franchise">Franchise</option>
+                                  </select>
+                                </div>
+                                {offerForm.targetType === 'franchise' && (
+                                  <div>
+                                    <label className="block text-[11px] font-semibold uppercase">
+                                      Franchise
+                                    </label>
+                                    <select
+                                      className="input mt-1"
+                                      value={offerForm.targetFranchiseId}
+                                      onChange={(event) =>
+                                        setOfferForm((prev) => ({
+                                          ...prev,
+                                          targetFranchiseId: event.target.value,
+                                        }))
+                                      }
+                                    >
+                                      <option value="">Select franchise</option>
+                                      {franchises.map((franchise) => (
+                                        <option key={franchise.id} value={franchise.id}>
+                                          {franchise.name || franchise.id}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                )}
+                                <div>
+                                  <label className="block text-[11px] font-semibold uppercase">
+                                    Assignee user ID (optional)
+                                  </label>
+                                  <input
+                                    type="text"
+                                    className="input mt-1"
+                                    value={offerForm.targetUserId}
+                                    onChange={(event) =>
+                                      setOfferForm((prev) => ({
+                                        ...prev,
+                                        targetUserId: event.target.value,
+                                      }))
+                                    }
+                                  />
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <label className="block text-[11px] font-semibold uppercase">
+                                      Total amount
+                                    </label>
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      className="input mt-1"
+                                      value={offerForm.totalAmount}
+                                      onChange={(event) =>
+                                        setOfferForm((prev) => ({
+                                          ...prev,
+                                          totalAmount: event.target.value,
+                                        }))
+                                      }
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[11px] font-semibold uppercase">
+                                      Currency
+                                    </label>
+                                    <input
+                                      type="text"
+                                      className="input mt-1"
+                                      value={offerForm.currency}
+                                      onChange={(event) =>
+                                        setOfferForm((prev) => ({
+                                          ...prev,
+                                          currency: event.target.value,
+                                        }))
+                                      }
+                                    />
+                                  </div>
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-semibold uppercase">
+                                    Payment schedule
+                                  </label>
+                                  <select
+                                    className="input mt-1"
+                                    value={offerForm.paymentMode}
+                                    onChange={(event) => {
+                                      const mode = event.target.value as PaymentMode;
+                                      setOfferForm((prev) => ({
+                                        ...prev,
+                                        paymentMode: mode,
+                                        depositAmount:
+                                          mode === 'deposit_balance' ? prev.depositAmount : '',
+                                      }));
+                                    }}
+                                  >
+                                    <option value="deposit_balance">Deposit + balance</option>
+                                    <option value="balance_on_completion">Balance on completion</option>
+                                  </select>
+                                </div>
+                                {offerForm.paymentMode === 'deposit_balance' && (
+                                  <div>
+                                    <label className="block text-[11px] font-semibold uppercase">
+                                      Deposit amount
+                                    </label>
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      className="input mt-1"
+                                      value={offerForm.depositAmount}
+                                      onChange={(event) =>
+                                        setOfferForm((prev) => ({
+                                          ...prev,
+                                          depositAmount: event.target.value,
+                                        }))
+                                      }
+                                    />
+                                  </div>
+                                )}
+                                <div>
+                                  <label className="block text-[11px] font-semibold uppercase">
+                                    Notes (optional)
+                                  </label>
+                                  <textarea
+                                    className="input mt-1"
+                                    rows={2}
+                                    value={offerForm.notes}
+                                    onChange={(event) =>
+                                      setOfferForm((prev) => ({
+                                        ...prev,
+                                        notes: event.target.value,
+                                      }))
+                                    }
+                                  />
+                                </div>
+                              </div>
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  className={primaryActionClasses}
+                                  onClick={() => submitOffer(task.id)}
+                                  disabled={offerSubmitting}
+                                >
+                                  {offerSubmitting ? 'Submitting…' : 'Send offer'}
+                                </button>
+                                <button
+                                  className={secondaryActionClasses}
+                                  onClick={closeOfferForm}
+                                  disabled={offerSubmitting}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <button
+                              className={secondaryActionClasses}
+                              onClick={() => openOfferForm(task.id)}
+                            >
+                              Propose outsourcing
+                            </button>
+                          )
+                        )}
+
+                        {userContext.canOutsource && hasOpenOffer && !showCounterForm && !awaitingTargetDecision && !awaitingRequesterDecision && offerStatus && (
+                          <p className="text-[11px] text-gray-500">
+                            Waiting on {proposal?.targetType === 'hq' ? 'HQ' : 'franchise'} response.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
               </div>
             )}
           </div>

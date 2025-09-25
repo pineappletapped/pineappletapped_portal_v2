@@ -907,6 +907,529 @@ export const reserveKit = functions.https.onCall(async (data) => {
     await batch.commit();
     return { conflicts: [], kitItems, rentalTotal };
 });
+function normaliseRoles(raw) {
+    if (!raw || typeof raw !== 'object') {
+        return {};
+    }
+    const roles = {};
+    Object.entries(raw).forEach(([key, value]) => {
+        if (value === true) {
+            roles[key] = true;
+        }
+    });
+    return roles;
+}
+async function loadUserContext(uid) {
+    const snap = await db.collection('users').doc(uid).get();
+    const data = snap.data() ?? {};
+    const roles = normaliseRoles(data.roles);
+    const displayName = typeof data.displayName === 'string' && data.displayName.trim().length
+        ? data.displayName.trim()
+        : typeof data.fullName === 'string' && data.fullName.trim().length
+            ? data.fullName.trim()
+            : null;
+    const email = typeof data.email === 'string' && data.email.includes('@') ? data.email : null;
+    const rawPrimary = typeof data.primaryFranchiseId === 'string' && data.primaryFranchiseId.trim().length
+        ? data.primaryFranchiseId.trim()
+        : null;
+    const rawFranchise = typeof data.franchiseId === 'string' && data.franchiseId.trim().length
+        ? data.franchiseId.trim()
+        : null;
+    const franchiseIds = new Set();
+    if (rawPrimary) {
+        franchiseIds.add(rawPrimary);
+    }
+    if (rawFranchise) {
+        franchiseIds.add(rawFranchise);
+    }
+    const extra = Array.isArray(data.franchiseIds)
+        ? data.franchiseIds.filter((value) => typeof value === 'string' && value.trim().length > 0)
+        : [];
+    extra.forEach((value) => franchiseIds.add(value.trim()));
+    const isStaff = data.isStaff === true || roles.admin === true || roles.operations === true || roles.projects === true;
+    return {
+        uid,
+        displayName,
+        email,
+        isStaff,
+        roles,
+        franchiseIds: Array.from(franchiseIds),
+        primaryFranchiseId: rawPrimary || rawFranchise || null,
+    };
+}
+function parseCurrency(value) {
+    if (typeof value === 'string' && value.trim().length >= 3) {
+        return value.trim().slice(0, 3).toUpperCase();
+    }
+    return 'GBP';
+}
+function parseMoney(value, fallback = 0) {
+    const numeric = typeof value === 'string' ? Number(value) : Number(value);
+    if (!Number.isFinite(numeric) || Number.isNaN(numeric)) {
+        return fallback;
+    }
+    return Math.max(0, Math.round(numeric * 100) / 100);
+}
+function assertPositive(value, field) {
+    if (value < 0) {
+        throw new functions.https.HttpsError('invalid-argument', `${field} must be zero or positive.`);
+    }
+}
+async function assertFranchiseMembership(uid, franchiseId) {
+    const snap = await db
+        .collection('franchiseMembers')
+        .where('userId', '==', uid)
+        .where('franchiseId', '==', franchiseId)
+        .limit(1)
+        .get();
+    return !snap.empty;
+}
+export const taskOffers_create = functions.https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+    }
+    const uid = context.auth.uid;
+    const projectId = typeof data?.projectId === 'string' ? data.projectId.trim() : '';
+    const taskId = typeof data?.taskId === 'string' ? data.taskId.trim() : '';
+    if (!projectId || !taskId) {
+        throw new functions.https.HttpsError('invalid-argument', 'projectId and taskId are required');
+    }
+    const targetTypeRaw = typeof data?.targetType === 'string' ? data.targetType.trim().toLowerCase() : '';
+    if (targetTypeRaw !== 'hq' && targetTypeRaw !== 'franchise') {
+        throw new functions.https.HttpsError('invalid-argument', 'targetType must be "hq" or "franchise"');
+    }
+    const targetType = targetTypeRaw;
+    const targetFranchiseIdRaw = typeof data?.targetFranchiseId === 'string' ? data.targetFranchiseId.trim() : '';
+    const targetFranchiseId = targetType === 'franchise' ? targetFranchiseIdRaw : '';
+    if (targetType === 'franchise' && !targetFranchiseId) {
+        throw new functions.https.HttpsError('invalid-argument', 'targetFranchiseId is required for franchise offers');
+    }
+    const targetUserId = typeof data?.targetUserId === 'string' && data.targetUserId.trim().length
+        ? data.targetUserId.trim()
+        : null;
+    const role = typeof data?.role === 'string' && data.role.trim().length ? data.role.trim() : null;
+    const currency = parseCurrency(data?.currency);
+    const totalAmount = parseMoney(data?.totalAmount ?? data?.total ?? data?.feeTotal, NaN);
+    if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+        throw new functions.https.HttpsError('invalid-argument', 'totalAmount must be greater than zero');
+    }
+    let paymentMode = data?.paymentMode === 'balance_on_completion' ? 'balance_on_completion' : 'deposit_balance';
+    let depositAmount = parseMoney(data?.depositAmount ?? data?.deposit, 0);
+    assertPositive(depositAmount, 'depositAmount');
+    if (paymentMode === 'balance_on_completion') {
+        depositAmount = 0;
+    }
+    if (depositAmount > totalAmount) {
+        throw new functions.https.HttpsError('invalid-argument', 'depositAmount cannot exceed totalAmount');
+    }
+    let balanceAmount = parseMoney(data?.balanceAmount ?? data?.balance, totalAmount - depositAmount);
+    if (paymentMode === 'deposit_balance') {
+        balanceAmount = Math.max(0, Math.round((totalAmount - depositAmount) * 100) / 100);
+    }
+    else {
+        balanceAmount = totalAmount;
+    }
+    assertPositive(balanceAmount, 'balanceAmount');
+    const notes = typeof data?.notes === 'string' && data.notes.trim().length ? data.notes.trim() : null;
+    const [userContext, projectSnap, taskSnap] = await Promise.all([
+        loadUserContext(uid),
+        db.collection('projects').doc(projectId).get(),
+        db.collection('projects').doc(projectId).collection('tasks').doc(taskId).get(),
+    ]);
+    if (!projectSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Project not found');
+    }
+    if (!taskSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Task not found');
+    }
+    if (!userContext.isStaff && userContext.franchiseIds.length === 0) {
+        throw new functions.https.HttpsError('permission-denied', 'Franchise membership required to outsource tasks');
+    }
+    const proposerFranchiseId = userContext.primaryFranchiseId || userContext.franchiseIds[0] || null;
+    const projectData = projectSnap.data();
+    const projectFranchiseId = typeof projectData.franchiseId === 'string' ? projectData.franchiseId : null;
+    if (!userContext.isStaff && projectFranchiseId && !userContext.franchiseIds.includes(projectFranchiseId)) {
+        // Ensure the proposer belongs to the franchise that owns the project
+        const hasMembership = await assertFranchiseMembership(uid, projectFranchiseId);
+        if (!hasMembership) {
+            throw new functions.https.HttpsError('permission-denied', 'You are not assigned to this franchise project');
+        }
+    }
+    const taskRef = db.collection('projects').doc(projectId).collection('tasks').doc(taskId);
+    const offerRef = taskRef.collection('offers').doc();
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const offerDoc = {
+        projectId,
+        taskId,
+        role,
+        status: 'pending',
+        requesterUid: uid,
+        requesterFranchiseId: proposerFranchiseId,
+        requesterName: userContext.displayName || userContext.email || uid,
+        targetType,
+        targetFranchiseId: targetType === 'franchise' ? targetFranchiseId : null,
+        targetUserId,
+        currency,
+        totalAmount,
+        depositAmount,
+        balanceAmount,
+        paymentMode,
+        notes,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+    };
+    await offerRef.set(offerDoc);
+    const existingProposal = taskSnap.data()?.outsourcingProposal;
+    const proposalPayload = {
+        ...existingProposal,
+        offerId: offerRef.id,
+        status: 'pending',
+        proposedByUid: uid,
+        proposedByFranchiseId: proposerFranchiseId,
+        proposedByName: userContext.displayName || userContext.email || uid,
+        targetType,
+        targetFranchiseId: targetType === 'franchise' ? targetFranchiseId : null,
+        targetUserId,
+        role,
+        currency,
+        totalAmount,
+        depositAmount,
+        balanceAmount,
+        paymentMode,
+        notes,
+        createdAt: existingProposal?.createdAt ?? timestamp,
+        updatedAt: timestamp,
+        respondedAt: null,
+        respondedByUid: null,
+        responseNotes: null,
+        counter: null,
+    };
+    await taskRef.set({
+        outsourcingProposal: proposalPayload,
+        outsourcingStatus: 'pending',
+    }, { merge: true });
+    await db.collection('taskHistory').add({
+        projectId,
+        taskId,
+        action: 'outsourcing_offer_created',
+        uid,
+        metadata: {
+            offerId: offerRef.id,
+            targetType,
+            targetFranchiseId: proposalPayload.targetFranchiseId,
+            targetUserId,
+            totalAmount,
+            currency,
+            paymentMode,
+        },
+        createdAt: timestamp,
+    });
+    return { offerId: offerRef.id };
+});
+export const taskOffers_respond = functions.https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+    }
+    const uid = context.auth.uid;
+    const projectId = typeof data?.projectId === 'string' ? data.projectId.trim() : '';
+    const taskId = typeof data?.taskId === 'string' ? data.taskId.trim() : '';
+    const offerId = typeof data?.offerId === 'string' ? data.offerId.trim() : '';
+    if (!projectId || !taskId || !offerId) {
+        throw new functions.https.HttpsError('invalid-argument', 'projectId, taskId, and offerId are required');
+    }
+    const actionRaw = typeof data?.action === 'string' ? data.action.trim().toLowerCase() : '';
+    if (!['accept', 'reject', 'counter', 'withdraw'].includes(actionRaw)) {
+        throw new functions.https.HttpsError('invalid-argument', 'Unsupported action');
+    }
+    const action = actionRaw;
+    const notes = typeof data?.notes === 'string' && data.notes.trim().length ? data.notes.trim() : null;
+    const taskRef = db.collection('projects').doc(projectId).collection('tasks').doc(taskId);
+    const offerRef = taskRef.collection('offers').doc(offerId);
+    const [userContext, offerSnap, taskSnap] = await Promise.all([
+        loadUserContext(uid),
+        offerRef.get(),
+        taskRef.get(),
+    ]);
+    if (!offerSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Offer not found');
+    }
+    const offer = offerSnap.data();
+    if (offer.projectId !== projectId || offer.taskId !== taskId) {
+        throw new functions.https.HttpsError('failed-precondition', 'Offer does not match project/task');
+    }
+    const proposal = taskSnap.data()?.outsourcingProposal;
+    const isRequester = offer.requesterUid === uid;
+    let isTargetFranchise = offer.targetType === 'franchise' && offer.targetFranchiseId
+        ? userContext.franchiseIds.includes(offer.targetFranchiseId)
+        : false;
+    const isTargetHq = offer.targetType === 'hq' ? userContext.isStaff : false;
+    if (offer.targetType === 'franchise' && !isTargetFranchise && offer.targetFranchiseId) {
+        const hasMembership = await assertFranchiseMembership(uid, offer.targetFranchiseId);
+        if (hasMembership) {
+            userContext.franchiseIds.push(offer.targetFranchiseId);
+            isTargetFranchise = true;
+        }
+    }
+    const isTarget = isTargetFranchise || isTargetHq;
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    if (action === 'withdraw') {
+        if (!isRequester) {
+            throw new functions.https.HttpsError('permission-denied', 'Only the requester can withdraw an offer');
+        }
+        if (offer.status !== 'pending' && offer.status !== 'countered') {
+            throw new functions.https.HttpsError('failed-precondition', 'Only pending offers can be withdrawn');
+        }
+        await offerRef.set({
+            status: 'withdrawn',
+            respondedByUid: uid,
+            respondedAt: timestamp,
+            responseNotes: notes ?? null,
+            updatedAt: timestamp,
+        }, { merge: true });
+        if (proposal) {
+            await taskRef.set({
+                outsourcingProposal: {
+                    ...proposal,
+                    status: 'withdrawn',
+                    respondedByUid: uid,
+                    respondedAt: timestamp,
+                    responseNotes: notes ?? null,
+                    updatedAt: timestamp,
+                },
+                outsourcingStatus: 'withdrawn',
+            }, { merge: true });
+        }
+        await db.collection('taskHistory').add({
+            projectId,
+            taskId,
+            action: 'outsourcing_offer_withdrawn',
+            uid,
+            metadata: { offerId },
+            createdAt: timestamp,
+        });
+        return { status: 'withdrawn' };
+    }
+    if (action === 'counter') {
+        if (!isTarget) {
+            throw new functions.https.HttpsError('permission-denied', 'Only the recipient can counter an offer');
+        }
+        if (offer.status !== 'pending') {
+            throw new functions.https.HttpsError('failed-precondition', 'Only pending offers can be countered');
+        }
+        const counterCurrency = parseCurrency(data?.currency ?? offer.currency);
+        const counterTotal = parseMoney(data?.totalAmount ?? data?.total ?? offer.totalAmount, offer.totalAmount);
+        if (counterTotal <= 0) {
+            throw new functions.https.HttpsError('invalid-argument', 'Counter total must be greater than zero');
+        }
+        const counterMode = data?.paymentMode === 'balance_on_completion' ? 'balance_on_completion' : 'deposit_balance';
+        let counterDeposit = parseMoney(data?.depositAmount ?? data?.deposit, offer.depositAmount);
+        if (counterMode === 'balance_on_completion') {
+            counterDeposit = 0;
+        }
+        if (counterDeposit > counterTotal) {
+            throw new functions.https.HttpsError('invalid-argument', 'Counter deposit cannot exceed total');
+        }
+        let counterBalance = parseMoney(data?.balanceAmount ?? data?.balance, counterMode === 'deposit_balance' ? counterTotal - counterDeposit : counterTotal);
+        if (counterMode === 'deposit_balance') {
+            counterBalance = Math.max(0, Math.round((counterTotal - counterDeposit) * 100) / 100);
+        }
+        else {
+            counterBalance = counterTotal;
+        }
+        await offerRef.set({
+            status: 'countered',
+            counterProposal: {
+                currency: counterCurrency,
+                totalAmount: counterTotal,
+                depositAmount: counterDeposit,
+                balanceAmount: counterBalance,
+                paymentMode: counterMode,
+                notes,
+                proposedByUid: uid,
+                proposedAt: timestamp,
+            },
+            respondedByUid: uid,
+            respondedAt: timestamp,
+            responseNotes: notes ?? null,
+            updatedAt: timestamp,
+        }, { merge: true });
+        if (proposal) {
+            await taskRef.set({
+                outsourcingProposal: {
+                    ...proposal,
+                    status: 'countered',
+                    counter: {
+                        currency: counterCurrency,
+                        totalAmount: counterTotal,
+                        depositAmount: counterDeposit,
+                        balanceAmount: counterBalance,
+                        paymentMode: counterMode,
+                        notes,
+                        proposedByUid: uid,
+                        proposedAt: timestamp,
+                    },
+                    respondedByUid: uid,
+                    respondedAt: timestamp,
+                    responseNotes: notes ?? null,
+                    updatedAt: timestamp,
+                },
+                outsourcingStatus: 'countered',
+            }, { merge: true });
+        }
+        await db.collection('taskHistory').add({
+            projectId,
+            taskId,
+            action: 'outsourcing_offer_countered',
+            uid,
+            metadata: { offerId, totalAmount: counterTotal, currency: counterCurrency },
+            createdAt: timestamp,
+        });
+        return { status: 'countered' };
+    }
+    if (action === 'reject') {
+        const canRejectTarget = isTarget && offer.status === 'pending';
+        const canRejectRequester = isRequester && offer.status === 'countered';
+        if (!canRejectTarget && !canRejectRequester) {
+            throw new functions.https.HttpsError('permission-denied', 'You cannot reject this offer');
+        }
+        await offerRef.set({
+            status: 'rejected',
+            respondedByUid: uid,
+            respondedAt: timestamp,
+            responseNotes: notes ?? null,
+            updatedAt: timestamp,
+        }, { merge: true });
+        if (proposal) {
+            await taskRef.set({
+                outsourcingProposal: {
+                    ...proposal,
+                    status: 'rejected',
+                    respondedByUid: uid,
+                    respondedAt: timestamp,
+                    responseNotes: notes ?? null,
+                    updatedAt: timestamp,
+                },
+                outsourcingStatus: 'rejected',
+            }, { merge: true });
+        }
+        await db.collection('taskHistory').add({
+            projectId,
+            taskId,
+            action: 'outsourcing_offer_rejected',
+            uid,
+            metadata: { offerId },
+            createdAt: timestamp,
+        });
+        return { status: 'rejected' };
+    }
+    if (action === 'accept') {
+        const acceptingTarget = isTarget && offer.status === 'pending';
+        const acceptingRequester = isRequester && offer.status === 'countered';
+        if (!acceptingTarget && !acceptingRequester) {
+            throw new functions.https.HttpsError('permission-denied', 'You cannot accept this offer');
+        }
+        const terms = offer.status === 'countered' && offer.counterProposal
+            ? {
+                currency: offer.counterProposal.currency,
+                totalAmount: offer.counterProposal.totalAmount,
+                depositAmount: offer.counterProposal.depositAmount,
+                balanceAmount: offer.counterProposal.balanceAmount,
+                paymentMode: offer.counterProposal.paymentMode,
+                notes: offer.counterProposal.notes ?? null,
+            }
+            : {
+                currency: offer.currency,
+                totalAmount: offer.totalAmount,
+                depositAmount: offer.depositAmount,
+                balanceAmount: offer.balanceAmount,
+                paymentMode: offer.paymentMode,
+                notes: offer.notes ?? null,
+            };
+        await offerRef.set({
+            status: 'accepted',
+            acceptedTerms: {
+                ...terms,
+                acceptedByUid: uid,
+                acceptedAt: timestamp,
+            },
+            respondedByUid: uid,
+            respondedAt: timestamp,
+            responseNotes: notes ?? null,
+            updatedAt: timestamp,
+        }, { merge: true });
+        let assigneeName = null;
+        const assignmentScope = offer.targetType === 'franchise' ? 'franchise' : 'hq';
+        const assignedTo = offer.targetUserId || null;
+        if (assignedTo) {
+            const assigneeSnap = await db.collection('users').doc(assignedTo).get();
+            const assigneeData = assigneeSnap.data();
+            if (assigneeData) {
+                assigneeName =
+                    (typeof assigneeData.displayName === 'string' && assigneeData.displayName.trim().length
+                        ? assigneeData.displayName.trim()
+                        : null) ||
+                        (typeof assigneeData.fullName === 'string' && assigneeData.fullName.trim().length
+                            ? assigneeData.fullName.trim()
+                            : null) ||
+                        (typeof assigneeData.email === 'string' ? assigneeData.email : null);
+            }
+        }
+        const agreement = {
+            offerId,
+            providerType: offer.targetType,
+            providerFranchiseId: offer.targetType === 'franchise' ? offer.targetFranchiseId ?? null : null,
+            providerUserId: offer.targetUserId || null,
+            currency: terms.currency,
+            totalAmount: terms.totalAmount,
+            depositAmount: terms.depositAmount,
+            balanceAmount: terms.balanceAmount,
+            paymentMode: terms.paymentMode,
+            notes: terms.notes ?? null,
+            acceptedAt: timestamp,
+            acceptedByUid: uid,
+            responseNotes: notes ?? null,
+        };
+        const taskUpdate = {
+            outsourcingAgreement: agreement,
+            outsourcingStatus: 'accepted',
+            assignmentScope,
+            updatedAt: timestamp,
+        };
+        if (assignedTo || offer.targetType === 'hq') {
+            taskUpdate.assignedTo = assignedTo;
+            taskUpdate.assigneeName = assigneeName;
+        }
+        if (proposal) {
+            taskUpdate.outsourcingProposal = {
+                ...proposal,
+                status: 'accepted',
+                respondedByUid: uid,
+                respondedAt: timestamp,
+                responseNotes: notes ?? null,
+                updatedAt: timestamp,
+                acceptedTerms: agreement,
+            };
+        }
+        await taskRef.set(taskUpdate, { merge: true });
+        await db.collection('taskHistory').add({
+            projectId,
+            taskId,
+            action: 'outsourcing_offer_accepted',
+            uid,
+            metadata: {
+                offerId,
+                providerType: offer.targetType,
+                providerFranchiseId: agreement.providerFranchiseId,
+                providerUserId: agreement.providerUserId,
+                totalAmount: terms.totalAmount,
+                currency: terms.currency,
+            },
+            createdAt: timestamp,
+        });
+        return { status: 'accepted' };
+    }
+    throw new functions.https.HttpsError('internal', 'Unhandled action');
+});
 async function sendEmail(to, subject, body) {
     try {
         const keyB64 = process.env.GMAIL_SERVICE_ACCOUNT_KEY_BASE64;
