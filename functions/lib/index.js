@@ -36,6 +36,32 @@ const VAT_RATE = 0.2;
 const DAY_IN_MS = 86_400_000;
 const DEFAULT_FILMING_SLA_DAYS = 7;
 const DEFAULT_EDITING_SLA_DAYS = 14;
+const CLIENT_RESEARCH_SCOPE_CONFIG = {
+    standard: {
+        estimatedTokens: 2500,
+        estimatedDurationMinutes: 7,
+        autoTokenCharge: 2,
+        manualTokenCharge: 3,
+    },
+    deep_dive: {
+        estimatedTokens: 4200,
+        estimatedDurationMinutes: 12,
+        autoTokenCharge: 3,
+        manualTokenCharge: 5,
+    },
+    competitor_refresh: {
+        estimatedTokens: 1800,
+        estimatedDurationMinutes: 5,
+        autoTokenCharge: 2,
+        manualTokenCharge: 3,
+    },
+};
+const CLIENT_RESEARCH_QUEUE_COLLECTION = 'clientResearchQueue';
+const CLIENT_RESEARCH_JOB_COLLECTION = 'clientResearchJobs';
+const TOKEN_WALLET_COLLECTION = 'tokenWallets';
+const CLIENT_RESEARCH_TOKEN_REASON_AUTO = 'client_research_auto';
+const CLIENT_RESEARCH_TOKEN_REASON_MANUAL = 'client_research_manual';
+const CLIENT_RESEARCH_TOKEN_REASON_GENERIC = 'client_research';
 function defaultRoyaltyConfig() {
     return {
         hqTiers: [
@@ -168,6 +194,263 @@ function buildOrderFolderName(context) {
         return sanitiseDriveName(`${context.products[0].name} (${suffix})`, `Order ${suffix}`);
     }
     return `Order ${suffix}`;
+}
+function normaliseNullableString(input) {
+    if (typeof input !== 'string')
+        return null;
+    const trimmed = input.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+function normaliseClientDocId(input) {
+    if (typeof input !== 'string')
+        return null;
+    const trimmed = input.trim();
+    if (!trimmed)
+        return null;
+    if (trimmed.startsWith('clients/')) {
+        const [, clientId] = trimmed.split('/');
+        return clientId ? clientId.trim() : null;
+    }
+    if (/^[a-z0-9-]{6,120}$/.test(trimmed)) {
+        return trimmed;
+    }
+    return toClientDocId(trimmed);
+}
+function buildDocPath(collection, id) {
+    if (!id)
+        return null;
+    const trimmed = id.trim();
+    if (!trimmed)
+        return null;
+    if (trimmed.startsWith(`${collection}/`)) {
+        return trimmed;
+    }
+    return `${collection}/${trimmed}`;
+}
+function buildClientDocPath(clientId) {
+    return clientId.startsWith('clients/') ? clientId : `clients/${clientId}`;
+}
+function normaliseClientResearchScope(input) {
+    if (typeof input === 'string') {
+        const value = input.trim().toLowerCase();
+        if (!value)
+            return 'standard';
+        if (value.includes('deep'))
+            return 'deep_dive';
+        if (value.includes('competitor'))
+            return 'competitor_refresh';
+        if (value.includes('refresh'))
+            return 'competitor_refresh';
+    }
+    return 'standard';
+}
+function getClientResearchScopeConfig(scope) {
+    return CLIENT_RESEARCH_SCOPE_CONFIG[scope] ?? CLIENT_RESEARCH_SCOPE_CONFIG.standard;
+}
+function parseBooleanFlag(input) {
+    if (input === true)
+        return true;
+    if (input === false)
+        return false;
+    if (typeof input === 'number') {
+        if (input === 1)
+            return true;
+        if (input === 0)
+            return false;
+    }
+    if (typeof input === 'string') {
+        const value = input.trim().toLowerCase();
+        if (!value)
+            return null;
+        if (['true', 'yes', 'y', 'on', 'enabled', 'enable', 'auto'].includes(value))
+            return true;
+        if (['false', 'no', 'n', 'off', 'disabled', 'disable', 'manual'].includes(value))
+            return false;
+    }
+    return null;
+}
+function resolveClientDocIdFromOrder(order, orderId) {
+    const candidateKeys = [
+        typeof order.clientId === 'string' ? order.clientId : null,
+        typeof order.clientRef === 'string' ? order.clientRef : null,
+        typeof order.clientPath === 'string' ? order.clientPath : null,
+        typeof order.clientKey === 'string' ? order.clientKey : null,
+        typeof order.clientRoyaltyKey === 'string' ? order.clientRoyaltyKey : null,
+        typeof order.driveClientKey === 'string' ? order.driveClientKey : null,
+    ];
+    for (const candidate of candidateKeys) {
+        const docId = normaliseClientDocId(candidate);
+        if (docId) {
+            return docId;
+        }
+    }
+    if (typeof order.userId === 'string' && order.userId.trim().length > 0) {
+        return toClientDocId(`uid:${order.userId.trim()}`);
+    }
+    const emailCandidate = normaliseNullableString(order.userEmail || order.customerEmail);
+    if (emailCandidate) {
+        return toClientDocId(`email:${emailCandidate.toLowerCase()}`);
+    }
+    return toClientDocId(`order:${orderId}`);
+}
+function resolveAutoResearchScope(order, clientAiSettings) {
+    const scopeCandidates = [
+        order.autoResearchScope,
+        order.clientResearchScope,
+        order.researchScope,
+        order?.clientResearch?.scope,
+        clientAiSettings.defaultScope,
+        clientAiSettings.preferredScope,
+    ];
+    for (const candidate of scopeCandidates) {
+        const scope = normaliseClientResearchScope(candidate);
+        if (candidate && scope) {
+            return scope;
+        }
+    }
+    return 'standard';
+}
+function shouldAutoTriggerClientResearch(order, clientData) {
+    const aiSettings = clientData && typeof clientData.ai === 'object' && clientData.ai !== null
+        ? clientData.ai
+        : {};
+    const explicitOptOutFlags = [
+        order.autoResearchOptOut,
+        order.disableAutoResearch,
+        order.autoResearchDisabled,
+        order.clientResearchOptOut,
+        aiSettings.autoResearchOptOut,
+        aiSettings.optOut,
+    ].map(parseBooleanFlag);
+    const scope = resolveAutoResearchScope(order, aiSettings);
+    if (explicitOptOutFlags.includes(true)) {
+        return { shouldRun: false, reason: 'opt_out', scope };
+    }
+    const explicitOffFlags = [
+        order.autoResearchEnabled,
+        order.clientResearchAuto,
+        aiSettings.autoResearchEnabled,
+        aiSettings.autoEnabled,
+        aiSettings.enabled,
+    ].map(parseBooleanFlag);
+    if (explicitOffFlags.includes(false)) {
+        return { shouldRun: false, reason: 'disabled', scope };
+    }
+    const explicitTrueFlags = [
+        order.autoResearchEnabled,
+        order.autoResearchRequested,
+        order.clientResearchAuto,
+        order.clientResearchEnabled,
+        aiSettings.autoResearchEnabled,
+        aiSettings.defaultOn,
+        aiSettings.enabled,
+    ].map(parseBooleanFlag);
+    if (explicitTrueFlags.includes(true)) {
+        const reason = parseBooleanFlag(order.autoResearchEnabled) === true ? 'order_auto' : 'client_auto';
+        return { shouldRun: true, reason, scope };
+    }
+    return { shouldRun: false, reason: 'not_enabled', scope };
+}
+async function attemptWalletDebitForClientResearch(options) {
+    if (!options.allowDebit || options.tokenCharge <= 0) {
+        return { tokenDebitApplied: false, walletBalanceAfter: null, insufficient: options.tokenCharge > 0 };
+    }
+    const usageReason = options.reason === 'auto'
+        ? CLIENT_RESEARCH_TOKEN_REASON_AUTO
+        : options.reason === 'manual'
+            ? CLIENT_RESEARCH_TOKEN_REASON_MANUAL
+            : CLIENT_RESEARCH_TOKEN_REASON_GENERIC;
+    const insufficientResult = { tokenDebitApplied: false, walletBalanceAfter: null, insufficient: true };
+    try {
+        let balanceAfter = null;
+        await db.runTransaction(async (tx) => {
+            const walletSnap = await tx.get(options.walletRef);
+            if (!walletSnap.exists) {
+                throw new Error('NO_WALLET');
+            }
+            const wallet = walletSnap.data() || {};
+            const currentBalance = typeof wallet.balance === 'number' ? wallet.balance : 0;
+            if (currentBalance < options.tokenCharge) {
+                throw new Error('INSUFFICIENT_TOKENS');
+            }
+            balanceAfter = currentBalance - options.tokenCharge;
+            tx.update(options.walletRef, {
+                balance: balanceAfter,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                usageLog: admin.firestore.FieldValue.arrayUnion({
+                    jobId: `${CLIENT_RESEARCH_JOB_COLLECTION}/${options.jobRef.id}`,
+                    delta: -options.tokenCharge,
+                    reason: usageReason,
+                    scope: options.scope,
+                    triggeredBy: options.triggeredBy,
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                }),
+            });
+        });
+        return { tokenDebitApplied: true, walletBalanceAfter: balanceAfter, insufficient: false };
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (message === 'INSUFFICIENT_TOKENS' || message === 'NO_WALLET') {
+            return insufficientResult;
+        }
+        console.error('Client research wallet debit failed', options.jobRef.id, err);
+        return insufficientResult;
+    }
+}
+async function persistClientResearchJob(options) {
+    const scopeConfig = getClientResearchScopeConfig(options.scope);
+    const payload = {
+        clientId: options.clientPath,
+        orderId: options.orderPath,
+        proposalId: options.proposalPath,
+        status: options.status,
+        manual: options.manual,
+        scope: options.scope,
+        estimatedTokens: scopeConfig.estimatedTokens,
+        estimatedDuration: scopeConfig.estimatedDurationMinutes,
+        billingMode: options.billingMode,
+        triggeredBy: options.triggeredBy,
+        tokenCharge: options.tokenCharge,
+        tokenDebitApplied: options.tokenDebitApplied,
+        tokenBalanceAfter: options.tokenDebitApplied ? options.walletBalanceAfter : null,
+        billingStatus: options.tokenDebitApplied ? 'paid' : 'payment_required',
+        source: options.source,
+        autoTriggered: !options.manual,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    if (options.status === 'queued') {
+        payload.queueStatus = 'pending';
+    }
+    else if (options.status === 'payment_required') {
+        payload.queueStatus = 'awaiting_payment';
+    }
+    if (options.metadata && Object.keys(options.metadata).length > 0) {
+        payload.metadata = JSON.parse(JSON.stringify(options.metadata));
+    }
+    await options.jobRef.set(payload, { merge: false });
+}
+async function enqueueClientResearchQueue(options) {
+    const queueRef = db.collection(CLIENT_RESEARCH_QUEUE_COLLECTION).doc(options.jobRef.id);
+    const queuePayload = {
+        jobId: options.jobRef.id,
+        jobRef: options.jobRef.path,
+        clientId: options.clientPath,
+        scope: options.scope,
+        manual: options.manual,
+        source: options.source,
+        triggeredBy: options.triggeredBy,
+        status: 'pending',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    try {
+        await queueRef.set(queuePayload, { merge: true });
+    }
+    catch (err) {
+        console.error('Failed to enqueue client research job', options.jobRef.id, err);
+    }
 }
 function buildProductFolderName(product, index, total) {
     const base = sanitiseDriveName(product.folderName ?? product.name, product.name || `Product ${index + 1}`);
@@ -3544,6 +3827,204 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         }, { merge: true });
     }
     return { orderId: orderRef.id };
+});
+export const clientResearch_onOrderCreated = functions.firestore
+    .document('orders/{orderId}')
+    .onCreate(async (snap) => {
+    const order = snap.data() || {};
+    const orderId = snap.id;
+    const clientDocId = resolveClientDocIdFromOrder(order, orderId);
+    const clientDocRef = db.collection('clients').doc(clientDocId);
+    const clientSnap = await clientDocRef.get();
+    const clientData = clientSnap.exists ? clientSnap.data() : undefined;
+    const autoDecision = shouldAutoTriggerClientResearch(order, clientData);
+    if (!autoDecision.shouldRun) {
+        if (autoDecision.reason !== 'not_enabled') {
+            console.log('Client research auto trigger skipped', {
+                orderId,
+                reason: autoDecision.reason,
+            });
+        }
+        return;
+    }
+    const orderPath = buildDocPath('orders', orderId);
+    const existingJobSnap = await db
+        .collection(CLIENT_RESEARCH_JOB_COLLECTION)
+        .where('orderId', '==', orderPath)
+        .limit(1)
+        .get();
+    if (!existingJobSnap.empty) {
+        console.log('Client research job already exists for order', orderId);
+        return;
+    }
+    const jobRef = db.collection(CLIENT_RESEARCH_JOB_COLLECTION).doc();
+    const scope = autoDecision.scope;
+    const scopeConfig = getClientResearchScopeConfig(scope);
+    const tokenCharge = scopeConfig.autoTokenCharge;
+    const walletRef = db.collection(TOKEN_WALLET_COLLECTION).doc(clientDocId);
+    const walletSnap = await walletRef.get();
+    const walletData = walletSnap.exists ? (walletSnap.data() || {}) : null;
+    const allowAutoDebit = walletData ? walletData.autoDebit !== false : false;
+    const debitResult = await attemptWalletDebitForClientResearch({
+        walletRef,
+        allowDebit: allowAutoDebit,
+        tokenCharge,
+        jobRef,
+        scope,
+        triggeredBy: null,
+        reason: 'auto',
+    });
+    const status = debitResult.tokenDebitApplied ? 'queued' : 'payment_required';
+    const metadata = {
+        orderId,
+        autoReason: autoDecision.reason,
+        tokenCharge,
+        tokenDebitApplied: debitResult.tokenDebitApplied,
+        allowAutoDebit,
+    };
+    if (order.companyName)
+        metadata.companyName = order.companyName;
+    if (order.customerName)
+        metadata.customerName = order.customerName;
+    if (order.projectName)
+        metadata.projectName = order.projectName;
+    if (order.leadSource)
+        metadata.leadSource = order.leadSource;
+    if (order.netTotal !== undefined)
+        metadata.netTotal = order.netTotal;
+    if (order.price !== undefined)
+        metadata.price = order.price;
+    await persistClientResearchJob({
+        jobRef,
+        clientPath: clientDocRef.path,
+        orderPath: orderPath,
+        proposalPath: null,
+        scope,
+        manual: false,
+        status,
+        billingMode: 'auto',
+        triggeredBy: null,
+        tokenCharge,
+        tokenDebitApplied: debitResult.tokenDebitApplied,
+        walletBalanceAfter: debitResult.walletBalanceAfter,
+        source: 'order_auto',
+        metadata,
+    });
+    if (status === 'queued') {
+        await enqueueClientResearchQueue({
+            jobRef,
+            clientPath: clientDocRef.path,
+            scope,
+            manual: false,
+            triggeredBy: null,
+            source: 'order_auto',
+        });
+    }
+    await writeAuditLog({
+        actorUid: 'system',
+        action: 'client_research.auto_enqueued',
+        entityType: 'client',
+        entityId: clientDocRef.id,
+        metadata: {
+            jobId: jobRef.id,
+            orderId,
+            scope,
+            tokenCharge,
+            tokenDebitApplied: debitResult.tokenDebitApplied,
+            allowAutoDebit,
+        },
+    });
+});
+export const createClientResearchJob = functions.https.onCall(async (data, context) => {
+    const roles = await assertStaff(context, ['sales', 'marketing', 'projects', 'admin']);
+    const clientIdInput = typeof data?.clientId === 'string' ? data.clientId : '';
+    const proposalIdInput = typeof data?.proposalId === 'string' ? data.proposalId : '';
+    const scopeInput = data?.scope;
+    const scope = normaliseClientResearchScope(scopeInput);
+    const clientDocId = normaliseClientDocId(clientIdInput);
+    if (!clientDocId) {
+        throw new functions.https.HttpsError('invalid-argument', 'clientId is required');
+    }
+    const clientDocRef = db.collection('clients').doc(clientDocId);
+    const clientSnap = await clientDocRef.get();
+    if (!clientSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Client not found');
+    }
+    const jobRef = db.collection(CLIENT_RESEARCH_JOB_COLLECTION).doc();
+    const scopeConfig = getClientResearchScopeConfig(scope);
+    const tokenCharge = scopeConfig.manualTokenCharge;
+    const walletRef = db.collection(TOKEN_WALLET_COLLECTION).doc(clientDocId);
+    const debitResult = await attemptWalletDebitForClientResearch({
+        walletRef,
+        allowDebit: true,
+        tokenCharge,
+        jobRef,
+        scope,
+        triggeredBy: context.auth.uid,
+        reason: 'manual',
+    });
+    const status = debitResult.tokenDebitApplied ? 'queued' : 'payment_required';
+    const proposalPath = buildDocPath('proposals', normaliseNullableString(proposalIdInput));
+    const metadata = {
+        tokenCharge,
+        tokenDebitApplied: debitResult.tokenDebitApplied,
+        triggerRoles: Array.from(roles),
+    };
+    const triggerEmail = typeof context.auth?.token.email === 'string' ? context.auth.token.email : null;
+    if (triggerEmail)
+        metadata.triggeredByEmail = triggerEmail;
+    if (proposalPath)
+        metadata.proposalPath = proposalPath;
+    await persistClientResearchJob({
+        jobRef,
+        clientPath: clientDocRef.path,
+        orderPath: null,
+        proposalPath,
+        scope,
+        manual: true,
+        status,
+        billingMode: 'manual',
+        triggeredBy: context.auth.uid,
+        tokenCharge,
+        tokenDebitApplied: debitResult.tokenDebitApplied,
+        walletBalanceAfter: debitResult.walletBalanceAfter,
+        source: 'manual',
+        metadata,
+    });
+    if (status === 'queued') {
+        await enqueueClientResearchQueue({
+            jobRef,
+            clientPath: clientDocRef.path,
+            scope,
+            manual: true,
+            triggeredBy: context.auth.uid,
+            source: 'manual',
+        });
+    }
+    await writeAuditLog({
+        actorUid: context.auth.uid,
+        action: 'client_research.manual_enqueued',
+        entityType: 'client',
+        entityId: clientDocRef.id,
+        metadata: {
+            jobId: jobRef.id,
+            proposalPath: proposalPath ?? null,
+            scope,
+            tokenCharge,
+            tokenDebitApplied: debitResult.tokenDebitApplied,
+            triggerRoles: Array.from(roles),
+        },
+    });
+    const billingStatus = debitResult.tokenDebitApplied ? 'paid' : 'payment_required';
+    const result = {
+        jobId: jobRef.id,
+        status,
+        billingStatus,
+        tokenDebitApplied: debitResult.tokenDebitApplied,
+        tokenCharge,
+        walletBalanceAfter: debitResult.walletBalanceAfter,
+    };
+    return result;
 });
 export const orders_refund = functions.https.onCall(async (data, context) => {
     const roles = await assertStaff(context, ['finance', 'admin']);

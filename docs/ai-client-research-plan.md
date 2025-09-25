@@ -16,6 +16,12 @@
 | Delivery | Surface insights in portal UI & notifications | Next.js app (portal), Cloud Functions for Slack/email |
 | Billing | Estimate & debit token fees | Firestore wallet + Stripe recharge flow |
 
+## Implementation Snapshot (July 2024)
+- ✅ **Automatic queueing**: `clientResearch_onOrderCreated` Firestore trigger now inspects new `orders/{orderId}` docs, honours client/order opt-in flags, and creates `clientResearchJobs` entries (status `queued` or `payment_required`). Jobs are also mirrored in `clientResearchQueue` for downstream processors. Auto debit attempts use `tokenWallets/{clientId}` with respect to each wallet's `autoDebit` flag.
+- ✅ **Manual queueing**: `createClientResearchJob` callable enforces staff access, debits wallets for manual runs, attaches proposal metadata, and enqueues work when balances permit. Payment shortfalls leave the job in `payment_required` so sales teams can request top-ups.
+- ✅ **Token wallet integration**: shared helpers manage wallet debits, audit logging, queue metadata, and scope normalisation with configurable token/duration estimates per scope.
+- 🔄 **Next steps**: build Pub/Sub/Cloud Run orchestration, Gemini analysis microservices, UI consumption of job timelines, and automated notifications per the roadmap below.
+
 ## Workflow
 1. **Job Creation**
    - **Automatic**: Firestore onCreate trigger on `orders/{orderId}` enqueues job if `autoResearchEnabled` flag true on the client.
