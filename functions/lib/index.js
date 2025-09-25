@@ -32,6 +32,9 @@ admin.initializeApp({
 const db = admin.firestore();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' });
 const VAT_RATE = 0.2;
+const DAY_IN_MS = 86_400_000;
+const DEFAULT_FILMING_SLA_DAYS = 7;
+const DEFAULT_EDITING_SLA_DAYS = 14;
 function defaultRoyaltyConfig() {
     return {
         hqTiers: [
@@ -481,9 +484,17 @@ export const onOrderCreated = functions.firestore
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     await snap.ref.set({ projectId: projRef.id }, { merge: true });
-    const projectBudgetData = {};
+    const filmingDueDate = new Date(Date.now() + DEFAULT_FILMING_SLA_DAYS * DAY_IN_MS);
+    const editingDueDate = new Date(Date.now() + DEFAULT_EDITING_SLA_DAYS * DAY_IN_MS);
+    const filmingDueAt = admin.firestore.Timestamp.fromDate(filmingDueDate);
+    const editingDueAt = admin.firestore.Timestamp.fromDate(editingDueDate);
+    const projectUpdates = {
+        kickoffDate: admin.firestore.FieldValue.serverTimestamp(),
+        dueDate: editingDueAt,
+        filmingDueDate: filmingDueAt,
+    };
     if (order.budgetTotals)
-        projectBudgetData.budgetTotals = order.budgetTotals;
+        projectUpdates.budgetTotals = order.budgetTotals;
     const budgetItems = (order.items || []).map((item) => ({
         id: item.id,
         name: item.name,
@@ -491,16 +502,38 @@ export const onOrderCreated = functions.firestore
         budget: item.budget || null,
     }));
     if (budgetItems.length > 0)
-        projectBudgetData.budgetItems = budgetItems;
-    if (Object.keys(projectBudgetData).length > 0) {
-        await projRef.set(projectBudgetData, { merge: true });
-    }
+        projectUpdates.budgetItems = budgetItems;
+    projectUpdates.franchiseId = order.franchiseId || null;
+    projectUpdates.franchiseTerritoryId = order.franchiseTerritoryId || null;
+    projectUpdates.franchiseAssignment = order.franchiseAssignment || null;
+    projectUpdates.franchiseAssignedMemberId = order.franchiseAssignedMemberId || null;
+    projectUpdates.franchiseAssignedUserId = order.franchiseAssignedUserId || null;
+    projectUpdates.franchiseAssignedRole = order.franchiseAssignedRole || null;
+    projectUpdates.franchiseAssignedIsPrimary = order.franchiseAssignedIsPrimary === true;
+    projectUpdates.franchiseAssignedUser =
+        order.franchiseAssignedUser && typeof order.franchiseAssignedUser === 'object'
+            ? order.franchiseAssignedUser
+            : null;
+    projectUpdates.clientPostalCode = order.clientPostalCode || null;
+    projectUpdates.royalty = order.royalty || null;
+    projectUpdates.royaltyPercentage =
+        typeof order.royaltyPercentage === 'number' ? order.royaltyPercentage : null;
+    projectUpdates.royaltySource = order.royaltySource || null;
+    await projRef.set(projectUpdates, { merge: true });
     // Populate workflow/default tasks from the ordered product
     if (order.serviceId) {
         try {
             const prodDoc = await db.collection('products').doc(order.serviceId).get();
             const prod = prodDoc.data();
             const taskDocs = [];
+            const franchiseOperatorId = typeof order.franchiseAssignedUserId === 'string'
+                ? String(order.franchiseAssignedUserId)
+                : null;
+            const franchiseOperatorName = order.franchiseAssignedUser && typeof order.franchiseAssignedUser === 'object'
+                ? order.franchiseAssignedUser.displayName ||
+                    order.franchiseAssignedUser.email ||
+                    null
+                : null;
             // If the product references a workflow, load its tasks
             if (prod?.workflowId) {
                 const wfDoc = await db.collection('workflows').doc(prod.workflowId).get();
@@ -567,6 +600,7 @@ export const onOrderCreated = functions.firestore
                             dependsOn,
                             workflowTaskId: typeof t.id === 'string' ? t.id : null,
                             dueAt,
+                            dueDate: dueAt,
                             forCustomer: !!t.forCustomer,
                             status: 'todo',
                             createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -591,6 +625,56 @@ export const onOrderCreated = functions.firestore
                         assigneeName: null,
                     });
                 }
+            }
+            const filmingTaskTitle = 'Filming & Capture';
+            const hasFilmingTask = taskDocs.some((task) => {
+                const title = typeof task.title === 'string' ? task.title.toLowerCase() : '';
+                return title.includes('film');
+            });
+            if (!hasFilmingTask) {
+                taskDocs.push({
+                    title: filmingTaskTitle,
+                    description: 'Coordinate and complete the on-site shoot within the agreed SLA.',
+                    subtasks: [
+                        'Confirm shoot date, time, and location with the client.',
+                        'Prepare kit, crew, and travel logistics for the territory.',
+                        'Capture footage and upload raw files to the project workspace within 24 hours.',
+                    ],
+                    slaDays: DEFAULT_FILMING_SLA_DAYS,
+                    dueAt: filmingDueAt,
+                    dueDate: filmingDueAt,
+                    forCustomer: false,
+                    status: 'todo',
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    assignedTo: franchiseOperatorId,
+                    assigneeName: franchiseOperatorName,
+                    assignmentScope: franchiseOperatorId ? 'franchise' : null,
+                });
+            }
+            const editingTaskTitle = 'Editing & Delivery';
+            const hasEditingTask = taskDocs.some((task) => {
+                const title = typeof task.title === 'string' ? task.title.toLowerCase() : '';
+                return title.includes('edit');
+            });
+            if (!hasEditingTask) {
+                taskDocs.push({
+                    title: editingTaskTitle,
+                    description: 'Ingest footage and deliver the first cut to HQ standards.',
+                    subtasks: [
+                        'Ingest and organise all footage in the project workspace.',
+                        'Produce the first cut following Pineapple Tapped brand guidelines.',
+                        'Submit edit for HQ quality check and client delivery.',
+                    ],
+                    slaDays: DEFAULT_EDITING_SLA_DAYS,
+                    dueAt: editingDueAt,
+                    dueDate: editingDueAt,
+                    forCustomer: false,
+                    status: 'todo',
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    assignedTo: null,
+                    assigneeName: null,
+                    assignmentScope: null,
+                });
             }
             if (taskDocs.length) {
                 const tasksRef = projRef.collection('tasks');
