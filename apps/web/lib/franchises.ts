@@ -3,6 +3,23 @@ import type { DocumentData, QueryDocumentSnapshot } from 'firebase/firestore';
 
 export type FranchiseStatus = 'prospect' | 'active' | 'paused' | 'suspended';
 
+export type FranchiseOnboardingStatus =
+  | 'not_started'
+  | 'in_progress'
+  | 'needs_attention'
+  | 'completed';
+
+export interface FranchiseOnboardingChecklist {
+  kycStatus: FranchiseOnboardingStatus;
+  stripeAccountStatus: FranchiseOnboardingStatus;
+  bankStatus: FranchiseOnboardingStatus;
+  legalStatus: FranchiseOnboardingStatus;
+  chargesEnabled: boolean;
+  notes?: string | null;
+  lastSyncedAt?: Timestamp | null;
+  activatedAt?: Timestamp | null;
+}
+
 export interface Franchise {
   id: string;
   name: string;
@@ -13,6 +30,7 @@ export interface Franchise {
   stripeAccountId?: string | null;
   platformFee?: number | null;
   notes?: string | null;
+  onboarding: FranchiseOnboardingChecklist;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
 }
@@ -48,8 +66,50 @@ export interface FranchiseMember {
 
 type SnapshotWithId = QueryDocumentSnapshot<DocumentData>;
 
+function parseOnboardingStatus(value: unknown): FranchiseOnboardingStatus {
+  switch (value) {
+    case 'in_progress':
+    case 'needs_attention':
+    case 'completed':
+      return value as FranchiseOnboardingStatus;
+    default:
+      return 'not_started';
+  }
+}
+
+function parseOnboardingChecklist(data: Record<string, unknown> | null | undefined): FranchiseOnboardingChecklist {
+  const notes = typeof data?.notes === 'string' ? data.notes : null;
+  return {
+    kycStatus: parseOnboardingStatus(data?.kycStatus),
+    stripeAccountStatus: parseOnboardingStatus(data?.stripeAccountStatus),
+    bankStatus: parseOnboardingStatus(data?.bankStatus),
+    legalStatus: parseOnboardingStatus(data?.legalStatus),
+    chargesEnabled: data?.chargesEnabled === true,
+    notes,
+    lastSyncedAt: (data?.lastSyncedAt as Timestamp) ?? null,
+    activatedAt: (data?.activatedAt as Timestamp) ?? null,
+  } satisfies FranchiseOnboardingChecklist;
+}
+
+export function defaultFranchiseOnboarding(): FranchiseOnboardingChecklist {
+  return {
+    kycStatus: 'not_started',
+    stripeAccountStatus: 'not_started',
+    bankStatus: 'not_started',
+    legalStatus: 'not_started',
+    chargesEnabled: false,
+    notes: null,
+    lastSyncedAt: null,
+    activatedAt: null,
+  };
+}
+
 export function parseFranchise(doc: SnapshotWithId): Franchise {
   const data = doc.data() as Record<string, unknown>;
+  const onboardingData =
+    data.onboarding && typeof data.onboarding === 'object'
+      ? (data.onboarding as Record<string, unknown>)
+      : null;
   return {
     id: doc.id,
     name: (data.name as string) || 'Untitled Franchise',
@@ -60,6 +120,7 @@ export function parseFranchise(doc: SnapshotWithId): Franchise {
     stripeAccountId: (data.stripeAccountId as string) ?? null,
     platformFee: typeof data.platformFee === 'number' ? (data.platformFee as number) : null,
     notes: (data.notes as string) ?? null,
+    onboarding: parseOnboardingChecklist(onboardingData),
     createdAt: (data.createdAt as Timestamp) ?? null,
     updatedAt: (data.updatedAt as Timestamp) ?? null,
   };
@@ -116,4 +177,12 @@ export function territorySummary(territory: FranchiseTerritory): string {
   const codes = territory.postalCodes.slice(0, 6).join(', ');
   const suffix = territory.postalCodes.length > 6 ? '…' : '';
   return `${territory.label} · ${territory.postalCodes.length} codes · ${codes}${suffix}`;
+}
+
+export function canActivateFranchise(onboarding: FranchiseOnboardingChecklist): boolean {
+  return (
+    onboarding.kycStatus === 'completed' &&
+    onboarding.stripeAccountStatus === 'completed' &&
+    onboarding.chargesEnabled === true
+  );
 }

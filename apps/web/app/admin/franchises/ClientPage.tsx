@@ -14,10 +14,13 @@ import { db } from "@/lib/firebase";
 import { useRoleGate } from "@/hooks/useRoleGate";
 import {
   type Franchise,
+  type FranchiseOnboardingStatus,
   type FranchiseMember,
   type FranchiseMemberRole,
   type FranchiseStatus,
   type FranchiseTerritory,
+  canActivateFranchise,
+  defaultFranchiseOnboarding,
   parseFranchise,
   parseMember,
   parseTerritory,
@@ -52,6 +55,30 @@ const TERRITORY_TYPES = [
   { value: "radius" as const, label: "Radius from coordinate" },
 ];
 
+const ONBOARDING_STATUS_OPTIONS: {
+  value: FranchiseOnboardingStatus;
+  label: string;
+  description: string;
+}[] = [
+  { value: "not_started", label: "Not started", description: "No information submitted yet." },
+  { value: "in_progress", label: "In progress", description: "Franchisee is working through the step." },
+  {
+    value: "needs_attention",
+    label: "Needs attention",
+    description: "Information provided but requires follow-up or correction.",
+  },
+  { value: "completed", label: "Completed", description: "Step verified and approved by HQ." },
+];
+
+const onboardingStatusLabel = (value: FranchiseOnboardingStatus) =>
+  ONBOARDING_STATUS_OPTIONS.find((option) => option.value === value)?.label || "Not started";
+
+function createOnboardingState() {
+  return { ...defaultFranchiseOnboarding() };
+}
+
+type OnboardingState = ReturnType<typeof createOnboardingState>;
+
 export default function AdminFranchisesPage() {
   const { allowed, loading: guardLoading } = useRoleGate("admin");
   const [loading, setLoading] = useState(true);
@@ -71,6 +98,7 @@ export default function AdminFranchisesPage() {
     stripeAccountId: "",
     platformFee: "",
     notes: "",
+    onboarding: createOnboardingState(),
   });
   const [editingFranchiseId, setEditingFranchiseId] = useState<string | null>(null);
   const [editingFranchise, setEditingFranchise] = useState({
@@ -82,6 +110,7 @@ export default function AdminFranchisesPage() {
     stripeAccountId: "",
     platformFee: "",
     notes: "",
+    onboarding: createOnboardingState(),
   });
 
   const [showCreateTerritory, setShowCreateTerritory] = useState(false);
@@ -116,6 +145,14 @@ export default function AdminFranchisesPage() {
     role: "franchisee" as FranchiseMemberRole,
     primary: false,
   });
+
+  const updateNewOnboarding = (updates: Partial<OnboardingState>) => {
+    setNewFranchise((prev) => ({ ...prev, onboarding: { ...prev.onboarding, ...updates } }));
+  };
+
+  const updateEditingOnboarding = (updates: Partial<OnboardingState>) => {
+    setEditingFranchise((prev) => ({ ...prev, onboarding: { ...prev.onboarding, ...updates } }));
+  };
 
   const loadAll = useCallback(async (cancelRef?: { current: boolean }) => {
     const [franchiseSnap, territorySnap, memberSnap, usersSnap] = await Promise.all([
@@ -243,6 +280,7 @@ export default function AdminFranchisesPage() {
       stripeAccountId: "",
       platformFee: "",
       notes: "",
+      onboarding: createOnboardingState(),
     });
   };
 
@@ -250,6 +288,12 @@ export default function AdminFranchisesPage() {
     event.preventDefault();
     try {
       const parsedPlatformFee = Number.parseFloat(newFranchise.platformFee);
+      const onboardingNotes =
+        typeof newFranchise.onboarding.notes === "string" ? newFranchise.onboarding.notes.trim() : "";
+      const onboardingPayload = {
+        ...newFranchise.onboarding,
+        notes: onboardingNotes.length > 0 ? onboardingNotes : null,
+      };
       const payload = {
         name: newFranchise.name.trim(),
         code: (newFranchise.code || newFranchise.name || "").trim().replace(/\s+/g, "-").toLowerCase(),
@@ -262,6 +306,7 @@ export default function AdminFranchisesPage() {
             ? parsedPlatformFee
             : null,
         notes: newFranchise.notes.trim() || null,
+        onboarding: onboardingPayload,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
@@ -286,6 +331,10 @@ export default function AdminFranchisesPage() {
       stripeAccountId: franchise.stripeAccountId || "",
       platformFee: typeof franchise.platformFee === "number" ? String(franchise.platformFee) : "",
       notes: franchise.notes || "",
+      onboarding: {
+        ...createOnboardingState(),
+        ...franchise.onboarding,
+      },
     });
   };
 
@@ -300,6 +349,7 @@ export default function AdminFranchisesPage() {
       stripeAccountId: "",
       platformFee: "",
       notes: "",
+      onboarding: createOnboardingState(),
     });
   };
 
@@ -308,6 +358,19 @@ export default function AdminFranchisesPage() {
     if (!editingFranchiseId) return;
     try {
       const parsedPlatformFee = Number.parseFloat(editingFranchise.platformFee);
+      const onboardingNotes =
+        typeof editingFranchise.onboarding.notes === "string" ? editingFranchise.onboarding.notes.trim() : "";
+      const onboardingPayload = {
+        ...editingFranchise.onboarding,
+        notes: onboardingNotes.length > 0 ? onboardingNotes : null,
+      };
+      const activationReady = canActivateFranchise(onboardingPayload);
+      if (editingFranchise.status === "active" && !activationReady) {
+        alert(
+          "Franchises can only be marked Active once KYC and Stripe Connect onboarding are completed and charges are enabled."
+        );
+        return;
+      }
       const payload = {
         name: editingFranchise.name.trim() || "Untitled Franchise",
         code: editingFranchise.code.trim() || editingFranchiseId,
@@ -320,6 +383,7 @@ export default function AdminFranchisesPage() {
             ? parsedPlatformFee
             : null,
         notes: editingFranchise.notes.trim() || null,
+        onboarding: onboardingPayload,
         updatedAt: serverTimestamp(),
       };
       await updateDoc(doc(db, "franchises", editingFranchiseId), payload);
@@ -641,6 +705,124 @@ export default function AdminFranchisesPage() {
                 />
               </label>
             </div>
+            <div className="grid gap-3 rounded border border-dashed border-gray-200 p-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-medium">Onboarding checklist</div>
+                  <p className="text-xs text-gray-500">
+                    Track key milestones needed before a franchise can take live payments.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-xs"
+                  onClick={() =>
+                    alert(
+                      "Stripe Connect onboarding placeholder – integration will hand off to Stripe Hosted onboarding in a later iteration."
+                    )
+                  }
+                >
+                  Launch Stripe flow
+                </button>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium">KYC verification</span>
+                  <select
+                    className="input"
+                    value={newFranchise.onboarding.kycStatus}
+                    onChange={(event) =>
+                      updateNewOnboarding({ kycStatus: event.target.value as FranchiseOnboardingStatus })
+                    }
+                  >
+                    {ONBOARDING_STATUS_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-gray-500">
+                    {ONBOARDING_STATUS_OPTIONS.find((option) => option.value === newFranchise.onboarding.kycStatus)?.description}
+                  </span>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium">Stripe Connect onboarding</span>
+                  <select
+                    className="input"
+                    value={newFranchise.onboarding.stripeAccountStatus}
+                    onChange={(event) =>
+                      updateNewOnboarding({
+                        stripeAccountStatus: event.target.value as FranchiseOnboardingStatus,
+                      })
+                    }
+                  >
+                    {ONBOARDING_STATUS_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-gray-500">
+                    Mark as completed once Stripe confirms the account is onboarded.
+                  </span>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium">Bank details</span>
+                  <select
+                    className="input"
+                    value={newFranchise.onboarding.bankStatus}
+                    onChange={(event) =>
+                      updateNewOnboarding({ bankStatus: event.target.value as FranchiseOnboardingStatus })
+                    }
+                  >
+                    {ONBOARDING_STATUS_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium">Legal documents</span>
+                  <select
+                    className="input"
+                    value={newFranchise.onboarding.legalStatus}
+                    onChange={(event) =>
+                      updateNewOnboarding({ legalStatus: event.target.value as FranchiseOnboardingStatus })
+                    }
+                  >
+                    {ONBOARDING_STATUS_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={newFranchise.onboarding.chargesEnabled}
+                  onChange={(event) => updateNewOnboarding({ chargesEnabled: event.target.checked })}
+                />
+                <span>Stripe indicates charges are enabled for this account.</span>
+              </label>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">Onboarding notes</span>
+                <textarea
+                  className="input"
+                  rows={2}
+                  value={typeof newFranchise.onboarding.notes === "string" ? newFranchise.onboarding.notes : ""}
+                  onChange={(event) => updateNewOnboarding({ notes: event.target.value })}
+                  placeholder="KYC checklist, outstanding documents, etc."
+                />
+              </label>
+              <p className="text-xs text-amber-600">
+                A franchise should only move to <span className="font-medium">Active</span> once KYC and Stripe onboarding
+                are complete and charges are enabled.
+              </p>
+            </div>
             <label className="grid gap-1 text-sm">
               <span className="font-medium">Notes</span>
               <textarea
@@ -669,13 +851,14 @@ export default function AdminFranchisesPage() {
           </form>
         )}
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] text-sm border">
+          <table className="w-full min-w-[720px] text-sm border">
             <thead>
               <tr className="bg-gray-100 text-left">
                 <th className="p-2">Franchise</th>
                 <th className="p-2">Status</th>
                 <th className="p-2">Contact</th>
                 <th className="p-2">Stripe</th>
+                <th className="p-2">Onboarding</th>
                 <th className="p-2">Territories</th>
                 <th className="p-2">Members</th>
                 <th className="p-2">Actions</th>
@@ -684,7 +867,7 @@ export default function AdminFranchisesPage() {
             <tbody>
               {franchises.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="p-4 text-center text-gray-500">
+                  <td colSpan={8} className="p-4 text-center text-gray-500">
                     No franchises created yet.
                   </td>
                 </tr>
@@ -693,6 +876,17 @@ export default function AdminFranchisesPage() {
                   const territoryCount = territoryByFranchise.get(franchise.id)?.length ?? 0;
                   const memberCount = membersByFranchise.get(franchise.id)?.length ?? 0;
                   const editing = editingFranchiseId === franchise.id;
+                  const activationReady = canActivateFranchise(franchise.onboarding);
+                  const editingActivationReady = editing
+                    ? canActivateFranchise(editingFranchise.onboarding)
+                    : false;
+                  const pendingSteps = [
+                    franchise.onboarding.kycStatus === "completed" ? null : "KYC",
+                    franchise.onboarding.stripeAccountStatus === "completed" ? null : "Stripe",
+                    franchise.onboarding.bankStatus === "completed" ? null : "Bank",
+                    franchise.onboarding.legalStatus === "completed" ? null : "Legal",
+                    franchise.onboarding.chargesEnabled ? null : "Charges",
+                  ].filter(Boolean) as string[];
                   return (
                     <tr key={franchise.id} className="border-t align-top">
                       <td className="p-2 font-medium">
@@ -714,6 +908,31 @@ export default function AdminFranchisesPage() {
                         )}
                         {typeof franchise.platformFee === "number" && (
                           <div className="text-xs text-gray-500">Platform fee: {franchise.platformFee}%</div>
+                        )}
+                      </td>
+                      <td className="p-2 text-xs">
+                        <div>KYC: {onboardingStatusLabel(franchise.onboarding.kycStatus)}</div>
+                        <div>Stripe: {onboardingStatusLabel(franchise.onboarding.stripeAccountStatus)}</div>
+                        <div>Bank: {onboardingStatusLabel(franchise.onboarding.bankStatus)}</div>
+                        <div>Legal: {onboardingStatusLabel(franchise.onboarding.legalStatus)}</div>
+                        <div>Charges: {franchise.onboarding.chargesEnabled ? "Enabled" : "Pending"}</div>
+                        {activationReady ? (
+                          <div className="mt-1 text-[10px] font-medium uppercase tracking-wide text-emerald-600">
+                            Ready to activate
+                          </div>
+                        ) : (
+                          <>
+                            {pendingSteps.length > 0 && (
+                              <div className="mt-1 text-[10px] tracking-wide text-amber-600">
+                                Awaiting: {pendingSteps.join(", ")}
+                              </div>
+                            )}
+                            {franchise.status === "active" && (
+                              <div className="mt-1 text-[10px] font-medium uppercase tracking-wide text-red-600">
+                                Review onboarding blockers
+                              </div>
+                            )}
+                          </>
                         )}
                       </td>
                       <td className="p-2">{territoryCount}</td>
@@ -826,6 +1045,129 @@ export default function AdminFranchisesPage() {
                                 }
                               />
                             </label>
+                            <div className="grid gap-2 rounded border border-dashed border-gray-200 p-2">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[11px] font-semibold uppercase tracking-wide">Onboarding</span>
+                                <button
+                                  type="button"
+                                  className="btn btn-xs"
+                                  onClick={() =>
+                                    alert(
+                                      "Stripe Connect onboarding placeholder – integration will hand off to Stripe Hosted onboarding in a later iteration."
+                                    )
+                                  }
+                                >
+                                  Launch Stripe flow
+                                </button>
+                              </div>
+                              <div className="grid gap-2">
+                                <label className="grid gap-1 text-xs">
+                                  <span className="font-medium">KYC verification</span>
+                                  <select
+                                    className="input"
+                                    value={editingFranchise.onboarding.kycStatus}
+                                    onChange={(event) =>
+                                      updateEditingOnboarding({
+                                        kycStatus: event.target.value as FranchiseOnboardingStatus,
+                                      })
+                                    }
+                                  >
+                                    {ONBOARDING_STATUS_OPTIONS.map((option) => (
+                                      <option key={option.value} value={option.value}>
+                                        {option.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="grid gap-1 text-xs">
+                                  <span className="font-medium">Stripe Connect</span>
+                                  <select
+                                    className="input"
+                                    value={editingFranchise.onboarding.stripeAccountStatus}
+                                    onChange={(event) =>
+                                      updateEditingOnboarding({
+                                        stripeAccountStatus: event.target.value as FranchiseOnboardingStatus,
+                                      })
+                                    }
+                                  >
+                                    {ONBOARDING_STATUS_OPTIONS.map((option) => (
+                                      <option key={option.value} value={option.value}>
+                                        {option.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="grid gap-1 text-xs">
+                                  <span className="font-medium">Bank details</span>
+                                  <select
+                                    className="input"
+                                    value={editingFranchise.onboarding.bankStatus}
+                                    onChange={(event) =>
+                                      updateEditingOnboarding({
+                                        bankStatus: event.target.value as FranchiseOnboardingStatus,
+                                      })
+                                    }
+                                  >
+                                    {ONBOARDING_STATUS_OPTIONS.map((option) => (
+                                      <option key={option.value} value={option.value}>
+                                        {option.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="grid gap-1 text-xs">
+                                  <span className="font-medium">Legal documents</span>
+                                  <select
+                                    className="input"
+                                    value={editingFranchise.onboarding.legalStatus}
+                                    onChange={(event) =>
+                                      updateEditingOnboarding({
+                                        legalStatus: event.target.value as FranchiseOnboardingStatus,
+                                      })
+                                    }
+                                  >
+                                    {ONBOARDING_STATUS_OPTIONS.map((option) => (
+                                      <option key={option.value} value={option.value}>
+                                        {option.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label className="flex items-center gap-2 text-xs">
+                                  <input
+                                    type="checkbox"
+                                    className="h-3.5 w-3.5"
+                                    checked={editingFranchise.onboarding.chargesEnabled}
+                                    onChange={(event) => updateEditingOnboarding({ chargesEnabled: event.target.checked })}
+                                  />
+                                  <span>Charges enabled</span>
+                                </label>
+                                <label className="grid gap-1 text-xs">
+                                  <span className="font-medium">Onboarding notes</span>
+                                  <textarea
+                                    className="input"
+                                    rows={2}
+                                    value={
+                                      typeof editingFranchise.onboarding.notes === "string"
+                                        ? editingFranchise.onboarding.notes
+                                        : ""
+                                    }
+                                    onChange={(event) => updateEditingOnboarding({ notes: event.target.value })}
+                                  />
+                                </label>
+                                <div className="rounded bg-gray-100 p-2 text-[11px] text-gray-600">
+                                  <div>
+                                    Activation readiness: {editingActivationReady ? "✅ Ready" : "🚧 Incomplete"}
+                                  </div>
+                                  {!editingActivationReady && (
+                                    <div className="mt-1">
+                                      Ensure KYC + Stripe Connect are approved and charges are enabled before setting the
+                                      status to Active.
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
                             <label className="grid gap-1 text-xs">
                               <span className="font-medium">Notes</span>
                               <textarea
