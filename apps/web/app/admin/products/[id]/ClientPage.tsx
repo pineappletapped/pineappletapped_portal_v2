@@ -491,6 +491,7 @@ export default function EditProductPage() {
     | "tasks"
     | "seo"
     | "modifiers"
+    | "drive"
   >("info");
 
   const [name, setName] = useState("");

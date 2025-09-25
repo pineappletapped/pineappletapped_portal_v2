@@ -131,14 +131,20 @@ export default function AdminFranchiseExpoSupportPage() {
     setError(null);
     try {
       const snap = await getDocs(collection(firestore, "franchiseExpoRequests"));
-      const items = snap.docs
-        .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as Record<string, unknown>) }))
+      const items: ExpoSupportRequest[] = snap.docs
+        .map((docSnap) => {
+          const data = docSnap.data() as Partial<ExpoSupportRequest>;
+          return {
+            id: docSnap.id,
+            ...data,
+          } as ExpoSupportRequest;
+        })
         .sort((a, b) => {
           const aTime = toDate(a.createdAt)?.getTime() ?? 0;
           const bTime = toDate(b.createdAt)?.getTime() ?? 0;
           return bTime - aTime;
         });
-      setRequests(items as ExpoSupportRequest[]);
+      setRequests(items);
     } catch (err) {
       console.error("Failed to load expo requests", err);
       setError("Unable to load expo support requests. Please try again.");

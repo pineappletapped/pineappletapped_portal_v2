@@ -315,7 +315,7 @@ export default function ProductDetail({
   const deliverableDisplay = useMemo(() => {
     const entries = Array.isArray(product.deliverables)
       ? product.deliverables.filter(
-          (item): item is Product["deliverables"][number] =>
+          (item): item is NonNullable<Product["deliverables"]>[number] =>
             !!item && typeof item === "object"
         )
       : [];

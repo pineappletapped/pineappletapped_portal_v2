@@ -144,29 +144,38 @@ export default function AdminExpoLeadPagesPage() {
     setError(null);
     try {
       const snap = await getDocs(collection(firestore, "expoLeadPages"));
-      const items = snap.docs
-        .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as Record<string, unknown>) }))
-        .map((data) => ({
-          id: data.id as string,
-          name: (data.name as string) || "Untitled",
-          slug: (data.slug as string) || "",
-          eventName: (data.eventName as string) || "",
-          headline: (data.headline as string) || "",
-          subheading: (data.subheading as string) || "",
-          prizeDescription: (data.prizeDescription as string) || "",
-          onePagerUrl: (data.onePagerUrl as string) || "",
-          emailSubject: (data.emailSubject as string) || "",
-          emailBody: (data.emailBody as string) || "",
-          successHeadline: (data.successHeadline as string) || "Thanks for entering!",
-          successMessage: (data.successMessage as string) || "",
-          consentText: (data.consentText as string) || "",
-          notificationEmails: Array.isArray(data.notificationEmails)
-            ? (data.notificationEmails as string[])
-            : normaliseNotificationList((data.notificationEmails as string) || ""),
-          isActive: data.isActive !== false,
-          createdAt: toDate(data.createdAt),
-          updatedAt: toDate(data.updatedAt),
-        }))
+      const items: ExpoLeadPageRecord[] = snap.docs
+        .map((docSnap) => {
+          const data = docSnap.data() as Partial<ExpoLeadPageRecord> & {
+            notificationEmails?: string[] | string;
+            createdAt?: unknown;
+            updatedAt?: unknown;
+          };
+          return {
+            id: docSnap.id,
+            name: typeof data.name === "string" && data.name.trim().length > 0 ? data.name : "Untitled",
+            slug: typeof data.slug === "string" ? data.slug : "",
+            eventName: typeof data.eventName === "string" ? data.eventName : "",
+            headline: typeof data.headline === "string" ? data.headline : "",
+            subheading: typeof data.subheading === "string" ? data.subheading : "",
+            prizeDescription: typeof data.prizeDescription === "string" ? data.prizeDescription : "",
+            onePagerUrl: typeof data.onePagerUrl === "string" ? data.onePagerUrl : "",
+            emailSubject: typeof data.emailSubject === "string" ? data.emailSubject : "",
+            emailBody: typeof data.emailBody === "string" ? data.emailBody : "",
+            successHeadline:
+              typeof data.successHeadline === "string" && data.successHeadline.trim().length > 0
+                ? data.successHeadline
+                : "Thanks for entering!",
+            successMessage: typeof data.successMessage === "string" ? data.successMessage : "",
+            consentText: typeof data.consentText === "string" ? data.consentText : "",
+            notificationEmails: Array.isArray(data.notificationEmails)
+              ? data.notificationEmails.filter((value): value is string => typeof value === "string")
+              : normaliseNotificationList(typeof data.notificationEmails === "string" ? data.notificationEmails : ""),
+            isActive: data.isActive !== false,
+            createdAt: toDate(data.createdAt),
+            updatedAt: toDate(data.updatedAt),
+          } satisfies ExpoLeadPageRecord;
+        })
         .sort((a, b) => {
           const aTime = a.updatedAt?.getTime() ?? a.createdAt?.getTime() ?? 0;
           const bTime = b.updatedAt?.getTime() ?? b.createdAt?.getTime() ?? 0;

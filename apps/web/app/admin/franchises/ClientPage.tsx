@@ -299,14 +299,15 @@ const removeRoyaltyTier = (state: RoyaltyState, index: number): RoyaltyState => 
   return { ...state, hqTiers: tiers };
 };
 
-const describeRoyaltyTier = (tier: { minOrder: number; maxOrder: number | null; percentage: number }) => {
-  if (tier.maxOrder == null) {
+const describeRoyaltyTier = (tier: { minOrder: number; maxOrder?: number | null; percentage: number }) => {
+  const maxOrder = tier.maxOrder ?? null;
+  if (maxOrder == null) {
     return `${tier.percentage}% ${ordinal(tier.minOrder)}+`;
   }
-  if (tier.minOrder === tier.maxOrder) {
+  if (tier.minOrder === maxOrder) {
     return `${tier.percentage}% ${ordinal(tier.minOrder)}`;
   }
-  return `${tier.percentage}% ${ordinal(tier.minOrder)}–${ordinal(tier.maxOrder)}`;
+  return `${tier.percentage}% ${ordinal(tier.minOrder)}–${ordinal(maxOrder)}`;
 };
 
 export default function AdminFranchisesPage() {

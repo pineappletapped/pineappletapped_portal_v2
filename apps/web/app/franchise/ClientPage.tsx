@@ -238,6 +238,11 @@ export default function FranchisePortalPage() {
     return "GBP";
   }, [orders]);
 
+  const activeFranchise = useMemo(
+    () => franchises.find((item) => item.id === activeFranchiseId) ?? null,
+    [activeFranchiseId, franchises]
+  );
+
   const currencyFormatter = useMemo(
     () =>
       new Intl.NumberFormat("en-GB", {
@@ -827,12 +832,6 @@ export default function FranchisePortalPage() {
       setUploadError(err?.message || "Failed to upload file. Please try again.");
     }
   };
-
-  const activeFranchise = useMemo(
-    () => franchises.find((item) => item.id === activeFranchiseId) ?? null,
-    [activeFranchiseId, franchises]
-  );
-
   const busy = initialising || dataLoading;
 
   return (
