@@ -19,6 +19,9 @@ import { useRoleGate } from "@/hooks/useRoleGate";
 export default function AdminOrdersPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [orders, setOrders] = useState<any[]>([]);
+  const [franchiseMap, setFranchiseMap] = useState<
+    Record<string, { name?: string | null; code?: string | null }>
+  >({});
   const [statusFilter, setStatusFilter] = useState("all");
   const [emailFilter, setEmailFilter] = useState("");
   const [startDate, setStartDate] = useState("");
@@ -87,20 +90,66 @@ export default function AdminOrdersPage() {
       return;
     }
     (async () => {
-      const orderSnap = await getDocs(
-        query(collection(db, "orders"), orderBy("createdAt", "desc"))
-      );
-      const raw = orderSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-      const ids = Array.from(new Set(raw.map((o) => o.userId).filter(Boolean)));
-      const userMap: Record<string, any> = {};
-      await Promise.all(
-        ids.map(async (uid) => {
-          const uSnap = await getDoc(doc(db, "users", uid));
-          if (uSnap.exists()) userMap[uid] = uSnap.data();
-        })
-      );
-      setOrders(raw.map((o) => ({ ...o, user: userMap[o.userId] })));
-      setLoading(false);
+      try {
+        const orderSnap = await getDocs(
+          query(collection(db, "orders"), orderBy("createdAt", "desc"))
+        );
+        const raw = orderSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+        const ids = Array.from(
+          new Set(raw.map((o) => o.userId).filter((value): value is string => Boolean(value)))
+        );
+        const userMap: Record<string, any> = {};
+        await Promise.all(
+          ids.map(async (uid) => {
+            try {
+              const uSnap = await getDoc(doc(db, "users", uid));
+              if (uSnap.exists()) userMap[uid] = uSnap.data();
+            } catch (err) {
+              console.warn("Failed to load user", uid, err);
+            }
+          })
+        );
+
+        const franchiseIds = new Set<string>();
+        raw.forEach((order) => {
+          if (order.franchiseId) franchiseIds.add(order.franchiseId as string);
+          const assignmentFranchiseId = (order.franchiseAssignment as any)?.franchiseId;
+          if (assignmentFranchiseId) {
+            franchiseIds.add(String(assignmentFranchiseId));
+          }
+        });
+
+        const franchiseData: Record<string, { name?: string | null; code?: string | null }> = {};
+        if (franchiseIds.size > 0) {
+          await Promise.all(
+            Array.from(franchiseIds).map(async (franchiseId) => {
+              try {
+                const snap = await getDoc(doc(db, "franchises", franchiseId));
+                if (snap.exists()) {
+                  const data = snap.data() as any;
+                  franchiseData[franchiseId] = {
+                    name: (data?.name as string) || null,
+                    code: (data?.code as string) || null,
+                  };
+                }
+              } catch (franchiseErr) {
+                console.warn(
+                  "Failed to load franchise details",
+                  franchiseId,
+                  franchiseErr
+                );
+              }
+            })
+          );
+        }
+
+        setFranchiseMap(franchiseData);
+        setOrders(raw.map((o) => ({ ...o, user: userMap[o.userId] })));
+      } catch (err) {
+        console.error("Failed to load orders", err);
+      } finally {
+        setLoading(false);
+      }
     })();
   }, [allowed, guardLoading]);
 
@@ -185,6 +234,7 @@ export default function AdminOrdersPage() {
               <th className="p-2">ID</th>
               <th className="p-2">Customer</th>
               <th className="p-2">Status</th>
+              <th className="p-2">Franchise Routing</th>
               <th className="p-2">Created</th>
               <th className="p-2">Project</th>
               <th className="p-2">Actions</th>
@@ -198,6 +248,42 @@ export default function AdminOrdersPage() {
                 o.user?.email ||
                 "-";
               const company = o.companyName || o.user?.companyName;
+              const assignment = o.franchiseAssignment as
+                | {
+                    status?: string;
+                    matchType?: string;
+                    franchiseId?: string;
+                    territoryLabel?: string;
+                    territoryPostalCode?: string;
+                    normalizedPostalCode?: string;
+                    inputPostalCode?: string;
+                  }
+                | null;
+              const assignmentStatus = assignment?.status || null;
+              const assignmentMatchType = assignment?.matchType || null;
+              const franchiseId =
+                (o.franchiseId as string | undefined) ||
+                (assignment?.franchiseId as string | undefined) ||
+                null;
+              const franchiseDetails = franchiseId
+                ? franchiseMap[franchiseId]
+                : undefined;
+              const franchiseName =
+                franchiseDetails?.name ||
+                franchiseDetails?.code ||
+                franchiseId ||
+                null;
+              const territoryLabel =
+                assignment?.territoryLabel || assignment?.territoryPostalCode || null;
+              const assignedOperator =
+                (o.franchiseAssignedUser?.displayName as string | undefined) ||
+                (o.franchiseAssignedUser?.email as string | undefined) ||
+                null;
+              const inputPostalCode =
+                (o.clientPostalCode as string | undefined) ||
+                assignment?.inputPostalCode ||
+                assignment?.normalizedPostalCode ||
+                null;
               return (
                 <tr key={o.id} className="border-t">
                   <td className="p-2">{o.id}</td>
@@ -217,40 +303,74 @@ export default function AdminOrdersPage() {
                     )}
                   </td>
                   <td className="p-2">
-                  <select
-                    className="input capitalize"
-                    value={o.status || "pending"}
-                    onChange={(e) => handleStatusChange(o, e.target.value)}
-                  >
-                    {statusOptions.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-                <td className="p-2">
-                  {o.createdAt?.toDate
-                    ? o.createdAt.toDate().toLocaleDateString()
-                    : "-"}
-                </td>
-                <td className="p-2">
-                  {o.projectId ? (
-                    <Link
-                      href={`/projects/${o.projectId}`}
-                      className="text-orange underline"
+                    <select
+                      className="input capitalize"
+                      value={o.status || "pending"}
+                      onChange={(e) => handleStatusChange(o, e.target.value)}
                     >
-                      View
+                      {statusOptions.map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="p-2 align-top">
+                    {franchiseName ? (
+                      <div>
+                        <div className="font-medium">{franchiseName}</div>
+                        {territoryLabel && (
+                          <div className="text-xs text-gray-500">
+                            Territory: {territoryLabel}
+                          </div>
+                        )}
+                        {assignedOperator && (
+                          <div className="text-xs text-gray-500">
+                            Operator: {assignedOperator}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-gray-500">
+                        {assignmentStatus === "unmatched"
+                          ? "No territory match"
+                          : "Not routed"}
+                      </div>
+                    )}
+                    {inputPostalCode && (
+                      <div className="text-[10px] uppercase text-gray-400 mt-1">
+                        Postcode: {inputPostalCode}
+                      </div>
+                    )}
+                    {assignmentStatus && (
+                      <div className="text-[10px] uppercase text-gray-400">
+                        {assignmentStatus}
+                        {assignmentMatchType ? ` · ${assignmentMatchType}` : ""}
+                      </div>
+                    )}
+                  </td>
+                  <td className="p-2">
+                    {o.createdAt?.toDate
+                      ? o.createdAt.toDate().toLocaleDateString()
+                      : "-"}
+                  </td>
+                  <td className="p-2">
+                    {o.projectId ? (
+                      <Link
+                        href={`/projects/${o.projectId}`}
+                        className="text-orange underline"
+                      >
+                        View
+                      </Link>
+                    ) : (
+                      "-"
+                    )}
+                  </td>
+                  <td className="p-2">
+                    <Link href={`/orders/${o.id}`} className="btn-sm">
+                      Open
                     </Link>
-                  ) : (
-                    "-"
-                  )}
-                </td>
-                <td className="p-2">
-                  <Link href={`/orders/${o.id}`} className="btn-sm">
-                    Open
-                  </Link>
-                </td>
+                  </td>
                 </tr>
               );
             })}

@@ -32,6 +32,149 @@ admin.initializeApp({
 const db = admin.firestore();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' });
 const VAT_RATE = 0.2;
+function normalisePostalCode(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return null;
+    }
+    const cleaned = trimmed.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!cleaned) {
+        return null;
+    }
+    return cleaned;
+}
+function extractTerritoryPostalCodes(data) {
+    const raw = data.postalCodes;
+    const list = [];
+    if (Array.isArray(raw)) {
+        raw.forEach((value) => {
+            if (value == null) {
+                return;
+            }
+            list.push(String(value));
+        });
+    }
+    else if (typeof raw === 'string') {
+        raw
+            .split(/\r?\n|,/)
+            .map((item) => item.trim())
+            .filter(Boolean)
+            .forEach((item) => list.push(item));
+    }
+    return list
+        .map((value) => {
+        const normalised = normalisePostalCode(value);
+        if (!normalised) {
+            return null;
+        }
+        return { raw: value, normalised };
+    })
+        .filter((item) => item !== null);
+}
+async function resolveTerritoryForPostalCode(postalCode) {
+    const normalisedInput = normalisePostalCode(postalCode);
+    if (!normalisedInput) {
+        return null;
+    }
+    const territoriesSnap = await db.collection('franchiseTerritories').get();
+    let best = null;
+    for (const territoryDoc of territoriesSnap.docs) {
+        const data = territoryDoc.data();
+        if (!data?.franchiseId) {
+            continue;
+        }
+        if (data.type && data.type !== 'postal') {
+            // Radius-based routing requires geospatial inputs; skip for postal-only auto routing.
+            continue;
+        }
+        const codes = extractTerritoryPostalCodes(data);
+        for (const code of codes) {
+            if (!code.normalised) {
+                continue;
+            }
+            let matchType = null;
+            let score = 0;
+            if (code.normalised === normalisedInput) {
+                matchType = 'exact';
+                score = 2000 + code.normalised.length;
+            }
+            else if (normalisedInput.startsWith(code.normalised)) {
+                matchType = 'prefix';
+                score = 1200 + code.normalised.length;
+            }
+            else if (code.normalised.startsWith(normalisedInput)) {
+                // Allow territories defined with full codes while customer provided a broader area.
+                matchType = 'superset';
+                score = 800 + normalisedInput.length;
+            }
+            if (!matchType) {
+                continue;
+            }
+            if (data.exclusive !== false) {
+                score += 50;
+            }
+            if (!best || score > best.score) {
+                best = {
+                    score,
+                    result: {
+                        franchiseId: data.franchiseId,
+                        territoryId: territoryDoc.id,
+                        territoryLabel: typeof data.label === 'string' ? data.label : null,
+                        territoryPostalCode: code.normalised,
+                        matchType,
+                        exclusive: data.exclusive !== false,
+                    },
+                };
+            }
+        }
+    }
+    if (!best) {
+        return null;
+    }
+    return best.result;
+}
+async function resolvePrimaryFranchiseMember(franchiseId) {
+    const membersSnap = await db
+        .collection('franchiseMembers')
+        .where('franchiseId', '==', franchiseId)
+        .get();
+    if (membersSnap.empty) {
+        return null;
+    }
+    const members = membersSnap.docs.map((doc) => {
+        const data = doc.data();
+        return {
+            memberId: doc.id,
+            userId: data.userId ? String(data.userId) : '',
+            role: data.role ? String(data.role) : null,
+            primary: data.primary === true,
+        };
+    });
+    const prioritised = members.find((member) => member.primary && member.userId) ||
+        members.find((member) => member.role === 'franchisee' && member.userId) ||
+        members.find((member) => member.userId) ||
+        null;
+    if (!prioritised) {
+        return null;
+    }
+    const userSnap = await db.collection('users').doc(prioritised.userId).get();
+    const profile = userSnap.exists
+        ? {
+            displayName: userSnap.data()?.displayName ?? null,
+            email: userSnap.data()?.email ?? null,
+        }
+        : null;
+    return {
+        memberId: prioritised.memberId,
+        userId: prioritised.userId,
+        role: prioritised.role,
+        primary: prioritised.primary,
+        userProfile: profile,
+    };
+}
 const ROLE_KEYS = ['admin', 'operations', 'finance', 'projects', 'sales', 'marketing'];
 const AUDIT_LOG_RETENTION_DAYS = 180;
 const AUDIT_LOG_BATCH_SIZE = 500;
@@ -1555,7 +1698,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     const parseOptional = (value) => value === undefined || value === null ? undefined : toNumber(value);
     const DEFAULT_TRAVEL_MILES = 100;
     const DEFAULT_TRAVEL_RATE = 0.3;
-    const { items, userEmail, customerName, companyName, location, projectName, voucher, kitItems = [], rentalSubtotal = 0, } = data;
+    const { items, userEmail, customerName, companyName, location, postalCode, projectName, voucher, kitItems = [], rentalSubtotal = 0, } = data;
     if (!items || !Array.isArray(items) || items.length === 0) {
         throw new functions.https.HttpsError('invalid-argument', 'items are required');
     }
@@ -1694,12 +1837,33 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         grossRevenue: price,
         profit,
     };
-    const orderRef = await db.collection('orders').add({
+    const postalCodeValue = typeof postalCode === 'string' ? postalCode : null;
+    const normalisedPostalCode = normalisePostalCode(postalCodeValue);
+    const assignmentResult = normalisedPostalCode
+        ? await resolveTerritoryForPostalCode(normalisedPostalCode)
+        : null;
+    const assignmentMember = assignmentResult
+        ? await resolvePrimaryFranchiseMember(assignmentResult.franchiseId)
+        : null;
+    const assignmentMeta = {
+        strategy: 'postal_code_auto_route',
+        inputPostalCode: postalCodeValue || null,
+        normalizedPostalCode: normalisedPostalCode || null,
+        status: assignmentResult
+            ? 'matched'
+            : normalisedPostalCode
+                ? 'unmatched'
+                : 'skipped',
+        resolvedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    const orderData = {
         userId: context.auth?.uid || null,
         userEmail: context.auth?.token.email || userEmail || null,
         customerName,
         companyName: companyName || null,
         location: location || null,
+        clientPostalCode: postalCodeValue || null,
+        clientPostalCodeNormalised: normalisedPostalCode || null,
         projectName: projectName || null,
         voucher: voucherCode,
         items: orderItems,
@@ -1721,7 +1885,47 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         profit,
         status: 'pending',
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+        franchiseAssignment: assignmentMeta,
+    };
+    if (assignmentResult) {
+        orderData.franchiseId = assignmentResult.franchiseId;
+        orderData.franchiseTerritoryId = assignmentResult.territoryId;
+        assignmentMeta.matchType = assignmentResult.matchType;
+        assignmentMeta.franchiseId = assignmentResult.franchiseId;
+        assignmentMeta.territoryId = assignmentResult.territoryId;
+        assignmentMeta.territoryPostalCode = assignmentResult.territoryPostalCode;
+        assignmentMeta.territoryLabel = assignmentResult.territoryLabel;
+        assignmentMeta.exclusive = assignmentResult.exclusive;
+    }
+    else {
+        orderData.franchiseId = null;
+        orderData.franchiseTerritoryId = null;
+    }
+    if (assignmentMember) {
+        orderData.franchiseAssignedMemberId = assignmentMember.memberId;
+        orderData.franchiseAssignedUserId = assignmentMember.userId;
+        orderData.franchiseAssignedRole = assignmentMember.role || null;
+        orderData.franchiseAssignedIsPrimary = assignmentMember.primary;
+        orderData.franchiseAssignedUser = assignmentMember.userProfile
+            ? {
+                uid: assignmentMember.userId,
+                displayName: assignmentMember.userProfile.displayName || null,
+                email: assignmentMember.userProfile.email || null,
+            }
+            : {
+                uid: assignmentMember.userId,
+                displayName: null,
+                email: null,
+            };
+    }
+    else {
+        orderData.franchiseAssignedMemberId = null;
+        orderData.franchiseAssignedUserId = null;
+        orderData.franchiseAssignedRole = null;
+        orderData.franchiseAssignedIsPrimary = false;
+        orderData.franchiseAssignedUser = null;
+    }
+    const orderRef = await db.collection('orders').add(orderData);
     return { orderId: orderRef.id };
 });
 /**
