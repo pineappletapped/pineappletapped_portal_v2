@@ -51,6 +51,26 @@ type ProfileFlags = {
   isStaff: boolean;
 };
 
+const deriveFranchiseIds = (data: any): string[] => {
+  const ids = new Set<string>();
+  const pushValue = (value: unknown) => {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) ids.add(trimmed);
+    }
+  };
+  pushValue(data?.primaryFranchiseId);
+  pushValue(data?.franchiseId);
+  if (Array.isArray(data?.franchiseIds)) {
+    data.franchiseIds.forEach((value: unknown) => pushValue(value));
+  }
+  const roles = data?.franchiseRoles;
+  if (roles && typeof roles === 'object') {
+    Object.values(roles).forEach((value) => pushValue(value));
+  }
+  return Array.from(ids);
+};
+
 export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {}) {
   const [user, setUser] = useState<any>(null);
   const [roles, setRoles] = useState<UserRoles>({});
@@ -58,6 +78,8 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
   const [profile, setProfile] = useState<ProfileFlags | null>(null);
   const [hasClientMembership, setHasClientMembership] = useState(false);
   const [hasClientOrders, setHasClientOrders] = useState(false);
+  const [franchiseIds, setFranchiseIds] = useState<string[]>([]);
+  const [hasFranchiseMembership, setHasFranchiseMembership] = useState(false);
   const authRef = useRef<Auth | null>(null);
   const dbRef = useRef<Firestore | null>(null);
   const cookieAttributes = useMemo(() => {
@@ -105,6 +127,8 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
           setProfile(null);
           setHasClientMembership(false);
           setHasClientOrders(false);
+          setFranchiseIds([]);
+          setHasFranchiseMembership(false);
           if (u) {
             try {
               const snap = await getDoc(doc(db, 'users', u.uid));
@@ -123,6 +147,9 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
               };
               setProfile(nextProfile);
               setRoles(extracted);
+              const franchiseList = deriveFranchiseIds(docData);
+              setFranchiseIds(franchiseList);
+              setHasFranchiseMembership(franchiseList.length > 0);
               const token = await u.getIdToken();
               document.cookie = `token=${encodeURIComponent(token)}; ${cookieAttributes.persistent}`;
               document.cookie = `uid=${encodeURIComponent(u.uid)}; ${cookieAttributes.persistent}`;
@@ -139,6 +166,8 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
             setProfile(null);
             setHasClientMembership(false);
             setHasClientOrders(false);
+            setFranchiseIds([]);
+            setHasFranchiseMembership(false);
           }
           setChecked(true);
         });
@@ -150,6 +179,8 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
           setProfile(null);
           setHasClientMembership(false);
           setHasClientOrders(false);
+          setFranchiseIds([]);
+          setHasFranchiseMembership(false);
           setChecked(true);
         }
       }
@@ -260,6 +291,42 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
     };
   }, [isProfileContractor, profileLoaded, user]);
 
+  useEffect(() => {
+    const db = dbRef.current;
+    if (!user || !db) {
+      setHasFranchiseMembership(false);
+      return;
+    }
+
+    if (franchiseIds.length > 0) {
+      setHasFranchiseMembership(true);
+      return;
+    }
+
+    let cancelled = false;
+    setHasFranchiseMembership(false);
+
+    (async () => {
+      try {
+        const snap = await getDocs(
+          query(collection(db, 'franchiseMembers'), where('userId', '==', user.uid), limit(1))
+        );
+        if (!cancelled) {
+          setHasFranchiseMembership(!snap.empty);
+        }
+      } catch (error) {
+        console.error('Failed to verify franchise membership', error);
+        if (!cancelled) {
+          setHasFranchiseMembership(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [franchiseIds, user]);
+
   const makeButtonClass = (variant: ButtonVariant) =>
     clsx(
       'inline-flex items-center justify-center rounded-full border font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2',
@@ -299,6 +366,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
       isGodAdmin ||
       (!isContractor && clientStatus) ||
       (isContractor && clientStatus && (hasClientMembership || hasClientOrders));
+    const showFranchisePortal = isGodAdmin || hasFranchiseMembership;
     const showTeamPortal = isGodAdmin || isContractor;
     const adminHref = getDefaultAdminRoute(roles);
     return (
@@ -306,6 +374,11 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
         {showClientPortal && (
           <Link href="/dashboard" className={makeButtonClass('solid')}>
             Client Portal
+          </Link>
+        )}
+        {showFranchisePortal && (
+          <Link href="/franchise" className={makeButtonClass('outline')}>
+            Franchise Portal
           </Link>
         )}
         {canAccessAdmin && (
