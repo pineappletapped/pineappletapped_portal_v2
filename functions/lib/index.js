@@ -1577,6 +1577,8 @@ async function sendEmail(to, subject, body) {
 }
 export const contact_send = functions.https.onCall(async (data) => {
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const leadSourceRaw = typeof data.leadSource === 'string' ? data.leadSource.trim() : '';
+    const leadSourceTag = leadSourceRaw || 'hq';
     const msg = {
         kind: 'contact',
         fromName: data.name || null,
@@ -1589,6 +1591,8 @@ export const contact_send = functions.https.onCall(async (data) => {
         createdAt: timestamp,
         updatedAt: timestamp,
         lastStatusAt: timestamp,
+        leadSource: leadSourceTag,
+        leadSourceCapturedAt: timestamp,
     };
     await db.collection('messages').add(msg);
     await sendEmail('info@pineapple.local', `Contact form: ${data.name || 'Message'}`, `From: ${data.name} <${data.email}>\\n\\n${data.message}`);
@@ -1602,11 +1606,21 @@ export const contact_send = functions.https.onCall(async (data) => {
                 company: data.company || null,
                 status: 'new',
                 source: 'contact',
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                createdAt: timestamp,
+                leadSource: leadSourceTag,
+                leadSourceCapturedAt: timestamp,
             });
         }
         else {
-            await existing.docs[0].ref.set({ name: data.name || null, company: data.company || null }, { merge: true });
+            const leadUpdate = {
+                name: data.name || null,
+                company: data.company || null,
+            };
+            if (leadSourceRaw) {
+                leadUpdate.leadSource = leadSourceTag;
+                leadUpdate.leadSourceCapturedAt = timestamp;
+            }
+            await existing.docs[0].ref.set(leadUpdate, { merge: true });
         }
     }
     catch (err) {
@@ -1680,6 +1694,9 @@ export const messages_onWrite = functions.firestore
     await Promise.all(notifications);
 });
 export const quote_request_public = functions.https.onCall(async (data) => {
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const leadSourceRaw = typeof data.leadSource === 'string' ? data.leadSource.trim() : '';
+    const leadSourceTag = leadSourceRaw || 'hq';
     const record = {
         userId: null,
         contactName: data.name,
@@ -1689,8 +1706,10 @@ export const quote_request_public = functions.https.onCall(async (data) => {
         items: data.items || [],
         customRequest: data.customRequest || null,
         productionPeriod: data.productionPeriod || null,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: timestamp,
         status: 'pending',
+        leadSource: leadSourceTag,
+        leadSourceCapturedAt: timestamp,
     };
     const ref = await db.collection('quoteRequests').add(record);
     await sendEmail('info@pineapple.local', `Quote request from ${data.name}`, `${data.projectName ? `Project: ${data.projectName}\n` : ''}${data.productionPeriod ? `Production: ${data.productionPeriod}\n` : ''}Email: ${data.email}\n\n${data.customRequest || ''}`);
@@ -1704,11 +1723,21 @@ export const quote_request_public = functions.https.onCall(async (data) => {
                 company: data.company || null,
                 status: 'new',
                 source: 'quote',
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                createdAt: timestamp,
+                leadSource: leadSourceTag,
+                leadSourceCapturedAt: timestamp,
             });
         }
         else {
-            await existing.docs[0].ref.set({ name: data.name || null, company: data.company || null }, { merge: true });
+            const leadUpdate = {
+                name: data.name || null,
+                company: data.company || null,
+            };
+            if (leadSourceRaw) {
+                leadUpdate.leadSource = leadSourceTag;
+                leadUpdate.leadSourceCapturedAt = timestamp;
+            }
+            await existing.docs[0].ref.set(leadUpdate, { merge: true });
         }
     }
     catch (err) {
@@ -2507,7 +2536,10 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         throw new functions.https.HttpsError('invalid-argument', 'items are required');
     }
     const productRefs = items.map((i) => db.collection('products').doc(i.id));
-    const leadSourceNormalised = typeof leadSourceInput === 'string' && leadSourceInput.toLowerCase().includes('franchise')
+    const leadSourceRaw = typeof leadSourceInput === 'string' ? leadSourceInput.trim() : '';
+    const leadSourceTag = leadSourceRaw || 'hq';
+    const leadSourceLower = leadSourceTag.toLowerCase();
+    const leadSourceNormalised = ['franchise', 'affiliate', 'partner', 'referral', 'territory'].some((indicator) => leadSourceLower.includes(indicator))
         ? 'franchisee'
         : 'hq';
     const authEmail = typeof context.auth?.token.email === 'string' ? context.auth.token.email : null;
@@ -2724,6 +2756,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             console.warn('Failed to resolve royalty configuration', royaltyErr);
         }
     }
+    const createdAt = admin.firestore.FieldValue.serverTimestamp();
     const orderData = {
         userId: context.auth?.uid || null,
         userEmail: context.auth?.token.email || userEmail || null,
@@ -2752,9 +2785,11 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         price,
         profit,
         status: 'pending',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt,
         franchiseAssignment: assignmentMeta,
         royaltySource: leadSourceNormalised,
+        leadSource: leadSourceTag,
+        leadSourceCapturedAt: createdAt,
         clientRoyaltyKey: clientRoyaltyKey || null,
         clientRoyaltyKeyType: clientRoyaltyKeyType || null,
         clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,

@@ -1860,6 +1860,9 @@ async function sendEmail(to: string, subject: string, body: string) {
 
 export const contact_send = functions.https.onCall(async (data) => {
   const timestamp = admin.firestore.FieldValue.serverTimestamp();
+  const leadSourceRaw =
+    typeof data.leadSource === 'string' ? (data.leadSource as string).trim() : '';
+  const leadSourceTag = leadSourceRaw || 'hq';
   const msg = {
     kind: 'contact',
     fromName: data.name || null,
@@ -1872,6 +1875,8 @@ export const contact_send = functions.https.onCall(async (data) => {
     createdAt: timestamp,
     updatedAt: timestamp,
     lastStatusAt: timestamp,
+    leadSource: leadSourceTag,
+    leadSourceCapturedAt: timestamp,
   };
   await db.collection('messages').add(msg);
   await sendEmail(
@@ -1889,10 +1894,20 @@ export const contact_send = functions.https.onCall(async (data) => {
         company: data.company || null,
         status: 'new',
         source: 'contact',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: timestamp,
+        leadSource: leadSourceTag,
+        leadSourceCapturedAt: timestamp,
       });
     } else {
-      await existing.docs[0].ref.set({ name: data.name || null, company: data.company || null }, { merge: true });
+      const leadUpdate: Record<string, any> = {
+        name: data.name || null,
+        company: data.company || null,
+      };
+      if (leadSourceRaw) {
+        leadUpdate.leadSource = leadSourceTag;
+        leadUpdate.leadSourceCapturedAt = timestamp;
+      }
+      await existing.docs[0].ref.set(leadUpdate, { merge: true });
     }
   } catch (err) {
     console.error('Failed to log contact lead', err);
@@ -1984,6 +1999,10 @@ export const messages_onWrite = functions.firestore
     await Promise.all(notifications);
   });
 export const quote_request_public = functions.https.onCall(async (data) => {
+  const timestamp = admin.firestore.FieldValue.serverTimestamp();
+  const leadSourceRaw =
+    typeof data.leadSource === 'string' ? (data.leadSource as string).trim() : '';
+  const leadSourceTag = leadSourceRaw || 'hq';
   const record = {
     userId: null,
     contactName: data.name,
@@ -1993,8 +2012,10 @@ export const quote_request_public = functions.https.onCall(async (data) => {
     items: data.items || [],
     customRequest: data.customRequest || null,
     productionPeriod: data.productionPeriod || null,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdAt: timestamp,
     status: 'pending',
+    leadSource: leadSourceTag,
+    leadSourceCapturedAt: timestamp,
   };
   const ref = await db.collection('quoteRequests').add(record);
   await sendEmail(
@@ -2012,10 +2033,20 @@ export const quote_request_public = functions.https.onCall(async (data) => {
         company: data.company || null,
         status: 'new',
         source: 'quote',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: timestamp,
+        leadSource: leadSourceTag,
+        leadSourceCapturedAt: timestamp,
       });
     } else {
-      await existing.docs[0].ref.set({ name: data.name || null, company: data.company || null }, { merge: true });
+      const leadUpdate: Record<string, any> = {
+        name: data.name || null,
+        company: data.company || null,
+      };
+      if (leadSourceRaw) {
+        leadUpdate.leadSource = leadSourceTag;
+        leadUpdate.leadSourceCapturedAt = timestamp;
+      }
+      await existing.docs[0].ref.set(leadUpdate, { merge: true });
     }
   } catch (err) {
     console.error('Failed to log quote lead', err);
@@ -2820,10 +2851,15 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   }
 
   const productRefs = items.map((i: any) => db.collection('products').doc(i.id));
-  const leadSourceNormalised: RoyaltySource =
-    typeof leadSourceInput === 'string' && leadSourceInput.toLowerCase().includes('franchise')
-      ? 'franchisee'
-      : 'hq';
+  const leadSourceRaw =
+    typeof leadSourceInput === 'string' ? (leadSourceInput as string).trim() : '';
+  const leadSourceTag = leadSourceRaw || 'hq';
+  const leadSourceLower = leadSourceTag.toLowerCase();
+  const leadSourceNormalised: RoyaltySource = ['franchise', 'affiliate', 'partner', 'referral', 'territory'].some(
+    (indicator) => leadSourceLower.includes(indicator)
+  )
+    ? 'franchisee'
+    : 'hq';
   const authEmail =
     typeof context.auth?.token.email === 'string' ? (context.auth.token.email as string) : null;
   const requestEmail = typeof userEmail === 'string' ? (userEmail as string) : null;
@@ -3052,6 +3088,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     }
   }
 
+  const createdAt = admin.firestore.FieldValue.serverTimestamp();
   const orderData: Record<string, any> = {
     userId: context.auth?.uid || null,
     userEmail: context.auth?.token.email || userEmail || null,
@@ -3080,9 +3117,11 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     price,
     profit,
     status: 'pending',
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdAt,
     franchiseAssignment: assignmentMeta,
     royaltySource: leadSourceNormalised,
+    leadSource: leadSourceTag,
+    leadSourceCapturedAt: createdAt,
     clientRoyaltyKey: clientRoyaltyKey || null,
     clientRoyaltyKeyType: clientRoyaltyKeyType || null,
     clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
