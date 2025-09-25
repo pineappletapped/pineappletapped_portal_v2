@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import clsx from "clsx";
+import TerritoryMap from "@/components/TerritoryMap";
 import {
   addDoc,
   collection,
@@ -36,6 +38,11 @@ interface UserSummary {
   contractor?: boolean;
   isStaff?: boolean;
   franchiseId?: string | null;
+}
+
+interface CategoryOption {
+  id: string;
+  name: string;
 }
 
 const FRANCHISE_STATUSES: { value: FranchiseStatus; label: string; description: string }[] = [
@@ -192,6 +199,7 @@ export default function AdminFranchisesPage() {
   const [territories, setTerritories] = useState<FranchiseTerritory[]>([]);
   const [members, setMembers] = useState<FranchiseMember[]>([]);
   const [users, setUsers] = useState<UserSummary[]>([]);
+  const [categoryOptions, setCategoryOptions] = useState<CategoryOption[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const [showCreateFranchise, setShowCreateFranchise] = useState(false);
@@ -231,6 +239,8 @@ export default function AdminFranchisesPage() {
     radiusKm: "",
     centerLat: "",
     centerLng: "",
+    categories: [] as string[],
+    licenseFee: "",
     notes: "",
   });
   const [editingTerritoryId, setEditingTerritoryId] = useState<string | null>(null);
@@ -243,6 +253,8 @@ export default function AdminFranchisesPage() {
     radiusKm: "",
     centerLat: "",
     centerLng: "",
+    categories: [] as string[],
+    licenseFee: "",
     notes: "",
   });
 
@@ -263,11 +275,12 @@ export default function AdminFranchisesPage() {
   };
 
   const loadAll = useCallback(async (cancelRef?: { current: boolean }) => {
-    const [franchiseSnap, territorySnap, memberSnap, usersSnap] = await Promise.all([
+    const [franchiseSnap, territorySnap, memberSnap, usersSnap, categorySnap] = await Promise.all([
       getDocs(collection(db, "franchises")),
       getDocs(collection(db, "franchiseTerritories")),
       getDocs(collection(db, "franchiseMembers")),
       getDocs(collection(db, "users")),
+      getDocs(collection(db, "categories")),
     ]);
 
     if (cancelRef?.current) return;
@@ -301,10 +314,19 @@ export default function AdminFranchisesPage() {
 
     if (cancelRef?.current) return;
 
+    const categories = categorySnap.docs
+      .map((doc) => {
+        const data = doc.data() as Record<string, unknown>;
+        const name = typeof data.name === "string" && data.name.trim() ? data.name.trim() : doc.id;
+        return { id: doc.id, name } satisfies CategoryOption;
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
     setFranchises(franchiseList);
     setTerritories(territoryList);
     setMembers(memberList);
     setUsers(userList.sort((a, b) => a.displayName.localeCompare(b.displayName)));
+    setCategoryOptions(categories);
   }, []);
 
   useEffect(() => {
@@ -349,6 +371,23 @@ export default function AdminFranchisesPage() {
     users.forEach((user) => map.set(user.id, user));
     return map;
   }, [users]);
+
+  const categoryMap = useMemo(() => {
+    const map = new Map<string, CategoryOption>();
+    categoryOptions.forEach((category) => map.set(category.id, category));
+    return map;
+  }, [categoryOptions]);
+
+  const gbpFormatter = useMemo(
+    () =>
+      new Intl.NumberFormat("en-GB", {
+        style: "currency",
+        currency: "GBP",
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2,
+      }),
+    []
+  );
 
   const territoryByFranchise = useMemo(() => {
     const map = new Map<string, FranchiseTerritory[]>();
@@ -520,6 +559,8 @@ export default function AdminFranchisesPage() {
       radiusKm: "",
       centerLat: "",
       centerLng: "",
+      categories: [],
+      licenseFee: "",
       notes: "",
     });
   };
@@ -534,6 +575,7 @@ export default function AdminFranchisesPage() {
       const parsedRadius = Number.parseFloat(newTerritory.radiusKm);
       const parsedLat = Number.parseFloat(newTerritory.centerLat);
       const parsedLng = Number.parseFloat(newTerritory.centerLng);
+      const parsedLicense = Number.parseFloat(newTerritory.licenseFee);
       const payload = {
         franchiseId: newTerritory.franchiseId,
         label: newTerritory.label.trim() || "Unnamed Territory",
@@ -551,6 +593,11 @@ export default function AdminFranchisesPage() {
         centerLng:
           newTerritory.type === "radius" && newTerritory.centerLng.trim() && Number.isFinite(parsedLng)
             ? parsedLng
+            : null,
+        categories: newTerritory.categories,
+        licenseFee:
+          newTerritory.licenseFee.trim() && Number.isFinite(parsedLicense) && parsedLicense >= 0
+            ? parsedLicense
             : null,
         notes: newTerritory.notes.trim() || null,
         createdAt: serverTimestamp(),
@@ -577,6 +624,8 @@ export default function AdminFranchisesPage() {
       radiusKm: territory.radiusKm ? String(territory.radiusKm) : "",
       centerLat: territory.centerLat ? String(territory.centerLat) : "",
       centerLng: territory.centerLng ? String(territory.centerLng) : "",
+      categories: territory.categories || [],
+      licenseFee: territory.licenseFee != null ? String(territory.licenseFee) : "",
       notes: territory.notes || "",
     });
   };
@@ -592,6 +641,8 @@ export default function AdminFranchisesPage() {
       radiusKm: "",
       centerLat: "",
       centerLng: "",
+      categories: [],
+      licenseFee: "",
       notes: "",
     });
   };
@@ -607,6 +658,7 @@ export default function AdminFranchisesPage() {
       const parsedRadius = Number.parseFloat(editingTerritory.radiusKm);
       const parsedLat = Number.parseFloat(editingTerritory.centerLat);
       const parsedLng = Number.parseFloat(editingTerritory.centerLng);
+      const parsedLicense = Number.parseFloat(editingTerritory.licenseFee);
       const payload = {
         franchiseId: editingTerritory.franchiseId,
         label: editingTerritory.label.trim() || "Unnamed Territory",
@@ -624,6 +676,11 @@ export default function AdminFranchisesPage() {
         centerLng:
           editingTerritory.type === "radius" && editingTerritory.centerLng.trim() && Number.isFinite(parsedLng)
             ? parsedLng
+            : null,
+        categories: editingTerritory.categories,
+        licenseFee:
+          editingTerritory.licenseFee.trim() && Number.isFinite(parsedLicense) && parsedLicense >= 0
+            ? parsedLicense
             : null,
         notes: editingTerritory.notes.trim() || null,
         updatedAt: serverTimestamp(),
@@ -724,6 +781,104 @@ export default function AdminFranchisesPage() {
         </p>
         {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
       </div>
+
+      <section className="grid gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">Territory manager</h2>
+          <p className="mt-1 text-sm text-gray-600">
+            Visualise every territory, see included services, and review monthly licensing at a glance.
+          </p>
+        </div>
+        <div className="grid gap-4">
+          {franchises.length === 0 ? (
+            <p className="text-sm text-gray-500">No franchise records yet.</p>
+          ) : (
+            franchises.map((franchise) => {
+              const assignedTerritories = territoryByFranchise.get(franchise.id) ?? [];
+              return (
+                <div key={franchise.id} className="rounded border p-4">
+                  <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <h3 className="text-base font-semibold">{franchise.name}</h3>
+                      <p className="text-xs uppercase tracking-wide text-gray-500">{franchise.status}</p>
+                    </div>
+                    {franchise.contactEmail && (
+                      <a
+                        className="text-sm text-blue-600 hover:underline"
+                        href={`mailto:${franchise.contactEmail}`}
+                      >
+                        {franchise.contactEmail}
+                      </a>
+                    )}
+                  </div>
+                  {assignedTerritories.length === 0 ? (
+                    <p className="mt-3 text-sm text-gray-500">No territories assigned.</p>
+                  ) : (
+                    <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                      {assignedTerritories.map((territory) => {
+                        const categories = territory.categories.map((categoryId) => ({
+                          id: categoryId,
+                          name: categoryMap.get(categoryId)?.name || categoryId,
+                        }));
+                        const licenceLabel =
+                          typeof territory.licenseFee === "number"
+                            ? gbpFormatter.format(territory.licenseFee)
+                            : null;
+                        return (
+                          <div key={territory.id} className="grid gap-2 rounded border border-dashed p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div>
+                                <div className="font-medium text-sm">{territory.label}</div>
+                                <div className="text-xs text-gray-500">{territorySummary(territory)}</div>
+                              </div>
+                              <span
+                                className={clsx(
+                                  "rounded px-2 py-0.5 text-[11px] uppercase",
+                                  territory.exclusive
+                                    ? "bg-emerald-100 text-emerald-800"
+                                    : "bg-gray-100 text-gray-600"
+                                )}
+                              >
+                                {territory.exclusive ? "Exclusive" : "Shared"}
+                              </span>
+                            </div>
+                            {categories.length > 0 && (
+                              <div>
+                                <span className="text-[11px] font-semibold uppercase text-gray-500">
+                                  Categories
+                                </span>
+                                <div className="mt-1 flex flex-wrap gap-1">
+                                  {categories.map((category) => (
+                                    <span
+                                      key={`${territory.id}-card-${category.id}`}
+                                      className="rounded bg-gray-100 px-2 py-0.5 text-[11px] text-gray-700"
+                                    >
+                                      {category.name}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            <div>
+                              <span className="text-[11px] font-semibold uppercase text-gray-500">
+                                License fee
+                              </span>
+                              <div className="mt-0.5 text-xs text-gray-700">
+                                {licenceLabel ? `${licenceLabel} / month` : "Free territory"}
+                              </div>
+                            </div>
+                            <TerritoryMap territory={territory} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </section>
 
       <section className="grid gap-4">
         <div className="flex items-center justify-between">
@@ -1684,6 +1839,48 @@ export default function AdminFranchisesPage() {
               Exclusive lock for this territory
             </label>
             <label className="grid gap-1 text-sm">
+              <span className="font-medium">Service categories</span>
+              <select
+                multiple
+                className="input min-h-[120px]"
+                value={newTerritory.categories}
+                onChange={(event) =>
+                  setNewTerritory({
+                    ...newTerritory,
+                    categories: Array.from(event.target.selectedOptions).map((option) => option.value),
+                  })
+                }
+              >
+                {categoryOptions.length === 0 ? (
+                  <option value="" disabled>
+                    No categories available
+                  </option>
+                ) : (
+                  categoryOptions.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))
+                )}
+              </select>
+              <span className="text-xs text-gray-500">
+                Hold Ctrl/Command to select multiple categories. Leave empty if unrestricted.
+              </span>
+            </label>
+            <label className="grid gap-1 text-sm">
+              <span className="font-medium">Monthly license fee (£/mo)</span>
+              <input
+                className="input"
+                type="number"
+                min="0"
+                step="0.01"
+                value={newTerritory.licenseFee}
+                onChange={(event) => setNewTerritory({ ...newTerritory, licenseFee: event.target.value })}
+                placeholder="0"
+              />
+              <span className="text-xs text-gray-500">Leave blank to keep the territory free.</span>
+            </label>
+            <label className="grid gap-1 text-sm">
               <span className="font-medium">Notes</span>
               <textarea
                 className="input"
@@ -1732,12 +1929,51 @@ export default function AdminFranchisesPage() {
                 territories.map((territory) => {
                   const franchise = franchiseMap.get(territory.franchiseId);
                   const editing = editingTerritoryId === territory.id;
+                  const territoryCategories = territory.categories.map((categoryId) => ({
+                    id: categoryId,
+                    name: categoryMap.get(categoryId)?.name || categoryId,
+                  }));
+                  const formattedLicense =
+                    typeof territory.licenseFee === "number"
+                      ? gbpFormatter.format(territory.licenseFee)
+                      : null;
+
                   return (
                     <tr key={territory.id} className="border-t align-top">
                       <td className="p-2 font-medium">{territory.label}</td>
                       <td className="p-2">{franchise ? franchise.name : territory.franchiseId}</td>
                       <td className="p-2">{territory.exclusive ? "Yes" : "No"}</td>
-                      <td className="p-2 text-xs text-gray-600">{territorySummary(territory)}</td>
+                      <td className="p-2 text-xs text-gray-600">
+                        <div className="grid gap-2">
+                          <div>{territorySummary(territory)}</div>
+                          {territoryCategories.length > 0 && (
+                            <div>
+                              <span className="text-[11px] font-semibold uppercase text-gray-500">
+                                Categories
+                              </span>
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {territoryCategories.map((category) => (
+                                  <span
+                                    key={`${territory.id}-${category.id}`}
+                                    className="rounded bg-gray-100 px-2 py-0.5 text-[11px] text-gray-700"
+                                  >
+                                    {category.name}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div>
+                            <span className="text-[11px] font-semibold uppercase text-gray-500">
+                              License fee
+                            </span>
+                            <div className="mt-0.5 text-gray-700">
+                              {formattedLicense ? `${formattedLicense} / month` : "Free territory"}
+                            </div>
+                          </div>
+                          <TerritoryMap territory={territory} className="mt-1" height={160} />
+                        </div>
+                      </td>
                       <td className="p-2">
                         <div className="flex flex-wrap gap-2">
                           <button
@@ -1880,6 +2116,49 @@ export default function AdminFranchisesPage() {
                                 }
                               />
                               Exclusive lock
+                            </label>
+                            <label className="grid gap-1 text-xs">
+                              <span className="font-medium">Service categories</span>
+                              <select
+                                multiple
+                                className="input min-h-[120px]"
+                                value={editingTerritory.categories}
+                                onChange={(event) =>
+                                  setEditingTerritory({
+                                    ...editingTerritory,
+                                    categories: Array.from(event.target.selectedOptions).map((option) => option.value),
+                                  })
+                                }
+                              >
+                                {categoryOptions.length === 0 ? (
+                                  <option value="" disabled>
+                                    No categories available
+                                  </option>
+                                ) : (
+                                  categoryOptions.map((category) => (
+                                    <option key={category.id} value={category.id}>
+                                      {category.name}
+                                    </option>
+                                  ))
+                                )}
+                              </select>
+                            </label>
+                            <label className="grid gap-1 text-xs">
+                              <span className="font-medium">Monthly license fee (£/mo)</span>
+                              <input
+                                className="input"
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={editingTerritory.licenseFee}
+                                onChange={(event) =>
+                                  setEditingTerritory({
+                                    ...editingTerritory,
+                                    licenseFee: event.target.value,
+                                  })
+                                }
+                                placeholder="0"
+                              />
                             </label>
                             <label className="grid gap-1 text-xs">
                               <span className="font-medium">Notes</span>

@@ -61,6 +61,8 @@ export interface FranchiseTerritory {
   radiusKm?: number | null;
   centerLat?: number | null;
   centerLng?: number | null;
+  categories: string[];
+  licenseFee?: number | null;
   notes?: string | null;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
@@ -262,6 +264,12 @@ export function parseTerritory(doc: SnapshotWithId): FranchiseTerritory {
     radiusKm: typeof data.radiusKm === 'number' ? (data.radiusKm as number) : null,
     centerLat: typeof data.centerLat === 'number' ? (data.centerLat as number) : null,
     centerLng: typeof data.centerLng === 'number' ? (data.centerLng as number) : null,
+    categories: Array.isArray(data.categories)
+      ? (data.categories as unknown[])
+          .map((value) => (typeof value === 'string' ? value.trim() : String(value ?? '')).trim())
+          .filter(Boolean)
+      : [],
+    licenseFee: typeof data.licenseFee === 'number' ? (data.licenseFee as number) : null,
     notes: (data.notes as string) ?? null,
     createdAt: (data.createdAt as Timestamp) ?? null,
     updatedAt: (data.updatedAt as Timestamp) ?? null,

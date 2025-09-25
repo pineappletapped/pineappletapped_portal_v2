@@ -48,6 +48,8 @@ type FranchiseTerritoryDoc = {
   type?: string;
   postalCodes?: unknown;
   exclusive?: boolean;
+  categories?: unknown;
+  licenseFee?: number;
 };
 
 type FranchiseMemberDoc = {
