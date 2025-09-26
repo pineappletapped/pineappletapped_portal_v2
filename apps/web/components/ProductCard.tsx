@@ -13,9 +13,10 @@ import {
 import {
   deliverableIconMap,
   getDeliverableSummary,
-  getPriceRangeLabel,
+  getListingPriceLabel,
 } from "./productListingUtils";
 import AddToCartWizard from "./AddToCartWizard";
+import ListingPriceNote from "./ListingPriceNote";
 
 export default function ProductCard({ product }: { product: Product }) {
   const [selectedVariation, setSelectedVariation] = useState("");
@@ -26,7 +27,8 @@ export default function ProductCard({ product }: { product: Product }) {
     ? variations.find((variation) => variation.id === selectedVariation)
     : null;
   const basePrice = activeVariation?.price ?? product.price;
-  const priceRangeLabel = getPriceRangeLabel(product) ?? "Pricing on request";
+  const priceRangeLabel =
+    getListingPriceLabel(product) ?? "Pricing on request";
   const priceLabel = selectedVariation
     ? `£${basePrice.toFixed(2)}`
     : priceRangeLabel;
@@ -100,7 +102,10 @@ export default function ProductCard({ product }: { product: Product }) {
             )}
           </>
         )}
-        <p className="font-bold text-sm">{priceLabel}</p>
+        <div className="flex flex-col gap-1">
+          <p className="font-bold text-sm">{priceLabel}</p>
+          <ListingPriceNote className="text-gray-500" />
+        </div>
         <div className="mt-auto flex flex-col gap-2">
           {requiresVariation && (
             <div className="flex flex-col gap-1">

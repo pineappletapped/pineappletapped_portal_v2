@@ -44,13 +44,14 @@ export function getProductPriceExtents(product: Product):
   };
 }
 
-export function getPriceRangeLabel(product: Product): string | null {
+export function getListingPriceLabel(product: Product): string | null {
   const range = getProductPriceExtents(product);
   if (!range) return null;
-  if (range.min === range.max) {
-    return `£${range.min.toFixed(2)}`;
+  const baseLabel = `From £${range.min.toFixed(2)} (listing price)`;
+  if (range.max > range.min) {
+    return `${baseLabel} · Packages up to £${range.max.toFixed(2)}`;
   }
-  return `£${range.min.toFixed(2)} - £${range.max.toFixed(2)}`;
+  return baseLabel;
 }
 
 type DeliverableBadge = {

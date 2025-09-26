@@ -23,6 +23,8 @@ import {
   FiPlay,
   FiExternalLink,
 } from "react-icons/fi";
+import { getListingPriceLabel } from "./productListingUtils";
+import ListingPriceNote from "./ListingPriceNote";
 
 const deliverableIcons: Record<DeliverableType, IconType> = {
   "long-form-video": FiFilm,
@@ -180,6 +182,10 @@ export default function ProductDetail({
   const [basePrice, setBasePrice] = useState(product.price);
   const [variation, setVariation] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
+  const listingPriceLabel = useMemo(
+    () => getListingPriceLabel(product),
+    [product]
+  );
 
   const exampleVideos = useMemo<NormalizedVideo[]>(() => {
     const rawVideos = Array.isArray(product.exampleVideos)
@@ -487,7 +493,15 @@ export default function ProductDetail({
           {product.tagline && (
             <p className="text-gray-600">{product.tagline}</p>
           )}
-          <p className="text-2xl font-bold">£{price.toFixed(2)}</p>
+          <div className="flex flex-col gap-1">
+            <p className="text-2xl font-bold">£{price.toFixed(2)}</p>
+            {listingPriceLabel && (
+              <p className="text-sm font-medium text-gray-700">
+                {listingPriceLabel}
+              </p>
+            )}
+            <ListingPriceNote className="text-gray-600" />
+          </div>
           {product.category === "exhibition-videography" && product.eventDate && (
             <p className="text-sm text-gray-700">
               Event Date: {new Date(product.eventDate).toLocaleDateString()}
