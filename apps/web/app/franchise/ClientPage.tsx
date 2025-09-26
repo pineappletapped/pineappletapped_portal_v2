@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import PortalContainer from "@/components/PortalContainer";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
@@ -906,6 +907,44 @@ export default function FranchisePortalPage() {
                 <p className="text-2xl font-semibold text-purple-900">
                   {currencyFormatter.format(orderMetrics.averageNet || 0)}
                 </p>
+              </div>
+            </section>
+
+            <section className="card border border-slate-200 p-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-semibold">Operations toolkit</h2>
+                  <p className="text-sm text-gray-600">
+                    Order uniforms and marketing materials without leaving the portal. Integrations will sync with our
+                    preferred suppliers as soon as credentials land.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Link href="/franchise/workwear" className="btn-sm">
+                    Workwear hub
+                  </Link>
+                  <Link href="/franchise/marketing-materials" className="btn-sm btn-outline">
+                    Marketing studio
+                  </Link>
+                </div>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <article className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-gray-700">
+                  <h3 className="text-base font-semibold text-gray-900">Uniform planning</h3>
+                  <p className="mt-2">
+                    Share sizing sheets and bundle requirements so HQ can push orders to Clothes2Order or our POD partner once
+                    integrations are switched on.
+                  </p>
+                  <p className="mt-2 text-xs text-gray-500">Track onboarding progress and fulfilment windows in the workwear hub.</p>
+                </article>
+                <article className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-gray-700">
+                  <h3 className="text-base font-semibold text-gray-900">Marketing fulfilment</h3>
+                  <p className="mt-2">
+                    Preview HQ-approved templates, log print quantities, and request bespoke campaigns ahead of the VistaPrint
+                    automation go-live.
+                  </p>
+                  <p className="mt-2 text-xs text-gray-500">Upload notes now so the studio can prepare artwork before the API connects.</p>
+                </article>
               </div>
             </section>
 
