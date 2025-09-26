@@ -474,9 +474,11 @@ export default function NewProductPage() {
     | "pnl"
     | "variations"
     | "deliverables"
+    | "kit"
     | "tasks"
     | "seo"
     | "modifiers"
+    | "drive"
   >("info");
 
   const [name, setName] = useState("");

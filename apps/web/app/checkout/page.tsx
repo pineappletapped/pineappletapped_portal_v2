@@ -1,5 +1,12 @@
 "use client";
 
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
+import { Elements } from "@stripe/react-stripe-js";
+import { loadStripe } from "@stripe/stripe-js";
+import { httpsCallable, type Functions } from "firebase/functions";
+import { doc, getDoc } from "firebase/firestore";
+import { signInWithEmailAndPassword, type Auth, type User } from "firebase/auth";
 import { useCart } from "@/lib/cart";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import { useLeadSourceTag } from "@/hooks/useLeadSourceTag";
@@ -9,20 +16,6 @@ import {
   type LeadSourceKind,
 } from "@/lib/lead-source";
 import { VAT_RATE } from "@/lib/vat";
-import { httpsCallable, type Functions } from "firebase/functions";
-import { doc, getDoc } from "firebase/firestore";
-import { signInWithEmailAndPassword, type Auth, type User } from "firebase/auth";
-import { loadStripe } from "@stripe/stripe-js";
-import { Elements } from "@stripe/react-stripe-js";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type FormEvent,
-} from "react";
-import { useRouter } from "next/navigation";
 import CheckoutPaymentForm from "./CheckoutPaymentForm";
 
 const LEAD_SOURCE_OPTIONS: LeadSourceKind[] = [
@@ -33,7 +26,7 @@ const LEAD_SOURCE_OPTIONS: LeadSourceKind[] = [
   "other",
 ];
 
-export default function CheckoutPage() {
+function CheckoutContent() {
   const { items, clear } = useCart();
   const productTotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
   const rentalTotal = items.reduce(
@@ -592,5 +585,13 @@ export default function CheckoutPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function CheckoutPage() {
+  return (
+    <Suspense fallback={<div className="py-12 text-center text-sm text-gray-500">Loading checkout…</div>}>
+      <CheckoutContent />
+    </Suspense>
   );
 }

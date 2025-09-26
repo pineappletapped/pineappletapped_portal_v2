@@ -315,15 +315,24 @@ export default function AdminUsersPage() {
     ? outreach.filter((u) => (u.suggestedProductId || '') === outreachProductFilter)
     : outreach;
 
-  const handleAddRecord = async (data: any) => {
+  const handleAddRecord = async (data: Record<string, unknown>) => {
     try {
       const id = crypto.randomUUID();
-      const payload: Record<string, any> = { ...data, crmStatus: activeTab };
+      const payload = { ...data, crmStatus: activeTab } as Partial<AdminUser> & Record<string, unknown>;
       if ('suggestedProductId' in payload && !payload.suggestedProductId) {
         payload.suggestedProductId = null;
       }
+      const emailValue = typeof payload.email === 'string' ? payload.email.trim() : '';
+      if (!emailValue) {
+        throw new Error('Email is required');
+      }
+      const newRecord: AdminUser = {
+        id,
+        ...payload,
+        email: emailValue,
+      };
       await adminUpdateUser({ userId: id, updates: payload });
-      setUsers([...users, { id, ...payload }]);
+      setUsers([...users, newRecord]);
       setShowForm(false);
     } catch (err: any) {
       console.error(err);

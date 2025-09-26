@@ -44,6 +44,72 @@ const DAY_IN_MS = 86_400_000;
 const DEFAULT_FILMING_SLA_DAYS = 7;
 const DEFAULT_EDITING_SLA_DAYS = 14;
 
+type ClientResearchScope = 'standard' | 'deep_dive' | 'competitor_refresh';
+
+type ClientResearchJobStatus =
+  | 'queued'
+  | 'ingesting'
+  | 'analysing'
+  | 'complete'
+  | 'failed'
+  | 'payment_required';
+
+interface ClientResearchScopeConfig {
+  estimatedTokens: number;
+  estimatedDurationMinutes: number;
+  autoTokenCharge: number;
+  manualTokenCharge: number;
+}
+
+interface TokenWalletDoc {
+  balance?: number;
+  currency?: string | null;
+  planTier?: string | null;
+  autoDebit?: boolean;
+  usageLog?: Array<Record<string, unknown>>;
+}
+
+interface ClientResearchJobCreationResult {
+  jobId: string;
+  status: ClientResearchJobStatus;
+  billingStatus: 'paid' | 'payment_required';
+  tokenDebitApplied: boolean;
+  tokenCharge: number;
+  walletBalanceAfter: number | null;
+}
+
+const CLIENT_RESEARCH_SCOPE_CONFIG: Record<ClientResearchScope, ClientResearchScopeConfig> = {
+  standard: {
+    estimatedTokens: 2500,
+    estimatedDurationMinutes: 7,
+    autoTokenCharge: 2,
+    manualTokenCharge: 3,
+  },
+  deep_dive: {
+    estimatedTokens: 4200,
+    estimatedDurationMinutes: 12,
+    autoTokenCharge: 3,
+    manualTokenCharge: 5,
+  },
+  competitor_refresh: {
+    estimatedTokens: 1800,
+    estimatedDurationMinutes: 5,
+    autoTokenCharge: 2,
+    manualTokenCharge: 3,
+  },
+};
+
+const CLIENT_RESEARCH_QUEUE_COLLECTION = 'clientResearchQueue';
+const CLIENT_RESEARCH_JOB_COLLECTION = 'clientResearchJobs';
+const TOKEN_WALLET_COLLECTION = 'tokenWallets';
+const CLIENT_RESEARCH_TOKEN_REASON_AUTO = 'client_research_auto';
+const CLIENT_RESEARCH_TOKEN_REASON_MANUAL = 'client_research_manual';
+const CLIENT_RESEARCH_TOKEN_REASON_GENERIC = 'client_research';
+const REMARKETING_CAMPAIGN_COLLECTION = 'remarketingCampaigns';
+const REMARKETING_SUGGESTION_COLLECTION = 'remarketingSuggestions';
+const REMARKETING_QUEUE_COLLECTION = 'remarketingQueue';
+const REMARKETING_MAX_SUGGESTIONS_PER_CAMPAIGN = 120;
+
 type FranchiseTerritoryType = 'postal' | 'radius';
 
 type FranchiseTerritoryDoc = {
@@ -257,6 +323,598 @@ function buildOrderFolderName(context: DriveSetupContext): string {
     return sanitiseDriveName(`${context.products[0].name} (${suffix})`, `Order ${suffix}`);
   }
   return `Order ${suffix}`;
+}
+
+function normaliseNullableString(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normaliseClientDocId(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('clients/')) {
+    const [, clientId] = trimmed.split('/');
+    return clientId ? clientId.trim() : null;
+  }
+  if (/^[a-z0-9-]{6,120}$/.test(trimmed)) {
+    return trimmed;
+  }
+  return toClientDocId(trimmed);
+}
+
+function buildDocPath(collection: string, id: string | null | undefined): string | null {
+  if (!id) return null;
+  const trimmed = id.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith(`${collection}/`)) {
+    return trimmed;
+  }
+  return `${collection}/${trimmed}`;
+}
+
+function buildClientDocPath(clientId: string): string {
+  return clientId.startsWith('clients/') ? clientId : `clients/${clientId}`;
+}
+
+function normaliseClientResearchScope(input: unknown): ClientResearchScope {
+  if (typeof input === 'string') {
+    const value = input.trim().toLowerCase();
+    if (!value) return 'standard';
+    if (value.includes('deep')) return 'deep_dive';
+    if (value.includes('competitor')) return 'competitor_refresh';
+    if (value.includes('refresh')) return 'competitor_refresh';
+  }
+  return 'standard';
+}
+
+function getClientResearchScopeConfig(scope: ClientResearchScope): ClientResearchScopeConfig {
+  return CLIENT_RESEARCH_SCOPE_CONFIG[scope] ?? CLIENT_RESEARCH_SCOPE_CONFIG.standard;
+}
+
+function parseBooleanFlag(input: unknown): boolean | null {
+  if (input === true) return true;
+  if (input === false) return false;
+  if (typeof input === 'number') {
+    if (input === 1) return true;
+    if (input === 0) return false;
+  }
+  if (typeof input === 'string') {
+    const value = input.trim().toLowerCase();
+    if (!value) return null;
+    if (['true', 'yes', 'y', 'on', 'enabled', 'enable', 'auto'].includes(value)) return true;
+    if (['false', 'no', 'n', 'off', 'disabled', 'disable', 'manual'].includes(value)) return false;
+  }
+  return null;
+}
+
+function normaliseStringArray(input: unknown): string[] {
+  if (Array.isArray(input)) {
+    const values = input
+      .map((value) => (typeof value === 'string' ? value.trim() : ''))
+      .filter((value) => value.length > 0);
+    return Array.from(new Set(values.map((value) => value.toLowerCase())));
+  }
+  if (typeof input === 'string') {
+    return Array.from(
+      new Set(
+        input
+          .split(/[\n,]+/)
+          .map((value) => value.trim().toLowerCase())
+          .filter((value) => value.length > 0)
+      )
+    );
+  }
+  return [];
+}
+
+function normaliseProductDocId(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('products/')) {
+    const [, productId] = trimmed.split('/');
+    return productId ? productId.trim() : null;
+  }
+  return trimmed;
+}
+
+function normaliseOrgId(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('orgs/')) {
+    const [, orgId] = trimmed.split('/');
+    return orgId ? orgId.trim() : null;
+  }
+  return trimmed;
+}
+
+function buildMonthKey(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth() + 1;
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+function computeNextMonthlyRunDate(sendDay: number, reference: Date): Date {
+  const next = new Date(Date.UTC(reference.getUTCFullYear(), reference.getUTCMonth(), 1, 9, 0, 0));
+  next.setUTCMonth(next.getUTCMonth() + 1);
+  const daysInMonth = new Date(Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, 0)).getUTCDate();
+  const safeDay = Math.min(Math.max(1, Math.floor(sendDay || 1)), daysInMonth);
+  next.setUTCDate(safeDay);
+  return next;
+}
+
+function extractTagSetFromData(data: Record<string, any>): Set<string> {
+  const tagFields = ['tags', 'labels', 'segments', 'lists', 'marketingTags', 'marketingLists'];
+  const tagSet = new Set<string>();
+  for (const field of tagFields) {
+    const value = data[field];
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (typeof entry === 'string') {
+          const trimmed = entry.trim().toLowerCase();
+          if (trimmed) tagSet.add(trimmed);
+        }
+      }
+    } else if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) {
+        trimmed
+          .split(/[\n,]+/)
+          .map((part) => part.trim().toLowerCase())
+          .filter((part) => part.length > 0)
+          .forEach((part) => tagSet.add(part));
+      }
+    }
+  }
+  return tagSet;
+}
+
+function hasMarketingOptOut(data: Record<string, any>): boolean {
+  const flags = [
+    data.marketingOptOut,
+    data.optOut,
+    data.doNotMarket,
+    data.doNotEmail,
+    data.unsubscribe,
+    data.noMarketing,
+    data.marketingDisabled,
+  ].map(parseBooleanFlag);
+  return flags.includes(true);
+}
+
+function isClientRecord(data: Record<string, any>): boolean {
+  const status = typeof data.status === 'string' ? data.status.toLowerCase() : '';
+  const stage = typeof data.lifecycleStage === 'string' ? data.lifecycleStage.toLowerCase() : '';
+  const type = typeof data.type === 'string' ? data.type.toLowerCase() : '';
+  const roleClient = parseBooleanFlag(data?.roles?.client) === true;
+  const roleArray = Array.isArray(data.roles)
+    ? data.roles
+        .map((value: unknown) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+        .filter((value) => value.length > 0)
+    : [];
+  return (
+    ['client', 'customer', 'active', 'retained'].some((value) => status.includes(value)) ||
+    ['client', 'customer'].some((value) => stage.includes(value)) ||
+    ['client', 'customer'].includes(type) ||
+    roleClient ||
+    roleArray.includes('client') ||
+    roleArray.includes('customer')
+  );
+}
+
+function isProspectRecord(data: Record<string, any>): boolean {
+  const status = typeof data.status === 'string' ? data.status.toLowerCase() : '';
+  const stage = typeof data.lifecycleStage === 'string' ? data.lifecycleStage.toLowerCase() : '';
+  const type = typeof data.type === 'string' ? data.type.toLowerCase() : '';
+  const roleProspect = parseBooleanFlag(data?.roles?.prospect) === true;
+  const roleArray = Array.isArray(data.roles)
+    ? data.roles
+        .map((value: unknown) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+        .filter((value) => value.length > 0)
+    : [];
+  return (
+    ['lead', 'prospect', 'opportunity', 'new'].some((value) => status.includes(value)) ||
+    ['lead', 'prospect'].some((value) => stage.includes(value)) ||
+    ['lead', 'prospect'].includes(type) ||
+    roleProspect ||
+    roleArray.includes('lead') ||
+    roleArray.includes('prospect')
+  );
+}
+
+function matchesTargetGroups(groups: string[], data: Record<string, any>): boolean {
+  if (groups.length === 0) return true;
+  for (const group of groups) {
+    const key = group.toLowerCase();
+    if (key === 'clients' && isClientRecord(data)) return true;
+    if (key === 'prospects' && isProspectRecord(data)) return true;
+    if (key === 'lists') {
+      const tagSet = extractTagSetFromData(data);
+      if (tagSet.size > 0) return true;
+    }
+  }
+  return false;
+}
+
+async function resolveRemarketingAudience(
+  clientDocId: string,
+  data: Record<string, any>,
+  membershipCache: Map<string, { userIds: string[]; emails: string[] }>
+): Promise<{ orgIds: string[]; userIds: string[]; emails: string[] }> {
+  const orgCandidates: Array<unknown> = [
+    data.orgId,
+    data.org,
+    data.organisationId,
+    data.organizationId,
+    data.organisation,
+    data.organization,
+    data.orgRef,
+    data.orgPath,
+    data.accountId,
+    data.account,
+    data.orgIds,
+    data.organisationIds,
+    data.organizationIds,
+    data.orgs,
+    data.accounts,
+  ];
+  const orgIds = new Set<string>();
+  for (const candidate of orgCandidates) {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) {
+        const normalised = normaliseOrgId(entry);
+        if (normalised) orgIds.add(normalised);
+      }
+    } else {
+      const normalised = normaliseOrgId(candidate);
+      if (normalised) orgIds.add(normalised);
+    }
+  }
+  const membershipField = data.memberships;
+  if (Array.isArray(membershipField)) {
+    for (const entry of membershipField) {
+      if (entry && typeof entry === 'object') {
+        const normalised = normaliseOrgId((entry as any).orgId ?? (entry as any).id);
+        if (normalised) orgIds.add(normalised);
+      }
+    }
+  }
+  const audienceUserIds = new Set<string>();
+  const audienceEmails = new Set<string>();
+  const addUserId = (value: unknown) => {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) audienceUserIds.add(trimmed);
+    }
+  };
+  const addEmail = (value: unknown) => {
+    if (typeof value === 'string') {
+      const trimmed = value.trim().toLowerCase();
+      if (trimmed) audienceEmails.add(trimmed);
+    }
+  };
+  const directUsers = [data.userId, data.primaryUserId, data.accountOwnerId];
+  directUsers.forEach(addUserId);
+  const directUserArray = Array.isArray(data.userIds) ? data.userIds : data.contactUserIds;
+  if (Array.isArray(directUserArray)) {
+    directUserArray.forEach(addUserId);
+  }
+  const directEmails = [data.email, data.primaryEmail, data.contactEmail];
+  directEmails.forEach(addEmail);
+  if (Array.isArray(data.emails)) {
+    data.emails.forEach(addEmail);
+  }
+  for (const orgId of orgIds) {
+    if (!membershipCache.has(orgId)) {
+      const membershipSnap = await db.collection('memberships').where('orgId', '==', orgId).get();
+      const userIds: string[] = [];
+      const emails: string[] = [];
+      membershipSnap.docs.forEach((docSnap) => {
+        const membership = (docSnap.data() as any) || {};
+        if (typeof membership.userId === 'string') {
+          const trimmed = membership.userId.trim();
+          if (trimmed) userIds.push(trimmed);
+        }
+        if (typeof membership.email === 'string') {
+          const trimmed = membership.email.trim().toLowerCase();
+          if (trimmed) emails.push(trimmed);
+        }
+      });
+      membershipCache.set(orgId, {
+        userIds: Array.from(new Set(userIds)),
+        emails: Array.from(new Set(emails)),
+      });
+    }
+    const cached = membershipCache.get(orgId);
+    if (cached) {
+      cached.userIds.forEach(addUserId);
+      cached.emails.forEach(addEmail);
+    }
+  }
+  return {
+    orgIds: Array.from(orgIds),
+    userIds: Array.from(audienceUserIds),
+    emails: Array.from(audienceEmails),
+  };
+}
+
+function buildRemarketingDraft(options: {
+  client: Record<string, any>;
+  campaignName: string;
+  productName: string | null;
+  targetTags: string[];
+}): { headline: string; summary: string; article: string } {
+  const companyName =
+    typeof options.client.companyName === 'string'
+      ? options.client.companyName
+      : typeof options.client.displayName === 'string'
+        ? options.client.displayName
+        : typeof options.client.name === 'string'
+          ? options.client.name
+          : 'your business';
+  const industry =
+    typeof options.client.industry === 'string'
+      ? options.client.industry
+      : typeof options.client.segment === 'string'
+        ? options.client.segment
+        : null;
+  const productName = options.productName ?? 'content programme';
+  const tagsLabel = options.targetTags.length ? `Focus: ${options.targetTags.join(', ')}.` : '';
+  const headline = `${productName} ideas for ${companyName}`;
+  const summaryParts = [
+    `A follow-up concept from the ${options.campaignName} campaign tailored for ${companyName}.`,
+    industry ? `Industry insight: ${industry}.` : null,
+    tagsLabel || null,
+    'Includes suggested deliverables, talking points and a ready-to-send email draft.',
+  ].filter(Boolean);
+  const summary = summaryParts.join(' ');
+  const article = `## ${productName} roadmap for ${companyName}
+
+### Opportunity
+- Aligns with ${options.campaignName} goals
+- ${industry ? `Leverages current trends in ${industry}` : 'Amplifies existing marketing activity'}
+
+### Proposed deliverables
+- Hero video with supporting social edits
+- Paid amplification assets and remarketing hooks
+- Measurement framework tied to CRM goals
+
+### How we'll personalise it
+- Gemini deep dive on brand tone, audience language and competitor messaging
+- Tailored CTA recommendations with seasonal triggers
+- Email and portal-ready copy blocks for quick deployment
+
+${tagsLabel}`;
+  return { headline, summary, article };
+}
+
+function resolveClientDocIdFromOrder(order: Record<string, any>, orderId: string): string {
+  const candidateKeys: Array<string | null> = [
+    typeof order.clientId === 'string' ? order.clientId : null,
+    typeof order.clientRef === 'string' ? order.clientRef : null,
+    typeof order.clientPath === 'string' ? order.clientPath : null,
+    typeof order.clientKey === 'string' ? order.clientKey : null,
+    typeof order.clientRoyaltyKey === 'string' ? order.clientRoyaltyKey : null,
+    typeof order.driveClientKey === 'string' ? order.driveClientKey : null,
+  ];
+  for (const candidate of candidateKeys) {
+    const docId = normaliseClientDocId(candidate);
+    if (docId) {
+      return docId;
+    }
+  }
+  if (typeof order.userId === 'string' && order.userId.trim().length > 0) {
+    return toClientDocId(`uid:${order.userId.trim()}`);
+  }
+  const emailCandidate = normaliseNullableString(order.userEmail || order.customerEmail);
+  if (emailCandidate) {
+    return toClientDocId(`email:${emailCandidate.toLowerCase()}`);
+  }
+  return toClientDocId(`order:${orderId}`);
+}
+
+function resolveAutoResearchScope(
+  order: Record<string, any>,
+  clientAiSettings: Record<string, any>
+): ClientResearchScope {
+  const scopeCandidates: Array<unknown> = [
+    order.autoResearchScope,
+    order.clientResearchScope,
+    order.researchScope,
+    order?.clientResearch?.scope,
+    clientAiSettings.defaultScope,
+    clientAiSettings.preferredScope,
+  ];
+  for (const candidate of scopeCandidates) {
+    const scope = normaliseClientResearchScope(candidate);
+    if (candidate && scope) {
+      return scope;
+    }
+  }
+  return 'standard';
+}
+
+function shouldAutoTriggerClientResearch(
+  order: Record<string, any>,
+  clientData: FirebaseFirestore.DocumentData | undefined
+): { shouldRun: boolean; reason: string; scope: ClientResearchScope } {
+  const aiSettings =
+    clientData && typeof clientData.ai === 'object' && clientData.ai !== null
+      ? (clientData.ai as Record<string, any>)
+      : {};
+  const explicitOptOutFlags = [
+    order.autoResearchOptOut,
+    order.disableAutoResearch,
+    order.autoResearchDisabled,
+    order.clientResearchOptOut,
+    aiSettings.autoResearchOptOut,
+    aiSettings.optOut,
+  ].map(parseBooleanFlag);
+  const scope = resolveAutoResearchScope(order, aiSettings);
+  if (explicitOptOutFlags.includes(true)) {
+    return { shouldRun: false, reason: 'opt_out', scope };
+  }
+  const explicitOffFlags = [
+    order.autoResearchEnabled,
+    order.clientResearchAuto,
+    aiSettings.autoResearchEnabled,
+    aiSettings.autoEnabled,
+    aiSettings.enabled,
+  ].map(parseBooleanFlag);
+  if (explicitOffFlags.includes(false)) {
+    return { shouldRun: false, reason: 'disabled', scope };
+  }
+  const explicitTrueFlags = [
+    order.autoResearchEnabled,
+    order.autoResearchRequested,
+    order.clientResearchAuto,
+    order.clientResearchEnabled,
+    aiSettings.autoResearchEnabled,
+    aiSettings.defaultOn,
+    aiSettings.enabled,
+  ].map(parseBooleanFlag);
+  if (explicitTrueFlags.includes(true)) {
+    const reason = parseBooleanFlag(order.autoResearchEnabled) === true ? 'order_auto' : 'client_auto';
+    return { shouldRun: true, reason, scope };
+  }
+  return { shouldRun: false, reason: 'not_enabled', scope };
+}
+
+async function attemptWalletDebitForClientResearch(options: {
+  walletRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
+  allowDebit: boolean;
+  tokenCharge: number;
+  jobRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
+  scope: ClientResearchScope;
+  triggeredBy: string | null;
+  reason: 'auto' | 'manual';
+}): Promise<{ tokenDebitApplied: boolean; walletBalanceAfter: number | null; insufficient: boolean }>
+{
+  if (!options.allowDebit || options.tokenCharge <= 0) {
+    return { tokenDebitApplied: false, walletBalanceAfter: null, insufficient: options.tokenCharge > 0 };
+  }
+  const usageReason =
+    options.reason === 'auto'
+      ? CLIENT_RESEARCH_TOKEN_REASON_AUTO
+      : options.reason === 'manual'
+        ? CLIENT_RESEARCH_TOKEN_REASON_MANUAL
+        : CLIENT_RESEARCH_TOKEN_REASON_GENERIC;
+  const insufficientResult = { tokenDebitApplied: false, walletBalanceAfter: null, insufficient: true } as const;
+  try {
+    let balanceAfter: number | null = null;
+    await db.runTransaction(async (tx) => {
+      const walletSnap = await tx.get(options.walletRef);
+      if (!walletSnap.exists) {
+        throw new Error('NO_WALLET');
+      }
+      const wallet = (walletSnap.data() as TokenWalletDoc) || {};
+      const currentBalance = typeof wallet.balance === 'number' ? wallet.balance : 0;
+      if (currentBalance < options.tokenCharge) {
+        throw new Error('INSUFFICIENT_TOKENS');
+      }
+      balanceAfter = currentBalance - options.tokenCharge;
+      tx.update(options.walletRef, {
+        balance: balanceAfter,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        usageLog: admin.firestore.FieldValue.arrayUnion({
+          jobId: `${CLIENT_RESEARCH_JOB_COLLECTION}/${options.jobRef.id}`,
+          delta: -options.tokenCharge,
+          reason: usageReason,
+          scope: options.scope,
+          triggeredBy: options.triggeredBy,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }),
+      });
+    });
+    return { tokenDebitApplied: true, walletBalanceAfter: balanceAfter, insufficient: false };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message === 'INSUFFICIENT_TOKENS' || message === 'NO_WALLET') {
+      return insufficientResult;
+    }
+    console.error('Client research wallet debit failed', options.jobRef.id, err);
+    return insufficientResult;
+  }
+}
+
+async function persistClientResearchJob(options: {
+  jobRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
+  clientPath: string;
+  orderPath: string | null;
+  proposalPath: string | null;
+  scope: ClientResearchScope;
+  manual: boolean;
+  status: ClientResearchJobStatus;
+  billingMode: 'auto' | 'manual';
+  triggeredBy: string | null;
+  tokenCharge: number;
+  tokenDebitApplied: boolean;
+  walletBalanceAfter: number | null;
+  source: string;
+  metadata?: Record<string, any> | null;
+}): Promise<void> {
+  const scopeConfig = getClientResearchScopeConfig(options.scope);
+  const payload: Record<string, any> = {
+    clientId: options.clientPath,
+    orderId: options.orderPath,
+    proposalId: options.proposalPath,
+    status: options.status,
+    manual: options.manual,
+    scope: options.scope,
+    estimatedTokens: scopeConfig.estimatedTokens,
+    estimatedDuration: scopeConfig.estimatedDurationMinutes,
+    billingMode: options.billingMode,
+    triggeredBy: options.triggeredBy,
+    tokenCharge: options.tokenCharge,
+    tokenDebitApplied: options.tokenDebitApplied,
+    tokenBalanceAfter: options.tokenDebitApplied ? options.walletBalanceAfter : null,
+    billingStatus: options.tokenDebitApplied ? 'paid' : 'payment_required',
+    source: options.source,
+    autoTriggered: !options.manual,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+  if (options.status === 'queued') {
+    payload.queueStatus = 'pending';
+  } else if (options.status === 'payment_required') {
+    payload.queueStatus = 'awaiting_payment';
+  }
+  if (options.metadata && Object.keys(options.metadata).length > 0) {
+    payload.metadata = JSON.parse(JSON.stringify(options.metadata));
+  }
+  await options.jobRef.set(payload, { merge: false });
+}
+
+async function enqueueClientResearchQueue(options: {
+  jobRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
+  clientPath: string;
+  scope: ClientResearchScope;
+  manual: boolean;
+  triggeredBy: string | null;
+  source: string;
+}): Promise<void> {
+  const queueRef = db.collection(CLIENT_RESEARCH_QUEUE_COLLECTION).doc(options.jobRef.id);
+  const queuePayload: Record<string, any> = {
+    jobId: options.jobRef.id,
+    jobRef: options.jobRef.path,
+    clientId: options.clientPath,
+    scope: options.scope,
+    manual: options.manual,
+    source: options.source,
+    triggeredBy: options.triggeredBy,
+    status: 'pending',
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+  try {
+    await queueRef.set(queuePayload, { merge: true });
+  } catch (err) {
+    console.error('Failed to enqueue client research job', options.jobRef.id, err);
+  }
 }
 
 function buildProductFolderName(
@@ -4066,6 +4724,416 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   return { orderId: orderRef.id };
 });
 
+export const clientResearch_onOrderCreated = functions.firestore
+  .document('orders/{orderId}')
+  .onCreate(async (snap) => {
+    const order = (snap.data() as Record<string, any>) || {};
+    const orderId = snap.id;
+    const clientDocId = resolveClientDocIdFromOrder(order, orderId);
+    const clientDocRef = db.collection('clients').doc(clientDocId);
+    const clientSnap = await clientDocRef.get();
+    const clientData = clientSnap.exists ? clientSnap.data() : undefined;
+    const autoDecision = shouldAutoTriggerClientResearch(order, clientData);
+    if (!autoDecision.shouldRun) {
+      if (autoDecision.reason !== 'not_enabled') {
+        console.log('Client research auto trigger skipped', {
+          orderId,
+          reason: autoDecision.reason,
+        });
+      }
+      return;
+    }
+
+    const orderPath = buildDocPath('orders', orderId);
+    const existingJobSnap = await db
+      .collection(CLIENT_RESEARCH_JOB_COLLECTION)
+      .where('orderId', '==', orderPath)
+      .limit(1)
+      .get();
+    if (!existingJobSnap.empty) {
+      console.log('Client research job already exists for order', orderId);
+      return;
+    }
+
+    const jobRef = db.collection(CLIENT_RESEARCH_JOB_COLLECTION).doc();
+    const scope = autoDecision.scope;
+    const scopeConfig = getClientResearchScopeConfig(scope);
+    const tokenCharge = scopeConfig.autoTokenCharge;
+    const walletRef = db.collection(TOKEN_WALLET_COLLECTION).doc(clientDocId);
+    const walletSnap = await walletRef.get();
+    const walletData = walletSnap.exists ? ((walletSnap.data() as TokenWalletDoc) || {}) : null;
+    const allowAutoDebit = walletData ? walletData.autoDebit !== false : false;
+    const debitResult = await attemptWalletDebitForClientResearch({
+      walletRef,
+      allowDebit: allowAutoDebit,
+      tokenCharge,
+      jobRef,
+      scope,
+      triggeredBy: null,
+      reason: 'auto',
+    });
+    const status: ClientResearchJobStatus = debitResult.tokenDebitApplied ? 'queued' : 'payment_required';
+    const metadata: Record<string, any> = {
+      orderId,
+      autoReason: autoDecision.reason,
+      tokenCharge,
+      tokenDebitApplied: debitResult.tokenDebitApplied,
+      allowAutoDebit,
+    };
+    if (order.companyName) metadata.companyName = order.companyName;
+    if (order.customerName) metadata.customerName = order.customerName;
+    if (order.projectName) metadata.projectName = order.projectName;
+    if (order.leadSource) metadata.leadSource = order.leadSource;
+    if (order.netTotal !== undefined) metadata.netTotal = order.netTotal;
+    if (order.price !== undefined) metadata.price = order.price;
+
+    await persistClientResearchJob({
+      jobRef,
+      clientPath: clientDocRef.path,
+      orderPath: orderPath,
+      proposalPath: null,
+      scope,
+      manual: false,
+      status,
+      billingMode: 'auto',
+      triggeredBy: null,
+      tokenCharge,
+      tokenDebitApplied: debitResult.tokenDebitApplied,
+      walletBalanceAfter: debitResult.walletBalanceAfter,
+      source: 'order_auto',
+      metadata,
+    });
+
+    if (status === 'queued') {
+      await enqueueClientResearchQueue({
+        jobRef,
+        clientPath: clientDocRef.path,
+        scope,
+        manual: false,
+        triggeredBy: null,
+        source: 'order_auto',
+      });
+    }
+
+    await writeAuditLog({
+      actorUid: 'system',
+      action: 'client_research.auto_enqueued',
+      entityType: 'client',
+      entityId: clientDocRef.id,
+      metadata: {
+        jobId: jobRef.id,
+        orderId,
+        scope,
+        tokenCharge,
+        tokenDebitApplied: debitResult.tokenDebitApplied,
+        allowAutoDebit,
+      },
+    });
+  });
+
+export const createClientResearchJob = functions.https.onCall(async (data, context) => {
+  const roles = await assertStaff(context, ['sales', 'marketing', 'projects', 'admin']);
+  const clientIdInput = typeof data?.clientId === 'string' ? data.clientId : '';
+  const proposalIdInput = typeof data?.proposalId === 'string' ? data.proposalId : '';
+  const scopeInput = data?.scope;
+  const scope = normaliseClientResearchScope(scopeInput);
+  const clientDocId = normaliseClientDocId(clientIdInput);
+  if (!clientDocId) {
+    throw new functions.https.HttpsError('invalid-argument', 'clientId is required');
+  }
+
+  const clientDocRef = db.collection('clients').doc(clientDocId);
+  const clientSnap = await clientDocRef.get();
+  if (!clientSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'Client not found');
+  }
+
+  const jobRef = db.collection(CLIENT_RESEARCH_JOB_COLLECTION).doc();
+  const scopeConfig = getClientResearchScopeConfig(scope);
+  const tokenCharge = scopeConfig.manualTokenCharge;
+  const walletRef = db.collection(TOKEN_WALLET_COLLECTION).doc(clientDocId);
+  const debitResult = await attemptWalletDebitForClientResearch({
+    walletRef,
+    allowDebit: true,
+    tokenCharge,
+    jobRef,
+    scope,
+    triggeredBy: context.auth!.uid,
+    reason: 'manual',
+  });
+  const status: ClientResearchJobStatus = debitResult.tokenDebitApplied ? 'queued' : 'payment_required';
+  const proposalPath = buildDocPath('proposals', normaliseNullableString(proposalIdInput));
+  const metadata: Record<string, any> = {
+    tokenCharge,
+    tokenDebitApplied: debitResult.tokenDebitApplied,
+    triggerRoles: Array.from(roles),
+  };
+  const triggerEmail = typeof context.auth?.token.email === 'string' ? context.auth.token.email : null;
+  if (triggerEmail) metadata.triggeredByEmail = triggerEmail;
+  if (proposalPath) metadata.proposalPath = proposalPath;
+
+  await persistClientResearchJob({
+    jobRef,
+    clientPath: clientDocRef.path,
+    orderPath: null,
+    proposalPath,
+    scope,
+    manual: true,
+    status,
+    billingMode: 'manual',
+    triggeredBy: context.auth!.uid,
+    tokenCharge,
+    tokenDebitApplied: debitResult.tokenDebitApplied,
+    walletBalanceAfter: debitResult.walletBalanceAfter,
+    source: 'manual',
+    metadata,
+  });
+
+  if (status === 'queued') {
+    await enqueueClientResearchQueue({
+      jobRef,
+      clientPath: clientDocRef.path,
+      scope,
+      manual: true,
+      triggeredBy: context.auth!.uid,
+      source: 'manual',
+    });
+  }
+
+  await writeAuditLog({
+    actorUid: context.auth!.uid,
+    action: 'client_research.manual_enqueued',
+    entityType: 'client',
+    entityId: clientDocRef.id,
+    metadata: {
+      jobId: jobRef.id,
+      proposalPath: proposalPath ?? null,
+      scope,
+      tokenCharge,
+      tokenDebitApplied: debitResult.tokenDebitApplied,
+      triggerRoles: Array.from(roles),
+    },
+  });
+
+  const billingStatus = debitResult.tokenDebitApplied ? 'paid' : 'payment_required';
+  const result: ClientResearchJobCreationResult = {
+    jobId: jobRef.id,
+    status,
+    billingStatus,
+    tokenDebitApplied: debitResult.tokenDebitApplied,
+    tokenCharge,
+    walletBalanceAfter: debitResult.walletBalanceAfter,
+  };
+  return result;
+});
+
+export const remarketing_monthlySweep = functions.pubsub
+  .schedule('0 9 1 * *')
+  .timeZone('Europe/London')
+  .onRun(async () => {
+    const now = new Date();
+    const monthKey = buildMonthKey(now);
+    const campaignsSnap = await db
+      .collection(REMARKETING_CAMPAIGN_COLLECTION)
+      .where('active', '==', true)
+      .get();
+    if (campaignsSnap.empty) {
+      console.log('No active remarketing campaigns to process');
+      return null;
+    }
+
+    const clientsSnap = await db.collection('clients').get();
+    const clients = clientsSnap.docs.map((docSnap) => ({
+      id: docSnap.id,
+      ref: docSnap.ref,
+      data: (docSnap.data() as Record<string, any>) || {},
+    }));
+    if (clients.length === 0) {
+      console.log('No clients found for remarketing sweep');
+      return null;
+    }
+
+    const membershipCache = new Map<string, { userIds: string[]; emails: string[] }>();
+    const productCache = new Map<string, { id: string; name: string | null }>();
+
+    for (const campaignDoc of campaignsSnap.docs) {
+      const campaignData = (campaignDoc.data() as Record<string, any>) || {};
+      const campaignName =
+        typeof campaignData.name === 'string' && campaignData.name.trim().length > 0
+          ? campaignData.name.trim()
+          : 'Remarketing';
+      const targetGroups = normaliseStringArray(campaignData.targetGroups ?? campaignData.groups ?? []);
+      const targetTags = normaliseStringArray(campaignData.targetTags ?? campaignData.tags ?? []);
+      const sendDay = typeof campaignData.monthlySendDay === 'number' ? campaignData.monthlySendDay : 1;
+      const lastRunAtDate = campaignData.lastRunAt?.toDate ? campaignData.lastRunAt.toDate() : null;
+      if (lastRunAtDate && buildMonthKey(lastRunAtDate) === monthKey) {
+        console.log('Campaign already processed this month, skipping', campaignDoc.id);
+        continue;
+      }
+
+      const productId = normaliseProductDocId(campaignData.highlightProductId);
+      if (productId && !productCache.has(productId)) {
+        try {
+          const productSnap = await db.collection('products').doc(productId).get();
+          if (productSnap.exists) {
+            const productData = (productSnap.data() as any) || {};
+            productCache.set(productId, {
+              id: productId,
+              name: typeof productData.name === 'string' ? productData.name : null,
+            });
+          } else {
+            productCache.set(productId, { id: productId, name: null });
+          }
+        } catch (error) {
+          console.warn('Failed to load product for remarketing campaign', campaignDoc.id, productId, error);
+          productCache.set(productId, { id: productId, name: null });
+        }
+      }
+      const productSummary = productId ? productCache.get(productId) ?? null : null;
+
+      let processed = 0;
+      let created = 0;
+      for (const client of clients) {
+        if (created >= REMARKETING_MAX_SUGGESTIONS_PER_CAMPAIGN) {
+          break;
+        }
+        if (!client.data || typeof client.data !== 'object') {
+          continue;
+        }
+        if (hasMarketingOptOut(client.data)) {
+          continue;
+        }
+        if (!matchesTargetGroups(targetGroups, client.data)) {
+          continue;
+        }
+        const tagSet = extractTagSetFromData(client.data);
+        if (targetTags.length > 0) {
+          const hasMatch = targetTags.some((tag) => tagSet.has(tag));
+          if (!hasMatch) {
+            continue;
+          }
+        }
+
+        processed += 1;
+        const existingSnap = await db
+          .collection(REMARKETING_SUGGESTION_COLLECTION)
+          .where('campaignId', '==', campaignDoc.id)
+          .where('targetClientId', '==', client.id)
+          .where('period', '==', monthKey)
+          .limit(1)
+          .get();
+        if (!existingSnap.empty) {
+          continue;
+        }
+
+        const audience = await resolveRemarketingAudience(client.id, client.data, membershipCache);
+        const drafts = buildRemarketingDraft({
+          client: client.data,
+          campaignName,
+          productName: productSummary?.name ?? null,
+          targetTags,
+        });
+        const suggestionRef = db.collection(REMARKETING_SUGGESTION_COLLECTION).doc();
+        const emailSubject =
+          typeof campaignData.emailSubject === 'string' && campaignData.emailSubject.trim().length > 0
+            ? campaignData.emailSubject.trim()
+            : `Project idea: ${productSummary?.name ?? 'content roadmap'}`;
+        const emailPreview =
+          typeof campaignData.emailPreview === 'string' && campaignData.emailPreview.trim().length > 0
+            ? campaignData.emailPreview.trim()
+            : null;
+
+        const suggestionPayload: Record<string, any> = {
+          campaignId: campaignDoc.id,
+          campaignName,
+          status: 'draft',
+          researchStatus: 'queued',
+          headline: drafts.headline,
+          summary: drafts.summary,
+          articleDraft: drafts.article,
+          emailSubject,
+          emailPreview,
+          emailOpenCount: 0,
+          emailClickCount: 0,
+          emailClickUrls: [],
+          emailLastOpenedAt: null,
+          emailLastClickedAt: null,
+          emailSentAt: null,
+          highlightProduct: productSummary ? { id: productSummary.id, name: productSummary.name } : null,
+          targetClientId: client.id,
+          targetClientPath: client.ref.path,
+          targetOrgIds: audience.orgIds.length > 0 ? audience.orgIds : null,
+          audienceUserIds: audience.userIds.length > 0 ? audience.userIds : null,
+          audienceEmails: audience.emails.length > 0 ? audience.emails : null,
+          targetTags: targetTags.length > 0 ? targetTags : null,
+          monthKey,
+          period: monthKey,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+
+        await suggestionRef.set(suggestionPayload, { merge: false });
+        await db
+          .collection(REMARKETING_QUEUE_COLLECTION)
+          .doc(suggestionRef.id)
+          .set(
+            {
+              suggestionId: suggestionRef.id,
+              campaignId: campaignDoc.id,
+              campaignName,
+              clientId: client.id,
+              status: 'pending',
+              scope: 'remarketing',
+              monthKey,
+              emailSubject,
+              emailPreview,
+              audienceEmailsCount: audience.emails.length,
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+
+        created += 1;
+      }
+
+      const nextRunDate = computeNextMonthlyRunDate(sendDay, now);
+      await campaignDoc.ref.set(
+        {
+          lastRunAt: admin.firestore.Timestamp.fromDate(now),
+          nextRunAt: admin.firestore.Timestamp.fromDate(nextRunDate),
+          lastRunSummary: {
+            processed,
+            suggestionsCreated: created,
+            monthKey,
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      await writeAuditLog({
+        actorUid: 'system',
+        action: 'remarketing.monthly_sweep',
+        entityType: 'remarketingCampaign',
+        entityId: campaignDoc.id,
+        metadata: {
+          processed,
+          suggestionsCreated: created,
+          monthKey,
+          productId: productId ?? null,
+        },
+      });
+    }
+
+    console.log('Remarketing sweep complete', {
+      campaigns: campaignsSnap.size,
+      monthKey,
+    });
+
+    return null;
+  });
+
 export const orders_refund = functions.https.onCall(async (data, context) => {
   const roles = await assertStaff(context, ['finance', 'admin']);
   const orderId = typeof data?.orderId === 'string' ? data.orderId.trim() : '';
@@ -4691,6 +5759,7 @@ export const quickbooks_exportInvoice = functions.https.onCall(async (data, cont
   const orderDoc = await db.collection('orders').doc(orderId).get();
   if (!orderDoc.exists) throw new functions.https.HttpsError('not-found', 'Order not found');
   const order = orderDoc.data() as any;
+  const franchiseId = typeof order.franchiseId === 'string' ? order.franchiseId : null;
 
   const invoice = {
     CustomerRef: { value: order.customerId || '1', name: order.customerName || 'Client' },
@@ -4711,12 +5780,55 @@ export const quickbooks_exportInvoice = functions.https.onCall(async (data, cont
     PrivateNote: `Order ${orderId}`,
   };
 
-  const clientId = process.env.QUICKBOOKS_CLIENT_ID;
-  const clientSecret = process.env.QUICKBOOKS_CLIENT_SECRET;
-  const refreshToken = process.env.QUICKBOOKS_REFRESH_TOKEN;
-  const realmId = process.env.QUICKBOOKS_REALM_ID;
+  const config: {
+    environment: 'production' | 'sandbox';
+    clientId: string | null;
+    clientSecret: string | null;
+    refreshToken: string | null;
+    realmId: string | null;
+    source: 'hq' | 'franchise';
+  } = {
+    environment: 'production',
+    clientId: process.env.QUICKBOOKS_CLIENT_ID ?? null,
+    clientSecret: process.env.QUICKBOOKS_CLIENT_SECRET ?? null,
+    refreshToken: process.env.QUICKBOOKS_REFRESH_TOKEN ?? null,
+    realmId: process.env.QUICKBOOKS_REALM_ID ?? null,
+    source: 'hq',
+  };
+
+  if (franchiseId) {
+    try {
+      const franchiseSnap = await db.collection('franchises').doc(franchiseId).get();
+      if (franchiseSnap.exists) {
+        const data = (franchiseSnap.data() as any)?.quickbooks ?? {};
+        const env = data?.environment === 'sandbox' ? 'sandbox' : 'production';
+        const clientIdValue = typeof data?.clientId === 'string' ? data.clientId.trim() : '';
+        const clientSecretValue = typeof data?.clientSecret === 'string' ? data.clientSecret.trim() : '';
+        const refreshTokenValue = typeof data?.refreshToken === 'string' ? data.refreshToken.trim() : '';
+        const realmIdValue = typeof data?.realmId === 'string' ? data.realmId.trim() : '';
+        if (clientIdValue && clientSecretValue && refreshTokenValue && realmIdValue) {
+          config.environment = env;
+          config.clientId = clientIdValue;
+          config.clientSecret = clientSecretValue;
+          config.refreshToken = refreshTokenValue;
+          config.realmId = realmIdValue;
+          config.source = 'franchise';
+        }
+      }
+    } catch (err) {
+      console.warn('Unable to load franchise QuickBooks configuration', franchiseId, err);
+    }
+  }
+
+  const clientId = config.clientId;
+  const clientSecret = config.clientSecret;
+  const refreshToken = config.refreshToken;
+  const realmId = config.realmId;
   if (!clientId || !clientSecret || !refreshToken || !realmId) {
-    console.error('Missing QuickBooks environment variables');
+    console.error('Missing QuickBooks credentials for export', {
+      franchiseId,
+      source: config.source,
+    });
     throw new functions.https.HttpsError('failed-precondition', 'QuickBooks configuration missing');
   }
 
@@ -4737,8 +5849,12 @@ export const quickbooks_exportInvoice = functions.https.onCall(async (data, cont
   const tokenJson = await tokenRes.json() as any;
   const accessToken = tokenJson.access_token as string;
 
+  const baseUrl =
+    config.environment === 'sandbox'
+      ? 'https://sandbox-quickbooks.api.intuit.com'
+      : 'https://quickbooks.api.intuit.com';
   const invoiceRes = await fetch(
-    `https://quickbooks.api.intuit.com/v3/company/${realmId}/invoice?minorversion=65`,
+    `${baseUrl}/v3/company/${realmId}/invoice?minorversion=65`,
     {
       method: 'POST',
       headers: {
@@ -4755,8 +5871,13 @@ export const quickbooks_exportInvoice = functions.https.onCall(async (data, cont
     throw new functions.https.HttpsError('internal', 'QuickBooks invoice creation failed');
   }
 
-  await orderDoc.ref.update({ quickbooksInvoiceId: invoiceJson.Invoice.Id });
-  return { invoiceId: invoiceJson.Invoice.Id };
+  await orderDoc.ref.update({
+    quickbooksInvoiceId: invoiceJson.Invoice.Id,
+    quickbooksInvoiceEnvironment: config.environment,
+    quickbooksInvoiceConfigSource: config.source,
+    quickbooksInvoiceUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  return { invoiceId: invoiceJson.Invoice.Id, environment: config.environment, source: config.source };
 });
 
 /**
@@ -5884,7 +7005,16 @@ export const admin_assignWorkflow = functions.https.onCall(async (data: any, con
  */
 export const admin_createProposal = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
   await assertStaff(context, ['admin', 'sales']);
-  const { orgId, clientEmail, items = [], agreementIds = [], sectionIds = [], templateId, customText } = data;
+  const {
+    orgId,
+    clientEmail,
+    items = [],
+    agreementIds = [],
+    sectionIds = [],
+    templateId,
+    customText,
+    setupPlan,
+  } = data;
   if (!orgId || !clientEmail) {
     throw new functions.https.HttpsError('invalid-argument', 'orgId and clientEmail required');
   }
@@ -5910,6 +7040,48 @@ export const admin_createProposal = functions.https.onCall(async (data: any, con
     .filter((i) => i.type === 'product' && i.productId)
     .map((i) => i.productId);
 
+  const normalizedSetupPlan = (() => {
+    if (!setupPlan || typeof setupPlan !== 'object') return null;
+    const allowedLayouts = new Set(['conference', 'panel', 'interview', 'custom']);
+    const layout = typeof setupPlan.layout === 'string' && allowedLayouts.has(setupPlan.layout)
+      ? setupPlan.layout
+      : 'custom';
+    const notes = typeof setupPlan.notes === 'string' ? setupPlan.notes.trim() : '';
+    const placements = Array.isArray(setupPlan.placements)
+      ? setupPlan.placements
+          .map((placement: any) => {
+            const itemId = typeof placement?.itemId === 'string' ? placement.itemId : null;
+            const itemName = typeof placement?.itemName === 'string' ? placement.itemName.trim() : '';
+            if (!itemId || !itemName) return null;
+            const quantityRaw = typeof placement?.quantity === 'number' ? placement.quantity : Number(placement?.quantity);
+            const quantity = Number.isFinite(quantityRaw) && quantityRaw > 0 ? Math.round(quantityRaw) : 1;
+            const zone = typeof placement?.zone === 'string' ? placement.zone : 'stage-front';
+            const type = placement?.type === 'stock' ? 'stock' : 'equipment';
+            const icon = typeof placement?.icon === 'string' ? placement.icon : null;
+            const notesValue = typeof placement?.notes === 'string' ? placement.notes.trim() : '';
+            return {
+              id: typeof placement?.id === 'string' ? placement.id : undefined,
+              itemId,
+              itemName,
+              zone,
+              quantity,
+              type,
+              icon,
+              notes: notesValue || null,
+            };
+          })
+          .filter((entry: any) => entry !== null)
+      : [];
+    if (placements.length === 0 && !notes) {
+      return null;
+    }
+    return {
+      layout,
+      notes,
+      placements,
+    };
+  })();
+
   const proposal = {
     orgId,
     clientEmail,
@@ -5918,6 +7090,7 @@ export const admin_createProposal = functions.https.onCall(async (data: any, con
     sectionIds: finalSections,
     serviceIds,
     customText: customText || '',
+    setupPlan: normalizedSetupPlan,
     status: 'sent',
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   };

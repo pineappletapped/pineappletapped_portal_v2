@@ -22,9 +22,11 @@ import {
   type FranchiseStatus,
   type FranchiseTerritory,
   type FranchiseRoyaltyConfig,
+  type FranchiseQuickBooksConfig,
   canActivateFranchise,
   defaultFranchiseOnboarding,
   defaultFranchiseRoyaltyConfig,
+  defaultFranchiseQuickBooksConfig,
   parseFranchise,
   parseMember,
   parseTerritory,
@@ -217,6 +219,14 @@ type RoyaltyState = {
   franchisePercentage: string;
 };
 
+type QuickBooksState = {
+  environment: 'sandbox' | 'production';
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+  realmId: string;
+};
+
 const ordinal = (value: number) => {
   const remainder = value % 10;
   const isTeen = value % 100 >= 11 && value % 100 <= 13;
@@ -242,6 +252,39 @@ const createRoyaltyState = (config?: FranchiseRoyaltyConfig | null): RoyaltyStat
     franchisePercentage: String(base.franchiseSourcedPercentage ?? defaultFranchiseRoyaltyConfig().franchiseSourcedPercentage),
   };
 };
+
+const createQuickBooksState = (config?: FranchiseQuickBooksConfig | null): QuickBooksState => {
+  const base = config ?? defaultFranchiseQuickBooksConfig();
+  return {
+    environment: base.environment ?? 'production',
+    clientId: base.clientId ?? '',
+    clientSecret: base.clientSecret ?? '',
+    refreshToken: base.refreshToken ?? '',
+    realmId: base.realmId ?? '',
+  };
+};
+
+const serializeQuickBooksState = (state: QuickBooksState) => {
+  const environment = state.environment === 'sandbox' ? 'sandbox' : 'production';
+  const clientId = state.clientId.trim();
+  const clientSecret = state.clientSecret.trim();
+  const refreshToken = state.refreshToken.trim();
+  const realmId = state.realmId.trim();
+  const connected = Boolean(clientId && clientSecret && refreshToken && realmId);
+  return {
+    environment,
+    clientId: clientId || null,
+    clientSecret: clientSecret || null,
+    refreshToken: refreshToken || null,
+    realmId: realmId || null,
+    connected,
+  };
+};
+
+const quickBooksConfigConnected = (config: FranchiseQuickBooksConfig | null | undefined): boolean =>
+  Boolean(config?.clientId && config?.clientSecret && config?.refreshToken && config?.realmId);
+
+const quickBooksStateConnected = (state: QuickBooksState): boolean => serializeQuickBooksState(state).connected;
 
 const serializeRoyaltyState = (state: RoyaltyState): FranchiseRoyaltyConfig => {
   const defaults = defaultFranchiseRoyaltyConfig();
@@ -299,14 +342,23 @@ const removeRoyaltyTier = (state: RoyaltyState, index: number): RoyaltyState => 
   return { ...state, hqTiers: tiers };
 };
 
-const describeRoyaltyTier = (tier: { minOrder: number; maxOrder: number | null; percentage: number }) => {
-  if (tier.maxOrder == null) {
+type AdminFranchiseTab = "franchises" | "territories" | "members";
+
+const FRANCHISE_TABS: { id: AdminFranchiseTab; label: string }[] = [
+  { id: "franchises", label: "Franchises" },
+  { id: "territories", label: "Territories" },
+  { id: "members", label: "Members & Assignments" },
+];
+
+const describeRoyaltyTier = (tier: { minOrder: number; maxOrder?: number | null; percentage: number }) => {
+  const maxOrder = tier.maxOrder ?? null;
+  if (maxOrder == null) {
     return `${tier.percentage}% ${ordinal(tier.minOrder)}+`;
   }
-  if (tier.minOrder === tier.maxOrder) {
+  if (tier.minOrder === maxOrder) {
     return `${tier.percentage}% ${ordinal(tier.minOrder)}`;
   }
-  return `${tier.percentage}% ${ordinal(tier.minOrder)}–${ordinal(tier.maxOrder)}`;
+  return `${tier.percentage}% ${ordinal(tier.minOrder)}–${ordinal(maxOrder)}`;
 };
 
 export default function AdminFranchisesPage() {
@@ -318,6 +370,7 @@ export default function AdminFranchisesPage() {
   const [users, setUsers] = useState<UserSummary[]>([]);
   const [categoryOptions, setCategoryOptions] = useState<CategoryOption[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<AdminFranchiseTab>("franchises");
 
   const [showCreateFranchise, setShowCreateFranchise] = useState(false);
   const [newFranchise, setNewFranchise] = useState({
@@ -331,6 +384,7 @@ export default function AdminFranchisesPage() {
     notes: "",
     onboarding: createOnboardingState(),
     royalty: createRoyaltyState(),
+    quickbooks: createQuickBooksState(),
   });
   const [editingFranchiseId, setEditingFranchiseId] = useState<string | null>(null);
   const [editingFranchise, setEditingFranchise] = useState({
@@ -344,6 +398,7 @@ export default function AdminFranchisesPage() {
     notes: "",
     onboarding: createOnboardingState(),
     royalty: createRoyaltyState(),
+    quickbooks: createQuickBooksState(),
   });
 
   const [showCreateTerritory, setShowCreateTerritory] = useState(false);
@@ -389,6 +444,14 @@ export default function AdminFranchisesPage() {
 
   const updateEditingOnboarding = (updates: Partial<OnboardingState>) => {
     setEditingFranchise((prev) => ({ ...prev, onboarding: { ...prev.onboarding, ...updates } }));
+  };
+
+  const updateNewQuickBooks = (updates: Partial<QuickBooksState>) => {
+    setNewFranchise((prev) => ({ ...prev, quickbooks: { ...prev.quickbooks, ...updates } }));
+  };
+
+  const updateEditingQuickBooks = (updates: Partial<QuickBooksState>) => {
+    setEditingFranchise((prev) => ({ ...prev, quickbooks: { ...prev.quickbooks, ...updates } }));
   };
 
   const loadAll = useCallback(async (cancelRef?: { current: boolean }) => {
@@ -546,6 +609,7 @@ export default function AdminFranchisesPage() {
       notes: "",
       onboarding: createOnboardingState(),
       royalty: createRoyaltyState(),
+      quickbooks: createQuickBooksState(),
     });
   };
 
@@ -560,6 +624,16 @@ export default function AdminFranchisesPage() {
         notes: onboardingNotes.length > 0 ? onboardingNotes : null,
       };
       const royaltyConfig = serializeRoyaltyState(newFranchise.royalty);
+      const quickbooksState = serializeQuickBooksState(newFranchise.quickbooks);
+      const quickbooksPayload = {
+        environment: quickbooksState.environment,
+        clientId: quickbooksState.clientId,
+        clientSecret: quickbooksState.clientSecret,
+        refreshToken: quickbooksState.refreshToken,
+        realmId: quickbooksState.realmId,
+        connectedAt: quickbooksState.connected ? serverTimestamp() : null,
+        updatedAt: serverTimestamp(),
+      };
       const payload = {
         name: newFranchise.name.trim(),
         code: (newFranchise.code || newFranchise.name || "").trim().replace(/\s+/g, "-").toLowerCase(),
@@ -573,6 +647,7 @@ export default function AdminFranchisesPage() {
             : null,
         notes: newFranchise.notes.trim() || null,
         onboarding: onboardingPayload,
+        quickbooks: quickbooksPayload,
         royalty: royaltyConfig,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -603,6 +678,7 @@ export default function AdminFranchisesPage() {
         ...franchise.onboarding,
       },
       royalty: createRoyaltyState(franchise.royalty),
+      quickbooks: createQuickBooksState(franchise.quickbooks),
     });
   };
 
@@ -619,6 +695,7 @@ export default function AdminFranchisesPage() {
       notes: "",
       onboarding: createOnboardingState(),
       royalty: createRoyaltyState(),
+      quickbooks: createQuickBooksState(),
     });
   };
 
@@ -634,6 +711,16 @@ export default function AdminFranchisesPage() {
         notes: onboardingNotes.length > 0 ? onboardingNotes : null,
       };
       const royaltyConfig = serializeRoyaltyState(editingFranchise.royalty);
+      const quickbooksState = serializeQuickBooksState(editingFranchise.quickbooks);
+      const quickbooksPayload = {
+        environment: quickbooksState.environment,
+        clientId: quickbooksState.clientId,
+        clientSecret: quickbooksState.clientSecret,
+        refreshToken: quickbooksState.refreshToken,
+        realmId: quickbooksState.realmId,
+        connectedAt: quickbooksState.connected ? serverTimestamp() : null,
+        updatedAt: serverTimestamp(),
+      };
       const activationReady = canActivateFranchise(onboardingPayload);
       if (editingFranchise.status === "active" && !activationReady) {
         alert(
@@ -654,6 +741,7 @@ export default function AdminFranchisesPage() {
             : null,
         notes: editingFranchise.notes.trim() || null,
         onboarding: onboardingPayload,
+        quickbooks: quickbooksPayload,
         royalty: royaltyConfig,
         updatedAt: serverTimestamp(),
       };
@@ -949,117 +1037,137 @@ export default function AdminFranchisesPage() {
         {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
       </div>
 
-      <section className="grid gap-4">
-        <div>
-          <h2 className="text-lg font-semibold">Territory manager</h2>
-          <p className="mt-1 text-sm text-gray-600">
-            Visualise every territory, see included services, and review monthly licensing at a glance.
-          </p>
-        </div>
-        <div className="grid gap-4">
-          {franchises.length === 0 ? (
-            <p className="text-sm text-gray-500">No franchise records yet.</p>
-          ) : (
-            franchises.map((franchise) => {
-              const assignedTerritories = territoryByFranchise.get(franchise.id) ?? [];
-              return (
-                <div key={franchise.id} className="rounded border p-4">
-                  <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <h3 className="text-base font-semibold">{franchise.name}</h3>
-                      <p className="text-xs uppercase tracking-wide text-gray-500">{franchise.status}</p>
-                    </div>
-                    {franchise.contactEmail && (
-                      <a
-                        className="text-sm text-blue-600 hover:underline"
-                        href={`mailto:${franchise.contactEmail}`}
-                      >
-                        {franchise.contactEmail}
-                      </a>
-                    )}
-                  </div>
-                  {assignedTerritories.length === 0 ? (
-                    <p className="mt-3 text-sm text-gray-500">No territories assigned.</p>
-                  ) : (
-                    <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                      {assignedTerritories.map((territory) => {
-                        const categories = territory.categories.map((categoryId) => ({
-                          id: categoryId,
-                          name: categoryMap.get(categoryId)?.name || categoryId,
-                        }));
-                        const licenceLabel =
-                          typeof territory.licenseFee === "number"
-                            ? gbpFormatter.format(territory.licenseFee)
-                            : null;
-                        return (
-                          <div key={territory.id} className="grid gap-2 rounded border border-dashed p-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <div>
-                                <div className="font-medium text-sm">{territory.label}</div>
-                                <div className="text-xs text-gray-500">{territorySummary(territory)}</div>
-                              </div>
-                              <span
-                                className={clsx(
-                                  "rounded px-2 py-0.5 text-[11px] uppercase",
-                                  territory.exclusive
-                                    ? "bg-emerald-100 text-emerald-800"
-                                    : "bg-gray-100 text-gray-600"
-                                )}
-                              >
-                                {territory.exclusive ? "Exclusive" : "Shared"}
-                              </span>
-                            </div>
-                            {categories.length > 0 && (
-                              <div>
-                                <span className="text-[11px] font-semibold uppercase text-gray-500">
-                                  Categories
-                                </span>
-                                <div className="mt-1 flex flex-wrap gap-1">
-                                  {categories.map((category) => (
-                                    <span
-                                      key={`${territory.id}-card-${category.id}`}
-                                      className="rounded bg-gray-100 px-2 py-0.5 text-[11px] text-gray-700"
-                                    >
-                                      {category.name}
-                                    </span>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                            <div>
-                              <span className="text-[11px] font-semibold uppercase text-gray-500">
-                                License fee
-                              </span>
-                              <div className="mt-0.5 text-xs text-gray-700">
-                                {licenceLabel ? `${licenceLabel} / month` : "Free territory"}
-                              </div>
-                            </div>
-                            <TerritoryMap territory={territory} />
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })
-          )}
-        </div>
-      </section>
-
-      <section className="grid gap-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Franchises</h2>
+      <div className="flex flex-wrap items-center gap-2">
+        {FRANCHISE_TABS.map((tab) => (
           <button
+            key={tab.id}
             type="button"
-            className="btn btn-sm"
-            onClick={() => setShowCreateFranchise((value) => !value)}
+            onClick={() => setActiveTab(tab.id)}
+            className={clsx(
+              "rounded-full border px-4 py-1.5 text-sm font-medium transition",
+              activeTab === tab.id
+                ? "border-blue-600 bg-blue-50 text-blue-700 shadow-sm"
+                : "border-transparent bg-gray-100 text-gray-600 hover:bg-gray-200"
+            )}
           >
-            {showCreateFranchise ? "Close" : "New franchise"}
+            {tab.label}
           </button>
-        </div>
-        {showCreateFranchise && (
-          <form className="grid gap-3 rounded border p-4" onSubmit={handleCreateFranchise}>
+        ))}
+      </div>
+
+      {activeTab === "franchises" && (
+        <section className="grid gap-6">
+          <div className="grid gap-4">
+            <div>
+              <h2 className="text-lg font-semibold">Territory manager</h2>
+              <p className="mt-1 text-sm text-gray-600">
+                Visualise every territory, see included services, and review monthly licensing at a glance.
+              </p>
+            </div>
+            <div className="grid gap-4">
+              {franchises.length === 0 ? (
+                <p className="text-sm text-gray-500">No franchise records yet.</p>
+              ) : (
+                franchises.map((franchise) => {
+                  const assignedTerritories = territoryByFranchise.get(franchise.id) ?? [];
+                  return (
+                    <div key={franchise.id} className="rounded border p-4">
+                      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <h3 className="text-base font-semibold">{franchise.name}</h3>
+                          <p className="text-xs uppercase tracking-wide text-gray-500">{franchise.status}</p>
+                        </div>
+                        {franchise.contactEmail && (
+                          <a
+                            className="text-sm text-blue-600 hover:underline"
+                            href={`mailto:${franchise.contactEmail}`}
+                          >
+                            {franchise.contactEmail}
+                          </a>
+                        )}
+                      </div>
+                      {assignedTerritories.length === 0 ? (
+                        <p className="mt-3 text-sm text-gray-500">No territories assigned.</p>
+                      ) : (
+                        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                          {assignedTerritories.map((territory) => {
+                            const categories = territory.categories.map((categoryId) => ({
+                              id: categoryId,
+                              name: categoryMap.get(categoryId)?.name || categoryId,
+                            }));
+                            const licenceLabel =
+                              typeof territory.licenseFee === "number"
+                                ? gbpFormatter.format(territory.licenseFee)
+                                : null;
+                            return (
+                              <div key={territory.id} className="grid gap-2 rounded border border-dashed p-3">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div>
+                                    <div className="font-medium text-sm">{territory.label}</div>
+                                    <div className="text-xs text-gray-500">{territorySummary(territory)}</div>
+                                  </div>
+                                  <span
+                                    className={clsx(
+                                      "rounded px-2 py-0.5 text-[11px] uppercase",
+                                      territory.exclusive
+                                        ? "bg-emerald-100 text-emerald-800"
+                                        : "bg-gray-100 text-gray-600"
+                                    )}
+                                  >
+                                    {territory.exclusive ? "Exclusive" : "Shared"}
+                                  </span>
+                                </div>
+                                {categories.length > 0 && (
+                                  <div>
+                                    <span className="text-[11px] font-semibold uppercase text-gray-500">
+                                      Categories
+                                    </span>
+                                    <div className="mt-1 flex flex-wrap gap-1">
+                                      {categories.map((category) => (
+                                        <span
+                                          key={`${territory.id}-card-${category.id}`}
+                                          className="rounded bg-gray-100 px-2 py-0.5 text-[11px] text-gray-700"
+                                        >
+                                          {category.name}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                                <div>
+                                  <span className="text-[11px] font-semibold uppercase text-gray-500">
+                                    License fee
+                                  </span>
+                                  <div className="mt-0.5 text-xs text-gray-700">
+                                    {licenceLabel ? `${licenceLabel} / month` : "Free territory"}
+                                  </div>
+                                </div>
+                                <TerritoryMap territory={territory} />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          <div className="grid gap-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Franchises</h2>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => setShowCreateFranchise((value) => !value)}
+              >
+                {showCreateFranchise ? "Close" : "New franchise"}
+              </button>
+            </div>
+            {showCreateFranchise && (
+              <form className="grid gap-3 rounded border p-4" onSubmit={handleCreateFranchise}>
             <div className="grid gap-2 sm:grid-cols-2">
               <label className="grid gap-1 text-sm">
                 <span className="font-medium">Franchise name</span>
@@ -1141,6 +1249,82 @@ export default function AdminFranchisesPage() {
                   placeholder="6"
                 />
               </label>
+            </div>
+            <div className="grid gap-3 rounded border border-dashed border-gray-200 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-medium">QuickBooks integration</div>
+                  <p className="text-xs text-gray-500">
+                    Capture franchise-specific QuickBooks Online credentials so invoices export with their ledger.
+                  </p>
+                </div>
+                <span
+                  className={clsx(
+                    "rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase",
+                    quickBooksStateConnected(newFranchise.quickbooks)
+                      ? "bg-emerald-100 text-emerald-700"
+                      : "bg-amber-100 text-amber-800"
+                  )}
+                >
+                  {quickBooksStateConnected(newFranchise.quickbooks) ? "Connected" : "Pending"}
+                </span>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium">Environment</span>
+                  <select
+                    className="input"
+                    value={newFranchise.quickbooks.environment}
+                    onChange={(event) =>
+                      updateNewQuickBooks({ environment: event.target.value as QuickBooksState["environment"] })
+                    }
+                  >
+                    <option value="production">Production</option>
+                    <option value="sandbox">Sandbox</option>
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium">Realm ID</span>
+                  <input
+                    className="input"
+                    value={newFranchise.quickbooks.realmId}
+                    onChange={(event) => updateNewQuickBooks({ realmId: event.target.value })}
+                    placeholder="1234567890"
+                  />
+                </label>
+              </div>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">Client ID</span>
+                <input
+                  className="input"
+                  value={newFranchise.quickbooks.clientId}
+                  onChange={(event) => updateNewQuickBooks({ clientId: event.target.value })}
+                  placeholder="QB0..."
+                />
+              </label>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">Client secret</span>
+                <input
+                  className="input"
+                  type="password"
+                  value={newFranchise.quickbooks.clientSecret}
+                  onChange={(event) => updateNewQuickBooks({ clientSecret: event.target.value })}
+                  placeholder="••••••"
+                />
+              </label>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">Refresh token</span>
+                <input
+                  className="input"
+                  type="password"
+                  value={newFranchise.quickbooks.refreshToken}
+                  onChange={(event) => updateNewQuickBooks({ refreshToken: event.target.value })}
+                  placeholder="Paste the long-lived refresh token"
+                />
+              </label>
+              <p className="text-xs text-gray-500">
+                Values are encrypted at rest and only visible to head office administrators.
+              </p>
             </div>
             <div className="grid gap-3 rounded border border-dashed border-gray-200 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1412,10 +1596,10 @@ export default function AdminFranchisesPage() {
                 Save franchise
               </button>
             </div>
-          </form>
-        )}
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] text-sm border">
+              </form>
+            )}
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-sm border">
             <thead>
               <tr className="bg-gray-100 text-left">
                 <th className="p-2">Franchise</th>
@@ -1455,11 +1639,14 @@ export default function AdminFranchisesPage() {
                     ? franchise.royalty
                     : defaultFranchiseRoyaltyConfig();
                   const hqScale = royaltyConfig.hqTiers
-                    .map((tier) => describeRoyaltyTier(tier))
+                    .map((tier) => describeRoyaltyTier({ ...tier, maxOrder: tier.maxOrder ?? null }))
                     .join(" → ");
                   const franchiseDirect = typeof royaltyConfig.franchiseSourcedPercentage === "number"
                     ? royaltyConfig.franchiseSourcedPercentage
                     : defaultFranchiseRoyaltyConfig().franchiseSourcedPercentage;
+                  const quickbooksConnected = quickBooksConfigConnected(franchise.quickbooks);
+                  const quickbooksEnvironmentLabel =
+                    franchise.quickbooks?.environment === "sandbox" ? "Sandbox" : "Production";
                   return (
                     <tr key={franchise.id} className="border-t align-top">
                       <td className="p-2 font-medium">
@@ -1486,6 +1673,23 @@ export default function AdminFranchisesPage() {
                           <div className="text-xs text-gray-500">HQ: {hqScale}</div>
                         )}
                         <div className="text-xs text-gray-500">Franchise-sourced: {franchiseDirect}%</div>
+                        <div className="mt-1 flex items-center gap-1 text-[11px]">
+                          <span
+                            className={clsx(
+                              "inline-flex items-center rounded px-1.5 py-0.5 font-semibold uppercase",
+                              quickbooksConnected
+                                ? "bg-emerald-100 text-emerald-700"
+                                : "bg-amber-100 text-amber-800"
+                            )}
+                          >
+                            QB
+                          </span>
+                          <span className="text-gray-600">
+                            {quickbooksConnected
+                              ? `Connected · ${quickbooksEnvironmentLabel}`
+                              : "Credentials pending"}
+                          </span>
+                        </div>
                       </td>
                       <td className="p-2 text-xs">
                         <div>KYC: {onboardingStatusLabel(franchise.onboarding.kycStatus)}</div>
@@ -1622,6 +1826,73 @@ export default function AdminFranchisesPage() {
                                 }
                               />
                             </label>
+                            <div className="grid gap-2 rounded border border-dashed border-gray-200 p-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-[11px] font-semibold uppercase tracking-wide">QuickBooks</span>
+                                <span
+                                  className={clsx(
+                                    "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase",
+                                    quickBooksStateConnected(editingFranchise.quickbooks)
+                                      ? "bg-emerald-100 text-emerald-700"
+                                      : "bg-amber-100 text-amber-800"
+                                  )}
+                                >
+                                  {quickBooksStateConnected(editingFranchise.quickbooks) ? "Connected" : "Pending"}
+                                </span>
+                              </div>
+                              <label className="grid gap-1 text-[11px]">
+                                <span className="font-medium">Environment</span>
+                                <select
+                                  className="input"
+                                  value={editingFranchise.quickbooks.environment}
+                                  onChange={(event) =>
+                                    updateEditingQuickBooks({
+                                      environment: event.target.value as QuickBooksState["environment"],
+                                    })
+                                  }
+                                >
+                                  <option value="production">Production</option>
+                                  <option value="sandbox">Sandbox</option>
+                                </select>
+                              </label>
+                              <label className="grid gap-1 text-[11px]">
+                                <span className="font-medium">Realm ID</span>
+                                <input
+                                  className="input"
+                                  value={editingFranchise.quickbooks.realmId}
+                                  onChange={(event) => updateEditingQuickBooks({ realmId: event.target.value })}
+                                />
+                              </label>
+                              <label className="grid gap-1 text-[11px]">
+                                <span className="font-medium">Client ID</span>
+                                <input
+                                  className="input"
+                                  value={editingFranchise.quickbooks.clientId}
+                                  onChange={(event) => updateEditingQuickBooks({ clientId: event.target.value })}
+                                />
+                              </label>
+                              <label className="grid gap-1 text-[11px]">
+                                <span className="font-medium">Client secret</span>
+                                <input
+                                  className="input"
+                                  type="password"
+                                  value={editingFranchise.quickbooks.clientSecret}
+                                  onChange={(event) => updateEditingQuickBooks({ clientSecret: event.target.value })}
+                                />
+                              </label>
+                              <label className="grid gap-1 text-[11px]">
+                                <span className="font-medium">Refresh token</span>
+                                <input
+                                  className="input"
+                                  type="password"
+                                  value={editingFranchise.quickbooks.refreshToken}
+                                  onChange={(event) => updateEditingQuickBooks({ refreshToken: event.target.value })}
+                                />
+                              </label>
+                              <p className="text-[10px] text-gray-500">
+                                Credentials sync invoices directly to the franchisee&apos;s QuickBooks company.
+                              </p>
+                            </div>
                             <div className="grid gap-2 rounded border border-dashed border-gray-200 p-2">
                               <div className="flex flex-wrap items-center justify-between gap-2">
                                 <span className="text-[11px] font-semibold uppercase tracking-wide">Royalty configuration</span>
@@ -1889,193 +2160,197 @@ export default function AdminFranchisesPage() {
                 })
               )}
             </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="grid gap-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Territories</h2>
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => setShowCreateTerritory((value) => !value)}
-          >
-            {showCreateTerritory ? "Close" : "New territory"}
-          </button>
-        </div>
-        {showCreateTerritory && (
-          <form className="grid gap-3 rounded border p-4" onSubmit={handleCreateTerritory}>
-            <label className="grid gap-1 text-sm">
-              <span className="font-medium">Franchise</span>
-              <select
-                className="input"
-                value={newTerritory.franchiseId}
-                onChange={(event) => setNewTerritory({ ...newTerritory, franchiseId: event.target.value })}
-                required
-              >
-                <option value="">Select franchise…</option>
-                {franchises.map((franchise) => (
-                  <option key={franchise.id} value={franchise.id}>
-                    {franchise.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">Label</span>
-                <input
-                  className="input"
-                  value={newTerritory.label}
-                  onChange={(event) => setNewTerritory({ ...newTerritory, label: event.target.value })}
-                  placeholder="Manchester city core"
-                  required
-                />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">Type</span>
-                <select
-                  className="input"
-                  value={newTerritory.type}
-                  onChange={(event) => setNewTerritory({ ...newTerritory, type: event.target.value as "postal" | "radius" })}
-                >
-                  {TERRITORY_TYPES.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              </table>
             </div>
-            {newTerritory.type === "postal" ? (
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">Postcodes (one per line)</span>
-                <textarea
-                  className="input"
-                  rows={4}
-                  value={newTerritory.postalCodes}
-                  onChange={(event) => setNewTerritory({ ...newTerritory, postalCodes: event.target.value })}
-                  placeholder="M1\nM2\nM3"
-                  required
-                />
-              </label>
-            ) : (
-              <div className="grid gap-3 sm:grid-cols-3">
+          </div>
+      </section>
+      )}
+
+      {activeTab === "territories" && (
+        <section className="grid gap-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold">Territories</h2>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setShowCreateTerritory((value) => !value)}
+            >
+              {showCreateTerritory ? "Close" : "New territory"}
+            </button>
+          </div>
+          <div className="grid gap-4">
+            {showCreateTerritory && (
+              <form className="grid gap-3 rounded border p-4" onSubmit={handleCreateTerritory}>
                 <label className="grid gap-1 text-sm">
-                  <span className="font-medium">Latitude</span>
-                  <input
+                  <span className="font-medium">Franchise</span>
+                  <select
                     className="input"
-                    value={newTerritory.centerLat}
-                    onChange={(event) => setNewTerritory({ ...newTerritory, centerLat: event.target.value })}
-                    placeholder="53.4808"
+                    value={newTerritory.franchiseId}
+                    onChange={(event) => setNewTerritory({ ...newTerritory, franchiseId: event.target.value })}
                     required
+                  >
+                    <option value="">Select franchise…</option>
+                    {franchises.map((franchise) => (
+                      <option key={franchise.id} value={franchise.id}>
+                        {franchise.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium">Label</span>
+                    <input
+                      className="input"
+                      value={newTerritory.label}
+                      onChange={(event) => setNewTerritory({ ...newTerritory, label: event.target.value })}
+                      placeholder="Manchester city core"
+                      required
+                    />
+                  </label>
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium">Type</span>
+                    <select
+                      className="input"
+                      value={newTerritory.type}
+                      onChange={(event) => setNewTerritory({ ...newTerritory, type: event.target.value as "postal" | "radius" })}
+                    >
+                      {TERRITORY_TYPES.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                {newTerritory.type === "postal" ? (
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium">Postcodes (one per line)</span>
+                    <textarea
+                      className="input"
+                      rows={4}
+                      value={newTerritory.postalCodes}
+                      onChange={(event) => setNewTerritory({ ...newTerritory, postalCodes: event.target.value })}
+                      placeholder="M1\nM2\nM3"
+                      required
+                    />
+                  </label>
+                ) : (
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <label className="grid gap-1 text-sm">
+                      <span className="font-medium">Latitude</span>
+                      <input
+                        className="input"
+                        value={newTerritory.centerLat}
+                        onChange={(event) => setNewTerritory({ ...newTerritory, centerLat: event.target.value })}
+                        placeholder="53.4808"
+                        required
+                      />
+                    </label>
+                    <label className="grid gap-1 text-sm">
+                      <span className="font-medium">Longitude</span>
+                      <input
+                        className="input"
+                        value={newTerritory.centerLng}
+                        onChange={(event) => setNewTerritory({ ...newTerritory, centerLng: event.target.value })}
+                        placeholder="-2.2426"
+                        required
+                      />
+                    </label>
+                    <label className="grid gap-1 text-sm">
+                      <span className="font-medium">Radius (km)</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min="1"
+                        step="0.5"
+                        value={newTerritory.radiusKm}
+                        onChange={(event) => setNewTerritory({ ...newTerritory, radiusKm: event.target.value })}
+                        placeholder="25"
+                        required
+                      />
+                    </label>
+                  </div>
+                )}
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={newTerritory.exclusive}
+                    onChange={(event) => setNewTerritory({ ...newTerritory, exclusive: event.target.checked })}
                   />
+                  Exclusive lock for this territory
                 </label>
                 <label className="grid gap-1 text-sm">
-                  <span className="font-medium">Longitude</span>
-                  <input
-                    className="input"
-                    value={newTerritory.centerLng}
-                    onChange={(event) => setNewTerritory({ ...newTerritory, centerLng: event.target.value })}
-                    placeholder="-2.2426"
-                    required
-                  />
+                  <span className="font-medium">Service categories</span>
+                  <select
+                    multiple
+                    className="input min-h-[120px]"
+                    value={newTerritory.categories}
+                    onChange={(event) =>
+                      setNewTerritory({
+                        ...newTerritory,
+                        categories: Array.from(event.target.selectedOptions).map((option) => option.value),
+                      })
+                    }
+                  >
+                    {categoryOptions.length === 0 ? (
+                      <option value="" disabled>
+                        No categories available
+                      </option>
+                    ) : (
+                      categoryOptions.map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {category.name}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  <span className="text-xs text-gray-500">
+                    Hold Ctrl/Command to select multiple categories. Leave empty if unrestricted.
+                  </span>
                 </label>
                 <label className="grid gap-1 text-sm">
-                  <span className="font-medium">Radius (km)</span>
+                  <span className="font-medium">Monthly license fee (£/mo)</span>
                   <input
                     className="input"
                     type="number"
-                    min="1"
-                    step="0.5"
-                    value={newTerritory.radiusKm}
-                    onChange={(event) => setNewTerritory({ ...newTerritory, radiusKm: event.target.value })}
-                    placeholder="25"
-                    required
+                    min="0"
+                    step="0.01"
+                    value={newTerritory.licenseFee}
+                    onChange={(event) => setNewTerritory({ ...newTerritory, licenseFee: event.target.value })}
+                    placeholder="0"
+                  />
+                  <span className="text-xs text-gray-500">Leave blank to keep the territory free.</span>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium">Notes</span>
+                  <textarea
+                    className="input"
+                    rows={2}
+                    value={newTerritory.notes}
+                    onChange={(event) => setNewTerritory({ ...newTerritory, notes: event.target.value })}
+                    placeholder="Paid ads radius, special restrictions, partner agreements…"
                   />
                 </label>
-              </div>
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={() => {
+                      resetTerritoryForm();
+                      setShowCreateTerritory(false);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn btn-sm">
+                    Save territory
+                  </button>
+                </div>
+              </form>
             )}
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={newTerritory.exclusive}
-                onChange={(event) => setNewTerritory({ ...newTerritory, exclusive: event.target.checked })}
-              />
-              Exclusive lock for this territory
-            </label>
-            <label className="grid gap-1 text-sm">
-              <span className="font-medium">Service categories</span>
-              <select
-                multiple
-                className="input min-h-[120px]"
-                value={newTerritory.categories}
-                onChange={(event) =>
-                  setNewTerritory({
-                    ...newTerritory,
-                    categories: Array.from(event.target.selectedOptions).map((option) => option.value),
-                  })
-                }
-              >
-                {categoryOptions.length === 0 ? (
-                  <option value="" disabled>
-                    No categories available
-                  </option>
-                ) : (
-                  categoryOptions.map((category) => (
-                    <option key={category.id} value={category.id}>
-                      {category.name}
-                    </option>
-                  ))
-                )}
-              </select>
-              <span className="text-xs text-gray-500">
-                Hold Ctrl/Command to select multiple categories. Leave empty if unrestricted.
-              </span>
-            </label>
-            <label className="grid gap-1 text-sm">
-              <span className="font-medium">Monthly license fee (£/mo)</span>
-              <input
-                className="input"
-                type="number"
-                min="0"
-                step="0.01"
-                value={newTerritory.licenseFee}
-                onChange={(event) => setNewTerritory({ ...newTerritory, licenseFee: event.target.value })}
-                placeholder="0"
-              />
-              <span className="text-xs text-gray-500">Leave blank to keep the territory free.</span>
-            </label>
-            <label className="grid gap-1 text-sm">
-              <span className="font-medium">Notes</span>
-              <textarea
-                className="input"
-                rows={2}
-                value={newTerritory.notes}
-                onChange={(event) => setNewTerritory({ ...newTerritory, notes: event.target.value })}
-                placeholder="Paid ads radius, special restrictions, partner agreements…"
-              />
-            </label>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={() => {
-                  resetTerritoryForm();
-                  setShowCreateTerritory(false);
-                }}
-              >
-                Cancel
-              </button>
-              <button type="submit" className="btn btn-sm">
-                Save territory
-              </button>
-            </div>
-          </form>
-        )}
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] text-sm border">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[640px] text-sm border">
             <thead>
               <tr className="bg-gray-100 text-left">
                 <th className="p-2">Territory</th>
@@ -2356,145 +2631,151 @@ export default function AdminFranchisesPage() {
             </tbody>
           </table>
         </div>
-      </section>
+          </div>
+        </section>
+      )}
 
-      <section className="grid gap-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Members & assignments</h2>
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => setShowCreateMember((value) => !value)}
-          >
-            {showCreateMember ? "Close" : "New assignment"}
-          </button>
-        </div>
-        {showCreateMember && (
-          <form className="grid gap-3 rounded border p-4" onSubmit={handleCreateMember}>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">Franchise</span>
-                <select
-                  className="input"
-                  value={newMember.franchiseId}
-                  onChange={(event) => setNewMember({ ...newMember, franchiseId: event.target.value })}
-                  required
-                >
-                  <option value="">Select franchise…</option>
-                  {franchises.map((franchise) => (
-                    <option key={franchise.id} value={franchise.id}>
-                      {franchise.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">User</span>
-                <select
-                  className="input"
-                  value={newMember.userId}
-                  onChange={(event) => setNewMember({ ...newMember, userId: event.target.value })}
-                  required
-                >
-                  <option value="">Select user…</option>
-                  {users.map((user) => (
-                    <option key={user.id} value={user.id}>
-                      {user.displayName} ({user.email})
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <label className="grid gap-1 text-sm">
-              <span className="font-medium">Role</span>
-              <select
-                className="input"
-                value={newMember.role}
-                onChange={(event) => setNewMember({ ...newMember, role: event.target.value as FranchiseMemberRole })}
-              >
-                {MEMBER_ROLES.map((role) => (
-                  <option key={role.value} value={role.value}>
-                    {role.label}
-                  </option>
-                ))}
-              </select>
-              <span className="text-xs text-gray-500">
-                {MEMBER_ROLES.find((role) => role.value === newMember.role)?.description}
-              </span>
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={newMember.primary}
-                onChange={(event) => setNewMember({ ...newMember, primary: event.target.checked })}
-              />
-              Primary assignment (updates the user profile to use this franchise by default)
-            </label>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={() => {
-                  setShowCreateMember(false);
-                  setNewMember({ franchiseId: "", userId: "", role: "franchisee", primary: false });
-                }}
-              >
-                Cancel
-              </button>
-              <button type="submit" className="btn btn-sm">
-                Save assignment
-              </button>
-            </div>
-          </form>
-        )}
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] text-sm border">
-            <thead>
-              <tr className="bg-gray-100 text-left">
-                <th className="p-2">User</th>
-                <th className="p-2">Franchise</th>
-                <th className="p-2">Role</th>
-                <th className="p-2">Primary</th>
-                <th className="p-2">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {members.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="p-4 text-center text-gray-500">
-                    No member assignments yet.
-                  </td>
-                </tr>
-              ) : (
-                members.map((member) => {
-                  const user = userMap.get(member.userId);
-                  const franchise = franchiseMap.get(member.franchiseId);
-                  return (
-                    <tr key={member.id} className="border-t">
-                      <td className="p-2">
-                        <div className="font-medium">{user?.displayName || user?.email || member.userId}</div>
-                        <div className="text-xs text-gray-500">{user?.email}</div>
-                      </td>
-                      <td className="p-2">{franchise ? franchise.name : member.franchiseId}</td>
-                      <td className="p-2 capitalize">{member.role}</td>
-                      <td className="p-2">{member.primary ? "Yes" : "No"}</td>
-                      <td className="p-2">
-                        <button
-                          type="button"
-                          className="btn btn-xs btn-outline"
-                          onClick={() => removeMember(member)}
-                        >
-                          Remove
-                        </button>
+      {activeTab === "members" && (
+        <section className="grid gap-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold">Members & assignments</h2>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setShowCreateMember((value) => !value)}
+            >
+              {showCreateMember ? "Close" : "New assignment"}
+            </button>
+          </div>
+          <div className="grid gap-4">
+            {showCreateMember && (
+              <form className="grid gap-3 rounded border p-4" onSubmit={handleCreateMember}>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium">Franchise</span>
+                    <select
+                      className="input"
+                      value={newMember.franchiseId}
+                      onChange={(event) => setNewMember({ ...newMember, franchiseId: event.target.value })}
+                      required
+                    >
+                      <option value="">Select franchise…</option>
+                      {franchises.map((franchise) => (
+                        <option key={franchise.id} value={franchise.id}>
+                          {franchise.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="grid gap-1 text-sm">
+                    <span className="font-medium">User</span>
+                    <select
+                      className="input"
+                      value={newMember.userId}
+                      onChange={(event) => setNewMember({ ...newMember, userId: event.target.value })}
+                      required
+                    >
+                      <option value="">Select user…</option>
+                      {users.map((user) => (
+                        <option key={user.id} value={user.id}>
+                          {user.displayName} ({user.email})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium">Role</span>
+                  <select
+                    className="input"
+                    value={newMember.role}
+                    onChange={(event) => setNewMember({ ...newMember, role: event.target.value as FranchiseMemberRole })}
+                  >
+                    {MEMBER_ROLES.map((role) => (
+                      <option key={role.value} value={role.value}>
+                        {role.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-gray-500">
+                    {MEMBER_ROLES.find((role) => role.value === newMember.role)?.description}
+                  </span>
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={newMember.primary}
+                    onChange={(event) => setNewMember({ ...newMember, primary: event.target.checked })}
+                  />
+                  Primary assignment (updates the user profile to use this franchise by default)
+                </label>
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={() => {
+                      setShowCreateMember(false);
+                      setNewMember({ franchiseId: "", userId: "", role: "franchisee", primary: false });
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="btn btn-sm">
+                    Save assignment
+                  </button>
+                </div>
+              </form>
+            )}
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[640px] text-sm border">
+                <thead>
+                  <tr className="bg-gray-100 text-left">
+                    <th className="p-2">User</th>
+                    <th className="p-2">Franchise</th>
+                    <th className="p-2">Role</th>
+                    <th className="p-2">Primary</th>
+                    <th className="p-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {members.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="p-4 text-center text-gray-500">
+                        No member assignments yet.
                       </td>
                     </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+                  ) : (
+                    members.map((member) => {
+                      const user = userMap.get(member.userId);
+                      const franchise = franchiseMap.get(member.franchiseId);
+                      return (
+                        <tr key={member.id} className="border-t">
+                          <td className="p-2">
+                            <div className="font-medium">{user?.displayName || user?.email || member.userId}</div>
+                            <div className="text-xs text-gray-500">{user?.email}</div>
+                          </td>
+                          <td className="p-2">{franchise ? franchise.name : member.franchiseId}</td>
+                          <td className="p-2 capitalize">{member.role}</td>
+                          <td className="p-2">{member.primary ? "Yes" : "No"}</td>
+                          <td className="p-2">
+                            <button
+                              type="button"
+                              className="btn btn-xs btn-outline"
+                              onClick={() => removeMember(member)}
+                            >
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }

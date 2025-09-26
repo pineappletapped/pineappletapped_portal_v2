@@ -16,6 +16,7 @@ import {
 import { db, auth, functions, httpsCallable } from '@/lib/firebase';
 import Link from 'next/link';
 import PortalContainer from '@/components/PortalContainer';
+import ContentPlanPanel from '@/components/ContentPlanPanel';
 
 /**
  * Enhanced dashboard showing a unified overview of projects, orders, bookings,
@@ -29,6 +30,7 @@ export default function DashboardPage() {
   const [orders, setOrders] = useState<any[]>([]);
   const [bookings, setBookings] = useState<any[]>([]);
   const [recommendations, setRecommendations] = useState<any[]>([]);
+  const [suggestedProjects, setSuggestedProjects] = useState<any[]>([]);
   const [notifications, setNotifications] = useState<any[]>([]);
   const [assets, setAssets] = useState<any[]>([]);
   const [tasks, setTasks] = useState<any[]>([]);
@@ -118,6 +120,61 @@ export default function DashboardPage() {
             } catch (err) {
               console.warn('Failed to load recommendations', err);
             }
+            // Remarketing suggestions from HQ
+            try {
+              const suggestionMap = new Map<string, any>();
+              try {
+                const directSnap = await getDocs(
+                  query(
+                    collection(db, 'remarketingSuggestions'),
+                    where('audienceUserIds', 'array-contains', user.uid),
+                    orderBy('createdAt', 'desc'),
+                    limit(6)
+                  )
+                );
+                directSnap.docs.forEach((docSnap) =>
+                  suggestionMap.set(docSnap.id, { id: docSnap.id, ...(docSnap.data() as any) })
+                );
+              } catch (errDirect) {
+                console.warn('Failed to load direct remarketing suggestions', errDirect);
+              }
+              const chunkSize = 10;
+              for (let index = 0; index < orgIds.length; index += chunkSize) {
+                const chunk = orgIds.slice(index, index + chunkSize);
+                try {
+                  const orgSnap = await getDocs(
+                    query(
+                      collection(db, 'remarketingSuggestions'),
+                      where('targetOrgIds', 'array-contains-any', chunk),
+                      limit(10)
+                    )
+                  );
+                  orgSnap.docs.forEach((docSnap) =>
+                    suggestionMap.set(docSnap.id, { id: docSnap.id, ...(docSnap.data() as any) })
+                  );
+                } catch (errOrg) {
+                  console.warn('Failed to load organisation remarketing suggestions', errOrg);
+                }
+              }
+              const allowedStatuses = new Set(['ready', 'draft', 'queued', 'researching', 'pending_review']);
+              const suggestions = Array.from(suggestionMap.values()).filter((entry) => {
+                const status = typeof entry.status === 'string' ? entry.status.toLowerCase() : '';
+                const researchStatus = typeof entry.researchStatus === 'string' ? entry.researchStatus.toLowerCase() : '';
+                return allowedStatuses.has(status) || allowedStatuses.has(researchStatus);
+              });
+              suggestions.sort((a, b) => {
+                const aTime = a.createdAt?.toMillis
+                  ? a.createdAt.toMillis()
+                  : new Date(a.createdAt || 0).getTime();
+                const bTime = b.createdAt?.toMillis
+                  ? b.createdAt.toMillis()
+                  : new Date(b.createdAt || 0).getTime();
+                return bTime - aTime;
+              });
+              setSuggestedProjects(suggestions.slice(0, 6));
+            } catch (err) {
+              console.warn('Failed to prepare remarketing suggestions', err);
+            }
             // Assets for these orgs
             try {
               const aQ = query(collection(db, 'assets'), where('orgId', 'in', orgIds), limit(5));
@@ -182,6 +239,7 @@ export default function DashboardPage() {
           <div className="font-medium">View Projects</div>
         </Link>
       </div>
+      <ContentPlanPanel />
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
       {/* Customer Tasks */}
       <section className="card p-4">
@@ -311,6 +369,50 @@ export default function DashboardPage() {
                 <div className="text-sm text-gray-500">{a.status || 'draft'}</div>
               </Link>
             ))}
+          </div>
+        )}
+      </section>
+      {/* Remarketing Suggestions */}
+      <section className="card p-4">
+        <h3 className="text-lg font-medium mb-2">Suggested Projects</h3>
+        {suggestedProjects.length === 0 ? (
+          <p className="text-sm text-gray-600">No suggestions yet. Once HQ drafts ideas you will see them here.</p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {suggestedProjects.map((suggestion) => {
+              const createdLabel = suggestion.createdAt?.toDate
+                ? suggestion.createdAt.toDate().toLocaleDateString()
+                : '';
+              return (
+                <div
+                  key={suggestion.id}
+                  className="card p-4 hover:shadow-md transition flex flex-col gap-3"
+                >
+                  <div className="flex items-center justify-between text-xs text-gray-500 uppercase tracking-wide">
+                    <span>{(suggestion.status || 'draft').toString()}</span>
+                    {createdLabel && <span>{createdLabel}</span>}
+                  </div>
+                  <div>
+                    <h3 className="font-medium text-gray-900">
+                      {suggestion.headline || suggestion.summary || 'Project idea'}
+                    </h3>
+                    {suggestion.summary && (
+                      <p className="text-sm text-gray-600 mt-1 line-clamp-4">{suggestion.summary}</p>
+                    )}
+                    {!suggestion.summary && suggestion.articleDraft && (
+                      <p className="text-sm text-gray-600 mt-1 line-clamp-4">{suggestion.articleDraft}</p>
+                    )}
+                  </div>
+                  {suggestion.highlightProduct?.name && (
+                    <p className="text-xs text-gray-500">Featured product: {suggestion.highlightProduct.name}</p>
+                  )}
+                  {suggestion.emailSubject && (
+                    <p className="text-xs text-gray-500">Email: {suggestion.emailSubject}</p>
+                  )}
+                  <p className="text-xs text-gray-500">Research status: {suggestion.researchStatus || 'pending'}</p>
+                </div>
+              );
+            })}
           </div>
         )}
       </section>
