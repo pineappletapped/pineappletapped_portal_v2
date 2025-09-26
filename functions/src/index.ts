@@ -105,6 +105,10 @@ const TOKEN_WALLET_COLLECTION = 'tokenWallets';
 const CLIENT_RESEARCH_TOKEN_REASON_AUTO = 'client_research_auto';
 const CLIENT_RESEARCH_TOKEN_REASON_MANUAL = 'client_research_manual';
 const CLIENT_RESEARCH_TOKEN_REASON_GENERIC = 'client_research';
+const REMARKETING_CAMPAIGN_COLLECTION = 'remarketingCampaigns';
+const REMARKETING_SUGGESTION_COLLECTION = 'remarketingSuggestions';
+const REMARKETING_QUEUE_COLLECTION = 'remarketingQueue';
+const REMARKETING_MAX_SUGGESTIONS_PER_CAMPAIGN = 120;
 
 type FranchiseTerritoryType = 'postal' | 'radius';
 
@@ -384,6 +388,308 @@ function parseBooleanFlag(input: unknown): boolean | null {
     if (['false', 'no', 'n', 'off', 'disabled', 'disable', 'manual'].includes(value)) return false;
   }
   return null;
+}
+
+function normaliseStringArray(input: unknown): string[] {
+  if (Array.isArray(input)) {
+    const values = input
+      .map((value) => (typeof value === 'string' ? value.trim() : ''))
+      .filter((value) => value.length > 0);
+    return Array.from(new Set(values.map((value) => value.toLowerCase())));
+  }
+  if (typeof input === 'string') {
+    return Array.from(
+      new Set(
+        input
+          .split(/[\n,]+/)
+          .map((value) => value.trim().toLowerCase())
+          .filter((value) => value.length > 0)
+      )
+    );
+  }
+  return [];
+}
+
+function normaliseProductDocId(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('products/')) {
+    const [, productId] = trimmed.split('/');
+    return productId ? productId.trim() : null;
+  }
+  return trimmed;
+}
+
+function normaliseOrgId(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('orgs/')) {
+    const [, orgId] = trimmed.split('/');
+    return orgId ? orgId.trim() : null;
+  }
+  return trimmed;
+}
+
+function buildMonthKey(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth() + 1;
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+function computeNextMonthlyRunDate(sendDay: number, reference: Date): Date {
+  const next = new Date(Date.UTC(reference.getUTCFullYear(), reference.getUTCMonth(), 1, 9, 0, 0));
+  next.setUTCMonth(next.getUTCMonth() + 1);
+  const daysInMonth = new Date(Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, 0)).getUTCDate();
+  const safeDay = Math.min(Math.max(1, Math.floor(sendDay || 1)), daysInMonth);
+  next.setUTCDate(safeDay);
+  return next;
+}
+
+function extractTagSetFromData(data: Record<string, any>): Set<string> {
+  const tagFields = ['tags', 'labels', 'segments', 'lists', 'marketingTags', 'marketingLists'];
+  const tagSet = new Set<string>();
+  for (const field of tagFields) {
+    const value = data[field];
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (typeof entry === 'string') {
+          const trimmed = entry.trim().toLowerCase();
+          if (trimmed) tagSet.add(trimmed);
+        }
+      }
+    } else if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) {
+        trimmed
+          .split(/[\n,]+/)
+          .map((part) => part.trim().toLowerCase())
+          .filter((part) => part.length > 0)
+          .forEach((part) => tagSet.add(part));
+      }
+    }
+  }
+  return tagSet;
+}
+
+function hasMarketingOptOut(data: Record<string, any>): boolean {
+  const flags = [
+    data.marketingOptOut,
+    data.optOut,
+    data.doNotMarket,
+    data.doNotEmail,
+    data.unsubscribe,
+    data.noMarketing,
+    data.marketingDisabled,
+  ].map(parseBooleanFlag);
+  return flags.includes(true);
+}
+
+function isClientRecord(data: Record<string, any>): boolean {
+  const status = typeof data.status === 'string' ? data.status.toLowerCase() : '';
+  const stage = typeof data.lifecycleStage === 'string' ? data.lifecycleStage.toLowerCase() : '';
+  const type = typeof data.type === 'string' ? data.type.toLowerCase() : '';
+  const roleClient = parseBooleanFlag(data?.roles?.client) === true;
+  const roleArray = Array.isArray(data.roles)
+    ? data.roles
+        .map((value: unknown) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+        .filter((value) => value.length > 0)
+    : [];
+  return (
+    ['client', 'customer', 'active', 'retained'].some((value) => status.includes(value)) ||
+    ['client', 'customer'].some((value) => stage.includes(value)) ||
+    ['client', 'customer'].includes(type) ||
+    roleClient ||
+    roleArray.includes('client') ||
+    roleArray.includes('customer')
+  );
+}
+
+function isProspectRecord(data: Record<string, any>): boolean {
+  const status = typeof data.status === 'string' ? data.status.toLowerCase() : '';
+  const stage = typeof data.lifecycleStage === 'string' ? data.lifecycleStage.toLowerCase() : '';
+  const type = typeof data.type === 'string' ? data.type.toLowerCase() : '';
+  const roleProspect = parseBooleanFlag(data?.roles?.prospect) === true;
+  const roleArray = Array.isArray(data.roles)
+    ? data.roles
+        .map((value: unknown) => (typeof value === 'string' ? value.trim().toLowerCase() : ''))
+        .filter((value) => value.length > 0)
+    : [];
+  return (
+    ['lead', 'prospect', 'opportunity', 'new'].some((value) => status.includes(value)) ||
+    ['lead', 'prospect'].some((value) => stage.includes(value)) ||
+    ['lead', 'prospect'].includes(type) ||
+    roleProspect ||
+    roleArray.includes('lead') ||
+    roleArray.includes('prospect')
+  );
+}
+
+function matchesTargetGroups(groups: string[], data: Record<string, any>): boolean {
+  if (groups.length === 0) return true;
+  for (const group of groups) {
+    const key = group.toLowerCase();
+    if (key === 'clients' && isClientRecord(data)) return true;
+    if (key === 'prospects' && isProspectRecord(data)) return true;
+    if (key === 'lists') {
+      const tagSet = extractTagSetFromData(data);
+      if (tagSet.size > 0) return true;
+    }
+  }
+  return false;
+}
+
+async function resolveRemarketingAudience(
+  clientDocId: string,
+  data: Record<string, any>,
+  membershipCache: Map<string, { userIds: string[]; emails: string[] }>
+): Promise<{ orgIds: string[]; userIds: string[]; emails: string[] }> {
+  const orgCandidates: Array<unknown> = [
+    data.orgId,
+    data.org,
+    data.organisationId,
+    data.organizationId,
+    data.organisation,
+    data.organization,
+    data.orgRef,
+    data.orgPath,
+    data.accountId,
+    data.account,
+    data.orgIds,
+    data.organisationIds,
+    data.organizationIds,
+    data.orgs,
+    data.accounts,
+  ];
+  const orgIds = new Set<string>();
+  for (const candidate of orgCandidates) {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) {
+        const normalised = normaliseOrgId(entry);
+        if (normalised) orgIds.add(normalised);
+      }
+    } else {
+      const normalised = normaliseOrgId(candidate);
+      if (normalised) orgIds.add(normalised);
+    }
+  }
+  const membershipField = data.memberships;
+  if (Array.isArray(membershipField)) {
+    for (const entry of membershipField) {
+      if (entry && typeof entry === 'object') {
+        const normalised = normaliseOrgId((entry as any).orgId ?? (entry as any).id);
+        if (normalised) orgIds.add(normalised);
+      }
+    }
+  }
+  const audienceUserIds = new Set<string>();
+  const audienceEmails = new Set<string>();
+  const addUserId = (value: unknown) => {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) audienceUserIds.add(trimmed);
+    }
+  };
+  const addEmail = (value: unknown) => {
+    if (typeof value === 'string') {
+      const trimmed = value.trim().toLowerCase();
+      if (trimmed) audienceEmails.add(trimmed);
+    }
+  };
+  const directUsers = [data.userId, data.primaryUserId, data.accountOwnerId];
+  directUsers.forEach(addUserId);
+  const directUserArray = Array.isArray(data.userIds) ? data.userIds : data.contactUserIds;
+  if (Array.isArray(directUserArray)) {
+    directUserArray.forEach(addUserId);
+  }
+  const directEmails = [data.email, data.primaryEmail, data.contactEmail];
+  directEmails.forEach(addEmail);
+  if (Array.isArray(data.emails)) {
+    data.emails.forEach(addEmail);
+  }
+  for (const orgId of orgIds) {
+    if (!membershipCache.has(orgId)) {
+      const membershipSnap = await db.collection('memberships').where('orgId', '==', orgId).get();
+      const userIds: string[] = [];
+      const emails: string[] = [];
+      membershipSnap.docs.forEach((docSnap) => {
+        const membership = (docSnap.data() as any) || {};
+        if (typeof membership.userId === 'string') {
+          const trimmed = membership.userId.trim();
+          if (trimmed) userIds.push(trimmed);
+        }
+        if (typeof membership.email === 'string') {
+          const trimmed = membership.email.trim().toLowerCase();
+          if (trimmed) emails.push(trimmed);
+        }
+      });
+      membershipCache.set(orgId, {
+        userIds: Array.from(new Set(userIds)),
+        emails: Array.from(new Set(emails)),
+      });
+    }
+    const cached = membershipCache.get(orgId);
+    if (cached) {
+      cached.userIds.forEach(addUserId);
+      cached.emails.forEach(addEmail);
+    }
+  }
+  return {
+    orgIds: Array.from(orgIds),
+    userIds: Array.from(audienceUserIds),
+    emails: Array.from(audienceEmails),
+  };
+}
+
+function buildRemarketingDraft(options: {
+  client: Record<string, any>;
+  campaignName: string;
+  productName: string | null;
+  targetTags: string[];
+}): { headline: string; summary: string; article: string } {
+  const companyName =
+    typeof options.client.companyName === 'string'
+      ? options.client.companyName
+      : typeof options.client.displayName === 'string'
+        ? options.client.displayName
+        : typeof options.client.name === 'string'
+          ? options.client.name
+          : 'your business';
+  const industry =
+    typeof options.client.industry === 'string'
+      ? options.client.industry
+      : typeof options.client.segment === 'string'
+        ? options.client.segment
+        : null;
+  const productName = options.productName ?? 'content programme';
+  const tagsLabel = options.targetTags.length ? `Focus: ${options.targetTags.join(', ')}.` : '';
+  const headline = `${productName} ideas for ${companyName}`;
+  const summaryParts = [
+    `A follow-up concept from the ${options.campaignName} campaign tailored for ${companyName}.`,
+    industry ? `Industry insight: ${industry}.` : null,
+    tagsLabel || null,
+    'Includes suggested deliverables, talking points and a ready-to-send email draft.',
+  ].filter(Boolean);
+  const summary = summaryParts.join(' ');
+  const article = `## ${productName} roadmap for ${companyName}
+
+### Opportunity
+- Aligns with ${options.campaignName} goals
+- ${industry ? `Leverages current trends in ${industry}` : 'Amplifies existing marketing activity'}
+
+### Proposed deliverables
+- Hero video with supporting social edits
+- Paid amplification assets and remarketing hooks
+- Measurement framework tied to CRM goals
+
+### How we'll personalise it
+- Gemini deep dive on brand tone, audience language and competitor messaging
+- Tailored CTA recommendations with seasonal triggers
+- Email and portal-ready copy blocks for quick deployment
+
+${tagsLabel}`;
+  return { headline, summary, article };
 }
 
 function resolveClientDocIdFromOrder(order: Record<string, any>, orderId: string): string {
@@ -4620,6 +4926,203 @@ export const createClientResearchJob = functions.https.onCall(async (data, conte
   };
   return result;
 });
+
+export const remarketing_monthlySweep = functions.pubsub
+  .schedule('0 9 1 * *')
+  .timeZone('Europe/London')
+  .onRun(async () => {
+    const now = new Date();
+    const monthKey = buildMonthKey(now);
+    const campaignsSnap = await db
+      .collection(REMARKETING_CAMPAIGN_COLLECTION)
+      .where('active', '==', true)
+      .get();
+    if (campaignsSnap.empty) {
+      console.log('No active remarketing campaigns to process');
+      return null;
+    }
+
+    const clientsSnap = await db.collection('clients').get();
+    const clients = clientsSnap.docs.map((docSnap) => ({
+      id: docSnap.id,
+      ref: docSnap.ref,
+      data: (docSnap.data() as Record<string, any>) || {},
+    }));
+    if (clients.length === 0) {
+      console.log('No clients found for remarketing sweep');
+      return null;
+    }
+
+    const membershipCache = new Map<string, { userIds: string[]; emails: string[] }>();
+    const productCache = new Map<string, { id: string; name: string | null }>();
+
+    for (const campaignDoc of campaignsSnap.docs) {
+      const campaignData = (campaignDoc.data() as Record<string, any>) || {};
+      const campaignName =
+        typeof campaignData.name === 'string' && campaignData.name.trim().length > 0
+          ? campaignData.name.trim()
+          : 'Remarketing';
+      const targetGroups = normaliseStringArray(campaignData.targetGroups ?? campaignData.groups ?? []);
+      const targetTags = normaliseStringArray(campaignData.targetTags ?? campaignData.tags ?? []);
+      const sendDay = typeof campaignData.monthlySendDay === 'number' ? campaignData.monthlySendDay : 1;
+      const lastRunAtDate = campaignData.lastRunAt?.toDate ? campaignData.lastRunAt.toDate() : null;
+      if (lastRunAtDate && buildMonthKey(lastRunAtDate) === monthKey) {
+        console.log('Campaign already processed this month, skipping', campaignDoc.id);
+        continue;
+      }
+
+      const productId = normaliseProductDocId(campaignData.highlightProductId);
+      if (productId && !productCache.has(productId)) {
+        try {
+          const productSnap = await db.collection('products').doc(productId).get();
+          if (productSnap.exists) {
+            const productData = (productSnap.data() as any) || {};
+            productCache.set(productId, {
+              id: productId,
+              name: typeof productData.name === 'string' ? productData.name : null,
+            });
+          } else {
+            productCache.set(productId, { id: productId, name: null });
+          }
+        } catch (error) {
+          console.warn('Failed to load product for remarketing campaign', campaignDoc.id, productId, error);
+          productCache.set(productId, { id: productId, name: null });
+        }
+      }
+      const productSummary = productId ? productCache.get(productId) ?? null : null;
+
+      let processed = 0;
+      let created = 0;
+      for (const client of clients) {
+        if (created >= REMARKETING_MAX_SUGGESTIONS_PER_CAMPAIGN) {
+          break;
+        }
+        if (!client.data || typeof client.data !== 'object') {
+          continue;
+        }
+        if (hasMarketingOptOut(client.data)) {
+          continue;
+        }
+        if (!matchesTargetGroups(targetGroups, client.data)) {
+          continue;
+        }
+        const tagSet = extractTagSetFromData(client.data);
+        if (targetTags.length > 0) {
+          const hasMatch = targetTags.some((tag) => tagSet.has(tag));
+          if (!hasMatch) {
+            continue;
+          }
+        }
+
+        processed += 1;
+        const existingSnap = await db
+          .collection(REMARKETING_SUGGESTION_COLLECTION)
+          .where('campaignId', '==', campaignDoc.id)
+          .where('targetClientId', '==', client.id)
+          .where('period', '==', monthKey)
+          .limit(1)
+          .get();
+        if (!existingSnap.empty) {
+          continue;
+        }
+
+        const audience = await resolveRemarketingAudience(client.id, client.data, membershipCache);
+        const drafts = buildRemarketingDraft({
+          client: client.data,
+          campaignName,
+          productName: productSummary?.name ?? null,
+          targetTags,
+        });
+        const suggestionRef = db.collection(REMARKETING_SUGGESTION_COLLECTION).doc();
+        const emailSubject =
+          typeof campaignData.emailSubject === 'string' && campaignData.emailSubject.trim().length > 0
+            ? campaignData.emailSubject.trim()
+            : `Project idea: ${productSummary?.name ?? 'content roadmap'}`;
+        const emailPreview =
+          typeof campaignData.emailPreview === 'string' && campaignData.emailPreview.trim().length > 0
+            ? campaignData.emailPreview.trim()
+            : null;
+
+        const suggestionPayload: Record<string, any> = {
+          campaignId: campaignDoc.id,
+          campaignName,
+          status: 'draft',
+          researchStatus: 'queued',
+          headline: drafts.headline,
+          summary: drafts.summary,
+          articleDraft: drafts.article,
+          emailSubject,
+          emailPreview,
+          highlightProduct: productSummary ? { id: productSummary.id, name: productSummary.name } : null,
+          targetClientId: client.id,
+          targetClientPath: client.ref.path,
+          targetOrgIds: audience.orgIds.length > 0 ? audience.orgIds : null,
+          audienceUserIds: audience.userIds.length > 0 ? audience.userIds : null,
+          audienceEmails: audience.emails.length > 0 ? audience.emails : null,
+          targetTags: targetTags.length > 0 ? targetTags : null,
+          monthKey,
+          period: monthKey,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+
+        await suggestionRef.set(suggestionPayload, { merge: false });
+        await db
+          .collection(REMARKETING_QUEUE_COLLECTION)
+          .doc(suggestionRef.id)
+          .set(
+            {
+              suggestionId: suggestionRef.id,
+              campaignId: campaignDoc.id,
+              clientId: client.id,
+              status: 'pending',
+              scope: 'remarketing',
+              monthKey,
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+
+        created += 1;
+      }
+
+      const nextRunDate = computeNextMonthlyRunDate(sendDay, now);
+      await campaignDoc.ref.set(
+        {
+          lastRunAt: admin.firestore.Timestamp.fromDate(now),
+          nextRunAt: admin.firestore.Timestamp.fromDate(nextRunDate),
+          lastRunSummary: {
+            processed,
+            suggestionsCreated: created,
+            monthKey,
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      await writeAuditLog({
+        actorUid: 'system',
+        action: 'remarketing.monthly_sweep',
+        entityType: 'remarketingCampaign',
+        entityId: campaignDoc.id,
+        metadata: {
+          processed,
+          suggestionsCreated: created,
+          monthKey,
+          productId: productId ?? null,
+        },
+      });
+    }
+
+    console.log('Remarketing sweep complete', {
+      campaigns: campaignsSnap.size,
+      monthKey,
+    });
+
+    return null;
+  });
 
 export const orders_refund = functions.https.onCall(async (data, context) => {
   const roles = await assertStaff(context, ['finance', 'admin']);

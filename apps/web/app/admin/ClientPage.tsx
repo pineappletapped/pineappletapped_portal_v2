@@ -284,6 +284,7 @@ export default function AdminPage() {
               title: 'Marketing',
               links: [
                 { href: '/admin/exhibitions', label: 'Exhibitions' },
+                { href: '/admin/marketing/remarketing', label: 'Remarketing' },
                 { href: '/admin/voucher-codes', label: 'Voucher Management' },
                 { href: '/admin/email-schedules', label: 'Email Schedules' },
               ],
