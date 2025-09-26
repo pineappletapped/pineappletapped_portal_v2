@@ -40,16 +40,31 @@ export async function POST(req: NextRequest) {
   const budgetValue = Number.parseFloat(typeof payload.budget === "string" ? payload.budget : `${payload.budget ?? ""}`);
   const budget = Number.isFinite(budgetValue) ? Math.max(0, budgetValue) : null;
 
-  const productSummaries = Array.isArray(payload.productSummaries)
-    ? payload.productSummaries
-        .filter((entry: unknown) => entry && typeof entry === "object")
-        .map((entry: any) => ({
-          id: typeof entry.id === "string" ? entry.id : null,
-          name: typeof entry.name === "string" ? entry.name : null,
-          category: typeof entry.category === "string" ? entry.category : null,
-          price: typeof entry.price === "number" ? entry.price : null,
-        }))
-        .filter((entry) => entry.id && entry.name)
+  type ProductSummary = {
+    id: string;
+    name: string;
+    category: string | null;
+    price: number | null;
+  };
+
+  const productSummaries: ProductSummary[] = Array.isArray(payload.productSummaries)
+    ? payload.productSummaries.reduce((acc: ProductSummary[], entry: unknown) => {
+        if (entry === null || typeof entry !== "object") {
+          return acc;
+        }
+
+        const record = entry as Record<string, unknown>;
+        const id = typeof record.id === "string" ? record.id : null;
+        const name = typeof record.name === "string" ? record.name : null;
+        const category = typeof record.category === "string" ? record.category : null;
+        const price = typeof record.price === "number" ? record.price : null;
+
+        if (id && name) {
+          acc.push({ id, name, category, price });
+        }
+
+        return acc;
+      }, [] as ProductSummary[])
     : [];
 
   const firestore = getFirebaseAdminFirestore();

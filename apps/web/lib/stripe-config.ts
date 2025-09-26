@@ -27,7 +27,22 @@ export interface StripeConnectSettings {
 
 const SETTINGS_COLLECTION = 'settings';
 const SETTINGS_DOC_ID = 'stripeConnect';
-const STRIPE_API_VERSION: Stripe.LatestApiVersion = '2024-06-20';
+const STRIPE_API_VERSION: Stripe.LatestApiVersion = '2024-04-10';
+
+function createEmptySettings(): StripeConnectSettings {
+  return {
+    publishableKey: null,
+    secretKey: null,
+    secretKeyLast4: null,
+    webhookSecret: null,
+    webhookSecretLast4: null,
+    platformFeePercent: null,
+    defaultPayoutScheduleDays: null,
+    splitTerms: [],
+    updatedAt: null,
+    updatedBy: null,
+  };
+}
 
 let cachedSettings:
   | {
@@ -53,7 +68,7 @@ function toDate(value: unknown): Date | null {
         console.warn('Failed to convert Firestore timestamp via toDate()', error);
       }
     }
-    if (typeof ts.toMillis === 'function') {
+    if ('toMillis' in ts && typeof ts.toMillis === 'function') {
       return new Date(ts.toMillis());
     }
     if (typeof (ts as any).seconds === 'number' && typeof (ts as any).nanoseconds === 'number') {
@@ -147,9 +162,18 @@ export async function getStripeConnectSettings(options?: { forceRefresh?: boolea
     return cachedSettings.data;
   }
 
-  const firestore = getFirebaseAdminFirestore();
-  const docRef = firestore.collection(SETTINGS_COLLECTION).doc(SETTINGS_DOC_ID);
-  const snapshot = await docRef.get();
+  let snapshot: FirebaseFirestore.DocumentSnapshot;
+  try {
+    const firestore = getFirebaseAdminFirestore();
+    const docRef = firestore.collection(SETTINGS_COLLECTION).doc(SETTINGS_DOC_ID);
+    snapshot = await docRef.get();
+  } catch (error) {
+    console.warn('Failed to load Stripe configuration', error);
+    const fallback = createEmptySettings();
+    cachedSettings = { data: fallback, versionKey: null };
+    return fallback;
+  }
+
   const raw = snapshot.exists ? (snapshot.data() as Record<string, unknown>) : {};
 
   const publishableKey = normaliseString(raw.publishableKey ?? raw.publicKey);

@@ -135,9 +135,7 @@ export async function POST(req: NextRequest) {
     let linkType: 'onboarding' | 'login';
 
     if (linkMode === 'login') {
-      const loginLink = await stripe.accounts.createLoginLink(accountId, {
-        redirect_url: returnUrl,
-      });
+      const loginLink = await stripe.accounts.createLoginLink(accountId);
       linkUrl = loginLink.url;
       linkType = 'login';
     } else {

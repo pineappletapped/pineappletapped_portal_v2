@@ -4,6 +4,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { collection, doc, getDocs, onSnapshot, query, where, type DocumentData } from "firebase/firestore";
+import { type User } from "firebase/auth";
 
 import { auth, db } from "@/lib/firebase";
 
@@ -420,7 +421,7 @@ export default function ContentPlanPanel() {
       );
     };
 
-    const unsubscribeAuth = auth.onAuthStateChanged((user) => {
+    const unsubscribeAuth = auth.onAuthStateChanged((user: User | null) => {
       setRequestsByRow({});
       if (unsubscribeRequests) {
         unsubscribeRequests();
@@ -475,7 +476,7 @@ export default function ContentPlanPanel() {
       );
     };
 
-    const unsubscribeAuth = auth.onAuthStateChanged((user) => {
+    const unsubscribeAuth = auth.onAuthStateChanged((user: User | null) => {
       setNarrativeHistory([]);
       if (unsubscribeNarratives) {
         unsubscribeNarratives();
@@ -601,18 +602,19 @@ export default function ContentPlanPanel() {
           note,
           templateId: row.templateId ?? null,
           productSummaries: row.productIds
-            .map((id) => {
+            .map((id): ProductSummary | null => {
               const product = productMap.get(id);
-              return product
-                ? {
-                    id: product.id,
-                    name: product.name,
-                    category: product.category,
-                    price: product.price,
-                  }
-                : null;
+              if (!product) {
+                return null;
+              }
+              return {
+                id: product.id,
+                name: product.name,
+                category: product.category,
+                price: product.price,
+              };
             })
-            .filter((item): item is Record<string, unknown> => item !== null),
+            .filter((item): item is ProductSummary => item !== null),
         }),
       });
 
@@ -661,18 +663,19 @@ export default function ContentPlanPanel() {
             productIds: row.productIds,
             templateId: row.templateId ?? null,
             products: row.productIds
-              .map((id) => {
+              .map((id): ProductSummary | null => {
                 const product = productMap.get(id);
-                return product
-                  ? {
-                      id: product.id,
-                      name: product.name,
-                      category: product.category,
-                      price: product.price,
-                    }
-                  : null;
+                if (!product) {
+                  return null;
+                }
+                return {
+                  id: product.id,
+                  name: product.name,
+                  category: product.category,
+                  price: product.price,
+                };
               })
-              .filter((item): item is Record<string, unknown> => item !== null),
+              .filter((item): item is ProductSummary => item !== null),
           })),
           marketingMix,
           totalBudget,
@@ -765,47 +768,61 @@ export default function ContentPlanPanel() {
       const payload = await response.json();
       const sections = Array.isArray(payload.sections)
         ? payload.sections
-            .map((section: any) => {
+            .map((section: unknown): StoryboardDraft["sections"][number] | null => {
               if (!section || typeof section !== "object") return null;
-              const talkingPoints = Array.isArray(section.talkingPoints)
-                ? section.talkingPoints.filter((item: unknown): item is string => typeof item === "string")
+              const record = section as Record<string, unknown>;
+              const rawTalkingPoints = record.talkingPoints;
+              const talkingPoints = Array.isArray(rawTalkingPoints)
+                ? rawTalkingPoints.filter((item: unknown): item is string => typeof item === "string")
                 : [];
               return {
-                id: typeof section.id === "string" ? section.id : randomId(),
-                title: typeof section.title === "string" ? section.title : "Storyboard scene",
-                summary: typeof section.summary === "string" ? section.summary : "",
+                id: typeof record.id === "string" ? record.id : randomId(),
+                title: typeof record.title === "string" ? record.title : "Storyboard scene",
+                summary: typeof record.summary === "string" ? record.summary : "",
                 talkingPoints,
               };
             })
-            .filter((item): item is StoryboardDraft["sections"][number] => item !== null)
+            .filter(
+              (item: StoryboardDraft["sections"][number] | null): item is StoryboardDraft["sections"][number] =>
+                item !== null
+            )
         : [];
       const timeline = Array.isArray(payload.timeline)
         ? payload.timeline
-            .map((entry: any) => {
+            .map((entry: unknown): StoryboardDraft["timeline"][number] | null => {
               if (!entry || typeof entry !== "object") return null;
-              const tasks = Array.isArray(entry.tasks)
-                ? entry.tasks.filter((task: unknown): task is string => typeof task === "string")
+              const record = entry as Record<string, unknown>;
+              const rawTasks = record.tasks;
+              const tasks = Array.isArray(rawTasks)
+                ? rawTasks.filter((task: unknown): task is string => typeof task === "string")
                 : [];
               return {
-                phase: typeof entry.phase === "string" ? entry.phase : "Phase",
-                duration: typeof entry.duration === "string" ? entry.duration : "",
+                phase: typeof record.phase === "string" ? record.phase : "Phase",
+                duration: typeof record.duration === "string" ? record.duration : "",
                 tasks,
               };
             })
-            .filter((item): item is StoryboardDraft["timeline"][number] => item !== null)
+            .filter(
+              (item: StoryboardDraft["timeline"][number] | null): item is StoryboardDraft["timeline"][number] =>
+                item !== null
+            )
         : [];
       const recommendedItems = Array.isArray(payload.recommendedItems)
         ? payload.recommendedItems
-            .map((entry: any) => {
+            .map((entry: unknown): StoryboardDraft["recommendedItems"][number] | null => {
               if (!entry || typeof entry !== "object") return null;
+              const record = entry as Record<string, unknown>;
               return {
-                id: typeof entry.id === "string" ? entry.id : randomId(),
-                name: typeof entry.name === "string" ? entry.name : "Proposal line item",
-                priceHint: typeof entry.priceHint === "string" ? entry.priceHint : null,
-                description: typeof entry.description === "string" ? entry.description : null,
+                id: typeof record.id === "string" ? record.id : randomId(),
+                name: typeof record.name === "string" ? record.name : "Proposal line item",
+                priceHint: typeof record.priceHint === "string" ? record.priceHint : null,
+                description: typeof record.description === "string" ? record.description : null,
               };
             })
-            .filter((item): item is StoryboardDraft["recommendedItems"][number] => item !== null)
+            .filter(
+              (item: StoryboardDraft["recommendedItems"][number] | null): item is StoryboardDraft["recommendedItems"][number] =>
+                item !== null
+            )
         : [];
 
       setStoryboardDraft({
