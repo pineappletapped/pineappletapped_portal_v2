@@ -159,6 +159,12 @@ export default function ContractorPortal() {
         </Link>
       </div>
 
+      <div className="mb-4 flex flex-wrap gap-2">
+        <Link href="/contractors/workwear" className="btn-sm">
+          Workwear hub
+        </Link>
+      </div>
+
       <div className="mb-4 flex gap-2">
         <button
           className={`${activeTab === "bookings" ? "btn" : "btn-outline"}`}

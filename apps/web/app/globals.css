@@ -34,15 +34,31 @@
 
 @layer components {
   .btn {
-    @apply inline-flex items-center gap-2 rounded-md px-4 py-2 bg-orange text-white font-semibold uppercase text-base hover:opacity-90;
+    @apply inline-flex items-center justify-center gap-2 rounded-full border border-orange bg-orange px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .btn-primary {
+    @apply border-orange bg-orange text-white hover:bg-orange/90 hover:border-orange focus-visible:outline-orange;
   }
 
   .btn-outline {
-    @apply inline-flex items-center gap-2 rounded-md px-4 py-2 border border-orange text-orange font-semibold uppercase text-base hover:bg-orange hover:text-white;
+    @apply border-orange bg-white text-orange hover:bg-orange hover:text-white focus-visible:outline-orange;
+  }
+
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-slate-600 hover:border-orange/60 hover:bg-orange/10 hover:text-orange focus-visible:outline-orange;
+  }
+
+  .btn-link {
+    @apply border-transparent bg-transparent text-orange underline-offset-4 hover:underline focus-visible:outline-orange;
   }
 
   .btn-sm {
-    @apply px-3 py-1.5 text-sm;
+    @apply h-9 px-4 text-sm;
+  }
+
+  .btn-xs {
+    @apply h-8 px-3 text-xs;
   }
 
   .card {

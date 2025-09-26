@@ -12,13 +12,15 @@ import {
 import {
   deliverableIconMap,
   getDeliverableSummary,
-  getPriceRangeLabel,
+  getListingPriceLabel,
 } from "./productListingUtils";
+import ListingPriceNote from "./ListingPriceNote";
 
 export default function ProductListRow({ product }: { product: Product }) {
   const imageUrl =
     product.imageUrl || "https://placehold.co/600x400?text=No+Image";
-  const priceLabel = getPriceRangeLabel(product) ?? "Pricing on request";
+  const priceLabel =
+    getListingPriceLabel(product) ?? "Pricing on request";
   const { visibleDeliverables, remainingDeliverableCount } =
     getDeliverableSummary(product);
   const showSummary = Boolean(product.deliveryTime || visibleDeliverables.length > 0);
@@ -89,9 +91,12 @@ export default function ProductListRow({ product }: { product: Product }) {
           )}
         </div>
         <div className="flex w-full flex-col gap-2 sm:w-44 sm:items-end sm:self-stretch">
-          <p className="text-base font-semibold text-gray-900 sm:text-right">
-            {priceLabel}
-          </p>
+          <div className="flex w-full flex-col items-start gap-1 sm:items-end">
+            <p className="text-base font-semibold text-gray-900 sm:text-right">
+              {priceLabel}
+            </p>
+            <ListingPriceNote className="text-gray-500 sm:text-right" />
+          </div>
           <Link
             href={`/products/${product.id}`}
             className="btn btn-sm w-full sm:w-auto"

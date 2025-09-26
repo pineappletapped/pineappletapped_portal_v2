@@ -1,6 +1,7 @@
 import ProductCard from "@/components/ProductCard";
 import { getCategories } from "@/lib/categories";
-import { getProducts } from "@/lib/products";
+import { getProducts, type Product } from "@/lib/products";
+import { searchProducts } from "@/lib/product-search";
 
 export default async function SearchPage({
   searchParams,
@@ -9,17 +10,16 @@ export default async function SearchPage({
 }) {
   const q = (searchParams?.q || "").toLowerCase();
   const category = searchParams?.category || "";
-  const [products, categories] = await Promise.all([
-    getProducts(),
+  const [categories, allProducts] = await Promise.all([
     getCategories(),
+    q ? Promise.resolve<Product[]>([]) : getProducts(),
   ]);
-  const matches = products.filter((p) => {
-    const haystack = `${p.name} ${p.tagline ?? ""}`.toLowerCase();
-    return (
-      (!q || haystack.includes(q)) &&
-      (!category || p.category === category)
-    );
-  });
+
+  const matches = q
+    ? (await searchProducts(q, { limit: 60, category })).map((hit) => hit.product)
+    : allProducts.filter((product) =>
+        !category || product.category === category
+      );
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
