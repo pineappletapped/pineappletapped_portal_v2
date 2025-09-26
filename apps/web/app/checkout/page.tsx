@@ -7,6 +7,7 @@ import { loadStripe } from "@stripe/stripe-js";
 import { httpsCallable, type Functions } from "firebase/functions";
 import { doc, getDoc } from "firebase/firestore";
 import { signInWithEmailAndPassword, type Auth, type User } from "firebase/auth";
+import type { FirebaseError } from "firebase/app";
 import { useCart } from "@/lib/cart";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import { useLeadSourceTag } from "@/hooks/useLeadSourceTag";
@@ -63,9 +64,12 @@ function CheckoutContent() {
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [initializingPayment, setInitializingPayment] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
   const authRef = useRef<Auth | null>(null);
   const functionsRef = useRef<Functions | null>(null);
   const lastIntentPayload = useRef<string | null>(null);
+  const loginErrorRef = useRef<HTMLDivElement | null>(null);
   const authEmail = currentUser?.email || "";
   const orderInput = useMemo(() => {
     const itemPayload = items.map((item) => ({
@@ -209,11 +213,22 @@ function CheckoutContent() {
       setOrderId(null);
       lastIntentPayload.current = null;
       setPaymentError(null);
+    } else {
+      setLoginError(null);
     }
+    setIsLoggingIn(false);
   }, [currentUser]);
+
+  useEffect(() => {
+    if (loginError && loginErrorRef.current) {
+      loginErrorRef.current.focus();
+    }
+  }, [loginError]);
 
   const login = async (e: FormEvent) => {
     e.preventDefault();
+    setLoginError(null);
+    setIsLoggingIn(true);
     try {
       let instance = authRef.current;
       if (!instance) {
@@ -227,7 +242,30 @@ function CheckoutContent() {
       await signInWithEmailAndPassword(instance, email, password);
     } catch (err) {
       console.error(err);
-      alert("Login failed");
+      let message = "We couldn't sign you in. Check your email and password, then try again.";
+      const firebaseErr = err as Partial<FirebaseError> | null;
+      if (firebaseErr && typeof firebaseErr === "object" && "code" in firebaseErr) {
+        switch (firebaseErr.code) {
+          case "auth/wrong-password":
+          case "auth/invalid-credential":
+            message = "Incorrect email or password. Try again or reset your password.";
+            break;
+          case "auth/user-not-found":
+            message = "No account exists for that email. Create an account or contact support for help.";
+            break;
+          case "auth/too-many-requests":
+            message = "Too many failed attempts. Reset your password or wait a moment before trying again.";
+            break;
+          default:
+            message = firebaseErr.message || message;
+            break;
+        }
+      } else if (err instanceof Error && err.message) {
+        message = err.message;
+      }
+      setLoginError(message);
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
@@ -359,14 +397,30 @@ function CheckoutContent() {
     <div className="max-w-5xl mx-auto grid md:grid-cols-2 gap-8">
       <div className="space-y-6">
         {authReady && !currentUser && (
-          <form onSubmit={login} className="space-y-2 border p-4 rounded">
+          <form onSubmit={login} className="space-y-2 border p-4 rounded" noValidate>
             <h2 className="font-semibold">Login</h2>
+            {loginError ? (
+              <div
+                ref={loginErrorRef}
+                className="rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700 focus:outline-none focus:ring-2 focus:ring-red-400"
+                role="alert"
+                tabIndex={-1}
+              >
+                {loginError}
+              </div>
+            ) : null}
             <input
               className="input input-bordered w-full"
               type="email"
               placeholder="Email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                if (loginError) {
+                  setLoginError(null);
+                }
+              }}
+              autoComplete="email"
               required
             />
             <input
@@ -374,10 +428,17 @@ function CheckoutContent() {
               type="password"
               placeholder="Password"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                if (loginError) {
+                  setLoginError(null);
+                }
+              }}
+              autoComplete="current-password"
+              required
             />
-            <button className="btn" type="submit">
-              Sign In
+            <button className="btn w-full" type="submit" disabled={isLoggingIn}>
+              {isLoggingIn ? "Signing in..." : "Sign In"}
             </button>
           </form>
         )}
@@ -390,7 +451,12 @@ function CheckoutContent() {
               type="email"
               placeholder="Email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                if (loginError) {
+                  setLoginError(null);
+                }
+              }}
               required
             />
           )}
