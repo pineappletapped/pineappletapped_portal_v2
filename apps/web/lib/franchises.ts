@@ -33,6 +33,18 @@ export interface FranchiseRoyaltyConfig {
   franchiseSourcedPercentage: number;
 }
 
+export type QuickBooksEnvironment = 'sandbox' | 'production';
+
+export interface FranchiseQuickBooksConfig {
+  environment: QuickBooksEnvironment;
+  clientId?: string | null;
+  clientSecret?: string | null;
+  refreshToken?: string | null;
+  realmId?: string | null;
+  connectedAt?: Timestamp | null;
+  updatedAt?: Timestamp | null;
+}
+
 export interface Franchise {
   id: string;
   name: string;
@@ -44,6 +56,7 @@ export interface Franchise {
   platformFee?: number | null;
   notes?: string | null;
   onboarding: FranchiseOnboardingChecklist;
+  quickbooks: FranchiseQuickBooksConfig;
   royalty: FranchiseRoyaltyConfig;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
@@ -163,6 +176,46 @@ function parseRoyaltyConfig(raw: unknown): FranchiseRoyaltyConfig {
   } satisfies FranchiseRoyaltyConfig;
 }
 
+function parseQuickBooksEnvironment(value: unknown): QuickBooksEnvironment {
+  return value === 'sandbox' ? 'sandbox' : 'production';
+}
+
+function parseQuickBooksConfig(raw: unknown): FranchiseQuickBooksConfig {
+  const defaults = defaultFranchiseQuickBooksConfig();
+  if (!raw || typeof raw !== 'object') {
+    return defaults;
+  }
+  const data = raw as Record<string, unknown>;
+  const environment = parseQuickBooksEnvironment(data.environment);
+  const clientId = typeof data.clientId === 'string' ? data.clientId.trim() : '';
+  const clientSecret = typeof data.clientSecret === 'string' ? data.clientSecret.trim() : '';
+  const refreshToken = typeof data.refreshToken === 'string' ? data.refreshToken.trim() : '';
+  const realmId = typeof data.realmId === 'string' ? data.realmId.trim() : '';
+  const connectedAt = (data.connectedAt as Timestamp) ?? null;
+  const updatedAt = (data.updatedAt as Timestamp) ?? null;
+  return {
+    environment,
+    clientId: clientId || null,
+    clientSecret: clientSecret || null,
+    refreshToken: refreshToken || null,
+    realmId: realmId || null,
+    connectedAt,
+    updatedAt,
+  } satisfies FranchiseQuickBooksConfig;
+}
+
+export function defaultFranchiseQuickBooksConfig(): FranchiseQuickBooksConfig {
+  return {
+    environment: 'production',
+    clientId: null,
+    clientSecret: null,
+    refreshToken: null,
+    realmId: null,
+    connectedAt: null,
+    updatedAt: null,
+  };
+}
+
 export function defaultFranchiseRoyaltyConfig(): FranchiseRoyaltyConfig {
   return {
     hqTiers: [
@@ -238,6 +291,7 @@ export function parseFranchise(doc: SnapshotWithId): Franchise {
     platformFee: typeof data.platformFee === 'number' ? (data.platformFee as number) : null,
     notes: (data.notes as string) ?? null,
     onboarding: parseOnboardingChecklist(onboardingData),
+    quickbooks: parseQuickBooksConfig(data.quickbooks),
     royalty: parseRoyaltyConfig(data.royalty),
     createdAt: (data.createdAt as Timestamp) ?? null,
     updatedAt: (data.updatedAt as Timestamp) ?? null,

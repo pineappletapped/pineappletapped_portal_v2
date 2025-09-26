@@ -5759,6 +5759,7 @@ export const quickbooks_exportInvoice = functions.https.onCall(async (data, cont
   const orderDoc = await db.collection('orders').doc(orderId).get();
   if (!orderDoc.exists) throw new functions.https.HttpsError('not-found', 'Order not found');
   const order = orderDoc.data() as any;
+  const franchiseId = typeof order.franchiseId === 'string' ? order.franchiseId : null;
 
   const invoice = {
     CustomerRef: { value: order.customerId || '1', name: order.customerName || 'Client' },
@@ -5779,12 +5780,55 @@ export const quickbooks_exportInvoice = functions.https.onCall(async (data, cont
     PrivateNote: `Order ${orderId}`,
   };
 
-  const clientId = process.env.QUICKBOOKS_CLIENT_ID;
-  const clientSecret = process.env.QUICKBOOKS_CLIENT_SECRET;
-  const refreshToken = process.env.QUICKBOOKS_REFRESH_TOKEN;
-  const realmId = process.env.QUICKBOOKS_REALM_ID;
+  const config: {
+    environment: 'production' | 'sandbox';
+    clientId: string | null;
+    clientSecret: string | null;
+    refreshToken: string | null;
+    realmId: string | null;
+    source: 'hq' | 'franchise';
+  } = {
+    environment: 'production',
+    clientId: process.env.QUICKBOOKS_CLIENT_ID ?? null,
+    clientSecret: process.env.QUICKBOOKS_CLIENT_SECRET ?? null,
+    refreshToken: process.env.QUICKBOOKS_REFRESH_TOKEN ?? null,
+    realmId: process.env.QUICKBOOKS_REALM_ID ?? null,
+    source: 'hq',
+  };
+
+  if (franchiseId) {
+    try {
+      const franchiseSnap = await db.collection('franchises').doc(franchiseId).get();
+      if (franchiseSnap.exists) {
+        const data = (franchiseSnap.data() as any)?.quickbooks ?? {};
+        const env = data?.environment === 'sandbox' ? 'sandbox' : 'production';
+        const clientIdValue = typeof data?.clientId === 'string' ? data.clientId.trim() : '';
+        const clientSecretValue = typeof data?.clientSecret === 'string' ? data.clientSecret.trim() : '';
+        const refreshTokenValue = typeof data?.refreshToken === 'string' ? data.refreshToken.trim() : '';
+        const realmIdValue = typeof data?.realmId === 'string' ? data.realmId.trim() : '';
+        if (clientIdValue && clientSecretValue && refreshTokenValue && realmIdValue) {
+          config.environment = env;
+          config.clientId = clientIdValue;
+          config.clientSecret = clientSecretValue;
+          config.refreshToken = refreshTokenValue;
+          config.realmId = realmIdValue;
+          config.source = 'franchise';
+        }
+      }
+    } catch (err) {
+      console.warn('Unable to load franchise QuickBooks configuration', franchiseId, err);
+    }
+  }
+
+  const clientId = config.clientId;
+  const clientSecret = config.clientSecret;
+  const refreshToken = config.refreshToken;
+  const realmId = config.realmId;
   if (!clientId || !clientSecret || !refreshToken || !realmId) {
-    console.error('Missing QuickBooks environment variables');
+    console.error('Missing QuickBooks credentials for export', {
+      franchiseId,
+      source: config.source,
+    });
     throw new functions.https.HttpsError('failed-precondition', 'QuickBooks configuration missing');
   }
 
@@ -5805,8 +5849,12 @@ export const quickbooks_exportInvoice = functions.https.onCall(async (data, cont
   const tokenJson = await tokenRes.json() as any;
   const accessToken = tokenJson.access_token as string;
 
+  const baseUrl =
+    config.environment === 'sandbox'
+      ? 'https://sandbox-quickbooks.api.intuit.com'
+      : 'https://quickbooks.api.intuit.com';
   const invoiceRes = await fetch(
-    `https://quickbooks.api.intuit.com/v3/company/${realmId}/invoice?minorversion=65`,
+    `${baseUrl}/v3/company/${realmId}/invoice?minorversion=65`,
     {
       method: 'POST',
       headers: {
@@ -5823,8 +5871,13 @@ export const quickbooks_exportInvoice = functions.https.onCall(async (data, cont
     throw new functions.https.HttpsError('internal', 'QuickBooks invoice creation failed');
   }
 
-  await orderDoc.ref.update({ quickbooksInvoiceId: invoiceJson.Invoice.Id });
-  return { invoiceId: invoiceJson.Invoice.Id };
+  await orderDoc.ref.update({
+    quickbooksInvoiceId: invoiceJson.Invoice.Id,
+    quickbooksInvoiceEnvironment: config.environment,
+    quickbooksInvoiceConfigSource: config.source,
+    quickbooksInvoiceUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  return { invoiceId: invoiceJson.Invoice.Id, environment: config.environment, source: config.source };
 });
 
 /**

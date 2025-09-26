@@ -22,9 +22,11 @@ import {
   type FranchiseStatus,
   type FranchiseTerritory,
   type FranchiseRoyaltyConfig,
+  type FranchiseQuickBooksConfig,
   canActivateFranchise,
   defaultFranchiseOnboarding,
   defaultFranchiseRoyaltyConfig,
+  defaultFranchiseQuickBooksConfig,
   parseFranchise,
   parseMember,
   parseTerritory,
@@ -217,6 +219,14 @@ type RoyaltyState = {
   franchisePercentage: string;
 };
 
+type QuickBooksState = {
+  environment: 'sandbox' | 'production';
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+  realmId: string;
+};
+
 const ordinal = (value: number) => {
   const remainder = value % 10;
   const isTeen = value % 100 >= 11 && value % 100 <= 13;
@@ -242,6 +252,39 @@ const createRoyaltyState = (config?: FranchiseRoyaltyConfig | null): RoyaltyStat
     franchisePercentage: String(base.franchiseSourcedPercentage ?? defaultFranchiseRoyaltyConfig().franchiseSourcedPercentage),
   };
 };
+
+const createQuickBooksState = (config?: FranchiseQuickBooksConfig | null): QuickBooksState => {
+  const base = config ?? defaultFranchiseQuickBooksConfig();
+  return {
+    environment: base.environment ?? 'production',
+    clientId: base.clientId ?? '',
+    clientSecret: base.clientSecret ?? '',
+    refreshToken: base.refreshToken ?? '',
+    realmId: base.realmId ?? '',
+  };
+};
+
+const serializeQuickBooksState = (state: QuickBooksState) => {
+  const environment = state.environment === 'sandbox' ? 'sandbox' : 'production';
+  const clientId = state.clientId.trim();
+  const clientSecret = state.clientSecret.trim();
+  const refreshToken = state.refreshToken.trim();
+  const realmId = state.realmId.trim();
+  const connected = Boolean(clientId && clientSecret && refreshToken && realmId);
+  return {
+    environment,
+    clientId: clientId || null,
+    clientSecret: clientSecret || null,
+    refreshToken: refreshToken || null,
+    realmId: realmId || null,
+    connected,
+  };
+};
+
+const quickBooksConfigConnected = (config: FranchiseQuickBooksConfig | null | undefined): boolean =>
+  Boolean(config?.clientId && config?.clientSecret && config?.refreshToken && config?.realmId);
+
+const quickBooksStateConnected = (state: QuickBooksState): boolean => serializeQuickBooksState(state).connected;
 
 const serializeRoyaltyState = (state: RoyaltyState): FranchiseRoyaltyConfig => {
   const defaults = defaultFranchiseRoyaltyConfig();
@@ -341,6 +384,7 @@ export default function AdminFranchisesPage() {
     notes: "",
     onboarding: createOnboardingState(),
     royalty: createRoyaltyState(),
+    quickbooks: createQuickBooksState(),
   });
   const [editingFranchiseId, setEditingFranchiseId] = useState<string | null>(null);
   const [editingFranchise, setEditingFranchise] = useState({
@@ -354,6 +398,7 @@ export default function AdminFranchisesPage() {
     notes: "",
     onboarding: createOnboardingState(),
     royalty: createRoyaltyState(),
+    quickbooks: createQuickBooksState(),
   });
 
   const [showCreateTerritory, setShowCreateTerritory] = useState(false);
@@ -399,6 +444,14 @@ export default function AdminFranchisesPage() {
 
   const updateEditingOnboarding = (updates: Partial<OnboardingState>) => {
     setEditingFranchise((prev) => ({ ...prev, onboarding: { ...prev.onboarding, ...updates } }));
+  };
+
+  const updateNewQuickBooks = (updates: Partial<QuickBooksState>) => {
+    setNewFranchise((prev) => ({ ...prev, quickbooks: { ...prev.quickbooks, ...updates } }));
+  };
+
+  const updateEditingQuickBooks = (updates: Partial<QuickBooksState>) => {
+    setEditingFranchise((prev) => ({ ...prev, quickbooks: { ...prev.quickbooks, ...updates } }));
   };
 
   const loadAll = useCallback(async (cancelRef?: { current: boolean }) => {
@@ -556,6 +609,7 @@ export default function AdminFranchisesPage() {
       notes: "",
       onboarding: createOnboardingState(),
       royalty: createRoyaltyState(),
+      quickbooks: createQuickBooksState(),
     });
   };
 
@@ -570,6 +624,16 @@ export default function AdminFranchisesPage() {
         notes: onboardingNotes.length > 0 ? onboardingNotes : null,
       };
       const royaltyConfig = serializeRoyaltyState(newFranchise.royalty);
+      const quickbooksState = serializeQuickBooksState(newFranchise.quickbooks);
+      const quickbooksPayload = {
+        environment: quickbooksState.environment,
+        clientId: quickbooksState.clientId,
+        clientSecret: quickbooksState.clientSecret,
+        refreshToken: quickbooksState.refreshToken,
+        realmId: quickbooksState.realmId,
+        connectedAt: quickbooksState.connected ? serverTimestamp() : null,
+        updatedAt: serverTimestamp(),
+      };
       const payload = {
         name: newFranchise.name.trim(),
         code: (newFranchise.code || newFranchise.name || "").trim().replace(/\s+/g, "-").toLowerCase(),
@@ -583,6 +647,7 @@ export default function AdminFranchisesPage() {
             : null,
         notes: newFranchise.notes.trim() || null,
         onboarding: onboardingPayload,
+        quickbooks: quickbooksPayload,
         royalty: royaltyConfig,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -613,6 +678,7 @@ export default function AdminFranchisesPage() {
         ...franchise.onboarding,
       },
       royalty: createRoyaltyState(franchise.royalty),
+      quickbooks: createQuickBooksState(franchise.quickbooks),
     });
   };
 
@@ -629,6 +695,7 @@ export default function AdminFranchisesPage() {
       notes: "",
       onboarding: createOnboardingState(),
       royalty: createRoyaltyState(),
+      quickbooks: createQuickBooksState(),
     });
   };
 
@@ -644,6 +711,16 @@ export default function AdminFranchisesPage() {
         notes: onboardingNotes.length > 0 ? onboardingNotes : null,
       };
       const royaltyConfig = serializeRoyaltyState(editingFranchise.royalty);
+      const quickbooksState = serializeQuickBooksState(editingFranchise.quickbooks);
+      const quickbooksPayload = {
+        environment: quickbooksState.environment,
+        clientId: quickbooksState.clientId,
+        clientSecret: quickbooksState.clientSecret,
+        refreshToken: quickbooksState.refreshToken,
+        realmId: quickbooksState.realmId,
+        connectedAt: quickbooksState.connected ? serverTimestamp() : null,
+        updatedAt: serverTimestamp(),
+      };
       const activationReady = canActivateFranchise(onboardingPayload);
       if (editingFranchise.status === "active" && !activationReady) {
         alert(
@@ -664,6 +741,7 @@ export default function AdminFranchisesPage() {
             : null,
         notes: editingFranchise.notes.trim() || null,
         onboarding: onboardingPayload,
+        quickbooks: quickbooksPayload,
         royalty: royaltyConfig,
         updatedAt: serverTimestamp(),
       };
@@ -1175,6 +1253,82 @@ export default function AdminFranchisesPage() {
             <div className="grid gap-3 rounded border border-dashed border-gray-200 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
+                  <div className="text-sm font-medium">QuickBooks integration</div>
+                  <p className="text-xs text-gray-500">
+                    Capture franchise-specific QuickBooks Online credentials so invoices export with their ledger.
+                  </p>
+                </div>
+                <span
+                  className={clsx(
+                    "rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase",
+                    quickBooksStateConnected(newFranchise.quickbooks)
+                      ? "bg-emerald-100 text-emerald-700"
+                      : "bg-amber-100 text-amber-800"
+                  )}
+                >
+                  {quickBooksStateConnected(newFranchise.quickbooks) ? "Connected" : "Pending"}
+                </span>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium">Environment</span>
+                  <select
+                    className="input"
+                    value={newFranchise.quickbooks.environment}
+                    onChange={(event) =>
+                      updateNewQuickBooks({ environment: event.target.value as QuickBooksState["environment"] })
+                    }
+                  >
+                    <option value="production">Production</option>
+                    <option value="sandbox">Sandbox</option>
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium">Realm ID</span>
+                  <input
+                    className="input"
+                    value={newFranchise.quickbooks.realmId}
+                    onChange={(event) => updateNewQuickBooks({ realmId: event.target.value })}
+                    placeholder="1234567890"
+                  />
+                </label>
+              </div>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">Client ID</span>
+                <input
+                  className="input"
+                  value={newFranchise.quickbooks.clientId}
+                  onChange={(event) => updateNewQuickBooks({ clientId: event.target.value })}
+                  placeholder="QB0..."
+                />
+              </label>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">Client secret</span>
+                <input
+                  className="input"
+                  type="password"
+                  value={newFranchise.quickbooks.clientSecret}
+                  onChange={(event) => updateNewQuickBooks({ clientSecret: event.target.value })}
+                  placeholder="••••••"
+                />
+              </label>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">Refresh token</span>
+                <input
+                  className="input"
+                  type="password"
+                  value={newFranchise.quickbooks.refreshToken}
+                  onChange={(event) => updateNewQuickBooks({ refreshToken: event.target.value })}
+                  placeholder="Paste the long-lived refresh token"
+                />
+              </label>
+              <p className="text-xs text-gray-500">
+                Values are encrypted at rest and only visible to head office administrators.
+              </p>
+            </div>
+            <div className="grid gap-3 rounded border border-dashed border-gray-200 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
                   <div className="text-sm font-medium">Royalty configuration</div>
                   <p className="text-xs text-gray-500">
                     Define how royalties are split between HQ and the franchisee for HQ-sourced and franchise-sourced orders.
@@ -1490,6 +1644,9 @@ export default function AdminFranchisesPage() {
                   const franchiseDirect = typeof royaltyConfig.franchiseSourcedPercentage === "number"
                     ? royaltyConfig.franchiseSourcedPercentage
                     : defaultFranchiseRoyaltyConfig().franchiseSourcedPercentage;
+                  const quickbooksConnected = quickBooksConfigConnected(franchise.quickbooks);
+                  const quickbooksEnvironmentLabel =
+                    franchise.quickbooks?.environment === "sandbox" ? "Sandbox" : "Production";
                   return (
                     <tr key={franchise.id} className="border-t align-top">
                       <td className="p-2 font-medium">
@@ -1516,6 +1673,23 @@ export default function AdminFranchisesPage() {
                           <div className="text-xs text-gray-500">HQ: {hqScale}</div>
                         )}
                         <div className="text-xs text-gray-500">Franchise-sourced: {franchiseDirect}%</div>
+                        <div className="mt-1 flex items-center gap-1 text-[11px]">
+                          <span
+                            className={clsx(
+                              "inline-flex items-center rounded px-1.5 py-0.5 font-semibold uppercase",
+                              quickbooksConnected
+                                ? "bg-emerald-100 text-emerald-700"
+                                : "bg-amber-100 text-amber-800"
+                            )}
+                          >
+                            QB
+                          </span>
+                          <span className="text-gray-600">
+                            {quickbooksConnected
+                              ? `Connected · ${quickbooksEnvironmentLabel}`
+                              : "Credentials pending"}
+                          </span>
+                        </div>
                       </td>
                       <td className="p-2 text-xs">
                         <div>KYC: {onboardingStatusLabel(franchise.onboarding.kycStatus)}</div>
@@ -1652,6 +1826,73 @@ export default function AdminFranchisesPage() {
                                 }
                               />
                             </label>
+                            <div className="grid gap-2 rounded border border-dashed border-gray-200 p-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-[11px] font-semibold uppercase tracking-wide">QuickBooks</span>
+                                <span
+                                  className={clsx(
+                                    "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase",
+                                    quickBooksStateConnected(editingFranchise.quickbooks)
+                                      ? "bg-emerald-100 text-emerald-700"
+                                      : "bg-amber-100 text-amber-800"
+                                  )}
+                                >
+                                  {quickBooksStateConnected(editingFranchise.quickbooks) ? "Connected" : "Pending"}
+                                </span>
+                              </div>
+                              <label className="grid gap-1 text-[11px]">
+                                <span className="font-medium">Environment</span>
+                                <select
+                                  className="input"
+                                  value={editingFranchise.quickbooks.environment}
+                                  onChange={(event) =>
+                                    updateEditingQuickBooks({
+                                      environment: event.target.value as QuickBooksState["environment"],
+                                    })
+                                  }
+                                >
+                                  <option value="production">Production</option>
+                                  <option value="sandbox">Sandbox</option>
+                                </select>
+                              </label>
+                              <label className="grid gap-1 text-[11px]">
+                                <span className="font-medium">Realm ID</span>
+                                <input
+                                  className="input"
+                                  value={editingFranchise.quickbooks.realmId}
+                                  onChange={(event) => updateEditingQuickBooks({ realmId: event.target.value })}
+                                />
+                              </label>
+                              <label className="grid gap-1 text-[11px]">
+                                <span className="font-medium">Client ID</span>
+                                <input
+                                  className="input"
+                                  value={editingFranchise.quickbooks.clientId}
+                                  onChange={(event) => updateEditingQuickBooks({ clientId: event.target.value })}
+                                />
+                              </label>
+                              <label className="grid gap-1 text-[11px]">
+                                <span className="font-medium">Client secret</span>
+                                <input
+                                  className="input"
+                                  type="password"
+                                  value={editingFranchise.quickbooks.clientSecret}
+                                  onChange={(event) => updateEditingQuickBooks({ clientSecret: event.target.value })}
+                                />
+                              </label>
+                              <label className="grid gap-1 text-[11px]">
+                                <span className="font-medium">Refresh token</span>
+                                <input
+                                  className="input"
+                                  type="password"
+                                  value={editingFranchise.quickbooks.refreshToken}
+                                  onChange={(event) => updateEditingQuickBooks({ refreshToken: event.target.value })}
+                                />
+                              </label>
+                              <p className="text-[10px] text-gray-500">
+                                Credentials sync invoices directly to the franchisee&apos;s QuickBooks company.
+                              </p>
+                            </div>
                             <div className="grid gap-2 rounded border border-dashed border-gray-200 p-2">
                               <div className="flex flex-wrap items-center justify-between gap-2">
                                 <span className="text-[11px] font-semibold uppercase tracking-wide">Royalty configuration</span>
