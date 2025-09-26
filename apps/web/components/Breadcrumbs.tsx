@@ -14,6 +14,7 @@ const LABELS: Record<string, string> = {
   expo: 'Expo Capture',
   'expo-support': 'Expo Support',
   'expo-pages': 'Expo Lead Pages',
+  exhibitions: 'Exhibitions',
   proposals: 'Proposals',
   quotes: 'Quotes',
   crm: 'CRM',
