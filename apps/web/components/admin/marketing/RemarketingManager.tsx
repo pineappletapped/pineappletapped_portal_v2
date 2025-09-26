@@ -53,11 +53,58 @@ interface RemarketingSuggestion {
   researchStatus?: string | null;
   targetClientId?: string | null;
   targetOrgIds?: string[] | null;
+  campaignName?: string | null;
+  emailOpenCount?: number | null;
+  emailClickCount?: number | null;
+  emailClickUrls?: Array<{ url?: string | null; count?: number | null }> | string[] | null;
+  emailLastOpenedAt?: Timestamp | null;
+  emailLastClickedAt?: Timestamp | null;
+  emailSentAt?: Timestamp | null;
 }
 
 interface ProductSummary {
   id: string;
   name: string;
+}
+
+interface RemarketingQueueEntry {
+  id: string;
+  suggestionId?: string | null;
+  campaignId?: string | null;
+  campaignName?: string | null;
+  clientId?: string | null;
+  status?: string | null;
+  scope?: string | null;
+  monthKey?: string | null;
+  emailSubject?: string | null;
+  emailPreview?: string | null;
+  audienceEmailsCount?: number | null;
+  createdAt?: Timestamp | null;
+  updatedAt?: Timestamp | null;
+  lastError?: string | null;
+  lastAttemptAt?: Timestamp | null;
+}
+
+interface RemarketingEmailRecord {
+  id: string;
+  suggestionId?: string | null;
+  campaignId?: string | null;
+  campaignName?: string | null;
+  headline?: string | null;
+  summary?: string | null;
+  emailSubject?: string | null;
+  emailPreview?: string | null;
+  status?: string | null;
+  emailOpenCount?: number | null;
+  emailClickCount?: number | null;
+  emailClickUrls?: Array<{ url?: string | null; count?: number | null }> | string[] | null;
+  emailLastOpenedAt?: Timestamp | null;
+  emailLastClickedAt?: Timestamp | null;
+  emailSentAt?: Timestamp | null;
+  createdAt?: Timestamp | null;
+  updatedAt?: Timestamp | null;
+  targetClientId?: string | null;
+  targetOrgIds?: string[] | null;
 }
 
 const GROUP_OPTIONS: { value: string; label: string }[] = [
@@ -131,6 +178,13 @@ export default function RemarketingManager() {
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<RemarketingSuggestion[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [queueItems, setQueueItems] = useState<RemarketingQueueEntry[]>([]);
+  const [queueLoading, setQueueLoading] = useState(true);
+  const [historyItems, setHistoryItems] = useState<RemarketingEmailRecord[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [outboxTab, setOutboxTab] = useState<"queue" | "sent">("queue");
+  const [queueSearch, setQueueSearch] = useState("");
+  const [historySearch, setHistorySearch] = useState("");
 
   useEffect(() => {
     if (guardLoading || !allowed) return;
@@ -189,10 +243,151 @@ export default function RemarketingManager() {
     return () => unsubscribe();
   }, [selectedCampaignId, allowed, guardLoading]);
 
+  useEffect(() => {
+    if (guardLoading || !allowed) {
+      return;
+    }
+    setQueueLoading(true);
+    const queueQuery = query(
+      collection(db, "remarketingQueue"),
+      orderBy("createdAt", "desc"),
+      limit(100)
+    );
+    const unsubscribe = onSnapshot(
+      queueQuery,
+      (snapshot) => {
+        const nextItems: RemarketingQueueEntry[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as Record<string, any>;
+          return {
+            id: docSnap.id,
+            suggestionId: data.suggestionId ?? null,
+            campaignId: data.campaignId ?? null,
+            campaignName: data.campaignName ?? null,
+            clientId: data.clientId ?? null,
+            status: data.status ?? null,
+            scope: data.scope ?? null,
+            monthKey: data.monthKey ?? null,
+            emailSubject: data.emailSubject ?? null,
+            emailPreview: data.emailPreview ?? null,
+            audienceEmailsCount:
+              typeof data.audienceEmailsCount === "number" ? data.audienceEmailsCount : null,
+            createdAt: data.createdAt ?? null,
+            updatedAt: data.updatedAt ?? null,
+            lastError: data.lastError ?? null,
+            lastAttemptAt: data.lastAttemptAt ?? null,
+          };
+        });
+        setQueueItems(nextItems);
+        setQueueLoading(false);
+      },
+      (error) => {
+        console.error("Failed to load remarketing queue", error);
+        setQueueLoading(false);
+      }
+    );
+    return () => unsubscribe();
+  }, [allowed, guardLoading]);
+
+  useEffect(() => {
+    if (guardLoading || !allowed) {
+      return;
+    }
+    setHistoryLoading(true);
+    const historyQuery = query(
+      collection(db, "remarketingSuggestions"),
+      where("status", "==", "sent"),
+      orderBy("createdAt", "desc"),
+      limit(100)
+    );
+    const unsubscribe = onSnapshot(
+      historyQuery,
+      (snapshot) => {
+        const nextItems: RemarketingEmailRecord[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as Record<string, any>;
+          return {
+            id: docSnap.id,
+            suggestionId: docSnap.id,
+            campaignId: data.campaignId ?? null,
+            campaignName: data.campaignName ?? null,
+            headline: data.headline ?? null,
+            summary: data.summary ?? null,
+            emailSubject: data.emailSubject ?? null,
+            emailPreview: data.emailPreview ?? null,
+            status: data.status ?? null,
+            emailOpenCount: typeof data.emailOpenCount === "number" ? data.emailOpenCount : null,
+            emailClickCount:
+              typeof data.emailClickCount === "number" ? data.emailClickCount : null,
+            emailClickUrls: Array.isArray(data.emailClickUrls) ? data.emailClickUrls : null,
+            emailLastOpenedAt: data.emailLastOpenedAt ?? null,
+            emailLastClickedAt: data.emailLastClickedAt ?? null,
+            emailSentAt: data.emailSentAt ?? null,
+            createdAt: data.createdAt ?? null,
+            updatedAt: data.updatedAt ?? null,
+            targetClientId: data.targetClientId ?? null,
+            targetOrgIds: Array.isArray(data.targetOrgIds) ? data.targetOrgIds : null,
+          };
+        });
+        setHistoryItems(nextItems);
+        setHistoryLoading(false);
+      },
+      (error) => {
+        console.error("Failed to load remarketing email history", error);
+        setHistoryLoading(false);
+      }
+    );
+    return () => unsubscribe();
+  }, [allowed, guardLoading]);
+
   const selectedCampaign = useMemo(
     () => campaigns.find((c) => c.id === selectedCampaignId) ?? null,
     [campaigns, selectedCampaignId]
   );
+
+  const filteredQueue = useMemo(() => {
+    const search = queueSearch.trim().toLowerCase();
+    const source = queueItems;
+    if (!search) {
+      return source;
+    }
+    return source.filter((item) => {
+      const haystack = [
+        item.emailSubject,
+        item.emailPreview,
+        item.campaignName,
+        item.campaignId,
+        item.status,
+        item.monthKey,
+        item.clientId,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(search);
+    });
+  }, [queueItems, queueSearch]);
+
+  const filteredHistory = useMemo(() => {
+    const search = historySearch.trim().toLowerCase();
+    const source = historyItems;
+    if (!search) {
+      return source;
+    }
+    return source.filter((item) => {
+      const haystack = [
+        item.emailSubject,
+        item.summary,
+        item.headline,
+        item.campaignName,
+        item.campaignId,
+        item.status,
+        item.targetClientId,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(search);
+    });
+  }, [historyItems, historySearch]);
 
   if (guardLoading) return <p>Loading…</p>;
   if (!allowed) return <p>You do not have permission to view remarketing settings.</p>;
@@ -521,6 +716,190 @@ export default function RemarketingManager() {
           )}
         </div>
       </div>
+
+      <section className="card p-4 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-medium">Remarketing Email Outbox</h2>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className={`btn btn-xs sm:btn-sm ${
+                outboxTab === "queue" ? "btn-primary" : "btn-ghost"
+              }`}
+              onClick={() => setOutboxTab("queue")}
+            >
+              Queue ({queueItems.length})
+            </button>
+            <button
+              type="button"
+              className={`btn btn-xs sm:btn-sm ${
+                outboxTab === "sent" ? "btn-primary" : "btn-ghost"
+              }`}
+              onClick={() => setOutboxTab("sent")}
+            >
+              Sent ({historyItems.length})
+            </button>
+          </div>
+        </div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-slate-600 sm:max-w-2xl">
+            Monitor queued remarketing emails to prevent spikes and audit delivered outreach with
+            open and click activity for compliance.
+          </p>
+          <input
+            type="search"
+            className="input input-bordered w-full sm:w-64"
+            placeholder={outboxTab === "queue" ? "Search queued emails…" : "Search sent emails…"}
+            value={outboxTab === "queue" ? queueSearch : historySearch}
+            onChange={(event) =>
+              outboxTab === "queue"
+                ? setQueueSearch(event.target.value)
+                : setHistorySearch(event.target.value)
+            }
+          />
+        </div>
+        {outboxTab === "queue" ? (
+          queueLoading ? (
+            <p className="text-sm text-slate-600">Loading queue…</p>
+          ) : filteredQueue.length === 0 ? (
+            <p className="text-sm text-slate-600">No remarketing emails are currently queued.</p>
+          ) : (
+            <div className="space-y-3">
+              {filteredQueue.map((item) => {
+                const matchesSelection =
+                  !!selectedCampaignId && item.campaignId === selectedCampaignId;
+                return (
+                  <article
+                    key={item.id}
+                    className="border border-slate-200 rounded-lg p-3 space-y-2 bg-white"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                      <span className="font-medium uppercase tracking-wide">
+                        {item.status || "pending"}
+                      </span>
+                      <span>{`Queued ${formatTimestamp(item.createdAt ?? null)}`}</span>
+                    </div>
+                    <h3 className="font-semibold text-slate-900 text-sm">
+                      {item.emailSubject || "Draft follow-up email"}
+                    </h3>
+                    {item.emailPreview && (
+                      <p className="text-sm text-slate-600 line-clamp-3">{item.emailPreview}</p>
+                    )}
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                      {item.campaignName && <span>Campaign: {item.campaignName}</span>}
+                      {item.monthKey && <span>Period: {item.monthKey}</span>}
+                      {typeof item.audienceEmailsCount === "number" && (
+                        <span>Audience emails: {item.audienceEmailsCount}</span>
+                      )}
+                      {matchesSelection && (
+                        <span className="text-orange-600 font-medium">Selected campaign</span>
+                      )}
+                    </div>
+                    {(item.updatedAt || item.lastAttemptAt) && (
+                      <p className="text-xs text-slate-500">
+                        Last touched {formatTimestamp(item.updatedAt ?? item.lastAttemptAt ?? null)}
+                      </p>
+                    )}
+                    {item.lastError && (
+                      <p className="text-xs text-red-600">Last error: {item.lastError}</p>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          )
+        ) : historyLoading ? (
+          <p className="text-sm text-slate-600">Loading sent email history…</p>
+        ) : filteredHistory.length === 0 ? (
+          <p className="text-sm text-slate-600">No sent remarketing emails recorded.</p>
+        ) : (
+          <div className="space-y-3">
+            {filteredHistory.map((record) => {
+              const matchesSelection =
+                !!selectedCampaignId && record.campaignId === selectedCampaignId;
+              const openCount = typeof record.emailOpenCount === "number" ? record.emailOpenCount : 0;
+              const clickCount =
+                typeof record.emailClickCount === "number" ? record.emailClickCount : 0;
+              const clickDetails = Array.isArray(record.emailClickUrls)
+                ? (record.emailClickUrls as Array<any>)
+                    .map((entry) => {
+                      if (!entry) return null;
+                      if (typeof entry === "string") {
+                        return { url: entry, count: null };
+                      }
+                      if (typeof entry === "object") {
+                        const urlValue =
+                          typeof entry.url === "string" && entry.url.trim().length > 0
+                            ? entry.url.trim()
+                            : null;
+                        if (!urlValue) return null;
+                        const countValue =
+                          typeof entry.count === "number" && entry.count >= 0
+                            ? entry.count
+                            : null;
+                        return { url: urlValue, count: countValue };
+                      }
+                      return null;
+                    })
+                    .filter((value): value is { url: string; count: number | null } => Boolean(value))
+                : [];
+              return (
+                <article
+                  key={record.id}
+                  className="border border-slate-200 rounded-lg p-3 space-y-2 bg-white"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                    <span className="font-medium uppercase tracking-wide">
+                      {record.status || "sent"}
+                    </span>
+                    <span>
+                      Sent {formatTimestamp(record.emailSentAt ?? record.createdAt ?? null)}
+                    </span>
+                  </div>
+                  <h3 className="font-semibold text-slate-900 text-sm">
+                    {record.emailSubject || record.headline || "Remarketing email"}
+                  </h3>
+                  {record.summary && (
+                    <p className="text-sm text-slate-600 line-clamp-3">{record.summary}</p>
+                  )}
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                    {record.campaignName && <span>Campaign: {record.campaignName}</span>}
+                    {matchesSelection && (
+                      <span className="text-orange-600 font-medium">Selected campaign</span>
+                    )}
+                    <span>Opens: {openCount}</span>
+                    <span>Clicks: {clickCount}</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                    {record.emailLastOpenedAt && (
+                      <span>Last opened {formatTimestamp(record.emailLastOpenedAt)}</span>
+                    )}
+                    {record.emailLastClickedAt && (
+                      <span>Last click {formatTimestamp(record.emailLastClickedAt)}</span>
+                    )}
+                  </div>
+                  {clickDetails.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      <p className="text-xs font-medium text-slate-600">Clicked links</p>
+                      <ul className="space-y-1 text-xs text-blue-600 break-all">
+                        {clickDetails.map((detail, index) => (
+                          <li key={`${record.id}-click-${index}`}>
+                            <span>{detail.url}</span>
+                            {typeof detail.count === "number" && (
+                              <span className="text-slate-500"> ({detail.count} clicks)</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
     </div>
   );
 }
