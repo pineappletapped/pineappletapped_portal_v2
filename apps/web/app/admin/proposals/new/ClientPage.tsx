@@ -1,13 +1,33 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { auth, db, functions } from "@/lib/firebase";
 import { doc, getDoc, collection, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
-import { getProductKit } from "@/lib/equipment";
+import { getProductKit, type ProductKitGroup } from "@/lib/equipment";
 import { extractUserRoles, hasRole } from "@/lib/roles";
+import ProposalSetupBuilder, {
+  type ProposalSetupItem as SetupLibraryItem,
+  type ProposalSetupPlan,
+} from "@/components/admin/proposals/ProposalSetupBuilder";
+
+const SETUP_LAYOUT_LABELS: Record<ProposalSetupPlan["layout"], string> = {
+  conference: "Conference stage",
+  panel: "Panel / fireside",
+  interview: "Interview setup",
+  custom: "Custom layout",
+};
+
+const SETUP_ZONE_LABELS: Record<string, string> = {
+  "stage-front": "Stage front",
+  "stage-rear": "Stage rear",
+  audience: "Audience",
+  lighting: "Lighting rig",
+  control: "Control / steering",
+  support: "Support areas",
+};
 
 interface ProposalItem {
   type: "product" | "custom";
@@ -37,6 +57,27 @@ export default function NewProposalPage() {
   const [agreementIds, setAgreementIds] = useState<string[]>([]);
   const [sectionIds, setSectionIds] = useState<string[]>([]);
   const [customText, setCustomText] = useState("");
+  const [setupPlan, setSetupPlan] = useState<ProposalSetupPlan>({
+    layout: "conference",
+    notes: "",
+    placements: [],
+  });
+  const [kitCache, setKitCache] = useState<Record<string, ProductKitGroup[]>>({});
+  const kitCacheRef = useRef<Record<string, ProductKitGroup[]>>({});
+
+  const ensureKit = useCallback(async (productId: string) => {
+    if (!productId) return [];
+    const cached = kitCacheRef.current[productId];
+    if (cached) return cached;
+    const kit = await getProductKit(productId);
+    kitCacheRef.current = { ...kitCacheRef.current, [productId]: kit };
+    setKitCache((prev) => ({ ...prev, [productId]: kit }));
+    return kit;
+  }, []);
+
+  useEffect(() => {
+    kitCacheRef.current = kitCache;
+  }, [kitCache]);
 
   useEffect(() => {
     (async () => {
@@ -81,7 +122,7 @@ export default function NewProposalPage() {
         items.map(async (it) => {
           if (it.type === "product" && it.productId && typeof it.rental === "undefined") {
             try {
-              const kit = await getProductKit(it.productId);
+              const kit = await ensureKit(it.productId);
               const rental = kit
                 .flatMap((g) => g.items)
                 .reduce((sum, i) => sum + (i.rentalPrice || 0), 0);
@@ -96,16 +137,64 @@ export default function NewProposalPage() {
       setItems(updated);
     }
     if (items.some((it) => it.type === "product" && typeof it.rental === "undefined")) {
-      fillRental();
+      void fillRental();
     }
-  }, [items]);
+  }, [items, ensureKit]);
+
+  useEffect(() => {
+    const productIds = Array.from(
+      new Set(
+        items
+          .filter((it) => it.type === "product" && typeof it.productId === "string")
+          .map((it) => it.productId as string)
+      )
+    );
+    productIds.forEach((id) => {
+      void ensureKit(id);
+    });
+  }, [items, ensureKit]);
+
+  const kitLibraryItems = useMemo<SetupLibraryItem[]>(() => {
+    const activeProductIds = new Set(
+      items
+        .filter((it) => it.type === "product" && typeof it.productId === "string")
+        .map((it) => it.productId as string)
+    );
+    const seen = new Set<string>();
+    const library: SetupLibraryItem[] = [];
+    activeProductIds.forEach((productId) => {
+      const groups = kitCache[productId];
+      if (!groups) return;
+      groups.forEach((group) => {
+        (group.items || []).forEach((equipment: any) => {
+          const equipId = typeof equipment.id === "string" ? equipment.id : null;
+          if (!equipId || seen.has(equipId)) return;
+          const name =
+            typeof equipment.name === "string"
+              ? equipment.name
+              : typeof equipment.serialNumber === "string"
+                ? equipment.serialNumber
+                : "Equipment";
+          const category = typeof equipment.category === "string" ? equipment.category : group.groupId;
+          seen.add(equipId);
+          library.push({ id: equipId, name, category: category || undefined, type: "equipment" });
+        });
+      });
+    });
+    library.sort((a, b) => a.name.localeCompare(b.name));
+    return library;
+  }, [items, kitCache]);
+
+  const handleSetupPlanChange = useCallback((plan: ProposalSetupPlan) => {
+    setSetupPlan(plan);
+  }, []);
 
   const addProduct = async (id: string) => {
     const prod = products.find((p) => p.id === id);
     if (prod) {
       let rental = 0;
       try {
-        const kit = await getProductKit(id);
+        const kit = await ensureKit(id);
         rental = kit
           .flatMap((g) => g.items)
           .reduce((sum, i) => sum + (i.rentalPrice || 0), 0);
@@ -133,7 +222,16 @@ export default function NewProposalPage() {
   const submit = async () => {
     try {
       const callable = httpsCallable(functions, "admin_createProposal");
-      await callable({ orgId, clientEmail, items, agreementIds, sectionIds, templateId: templateId || undefined, customText });
+      await callable({
+        orgId,
+        clientEmail,
+        items,
+        agreementIds,
+        sectionIds,
+        templateId: templateId || undefined,
+        customText,
+        setupPlan,
+      });
       router.push("/admin/proposals");
     } catch (err: any) {
       alert(err.message || "Error creating proposal");
@@ -164,47 +262,62 @@ export default function NewProposalPage() {
         </div>
       )}
       {step === 2 && (
-        <div className="card p-4 grid gap-3">
-          <div className="flex gap-2">
-            <select className="input" onChange={(e) => { if (e.target.value) { addProduct(e.target.value); e.target.value=""; } }}>
-              <option value="">Add product…</option>
-              {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-            <button className="btn" onClick={addCustom}>Add Custom</button>
-          </div>
-          {items.length === 0 ? <p>No items added.</p> : (
-            <div className="grid gap-2">
-              {items.map((it, i) => (
-                <div key={i} className="grid gap-1">
-                  <div className="flex items-center gap-2">
-                    {it.type === "custom" ? (
-                      <>
-                        <input className="input flex-1" placeholder="Description" value={it.name} onChange={(e) => updateItem(i, "name", e.target.value)} />
-                        <input className="input w-24" type="number" value={it.price} onChange={(e) => updateItem(i, "price", Number(e.target.value))} />
-                      </>
-                    ) : (
-                      <>
-                        <span className="flex-1">{it.name}</span>
-                        <span className="w-24 text-right">£{it.price}</span>
-                        {typeof it.rental === "number" && (
-                          <span className="w-24 text-right text-xs text-gray-500">
-                            £{it.rental.toFixed(2)} rent
-                          </span>
-                        )}
-                      </>
-                    )}
-                    <button className="btn-outline" onClick={() => removeItem(i)}>Remove</button>
-                  </div>
-                  {it.type === "product" && (
-                    <textarea className="input" placeholder="Notes" value={it.notes || ""} onChange={(e) => updateItem(i, "notes", e.target.value)} />
-                  )}
-                </div>
-              ))}
+        <div className="grid gap-4">
+          <div className="card p-4 grid gap-3">
+            <div className="flex gap-2">
+              <select className="input" onChange={(e) => { if (e.target.value) { addProduct(e.target.value); e.target.value=""; } }}>
+                <option value="">Add product…</option>
+                {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <button className="btn" onClick={addCustom}>Add Custom</button>
             </div>
-          )}
-          <div className="flex justify-between mt-2">
-            <button className="btn-outline" onClick={() => setStep(1)}>Back</button>
-            <button className="btn" onClick={() => setStep(3)}>Next</button>
+            {items.length === 0 ? <p>No items added.</p> : (
+              <div className="grid gap-2">
+                {items.map((it, i) => (
+                  <div key={i} className="grid gap-1">
+                    <div className="flex items-center gap-2">
+                      {it.type === "custom" ? (
+                        <>
+                          <input className="input flex-1" placeholder="Description" value={it.name} onChange={(e) => updateItem(i, "name", e.target.value)} />
+                          <input className="input w-24" type="number" value={it.price} onChange={(e) => updateItem(i, "price", Number(e.target.value))} />
+                        </>
+                      ) : (
+                        <>
+                          <span className="flex-1">{it.name}</span>
+                          <span className="w-24 text-right">£{it.price}</span>
+                          {typeof it.rental === "number" && (
+                            <span className="w-24 text-right text-xs text-gray-500">
+                              £{it.rental.toFixed(2)} rent
+                            </span>
+                          )}
+                        </>
+                      )}
+                      <button className="btn-outline" onClick={() => removeItem(i)}>Remove</button>
+                    </div>
+                    {it.type === "product" && (
+                      <textarea className="input" placeholder="Notes" value={it.notes || ""} onChange={(e) => updateItem(i, "notes", e.target.value)} />
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex justify-between mt-2">
+              <button className="btn-outline" onClick={() => setStep(1)}>Back</button>
+              <button className="btn" onClick={() => setStep(3)}>Next</button>
+            </div>
+          </div>
+          <div className="card p-4 grid gap-4">
+            <div>
+              <h2 className="text-lg font-semibold">Stage & setup designer</h2>
+              <p className="text-sm text-gray-600">
+                Map camera angles, lighting positions, control areas, and staging stock before sending the proposal.
+              </p>
+            </div>
+            <ProposalSetupBuilder
+              kitItems={kitLibraryItems}
+              value={setupPlan}
+              onChange={handleSetupPlanChange}
+            />
           </div>
         </div>
       )}
@@ -252,6 +365,25 @@ export default function NewProposalPage() {
                 </li>
               ))}
             </ul>
+          )}
+          {(setupPlan.placements.length > 0 || setupPlan.notes.trim()) && (
+            <div className="grid gap-1">
+              <p className="font-medium">Setup plan</p>
+              <p className="text-sm text-gray-600">Layout: {SETUP_LAYOUT_LABELS[setupPlan.layout] || setupPlan.layout}</p>
+              {setupPlan.placements.length > 0 && (
+                <ul className="list-disc pl-6">
+                  {setupPlan.placements.map((placement) => (
+                    <li key={placement.id}>
+                      {placement.itemName} ×{placement.quantity} → {SETUP_ZONE_LABELS[placement.zone] || placement.zone}
+                      {placement.notes ? ` (${placement.notes})` : ""}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {setupPlan.notes.trim() && (
+                <p className="text-sm text-gray-600">Notes: {setupPlan.notes.trim()}</p>
+              )}
+            </div>
           )}
           {sectionIds.length > 0 && <p>Sections: {sectionIds.length}</p>}
           {agreementIds.length > 0 && (

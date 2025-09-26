@@ -5735,7 +5735,7 @@ export const admin_assignWorkflow = functions.https.onCall(async (data, context)
  */
 export const admin_createProposal = functions.https.onCall(async (data, context) => {
     await assertStaff(context, ['admin', 'sales']);
-    const { orgId, clientEmail, items = [], agreementIds = [], sectionIds = [], templateId, customText } = data;
+    const { orgId, clientEmail, items = [], agreementIds = [], sectionIds = [], templateId, customText, setupPlan, } = data;
     if (!orgId || !clientEmail) {
         throw new functions.https.HttpsError('invalid-argument', 'orgId and clientEmail required');
     }
@@ -5758,6 +5758,49 @@ export const admin_createProposal = functions.https.onCall(async (data, context)
     const serviceIds = finalItems
         .filter((i) => i.type === 'product' && i.productId)
         .map((i) => i.productId);
+    const normalizedSetupPlan = (() => {
+        if (!setupPlan || typeof setupPlan !== 'object')
+            return null;
+        const allowedLayouts = new Set(['conference', 'panel', 'interview', 'custom']);
+        const layout = typeof setupPlan.layout === 'string' && allowedLayouts.has(setupPlan.layout)
+            ? setupPlan.layout
+            : 'custom';
+        const notes = typeof setupPlan.notes === 'string' ? setupPlan.notes.trim() : '';
+        const placements = Array.isArray(setupPlan.placements)
+            ? setupPlan.placements
+                .map((placement) => {
+                const itemId = typeof placement?.itemId === 'string' ? placement.itemId : null;
+                const itemName = typeof placement?.itemName === 'string' ? placement.itemName.trim() : '';
+                if (!itemId || !itemName)
+                    return null;
+                const quantityRaw = typeof placement?.quantity === 'number' ? placement.quantity : Number(placement?.quantity);
+                const quantity = Number.isFinite(quantityRaw) && quantityRaw > 0 ? Math.round(quantityRaw) : 1;
+                const zone = typeof placement?.zone === 'string' ? placement.zone : 'stage-front';
+                const type = placement?.type === 'stock' ? 'stock' : 'equipment';
+                const icon = typeof placement?.icon === 'string' ? placement.icon : null;
+                const notesValue = typeof placement?.notes === 'string' ? placement.notes.trim() : '';
+                return {
+                    id: typeof placement?.id === 'string' ? placement.id : undefined,
+                    itemId,
+                    itemName,
+                    zone,
+                    quantity,
+                    type,
+                    icon,
+                    notes: notesValue || null,
+                };
+            })
+                .filter((entry) => entry !== null)
+            : [];
+        if (placements.length === 0 && !notes) {
+            return null;
+        }
+        return {
+            layout,
+            notes,
+            placements,
+        };
+    })();
     const proposal = {
         orgId,
         clientEmail,
@@ -5766,6 +5809,7 @@ export const admin_createProposal = functions.https.onCall(async (data, context)
         sectionIds: finalSections,
         serviceIds,
         customText: customText || '',
+        setupPlan: normalizedSetupPlan,
         status: 'sent',
         createdAt: admin.firestore.FieldValue.serverTimestamp()
     };
