@@ -1,15 +1,74 @@
 import { cookies } from 'next/headers';
 import { NextResponse, type NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
+import Stripe from 'stripe';
 import { z } from 'zod';
 
-import { getFirebaseAdminFirestore } from '@/lib/firebase-admin';
+import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from '@/lib/firebase-admin';
 import {
   getStripeConnectSettings,
+  getStripeSecretKey,
   invalidateStripeSettingsCache,
   resetStripeClientCache,
+  resetStripeSecretCache,
 } from '@/lib/stripe-config';
-import { decodeRolesCookie } from '@/lib/roles';
+import { createSecretConfig, writeSecretValue } from '@/lib/secret-manager';
+import { extractUserRoles, hasRole, type UserRoles } from '@/lib/roles';
+
+const STRIPE_API_VERSION: Stripe.LatestApiVersion = '2024-04-10';
+
+const SECRET_KEY_CONFIG = createSecretConfig(
+  process.env.STRIPE_SECRET_KEY_SECRET_NAME,
+  process.env.STRIPE_SECRET_KEY,
+  'Stripe secret key'
+);
+const WEBHOOK_SECRET_CONFIG = createSecretConfig(
+  process.env.STRIPE_WEBHOOK_SECRET_SECRET_NAME,
+  process.env.STRIPE_WEBHOOK_SECRET,
+  'Stripe webhook secret'
+);
+
+type AdminContext = { uid: string; email: string | null; roles: UserRoles };
+
+function formatStripeError(error: unknown): string {
+  if (error instanceof Stripe.errors.StripeError && error.message) {
+    return error.message;
+  }
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return 'Unknown Stripe error';
+}
+
+async function verifySecretKey(secret: string): Promise<string> {
+  const trimmed = secret.trim();
+  if (!/^sk_(live|test)_/i.test(trimmed)) {
+    throw new Error('Stripe secret keys must begin with sk_live_ or sk_test_.');
+  }
+  const client = new Stripe(trimmed, { apiVersion: STRIPE_API_VERSION });
+  try {
+    await client.accounts.retrieve();
+  } catch (error) {
+    throw new Error(`Stripe rejected the secret key: ${formatStripeError(error)}.`);
+  }
+  return trimmed;
+}
+
+async function verifyWebhookSecret(secret: string, stripeClient: Stripe): Promise<string> {
+  const trimmed = secret.trim();
+  if (!/^whsec_[A-Za-z0-9]{16,}$/i.test(trimmed)) {
+    throw new Error('Webhook signing secrets must begin with whsec_ and contain at least 16 characters.');
+  }
+  try {
+    const endpoints = await stripeClient.webhookEndpoints.list({ limit: 100 });
+    if (!Array.isArray(endpoints.data) || endpoints.data.length === 0) {
+      throw new Error('No webhook endpoints are configured for this Stripe account.');
+    }
+  } catch (error) {
+    throw new Error(`Unable to confirm webhook secret against Stripe endpoints: ${formatStripeError(error)}.`);
+  }
+  return trimmed;
+}
 
 const SPLIT_TERM_SCHEMA = z
   .object({
@@ -105,6 +164,59 @@ const SETTINGS_SCHEMA = z.object({
   splitTerms: z
     .union([z.array(SPLIT_TERM_SCHEMA), z.null(), z.undefined()])
     .transform((value) => (Array.isArray(value) ? value : [])),
+}).superRefine((value, ctx) => {
+  const terms = Array.isArray(value.splitTerms) ? value.splitTerms : [];
+  const seenLabels = new Set<string>();
+  let runningTotal = 0;
+  let previousDue: number | null = null;
+
+  terms.forEach((term, index) => {
+    const normalisedLabel = term.label.trim().toLowerCase();
+    if (seenLabels.has(normalisedLabel)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Split term labels must be unique.',
+        path: ['splitTerms', index, 'label'],
+      });
+    } else {
+      seenLabels.add(normalisedLabel);
+    }
+
+    if (!Number.isFinite(term.percentage) || term.percentage < 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Split term percentage must be a non-negative number.',
+        path: ['splitTerms', index, 'percentage'],
+      });
+    } else {
+      runningTotal += term.percentage;
+    }
+
+    const dueComparable = term.dueDays ?? 0;
+    if (term.dueDays !== null && term.dueDays < 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Due days must be zero or positive.',
+        path: ['splitTerms', index, 'dueDays'],
+      });
+    }
+    if (previousDue !== null && dueComparable < previousDue) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Split term due days must be non-decreasing.',
+        path: ['splitTerms', index, 'dueDays'],
+      });
+    }
+    previousDue = dueComparable;
+  });
+
+  if (runningTotal > 100.0001) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Split term percentages cannot exceed 100%.',
+      path: ['splitTerms'],
+    });
+  }
 });
 
 function unauthorized(message = 'Unauthorized') {
@@ -119,33 +231,44 @@ function badRequest(message: string) {
   return NextResponse.json({ error: message }, { status: 400 });
 }
 
-async function resolveAdminContext(loadUserDoc = false) {
+async function resolveAdminContext(): Promise<AdminContext | null> {
   const cookieStore = cookies();
-  const uid = cookieStore.get('uid')?.value;
-  const rolesCookie = cookieStore.get('roles')?.value;
-  if (!uid) {
+  const sessionCookie =
+    cookieStore.get('session')?.value ??
+    cookieStore.get('__session')?.value ??
+    cookieStore.get('firebase-session')?.value ??
+    null;
+  if (!sessionCookie) {
     return null;
   }
-  const roles = new Set(decodeRolesCookie(rolesCookie));
-  if (!roles.has('admin') && !roles.has('finance')) {
-    return null;
-  }
-  if (!loadUserDoc) {
-    return { uid, email: null };
-  }
+
   try {
+    const auth = getFirebaseAdminAuth();
+    const decoded = await auth.verifySessionCookie(sessionCookie, true);
     const firestore = getFirebaseAdminFirestore();
-    const snapshot = await firestore.collection('users').doc(uid).get();
-    const email = typeof snapshot.data()?.email === 'string' ? (snapshot.data()?.email as string) : null;
-    return { uid, email };
+    const snapshot = await firestore.collection('users').doc(decoded.uid).get();
+    const data = snapshot.exists ? snapshot.data() ?? {} : {};
+    const emailFromStore = typeof data?.email === 'string' ? (data.email as string) : null;
+    const email = typeof decoded.email === 'string' ? decoded.email : emailFromStore;
+    const enrichedDoc = {
+      ...data,
+      id: snapshot.id || decoded.uid,
+      uid: decoded.uid,
+      email,
+    };
+    const roles = extractUserRoles(enrichedDoc);
+    if (!hasRole(roles, ['admin', 'finance'])) {
+      return null;
+    }
+    return { uid: decoded.uid, email, roles };
   } catch (error) {
-    console.warn('Failed to load admin user profile', error);
-    return { uid, email: null };
+    console.warn('Failed to verify admin session', error);
+    return null;
   }
 }
 
 export async function GET() {
-  const context = await resolveAdminContext(false);
+  const context = await resolveAdminContext();
   if (!context) {
     return unauthorized();
   }
@@ -174,7 +297,7 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const context = await resolveAdminContext(true);
+  const context = await resolveAdminContext();
   if (!context) {
     return unauthorized();
   }
@@ -211,18 +334,58 @@ export async function POST(req: NextRequest) {
       uid: context.uid,
       email: context.email,
     },
+    secretKey: FieldValue.delete(),
+    webhookSecret: FieldValue.delete(),
   };
 
+  let latestSecretKey: string | null | undefined;
   if (parsedBody.secretKey !== undefined) {
-    const secret = parsedBody.secretKey && parsedBody.secretKey.length > 0 ? parsedBody.secretKey : null;
-    updates.secretKey = secret;
-    updates.secretKeyLast4 = secret ? secret.slice(-4) : null;
+    try {
+      if (parsedBody.secretKey) {
+        latestSecretKey = await verifySecretKey(parsedBody.secretKey);
+        await writeSecretValue(SECRET_KEY_CONFIG, latestSecretKey);
+        updates.secretKeyLast4 = latestSecretKey.slice(-4);
+      } else {
+        latestSecretKey = null;
+        await writeSecretValue(SECRET_KEY_CONFIG, null);
+        updates.secretKeyLast4 = null;
+      }
+      resetStripeSecretCache();
+      resetStripeClientCache();
+    } catch (error) {
+      console.error('Failed to persist Stripe secret key', error);
+      const message = error instanceof Error ? error.message : 'Failed to store Stripe secret key.';
+      const status = /Secret Manager|infrastructure/i.test(message) ? 500 : 400;
+      return NextResponse.json({ error: message }, { status });
+    }
   }
 
+  const getStripeClientForWebhookValidation = async (): Promise<Stripe> => {
+    const secret = latestSecretKey ?? (await getStripeSecretKey());
+    if (!secret) {
+      throw new Error('Configure a Stripe secret key before saving a webhook secret.');
+    }
+    return new Stripe(secret, { apiVersion: STRIPE_API_VERSION });
+  };
+
   if (parsedBody.webhookSecret !== undefined) {
-    const secret = parsedBody.webhookSecret && parsedBody.webhookSecret.length > 0 ? parsedBody.webhookSecret : null;
-    updates.webhookSecret = secret;
-    updates.webhookSecretLast4 = secret ? secret.slice(-4) : null;
+    try {
+      if (parsedBody.webhookSecret) {
+        const stripeClient = await getStripeClientForWebhookValidation();
+        const verifiedWebhookSecret = await verifyWebhookSecret(parsedBody.webhookSecret, stripeClient);
+        await writeSecretValue(WEBHOOK_SECRET_CONFIG, verifiedWebhookSecret);
+        updates.webhookSecretLast4 = verifiedWebhookSecret.slice(-4);
+      } else {
+        await writeSecretValue(WEBHOOK_SECRET_CONFIG, null);
+        updates.webhookSecretLast4 = null;
+      }
+      resetStripeSecretCache();
+    } catch (error) {
+      console.error('Failed to persist Stripe webhook secret', error);
+      const message = error instanceof Error ? error.message : 'Failed to store Stripe webhook secret.';
+      const status = /Secret Manager|infrastructure/i.test(message) ? 500 : 400;
+      return NextResponse.json({ error: message }, { status });
+    }
   }
 
   try {

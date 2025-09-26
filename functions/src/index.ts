@@ -3,6 +3,7 @@ import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { onRequest } from 'firebase-functions/v2/https';
 import Stripe from 'stripe';
+import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import sharp from 'sharp';
 import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
@@ -50,14 +51,14 @@ const STRIPE_SETTINGS_DOC_ID = 'stripeConnect';
 const STRIPE_API_VERSION: Stripe.LatestApiVersion = '2024-06-20';
 
 let cachedStripeClient: Stripe | null = null;
-let cachedStripeSecret: string | null =
+let cachedStripeSecret: string | null | undefined =
   typeof process.env.STRIPE_SECRET_KEY === 'string' && process.env.STRIPE_SECRET_KEY.trim().length > 0
     ? process.env.STRIPE_SECRET_KEY.trim()
-    : null;
-let cachedStripeWebhookSecret: string | null =
+    : undefined;
+let cachedStripeWebhookSecret: string | null | undefined =
   typeof process.env.STRIPE_WEBHOOK_SECRET === 'string' && process.env.STRIPE_WEBHOOK_SECRET.trim().length > 0
     ? process.env.STRIPE_WEBHOOK_SECRET.trim()
-    : null;
+    : undefined;
 let cachedOperationalSettings:
   | { platformFeePercent: number | null; splitTerms: StripeSplitTermConfig[]; fetchedAt: number }
   | null = null;
@@ -121,60 +122,95 @@ function parseSplitTerms(raw: unknown): StripeSplitTermConfig[] {
     .filter((term): term is StripeSplitTermConfig => Boolean(term));
 }
 
+const secretManagerClient = new SecretManagerServiceClient();
+const STRIPE_SECRET_KEY_RESOURCE = normaliseString(process.env.STRIPE_SECRET_KEY_SECRET_NAME);
+const STRIPE_WEBHOOK_SECRET_RESOURCE = normaliseString(process.env.STRIPE_WEBHOOK_SECRET_SECRET_NAME);
+
+function parseSecretResource(resource: string): { parent: string; versionName: string } {
+  const trimmed = resource.trim();
+  if (!trimmed.startsWith('projects/')) {
+    throw new Error(`Secret resource must start with "projects/". Received: ${resource}`);
+  }
+  if (trimmed.includes('/versions/')) {
+    const [parent, version] = trimmed.split('/versions/');
+    const versionName = version && version.length > 0 ? version : 'latest';
+    return { parent, versionName: `${parent}/versions/${versionName}` };
+  }
+  return { parent: trimmed, versionName: `${trimmed}/versions/latest` };
+}
+
+async function readSecretValue(
+  resource: string | null,
+  fallbackEnv: string | null,
+  label: string
+): Promise<string | null> {
+  const fallback = normaliseString(fallbackEnv);
+  if (!resource) {
+    return fallback;
+  }
+  try {
+    const { versionName } = parseSecretResource(resource);
+    const [response] = await secretManagerClient.accessSecretVersion({ name: versionName });
+    const data = response.payload?.data;
+    if (!data || data.length === 0) {
+      return null;
+    }
+    const decoded = Buffer.from(data).toString('utf8').trim();
+    return decoded.length > 0 ? decoded : null;
+  } catch (error) {
+    if ((error as { code?: number }).code === 5) {
+      return fallback;
+    }
+    throw new Error(`Unable to read ${label} from Secret Manager: ${(error as Error).message}`);
+  }
+}
+
 async function loadStripeSettingsFromFirestore(): Promise<{
-  secretKey: string | null;
-  webhookSecret: string | null;
   platformFeePercent: number | null;
   splitTerms: StripeSplitTermConfig[];
 }> {
   const docRef = db.collection(STRIPE_SETTINGS_COLLECTION).doc(STRIPE_SETTINGS_DOC_ID);
   const snapshot = await docRef.get();
   const data = (snapshot.data() as Record<string, unknown>) || {};
-  const secretKey = normaliseString(data.secretKey ?? data.privateKey ?? data.secret);
-  const webhookSecret = normaliseString(data.webhookSecret ?? data.webhookSigningSecret ?? data.webhook);
   const platformFeePercent = parseNumber(data.platformFeePercent ?? data.platformFee ?? data.applicationFeePercent);
   const splitTerms = parseSplitTerms(data.splitTerms ?? data.splitPaymentTerms ?? data.paymentSchedule);
-  return { secretKey, webhookSecret, platformFeePercent, splitTerms };
+  return { platformFeePercent, splitTerms };
 }
 
 async function getStripeSecretKey(): Promise<string> {
-  if (cachedStripeSecret) {
+  if (cachedStripeSecret !== undefined) {
+    if (!cachedStripeSecret) {
+      throw new Error('Stripe secret key is not configured.');
+    }
     return cachedStripeSecret;
   }
-  const settings = await loadStripeSettingsFromFirestore();
-  if (!settings.secretKey) {
+  const secret = await readSecretValue(
+    STRIPE_SECRET_KEY_RESOURCE,
+    process.env.STRIPE_SECRET_KEY ?? null,
+    'Stripe secret key'
+  );
+  cachedStripeSecret = secret ?? null;
+  if (!cachedStripeSecret) {
     throw new Error('Stripe secret key is not configured.');
   }
-  cachedStripeSecret = settings.secretKey;
-  if (settings.webhookSecret && !cachedStripeWebhookSecret) {
-    cachedStripeWebhookSecret = settings.webhookSecret;
-  }
-  cachedOperationalSettings = {
-    platformFeePercent: settings.platformFeePercent,
-    splitTerms: settings.splitTerms,
-    fetchedAt: Date.now(),
-  };
   return cachedStripeSecret;
 }
 
 async function getStripeWebhookSecret(): Promise<string | null> {
-  if (cachedStripeWebhookSecret) {
+  if (cachedStripeWebhookSecret !== undefined) {
     return cachedStripeWebhookSecret;
   }
   try {
-    const settings = await loadStripeSettingsFromFirestore();
-    cachedStripeWebhookSecret = settings.webhookSecret;
-    if (!cachedStripeSecret && settings.secretKey) {
-      cachedStripeSecret = settings.secretKey;
-    }
-    cachedOperationalSettings = {
-      platformFeePercent: settings.platformFeePercent,
-      splitTerms: settings.splitTerms,
-      fetchedAt: Date.now(),
-    };
+    const secret = await readSecretValue(
+      STRIPE_WEBHOOK_SECRET_RESOURCE,
+      process.env.STRIPE_WEBHOOK_SECRET ?? null,
+      'Stripe webhook secret'
+    );
+    cachedStripeWebhookSecret = secret ?? null;
     return cachedStripeWebhookSecret;
   } catch (error) {
     console.warn('Unable to load Stripe webhook secret', error);
+    cachedStripeWebhookSecret = null;
     return null;
   }
 }
@@ -204,12 +240,6 @@ async function getStripeOperationalSettings(): Promise<{
     splitTerms: settings.splitTerms,
     fetchedAt: Date.now(),
   };
-  if (settings.secretKey && !cachedStripeSecret) {
-    cachedStripeSecret = settings.secretKey;
-  }
-  if (settings.webhookSecret && !cachedStripeWebhookSecret) {
-    cachedStripeWebhookSecret = settings.webhookSecret;
-  }
   return { platformFeePercent: settings.platformFeePercent, splitTerms: settings.splitTerms };
 }
 

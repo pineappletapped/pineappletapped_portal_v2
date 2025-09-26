@@ -3,6 +3,7 @@ import 'server-only';
 import Stripe from 'stripe';
 
 import { getFirebaseAdminFirestore } from './firebase-admin';
+import { createSecretConfig, readSecretValue } from './secret-manager';
 
 type FirestoreTimestamp = { toMillis(): number } | { seconds: number; nanoseconds: number };
 
@@ -14,9 +15,7 @@ export interface StripeSplitTerm {
 
 export interface StripeConnectSettings {
   publishableKey: string | null;
-  secretKey: string | null;
   secretKeyLast4: string | null;
-  webhookSecret: string | null;
   webhookSecretLast4: string | null;
   platformFeePercent: number | null;
   defaultPayoutScheduleDays: number | null;
@@ -29,12 +28,21 @@ const SETTINGS_COLLECTION = 'settings';
 const SETTINGS_DOC_ID = 'stripeConnect';
 const STRIPE_API_VERSION: Stripe.LatestApiVersion = '2024-04-10';
 
+const SECRET_KEY_CONFIG = createSecretConfig(
+  process.env.STRIPE_SECRET_KEY_SECRET_NAME,
+  process.env.STRIPE_SECRET_KEY,
+  'Stripe secret key'
+);
+const WEBHOOK_SECRET_CONFIG = createSecretConfig(
+  process.env.STRIPE_WEBHOOK_SECRET_SECRET_NAME,
+  process.env.STRIPE_WEBHOOK_SECRET,
+  'Stripe webhook secret'
+);
+
 function createEmptySettings(): StripeConnectSettings {
   return {
     publishableKey: null,
-    secretKey: null,
     secretKeyLast4: null,
-    webhookSecret: null,
     webhookSecretLast4: null,
     platformFeePercent: null,
     defaultPayoutScheduleDays: null,
@@ -51,6 +59,8 @@ let cachedSettings:
     }
   | null = null;
 let cachedStripeClient: { instance: Stripe; secret: string } | null = null;
+let cachedSecretKey: { value: string | null } | null = null;
+let cachedWebhookSecret: { value: string | null } | null = null;
 
 function toDate(value: unknown): Date | null {
   if (!value) {
@@ -177,9 +187,7 @@ export async function getStripeConnectSettings(options?: { forceRefresh?: boolea
   const raw = snapshot.exists ? (snapshot.data() as Record<string, unknown>) : {};
 
   const publishableKey = normaliseString(raw.publishableKey ?? raw.publicKey);
-  const secretKey = normaliseString(raw.secretKey ?? raw.privateKey ?? raw.secret);
   const secretKeyLast4 = normaliseString(raw.secretKeyLast4 ?? raw.secretLast4 ?? raw.secretSuffix);
-  const webhookSecret = normaliseString(raw.webhookSecret ?? raw.webhookSigningSecret);
   const webhookSecretLast4 = normaliseString(raw.webhookSecretLast4 ?? raw.webhookSuffix);
   const platformFeePercent = parsePercentage(raw.platformFeePercent ?? raw.applicationFeePercent ?? raw.platformFee);
   const defaultPayoutScheduleDays = parseInteger(raw.defaultPayoutScheduleDays ?? raw.payoutScheduleDays);
@@ -196,9 +204,7 @@ export async function getStripeConnectSettings(options?: { forceRefresh?: boolea
 
   const settings: StripeConnectSettings = {
     publishableKey,
-    secretKey,
     secretKeyLast4,
-    webhookSecret,
     webhookSecretLast4,
     platformFeePercent,
     defaultPayoutScheduleDays,
@@ -220,21 +226,21 @@ export function invalidateStripeSettingsCache() {
 }
 
 export async function getStripeSecretKey(): Promise<string | null> {
-  const envSecret = normaliseString(process.env.STRIPE_SECRET_KEY);
-  if (envSecret) {
-    return envSecret;
+  if (cachedSecretKey) {
+    return cachedSecretKey.value;
   }
-  const settings = await getStripeConnectSettings();
-  return settings.secretKey;
+  const value = await readSecretValue(SECRET_KEY_CONFIG);
+  cachedSecretKey = { value };
+  return value;
 }
 
 export async function getStripeWebhookSecret(): Promise<string | null> {
-  const envSecret = normaliseString(process.env.STRIPE_WEBHOOK_SECRET);
-  if (envSecret) {
-    return envSecret;
+  if (cachedWebhookSecret) {
+    return cachedWebhookSecret.value;
   }
-  const settings = await getStripeConnectSettings();
-  return settings.webhookSecret;
+  const value = await readSecretValue(WEBHOOK_SECRET_CONFIG);
+  cachedWebhookSecret = { value };
+  return value;
 }
 
 export async function getStripeClient(): Promise<Stripe | null> {
@@ -252,6 +258,11 @@ export async function getStripeClient(): Promise<Stripe | null> {
 
 export function resetStripeClientCache() {
   cachedStripeClient = null;
+}
+
+export function resetStripeSecretCache() {
+  cachedSecretKey = null;
+  cachedWebhookSecret = null;
 }
 
 export function summariseSecret(secret: string | null | undefined): { masked: string; last4: string | null } {

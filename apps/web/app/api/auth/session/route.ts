@@ -61,6 +61,20 @@ export async function POST(req: NextRequest) {
     const response = NextResponse.json({ destination, hasBackofficeAccess });
     const secure = process.env.NODE_ENV === 'production';
 
+    const sessionCookie = await auth.createSessionCookie(idToken, {
+      expiresIn: SESSION_MAX_AGE_SECONDS * 1000,
+    });
+
+    response.cookies.set({
+      name: 'session',
+      value: sessionCookie,
+      httpOnly: true,
+      sameSite: 'strict',
+      secure,
+      path: '/',
+      maxAge: SESSION_MAX_AGE_SECONDS,
+    });
+
     response.cookies.set({
       name: 'uid',
       value: decoded.uid,
@@ -103,7 +117,7 @@ export async function POST(req: NextRequest) {
 
 export async function DELETE() {
   const response = NextResponse.json({ success: true });
-  ['uid', 'roles', 'isStaff'].forEach((name) => {
+  ['session', 'uid', 'roles', 'isStaff'].forEach((name) => {
     response.cookies.set({
       name,
       value: '',
