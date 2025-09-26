@@ -40,6 +40,8 @@ interface RemarketingCampaign {
   } | null;
 }
 
+type RemarketingCampaignDoc = Omit<RemarketingCampaign, "id"> & Partial<Pick<RemarketingCampaign, "id">>;
+
 interface RemarketingSuggestion {
   id: string;
   campaignId?: string;
@@ -61,6 +63,8 @@ interface RemarketingSuggestion {
   emailLastClickedAt?: Timestamp | null;
   emailSentAt?: Timestamp | null;
 }
+
+type RemarketingSuggestionDoc = Omit<RemarketingSuggestion, "id"> & Partial<Pick<RemarketingSuggestion, "id">>;
 
 interface ProductSummary {
   id: string;
@@ -190,10 +194,14 @@ export default function RemarketingManager() {
     if (guardLoading || !allowed) return;
     const campaignsQuery = query(collection(db, "remarketingCampaigns"), orderBy("createdAt", "desc"));
     const unsubscribe = onSnapshot(campaignsQuery, (snapshot) => {
-      const nextCampaigns: RemarketingCampaign[] = snapshot.docs.map((docSnap) => ({
-        id: docSnap.id,
-        ...(docSnap.data() as RemarketingCampaign),
-      }));
+      const nextCampaigns: RemarketingCampaign[] = snapshot.docs.map((docSnap) => {
+        const data = docSnap.data() as RemarketingCampaignDoc | undefined;
+        const { id: dataId, ...rest } = data ?? ({} as RemarketingCampaignDoc);
+        return {
+          ...rest,
+          id: dataId ?? docSnap.id,
+        } as RemarketingCampaign;
+      });
       setCampaigns(nextCampaigns);
       setSelectedCampaignId((current) => {
         if (current) return current;
@@ -233,10 +241,14 @@ export default function RemarketingManager() {
       limit(25)
     );
     const unsubscribe = onSnapshot(suggestionQuery, (snapshot) => {
-      const filtered: RemarketingSuggestion[] = snapshot.docs.map((docSnap) => ({
-        id: docSnap.id,
-        ...(docSnap.data() as RemarketingSuggestion),
-      }));
+      const filtered: RemarketingSuggestion[] = snapshot.docs.map((docSnap) => {
+        const data = docSnap.data() as RemarketingSuggestionDoc | undefined;
+        const { id: dataId, ...rest } = data ?? ({} as RemarketingSuggestionDoc);
+        return {
+          ...rest,
+          id: dataId ?? docSnap.id,
+        } as RemarketingSuggestion;
+      });
       setSuggestions(filtered);
       setSuggestionsLoading(false);
     });

@@ -1639,7 +1639,7 @@ export default function AdminFranchisesPage() {
                     ? franchise.royalty
                     : defaultFranchiseRoyaltyConfig();
                   const hqScale = royaltyConfig.hqTiers
-                    .map((tier) => describeRoyaltyTier(tier))
+                    .map((tier) => describeRoyaltyTier({ ...tier, maxOrder: tier.maxOrder ?? null }))
                     .join(" → ");
                   const franchiseDirect = typeof royaltyConfig.franchiseSourcedPercentage === "number"
                     ? royaltyConfig.franchiseSourcedPercentage
