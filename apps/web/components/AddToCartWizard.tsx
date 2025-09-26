@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Product, ProductModifierSelection } from "@/lib/products";
 import { useCart } from "@/lib/cart";
 import { db, functions } from "@/lib/firebase";
@@ -41,6 +41,24 @@ export default function AddToCartWizard({
   const [date, setDate] = useState<string | null>(
     product.category === "exhibition-videography" ? product.eventDate ?? null : null
   );
+  const [error, setError] = useState<string | null>(null);
+  const [conflicts, setConflicts] = useState<string[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [liveMessage, setLiveMessage] = useState("Add this product to your cart");
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const handleDateSelect = (value: string) => {
+    setDate(value);
+    setConflicts([]);
+    setError(null);
+    const spokenDate = new Date(`${value}T00:00:00`).toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    });
+    setLiveMessage(`Selected ${spokenDate} for production`);
+  };
 
   useEffect(() => {
     async function load() {
@@ -77,8 +95,63 @@ export default function AddToCartWizard({
 
   const totalSteps = groups.length + 1; // final step for date
   const currentGroup = step < groups.length ? groups[step] : null;
+  const stepLabel = currentGroup
+    ? `Choose ${currentGroup.multiple ? "one or more" : "an"} option for ${currentGroup.name}`
+    : "Confirm the production date";
+
+  useEffect(() => {
+    setLiveMessage(`Step ${step + 1} of ${totalSteps}: ${stepLabel}`);
+  }, [step, totalSteps, stepLabel]);
+
+  useEffect(() => {
+    restoreFocusRef.current = document.activeElement as HTMLElement | null;
+    const dialogNode = dialogRef.current;
+    dialogNode?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+
+      if (event.key === "Tab" && dialogNode) {
+        const focusable = Array.from(
+          dialogNode.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+          )
+        ).filter((el) => !el.hasAttribute("data-focus-guard"));
+
+        if (focusable.length === 0) {
+          event.preventDefault();
+          dialogNode.focus();
+          return;
+        }
+
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const isShift = event.shiftKey;
+        const active = document.activeElement as HTMLElement;
+
+        if (!isShift && active === last) {
+          event.preventDefault();
+          first.focus();
+        } else if (isShift && active === first) {
+          event.preventDefault();
+          last.focus();
+        }
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      restoreFocusRef.current?.focus?.();
+    };
+  }, [onClose]);
 
   const toggle = (group: ModifierGroup, optionId: string, checked: boolean) => {
+    setError(null);
     setSelected((prev) => {
       const current = prev[group.id] || [];
       if (group.multiple) {
@@ -98,6 +171,8 @@ export default function AddToCartWizard({
   };
 
   const handleFinish = async () => {
+    setError(null);
+    setConflicts([]);
     const selections: ProductModifierSelection[] = [];
     let adj = 0;
     groups.forEach((g) => {
@@ -111,17 +186,25 @@ export default function AddToCartWizard({
       });
     });
     const price = basePrice + adj;
-    if (!date) return;
+    if (!date) {
+      setError("Select a production date to continue.");
+      setLiveMessage("Production date required before adding to cart");
+      return;
+    }
+    setSubmitting(true);
+    setLiveMessage("Checking equipment availability");
     try {
       const reserve = httpsCallable(functions, "reserveKit");
       const res: any = await reserve({ productId: product.id, date });
       const { conflicts = [], kitItems = [], rentalTotal = 0 } = res.data || {};
       if (conflicts.length > 0) {
-        alert(
-          `Unavailable equipment: ${conflicts
-            .map((c: any) => c.name || c.id)
-            .join(", ")}`
-        );
+        const conflictNames = conflicts
+          .map((c: any) => (c && (c.name || c.id)) || "Unavailable item")
+          .filter(Boolean);
+        setConflicts(conflictNames);
+        setError("Some equipment is already reserved on the selected date.");
+        setLiveMessage("Equipment conflicts found for the selected date");
+        setSubmitting(false);
         return;
       }
       add({
@@ -134,10 +217,14 @@ export default function AddToCartWizard({
         kitItems,
         rentalTotal,
       });
+      setLiveMessage("Added to cart");
+      setSubmitting(false);
       onClose();
     } catch (err) {
       console.error(err);
-      alert("Could not reserve equipment");
+      setError("We couldn't reserve the equipment right now. Try again in a moment.");
+      setLiveMessage("Reservation failed");
+      setSubmitting(false);
     }
   };
 
@@ -146,9 +233,48 @@ export default function AddToCartWizard({
     ? (selected[currentGroup.id] || []).length > 0
     : !!date;
 
+  const descriptionIds = useMemo(() => {
+    const ids = ["wizard-description"];
+    if (error) ids.push("wizard-error");
+    if (conflicts.length > 0) ids.push("wizard-conflicts");
+    return ids.join(" ");
+  }, [error, conflicts]);
+
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white p-6 rounded max-w-md w-full space-y-4">
+    <div
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 px-4"
+      role="presentation"
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="wizard-title"
+        aria-describedby={descriptionIds}
+        tabIndex={-1}
+        className="bg-white p-6 rounded-lg shadow-xl max-w-lg w-full space-y-5 focus:outline-none"
+      >
+        <div className="sr-only" aria-live="polite">
+          {liveMessage}
+        </div>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 id="wizard-title" className="text-lg font-semibold">
+              Add {product.name} to your cart
+            </h2>
+            <p id="wizard-description" className="mt-1 text-sm text-gray-600">
+              Step {step + 1} of {totalSteps}. {stepLabel}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={onClose}
+            aria-label="Close add to cart dialog"
+          >
+            Close
+          </button>
+        </div>
         {currentGroup ? (
           <div className="space-y-2">
             <p className="font-semibold">{currentGroup.name}</p>
@@ -156,7 +282,10 @@ export default function AddToCartWizard({
               const ids = selected[currentGroup.id] || [];
               const checked = ids.includes(o.id);
               return (
-                <label key={o.id} className="flex items-center gap-2 text-sm">
+                <label
+                  key={o.id}
+                  className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-sm hover:border-gray-300 focus-within:border-orange-400"
+                >
                   <input
                     type={currentGroup.multiple ? "checkbox" : "radio"}
                     name={`mod-${currentGroup.id}`}
@@ -178,7 +307,7 @@ export default function AddToCartWizard({
               <ProductDatePicker
                 productId={product.id}
                 selected={date}
-                onSelect={setDate}
+                onSelect={handleDateSelect}
               />
             ) : product.eventDate ? (
               <p className="text-sm">
@@ -189,6 +318,30 @@ export default function AddToCartWizard({
             )}
           </div>
         )}
+        {error && (
+          <div
+            id="wizard-error"
+            className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+            role="alert"
+          >
+            {error}
+          </div>
+        )}
+        {conflicts.length > 0 && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+            <p id="wizard-conflicts" className="font-medium">
+              The following items are unavailable on {date}:
+            </p>
+            <ul className="mt-2 list-disc space-y-1 pl-5">
+              {conflicts.map((name) => (
+                <li key={name}>{name}</li>
+              ))}
+            </ul>
+            <p className="mt-2">
+              Choose a different date or adjust your selections to continue.
+            </p>
+          </div>
+        )}
         <div className="flex justify-between pt-2">
           <button className="btn btn-sm" onClick={back}>
             {step === 0 ? "Cancel" : "Back"}
@@ -196,10 +349,10 @@ export default function AddToCartWizard({
           {dateStep ? (
             <button
               className="btn btn-sm"
-              disabled={!date}
+              disabled={!date || submitting}
               onClick={handleFinish}
             >
-              Add to Cart
+              {submitting ? "Adding…" : "Add to Cart"}
             </button>
           ) : (
             <button
