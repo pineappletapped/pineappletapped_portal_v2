@@ -38,7 +38,181 @@ admin.initializeApp({
     'pineapple-tapped---portal.firebasestorage.app',
 });
 const db = admin.firestore();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' });
+
+type StripeSplitTermConfig = {
+  label: string;
+  percentage: number;
+  dueDays: number | null;
+};
+
+const STRIPE_SETTINGS_COLLECTION = 'settings';
+const STRIPE_SETTINGS_DOC_ID = 'stripeConnect';
+const STRIPE_API_VERSION: Stripe.LatestApiVersion = '2024-06-20';
+
+let cachedStripeClient: Stripe | null = null;
+let cachedStripeSecret: string | null =
+  typeof process.env.STRIPE_SECRET_KEY === 'string' && process.env.STRIPE_SECRET_KEY.trim().length > 0
+    ? process.env.STRIPE_SECRET_KEY.trim()
+    : null;
+let cachedStripeWebhookSecret: string | null =
+  typeof process.env.STRIPE_WEBHOOK_SECRET === 'string' && process.env.STRIPE_WEBHOOK_SECRET.trim().length > 0
+    ? process.env.STRIPE_WEBHOOK_SECRET.trim()
+    : null;
+let cachedOperationalSettings:
+  | { platformFeePercent: number | null; splitTerms: StripeSplitTermConfig[]; fetchedAt: number }
+  | null = null;
+
+function normaliseString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value.trim());
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function parseInteger(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed)) {
+      return Math.trunc(parsed);
+    }
+  }
+  return null;
+}
+
+function parseSplitTerms(raw: unknown): StripeSplitTermConfig[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+      const data = entry as Record<string, unknown>;
+      const label = normaliseString(data.label ?? data.name ?? data.title);
+      const percentage = parseNumber(data.percentage ?? data.percent ?? data.share);
+      const dueDays = parseInteger(data.dueDays ?? data.days ?? data.offsetDays ?? data.dueInDays);
+      if (!label || percentage === null) {
+        return null;
+      }
+      return {
+        label,
+        percentage,
+        dueDays: dueDays ?? null,
+      } as StripeSplitTermConfig;
+    })
+    .filter((term): term is StripeSplitTermConfig => Boolean(term));
+}
+
+async function loadStripeSettingsFromFirestore(): Promise<{
+  secretKey: string | null;
+  webhookSecret: string | null;
+  platformFeePercent: number | null;
+  splitTerms: StripeSplitTermConfig[];
+}> {
+  const docRef = db.collection(STRIPE_SETTINGS_COLLECTION).doc(STRIPE_SETTINGS_DOC_ID);
+  const snapshot = await docRef.get();
+  const data = (snapshot.data() as Record<string, unknown>) || {};
+  const secretKey = normaliseString(data.secretKey ?? data.privateKey ?? data.secret);
+  const webhookSecret = normaliseString(data.webhookSecret ?? data.webhookSigningSecret ?? data.webhook);
+  const platformFeePercent = parseNumber(data.platformFeePercent ?? data.platformFee ?? data.applicationFeePercent);
+  const splitTerms = parseSplitTerms(data.splitTerms ?? data.splitPaymentTerms ?? data.paymentSchedule);
+  return { secretKey, webhookSecret, platformFeePercent, splitTerms };
+}
+
+async function getStripeSecretKey(): Promise<string> {
+  if (cachedStripeSecret) {
+    return cachedStripeSecret;
+  }
+  const settings = await loadStripeSettingsFromFirestore();
+  if (!settings.secretKey) {
+    throw new Error('Stripe secret key is not configured.');
+  }
+  cachedStripeSecret = settings.secretKey;
+  if (settings.webhookSecret && !cachedStripeWebhookSecret) {
+    cachedStripeWebhookSecret = settings.webhookSecret;
+  }
+  cachedOperationalSettings = {
+    platformFeePercent: settings.platformFeePercent,
+    splitTerms: settings.splitTerms,
+    fetchedAt: Date.now(),
+  };
+  return cachedStripeSecret;
+}
+
+async function getStripeWebhookSecret(): Promise<string | null> {
+  if (cachedStripeWebhookSecret) {
+    return cachedStripeWebhookSecret;
+  }
+  try {
+    const settings = await loadStripeSettingsFromFirestore();
+    cachedStripeWebhookSecret = settings.webhookSecret;
+    if (!cachedStripeSecret && settings.secretKey) {
+      cachedStripeSecret = settings.secretKey;
+    }
+    cachedOperationalSettings = {
+      platformFeePercent: settings.platformFeePercent,
+      splitTerms: settings.splitTerms,
+      fetchedAt: Date.now(),
+    };
+    return cachedStripeWebhookSecret;
+  } catch (error) {
+    console.warn('Unable to load Stripe webhook secret', error);
+    return null;
+  }
+}
+
+async function getStripeClient(): Promise<Stripe> {
+  const secret = await getStripeSecretKey();
+  if (cachedStripeClient) {
+    return cachedStripeClient;
+  }
+  cachedStripeClient = new Stripe(secret, { apiVersion: STRIPE_API_VERSION });
+  return cachedStripeClient;
+}
+
+async function getStripeOperationalSettings(): Promise<{
+  platformFeePercent: number | null;
+  splitTerms: StripeSplitTermConfig[];
+}> {
+  if (cachedOperationalSettings && Date.now() - cachedOperationalSettings.fetchedAt < 5 * 60 * 1000) {
+    return {
+      platformFeePercent: cachedOperationalSettings.platformFeePercent,
+      splitTerms: cachedOperationalSettings.splitTerms,
+    };
+  }
+  const settings = await loadStripeSettingsFromFirestore();
+  cachedOperationalSettings = {
+    platformFeePercent: settings.platformFeePercent,
+    splitTerms: settings.splitTerms,
+    fetchedAt: Date.now(),
+  };
+  if (settings.secretKey && !cachedStripeSecret) {
+    cachedStripeSecret = settings.secretKey;
+  }
+  if (settings.webhookSecret && !cachedStripeWebhookSecret) {
+    cachedStripeWebhookSecret = settings.webhookSecret;
+  }
+  return { platformFeePercent: settings.platformFeePercent, splitTerms: settings.splitTerms };
+}
+
 const VAT_RATE = 0.2;
 const DAY_IN_MS = 86_400_000;
 const DEFAULT_FILMING_SLA_DAYS = 7;
@@ -4655,6 +4829,41 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     orderData.royaltyPercentage = null;
   }
 
+  if (!Array.isArray(order.paymentSchedule) || order.paymentSchedule.length === 0) {
+    try {
+      const { splitTerms } = await getStripeOperationalSettings();
+      if (splitTerms.length > 0) {
+        const scheduleEntries = splitTerms.map((term, index) => {
+          const grossAmount = Number((price * (term.percentage / 100)).toFixed(2));
+          const netAmount = Number((finalTotal * (term.percentage / 100)).toFixed(2));
+          let dueAt: admin.firestore.Timestamp | admin.firestore.FieldValue | null = null;
+          if (term.dueDays !== null) {
+            if (term.dueDays <= 0) {
+              dueAt = admin.firestore.FieldValue.serverTimestamp();
+            } else {
+              const dueDate = new Date(Date.now() + term.dueDays * DAY_IN_MS);
+              dueAt = admin.firestore.Timestamp.fromDate(dueDate);
+            }
+          }
+          return {
+            id: uuidv4(),
+            label: term.label,
+            percentage: term.percentage,
+            dueDays: term.dueDays,
+            grossAmount,
+            netAmount,
+            status: index === 0 ? 'due' : 'scheduled',
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            dueAt,
+          };
+        });
+        orderData.paymentSchedule = scheduleEntries;
+      }
+    } catch (scheduleError) {
+      console.warn('Failed to apply default Stripe payment schedule', scheduleError);
+    }
+  }
+
   const orderRef = await db.collection('orders').add(orderData);
 
   const driveClientKeyBase = clientRoyaltyKey ?? (normalisedEmail ? `email:${normalisedEmail}` : null);
@@ -5501,44 +5710,133 @@ export const orders_refund = functions.https.onCall(async (data, context) => {
  */
 export const stripe_createPaymentIntent = functions.https.onCall(async (data, context) => {
   if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
-  const { orderId, type } = data;
-  if (!orderId || !type) throw new functions.https.HttpsError('invalid-argument', 'orderId and type are required');
+  const { orderId, type } = data || {};
+  if (!orderId || !type) {
+    throw new functions.https.HttpsError('invalid-argument', 'orderId and type are required');
+  }
   const orderDoc = await db.collection('orders').doc(orderId).get();
-  if (!orderDoc.exists) throw new functions.https.HttpsError('not-found', 'Order not found');
-  const order = orderDoc.data() as any;
-  const price = order.price || 0;
-  const depositPercentage = order.depositPercentage || 0;
-  const depositAmount = order.depositAmount || (price * (depositPercentage / 100));
-  const balanceAmount = order.balanceAmount || (price - depositAmount);
-  let amount: number;
+  if (!orderDoc.exists) {
+    throw new functions.https.HttpsError('not-found', 'Order not found');
+  }
+  const order = orderDoc.data() as Record<string, any>;
+
+  const price = Number(order.price) || 0;
+  const depositPercentage = Number(order.depositPercentage) || 0;
+  const depositAmount = Number(order.depositAmount) || price * (depositPercentage / 100);
+  const balanceAmount = Number(order.balanceAmount) || price - depositAmount;
+
+  let amountCents: number;
   let description: string;
   if (type === 'deposit') {
-    amount = Math.round(depositAmount * 100);
+    amountCents = Math.round(Math.max(depositAmount, 0) * 100);
     description = `Deposit for order ${orderId}`;
   } else if (type === 'balance') {
-    amount = Math.round(balanceAmount * 100);
+    amountCents = Math.round(Math.max(balanceAmount, 0) * 100);
     description = `Balance for order ${orderId}`;
+  } else if (type === 'custom') {
+    const customAmountInput = data?.customAmount;
+    const parsedAmount =
+      typeof customAmountInput === 'number'
+        ? customAmountInput
+        : typeof customAmountInput === 'string'
+          ? Number.parseFloat(customAmountInput)
+          : NaN;
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      throw new functions.https.HttpsError('invalid-argument', 'customAmount must be a positive number');
+    }
+    amountCents = Math.round(parsedAmount * 100);
+    const customDescription =
+      typeof data?.customDescription === 'string' && data.customDescription.trim().length > 0
+        ? data.customDescription.trim()
+        : `Payment for order ${orderId}`;
+    description = customDescription;
   } else {
     throw new functions.https.HttpsError('invalid-argument', 'Invalid payment type');
   }
-  // Create PaymentIntent
+
+  if (!Number.isFinite(amountCents) || amountCents <= 0) {
+    throw new functions.https.HttpsError('failed-precondition', 'Payment amount must be greater than zero.');
+  }
+
+  const stripe = await getStripeClient();
+  const { platformFeePercent } = await getStripeOperationalSettings();
+
+  let applicationFeeAmount: number | null = null;
+  let destinationAccountId: string | null = null;
+  const rawFranchiseId = typeof order.franchiseId === 'string' ? order.franchiseId.trim() : '';
+
+  if (rawFranchiseId) {
+    try {
+      const franchiseSnap = await db.collection('franchises').doc(rawFranchiseId).get();
+      if (franchiseSnap.exists) {
+        const franchiseData = (franchiseSnap.data() as Record<string, unknown>) || {};
+        const accountId = normaliseString(franchiseData.stripeAccountId ?? franchiseData.connectAccountId);
+        if (accountId) {
+          destinationAccountId = accountId;
+          const franchiseFee = parseNumber(franchiseData.platformFee);
+          const feePercentage = franchiseFee ?? platformFeePercent;
+          if (feePercentage !== null && Number.isFinite(feePercentage) && feePercentage > 0) {
+            applicationFeeAmount = Math.round((amountCents * feePercentage) / 100);
+            if (applicationFeeAmount < 0) {
+              applicationFeeAmount = 0;
+            }
+            if (applicationFeeAmount > amountCents) {
+              applicationFeeAmount = amountCents;
+            }
+          }
+        }
+      }
+    } catch (franchiseError) {
+      console.warn('Unable to resolve franchise Stripe account', rawFranchiseId, franchiseError);
+    }
+  }
+
+  const metadata: Record<string, string> = {
+    orderId: String(orderId),
+    type: String(type),
+  };
+  if (rawFranchiseId) {
+    metadata.franchiseId = rawFranchiseId;
+  }
+  if (applicationFeeAmount !== null) {
+    metadata.applicationFeeAmount = String(applicationFeeAmount);
+  }
+  if (destinationAccountId) {
+    metadata.destinationAccountId = destinationAccountId;
+  }
+
   const paymentIntent = await stripe.paymentIntents.create({
-    amount,
+    amount: amountCents,
     currency: 'gbp',
     description,
-    metadata: { orderId, type },
+    metadata,
     automatic_payment_methods: { enabled: true },
+    transfer_data: destinationAccountId ? { destination: destinationAccountId } : undefined,
+    application_fee_amount:
+      applicationFeeAmount !== null && applicationFeeAmount > 0 ? applicationFeeAmount : undefined,
   });
+
   return { clientSecret: paymentIntent.client_secret };
 });
 
 // Stripe webhook (deposit/balance) — skeleton
 export const stripe_webhook = functions.https.onRequest(async (req, res) => {
   const sig = req.headers['stripe-signature'] as string;
+  let stripe: Stripe;
+  let webhookSecret: string | null = null;
+  try {
+    stripe = await getStripeClient();
+    webhookSecret = await getStripeWebhookSecret();
+  } catch (clientError) {
+    console.error('Unable to initialise Stripe client for webhook processing', clientError);
+    res.status(500).send('Stripe configuration error');
+    return;
+  }
+
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET || '');
-  } catch (err:any) {
+    event = stripe.webhooks.constructEvent(req.rawBody, sig, webhookSecret || '');
+  } catch (err: any) {
     console.error('Webhook signature verification failed.', err.message);
     res.status(400).send(`Webhook Error: ${err.message}`);
     return;
@@ -5984,6 +6282,7 @@ export const stripe_createPlan = functions.https.onCall(async (data, context) =>
   if (!name || !amount || !interval)
     throw new functions.https.HttpsError('invalid-argument', 'Missing plan parameters');
   try {
+    const stripe = await getStripeClient();
     const product = await stripe.products.create({ name });
     const price = await stripe.prices.create({
       unit_amount: Math.round(amount * 100),
@@ -6027,6 +6326,7 @@ export const stripe_createSubscription = functions.https.onCall(async (data, con
     priceId = planData.priceId;
   }
   try {
+    const stripe = await getStripeClient();
     let customerId = (orgSnap.data() as any).stripeCustomerId;
     if (!customerId) {
       const customer = await stripe.customers.create({ email: customerEmail });
@@ -6062,6 +6362,7 @@ export const stripe_cancelSubscription = functions.https.onCall(async (data, con
   if (!subscriptionId)
     throw new functions.https.HttpsError('invalid-argument', 'Subscription ID required');
   try {
+    const stripe = await getStripeClient();
     await stripe.subscriptions.cancel(subscriptionId);
     const snap = await db
       .collection('orgs')
@@ -6094,6 +6395,7 @@ export const stripe_createCheckoutSession = functions.https.onCall(async (data, 
     throw new functions.https.HttpsError('invalid-argument', 'orderId and lineItems required');
   }
   try {
+    const stripe = await getStripeClient();
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       line_items: lineItems,

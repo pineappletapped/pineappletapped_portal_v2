@@ -40,9 +40,48 @@ function CheckoutContent() {
   const vat = finalTotal * VAT_RATE;
   const grandTotal = finalTotal + vat;
   const router = useRouter();
-  const stripePromise = useMemo(() => {
-    const key = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "";
-    return key ? loadStripe(key) : null;
+  const [stripePromise, setStripePromise] = useState<ReturnType<typeof loadStripe> | null>(null);
+  const [stripeConfigLoading, setStripeConfigLoading] = useState(true);
+  const [stripeConfigError, setStripeConfigError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStripeConfigLoading(true);
+    (async () => {
+      try {
+        const response = await fetch("/api/stripe/config");
+        if (!response.ok) {
+          throw new Error(`Stripe configuration unavailable (${response.status}).`);
+        }
+        const data = await response.json();
+        if (cancelled) {
+          return;
+        }
+        const key = typeof data.publishableKey === "string" ? data.publishableKey.trim() : "";
+        if (!key) {
+          setStripePromise(null);
+          setStripeConfigError("Stripe publishable key is not configured.");
+        } else {
+          setStripePromise(loadStripe(key));
+          setStripeConfigError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Failed to load Stripe publishable key", error);
+          setStripePromise(null);
+          setStripeConfigError(
+            error instanceof Error ? error.message : "Stripe configuration is unavailable."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setStripeConfigLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const [email, setEmail] = useState("");
@@ -290,7 +329,7 @@ function CheckoutContent() {
       return false;
     }
     if (!stripePromise) {
-      setPaymentError("Payment configuration is unavailable.");
+      setPaymentError(stripeConfigError || "Payment configuration is unavailable.");
       return false;
     }
 
@@ -350,6 +389,7 @@ function CheckoutContent() {
     items.length,
     orderInput,
     stripePromise,
+    stripeConfigError,
   ]);
 
   useEffect(() => {
@@ -359,7 +399,9 @@ function CheckoutContent() {
       !clientSecret &&
       !initializingPayment &&
       items.length > 0 &&
-      name
+      name &&
+      stripePromise &&
+      !stripeConfigLoading
     ) {
       void initializePaymentIntent();
     }
@@ -371,6 +413,8 @@ function CheckoutContent() {
     initializingPayment,
     items.length,
     name,
+    stripePromise,
+    stripeConfigLoading,
   ]);
 
   const handlePaymentSuccess = useCallback(
@@ -626,6 +670,10 @@ function CheckoutContent() {
                   ? "Sign in to continue to payment."
                   : !name
                   ? "Enter your name to continue."
+                  : stripeConfigLoading
+                  ? "Loading payment configuration…"
+                  : stripeConfigError
+                  ? stripeConfigError
                   : !stripePromise
                   ? "Payment is currently unavailable."
                   : "Prepare your payment details to enter card information."}
@@ -639,6 +687,8 @@ function CheckoutContent() {
                   items.length === 0 ||
                   !currentUser ||
                   !name ||
+                  stripeConfigLoading ||
+                  Boolean(stripeConfigError) ||
                   !stripePromise
                 }
               >
