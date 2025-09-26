@@ -16,7 +16,6 @@ import {
 import { db, auth, functions, httpsCallable } from '@/lib/firebase';
 import Link from 'next/link';
 import PortalContainer from '@/components/PortalContainer';
-import ContentPlanPanel from '@/components/ContentPlanPanel';
 
 /**
  * Enhanced dashboard showing a unified overview of projects, orders, bookings,
@@ -239,7 +238,24 @@ export default function DashboardPage() {
           <div className="font-medium">View Projects</div>
         </Link>
       </div>
-      <ContentPlanPanel />
+      <section className="card p-6 border border-dashed border-amber-200 bg-amber-50 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="space-y-1">
+            <h2 className="text-lg font-semibold text-amber-900">Annual content planner</h2>
+            <p className="text-sm text-amber-800">
+              Build your campaign roadmap with deliverables, budgets, and linked services without leaving the dashboard.
+            </p>
+          </div>
+          <Link href="/dashboard/content-planner" className="btn-sm">
+            Open planner
+          </Link>
+        </div>
+        <ul className="space-y-1 text-xs text-amber-900">
+          <li>• Auto-connect initiatives to live Pineapple Tapped products and pricing.</li>
+          <li>• Brief HQ on bespoke concepts with a single click.</li>
+          <li>• Generate AI storyboards to keep your stakeholders aligned.</li>
+        </ul>
+      </section>
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
       {/* Customer Tasks */}
       <section className="card p-4">

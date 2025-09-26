@@ -27,6 +27,7 @@ const LABELS: Record<string, string> = {
   team: 'Team',
   contractors: 'Contractors',
   bookings: 'Bookings',
+  'content-planner': 'Content Planner',
 };
 
 function formatSegment(seg: string): string {
