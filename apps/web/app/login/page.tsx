@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getClientFirebaseAuth } from '@/lib/firebase';
 import { setPersistence, browserLocalPersistence } from 'firebase/auth';
 
@@ -10,7 +10,18 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [resetEmail, setResetEmail] = useState<string | null>(null);
+  const [isResetFormVisible, setIsResetFormVisible] = useState(false);
+  const [resetIdentifier, setResetIdentifier] = useState('');
+  const resetInputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+
+  useEffect(() => {
+    if (isResetFormVisible) {
+      requestAnimationFrame(() => {
+        resetInputRef.current?.focus();
+      });
+    }
+  }, [isResetFormVisible]);
 
   const login = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,27 +70,30 @@ export default function Login() {
     }
   };
 
-  const handlePasswordReset = async () => {
+  const openResetForm = () => {
     setError('');
     setResetEmail(null);
-
     const defaultIdentifier = username.trim();
-    const defaultEmail = defaultIdentifier
+    const defaultValue = defaultIdentifier
       ? defaultIdentifier.includes('@')
         ? defaultIdentifier
         : `${defaultIdentifier}@pineappletapped.com`
       : '';
+    setResetIdentifier(defaultValue);
+    setIsResetFormVisible(true);
+  };
 
-    const input =
-      typeof window === 'undefined'
-        ? ''
-        : window.prompt('Enter the email address for your account', defaultEmail);
+  const cancelReset = () => {
+    setIsResetFormVisible(false);
+    setResetIdentifier('');
+  };
 
-    if (!input) {
-      return;
-    }
+  const handlePasswordReset = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError('');
+    setResetEmail(null);
 
-    const trimmedInput = input.trim();
+    const trimmedInput = resetIdentifier.trim();
     if (!trimmedInput) {
       setError('Please enter an email address to reset your password.');
       return;
@@ -93,6 +107,8 @@ export default function Login() {
       const { auth, sendPasswordResetEmail } = await getClientFirebaseAuth();
       await sendPasswordResetEmail(auth, email);
       setResetEmail(email);
+      setIsResetFormVisible(false);
+      setResetIdentifier('');
       router.prefetch(`/auth/reset?email=${encodeURIComponent(email)}`);
     } catch (err: any) {
       console.error('Failed to send password reset email', err);
@@ -110,20 +126,24 @@ export default function Login() {
   return (
     <div className="max-w-md mx-auto card grid gap-3">
       <h1 className="text-xl font-semibold">Sign in</h1>
-      <form onSubmit={login} className="grid gap-3">
-        {error && <p className="text-sm text-red-600">{error}</p>}
-        {resetEmail && (
-          <p className="text-sm text-green-600">
-            Password reset email sent to <span className="font-medium">{resetEmail}</span>.{' '}
-            <Link
-              href={`/auth/reset?email=${encodeURIComponent(resetEmail)}`}
-              className="underline"
-            >
-              View next steps
-            </Link>
-            .
-          </p>
-        )}
+      {error && (
+        <p className="text-sm text-red-600" role="alert" aria-live="assertive">
+          {error}
+        </p>
+      )}
+      {resetEmail && (
+        <p className="text-sm text-green-600" role="status" aria-live="polite">
+          Password reset email sent to <span className="font-medium">{resetEmail}</span>.{' '}
+          <Link
+            href={`/auth/reset?email=${encodeURIComponent(resetEmail)}`}
+            className="underline"
+          >
+            View next steps
+          </Link>
+          .
+        </p>
+      )}
+      <form onSubmit={login} className="grid gap-3" noValidate>
         <input
           className="input"
           type="text"
@@ -145,14 +165,58 @@ export default function Login() {
         <button type="submit" className="btn">
           Login
         </button>
+      </form>
+      <div className="grid gap-2">
         <button
           type="button"
           className="btn btn-link justify-start px-0"
-          onClick={handlePasswordReset}
+          onClick={openResetForm}
+          aria-expanded={isResetFormVisible}
+          aria-controls="password-reset-panel"
         >
           Forgot password?
         </button>
-      </form>
+        {isResetFormVisible && (
+          <div
+            id="password-reset-panel"
+            className="rounded-md border border-base-300 p-3 bg-base-100"
+            role="region"
+            aria-labelledby="password-reset-heading"
+          >
+            <h2 id="password-reset-heading" className="text-sm font-medium">
+              Reset your password
+            </h2>
+            <p id="password-reset-instructions" className="text-xs text-base-content/70">
+              Enter the email associated with your account and we will send you a link to reset your password.
+            </p>
+            <form className="mt-2 grid gap-2" onSubmit={handlePasswordReset} noValidate>
+              <label htmlFor="reset-email" className="text-xs font-medium">
+                Email address
+              </label>
+              <input
+                id="reset-email"
+                ref={resetInputRef}
+                className="input input-sm"
+                type="email"
+                inputMode="email"
+                autoComplete="email"
+                aria-describedby="password-reset-instructions"
+                value={resetIdentifier}
+                onChange={event => setResetIdentifier(event.target.value)}
+                required
+              />
+              <div className="flex gap-2">
+                <button type="submit" className="btn btn-sm">
+                  Send reset link
+                </button>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={cancelReset}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
