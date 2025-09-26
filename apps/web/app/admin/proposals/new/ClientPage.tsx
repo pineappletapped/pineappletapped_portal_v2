@@ -12,6 +12,7 @@ import ProposalSetupBuilder, {
   type ProposalSetupItem as SetupLibraryItem,
   type ProposalSetupPlan,
 } from "@/components/admin/proposals/ProposalSetupBuilder";
+import ProposalStoryboardAssistant from "@/components/admin/proposals/ProposalStoryboardAssistant";
 
 const SETUP_LAYOUT_LABELS: Record<ProposalSetupPlan["layout"], string> = {
   conference: "Conference stage",
@@ -206,6 +207,17 @@ export default function NewProposalPage() {
     }
   };
   const addCustom = () => setItems((prev) => [...prev, { type: "custom", name: "", price: 0 }]);
+  const addGeneratedItems = (generated: ProposalItem[]) => {
+    if (!generated || generated.length === 0) return;
+    setItems((prev) => [...prev, ...generated]);
+  };
+  const appendNarrativeToNotes = (value: string) => {
+    if (!value || !value.trim()) return;
+    setCustomText((prev) => {
+      if (!prev || !prev.trim()) return value;
+      return `${prev}\n\n${value}`;
+    });
+  };
   const updateItem = (i: number, field: keyof ProposalItem, value: any) => {
     setItems((prev) =>
       prev.map((it, idx) => (idx === i ? { ...it, [field]: value } : it))
@@ -319,6 +331,13 @@ export default function NewProposalPage() {
               onChange={handleSetupPlanChange}
             />
           </div>
+          <ProposalStoryboardAssistant
+            items={items}
+            products={products}
+            orgId={orgId || undefined}
+            onAddItems={addGeneratedItems}
+            onAppendNarrative={appendNarrativeToNotes}
+          />
         </div>
       )}
       {step === 3 && (

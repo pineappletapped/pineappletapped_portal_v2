@@ -87,6 +87,28 @@ type NarrativeDoc = {
   updatedAt: Date | null;
 };
 
+type StoryboardDraft = {
+  id: string;
+  narrative: string;
+  sections: Array<{
+    id: string;
+    title: string;
+    summary: string;
+    talkingPoints: string[];
+  }>;
+  timeline: Array<{
+    phase: string;
+    duration: string;
+    tasks: string[];
+  }>;
+  recommendedItems: Array<{
+    id: string;
+    name: string;
+    priceHint: string | null;
+    description: string | null;
+  }>;
+};
+
 const MARKETING_PRIORITY_LABELS: Record<PlanRow["priority"], string> = {
   awareness: "Awareness",
   engagement: "Engagement",
@@ -220,6 +242,9 @@ export default function ContentPlanPanel() {
   const [narrativeError, setNarrativeError] = useState<string | null>(null);
   const [narrativeDraft, setNarrativeDraft] = useState<NarrativeDoc | null>(null);
   const [narrativeHistory, setNarrativeHistory] = useState<NarrativeDoc[]>([]);
+  const [storyboardStatus, setStoryboardStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [storyboardError, setStoryboardError] = useState<string | null>(null);
+  const [storyboardDraft, setStoryboardDraft] = useState<StoryboardDraft | null>(null);
 
   const remainingMonths = useMemo(
     () => MONTHS.filter((month) => !rows.some((row) => row.month === month)),
@@ -678,6 +703,125 @@ export default function ContentPlanPanel() {
     }
   };
 
+  const handleGenerateStoryboard = async () => {
+    const meaningfulRows = rows.filter((row) => row.theme || row.deliverables || row.productIds.length > 0);
+    if (meaningfulRows.length === 0) {
+      setStoryboardStatus("error");
+      setStoryboardError("Add campaign details before building a storyboard.");
+      return;
+    }
+
+    setStoryboardStatus("loading");
+    setStoryboardError(null);
+
+    const primaryTheme = meaningfulRows.find((row) => row.theme)?.theme || meaningfulRows[0]?.month || "Campaign";
+    const deliverables = meaningfulRows.flatMap((row) => parseDeliverables(row.deliverables));
+    const items = meaningfulRows.flatMap((row) =>
+      row.productIds.map((id) => {
+        const product = productMap.get(id);
+        return {
+          name: product?.name || "Service",
+          category: product?.category || null,
+          price: product?.price ?? null,
+          deliverables: parseDeliverables(row.deliverables),
+        };
+      })
+    );
+
+    const goals = [
+      `Awareness weighting ${marketingMix.awareness}%`,
+      `Engagement weighting ${marketingMix.engagement}%`,
+      `Conversion weighting ${marketingMix.conversion}%`,
+    ];
+
+    const notes: string[] = [];
+    if (totalBudget > 0) {
+      notes.push(`Working budget ${formatCurrency(totalBudget)}.`);
+    }
+    if (meaningfulRows.length < 12) {
+      notes.push(`Plan covers ${meaningfulRows.length} months.`);
+    }
+
+    try {
+      const response = await fetch("/api/proposals/storyboard", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectName: primaryTheme,
+          audience: null,
+          tone: "Strategic",
+          goals,
+          deliverables,
+          items,
+          notes: notes.join(" ") || null,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: "Failed to build storyboard" }));
+        throw new Error(typeof error.error === "string" ? error.error : "Failed to build storyboard");
+      }
+
+      const payload = await response.json();
+      const sections = Array.isArray(payload.sections)
+        ? payload.sections
+            .map((section: any) => {
+              if (!section || typeof section !== "object") return null;
+              const talkingPoints = Array.isArray(section.talkingPoints)
+                ? section.talkingPoints.filter((item: unknown): item is string => typeof item === "string")
+                : [];
+              return {
+                id: typeof section.id === "string" ? section.id : randomId(),
+                title: typeof section.title === "string" ? section.title : "Storyboard scene",
+                summary: typeof section.summary === "string" ? section.summary : "",
+                talkingPoints,
+              };
+            })
+            .filter((item): item is StoryboardDraft["sections"][number] => item !== null)
+        : [];
+      const timeline = Array.isArray(payload.timeline)
+        ? payload.timeline
+            .map((entry: any) => {
+              if (!entry || typeof entry !== "object") return null;
+              const tasks = Array.isArray(entry.tasks)
+                ? entry.tasks.filter((task: unknown): task is string => typeof task === "string")
+                : [];
+              return {
+                phase: typeof entry.phase === "string" ? entry.phase : "Phase",
+                duration: typeof entry.duration === "string" ? entry.duration : "",
+                tasks,
+              };
+            })
+            .filter((item): item is StoryboardDraft["timeline"][number] => item !== null)
+        : [];
+      const recommendedItems = Array.isArray(payload.recommendedItems)
+        ? payload.recommendedItems
+            .map((entry: any) => {
+              if (!entry || typeof entry !== "object") return null;
+              return {
+                id: typeof entry.id === "string" ? entry.id : randomId(),
+                name: typeof entry.name === "string" ? entry.name : "Proposal line item",
+                priceHint: typeof entry.priceHint === "string" ? entry.priceHint : null,
+                description: typeof entry.description === "string" ? entry.description : null,
+              };
+            })
+            .filter((item): item is StoryboardDraft["recommendedItems"][number] => item !== null)
+        : [];
+
+      setStoryboardDraft({
+        id: typeof payload.id === "string" ? payload.id : randomId(),
+        narrative: typeof payload.narrative === "string" ? payload.narrative : "Storyboard prepared.",
+        sections,
+        timeline,
+        recommendedItems,
+      });
+      setStoryboardStatus("ready");
+    } catch (error) {
+      setStoryboardStatus("error");
+      setStoryboardError(error instanceof Error ? error.message : "Failed to build storyboard");
+    }
+  };
+
   const latestNarrative = narrativeDraft || narrativeHistory[0] || null;
 
   return (
@@ -967,7 +1111,7 @@ export default function ContentPlanPanel() {
         </div>
       </div>
 
-      <div className="card border p-4 space-y-3">
+      <div className="card border p-4 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-semibold text-gray-700">Narrative & storyboard draft</h3>
@@ -975,14 +1119,24 @@ export default function ContentPlanPanel() {
               Send your plan to our AI assistant for a suggested storyline, quarterly beats, and follow-up recommendations.
             </p>
           </div>
-          <button
-            type="button"
-            className="btn-xs"
-            onClick={handleGenerateNarrative}
-            disabled={narrativeStatus === "loading"}
-          >
-            {narrativeStatus === "loading" ? "Generating…" : "Generate AI narrative"}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn-xs"
+              onClick={handleGenerateNarrative}
+              disabled={narrativeStatus === "loading"}
+            >
+              {narrativeStatus === "loading" ? "Generating…" : "Generate AI narrative"}
+            </button>
+            <button
+              type="button"
+              className="btn-xs"
+              onClick={handleGenerateStoryboard}
+              disabled={storyboardStatus === "loading"}
+            >
+              {storyboardStatus === "loading" ? "Building…" : "Build storyboard pack"}
+            </button>
+          </div>
         </div>
         {narrativeError ? <p className="text-xs text-red-600">{narrativeError}</p> : null}
         {latestNarrative ? (
@@ -1006,6 +1160,70 @@ export default function ContentPlanPanel() {
         ) : (
           <p className="text-xs text-gray-500">Generate a draft narrative to see recommended story arcs and follow-up steps.</p>
         )}
+        <div className="border-t pt-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Storyboard package</h4>
+            <span className="text-[11px] text-gray-400">Saved to your proposal workspace for quick quoting.</span>
+          </div>
+          {storyboardError ? <p className="text-xs text-red-600">{storyboardError}</p> : null}
+          {storyboardDraft ? (
+            <div className="space-y-3 text-xs text-gray-600">
+              <p className="text-sm text-gray-700">{storyboardDraft.narrative}</p>
+              {storyboardDraft.sections.length > 0 ? (
+                <div className="grid gap-3 md:grid-cols-2">
+                  {storyboardDraft.sections.map((section) => (
+                    <section key={section.id} className="border rounded-md p-3 bg-gray-50">
+                      <h5 className="text-sm font-semibold text-gray-700">{section.title}</h5>
+                      <p className="text-[11px] text-gray-500">{section.summary}</p>
+                      <ul className="mt-2 list-disc pl-5 space-y-1">
+                        {section.talkingPoints.map((point) => (
+                          <li key={point}>{point}</li>
+                        ))}
+                      </ul>
+                    </section>
+                  ))}
+                </div>
+              ) : null}
+              {storyboardDraft.timeline.length > 0 ? (
+                <div className="grid gap-3 md:grid-cols-2">
+                  {storyboardDraft.timeline.map((phase) => (
+                    <section key={phase.phase} className="border rounded-md p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <h5 className="text-sm font-semibold text-gray-700">{phase.phase}</h5>
+                        <span className="text-[11px] text-gray-500">{phase.duration}</span>
+                      </div>
+                      <ul className="mt-2 list-disc pl-5 space-y-1">
+                        {phase.tasks.map((task) => (
+                          <li key={task}>{task}</li>
+                        ))}
+                      </ul>
+                    </section>
+                  ))}
+                </div>
+              ) : null}
+              {storyboardDraft.recommendedItems.length > 0 ? (
+                <div className="space-y-2">
+                  <h5 className="text-sm font-semibold text-gray-700">Recommended line items</h5>
+                  <ul className="grid gap-2 md:grid-cols-2">
+                    {storyboardDraft.recommendedItems.map((item) => (
+                      <li key={item.id} className="border rounded-md p-3 bg-white shadow-sm">
+                        <p className="font-medium text-gray-700">{item.name}</p>
+                        {item.description ? <p className="text-[11px] text-gray-500">{item.description}</p> : null}
+                        {item.priceHint ? <p className="text-[11px] text-gray-400">Suggested budget {item.priceHint}</p> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          ) : storyboardStatus === "loading" ? (
+            <p className="text-xs text-gray-500">Building storyboard…</p>
+          ) : (
+            <p className="text-xs text-gray-500">
+              Build the storyboard pack to unlock pre-written scenes, production timelines, and ready-to-quote line items.
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="card border p-4">
