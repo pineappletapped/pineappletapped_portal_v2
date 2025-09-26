@@ -3,18 +3,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { getClientFirebaseAuth } from '@/lib/firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { setPersistence, browserLocalPersistence, type UserCredential } from 'firebase/auth';
-import {
-  ROLE_KEYS,
-  encodeRolesCookie,
-  extractUserRoles,
-  getDefaultAdminRoute,
-  hasRole,
-  UserRoles,
-} from '@/lib/roles';
-
-const TEMP_ADMIN_PASSWORD = 'DDp42km9TT!!Campion02';
+import { setPersistence, browserLocalPersistence } from 'firebase/auth';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -27,72 +16,45 @@ export default function Login() {
     e.preventDefault();
     setError('');
     setResetEmail(null);
+
     const trimmedUsername = username.trim();
     const normalizedUsername = trimmedUsername.toLowerCase();
-    const isTempAdmin =
-      normalizedUsername === 'ryanadmin' || normalizedUsername === 'ryanadmin@pineappletapped.com';
-    if (isTempAdmin && password !== TEMP_ADMIN_PASSWORD) {
-      setError('Invalid admin password');
-      return;
-    }
+    const email = trimmedUsername.includes('@')
+      ? trimmedUsername
+      : `${normalizedUsername}@pineappletapped.com`;
 
-    const email = isTempAdmin
-      ? 'ryanadmin@pineappletapped.com'
-      : trimmedUsername.includes('@')
-        ? trimmedUsername
-        : `${trimmedUsername}@pineappletapped.com`;
     try {
-      const { auth, db, signInWithEmailAndPassword, createUserWithEmailAndPassword } =
-        await getClientFirebaseAuth();
+      const { auth, signInWithEmailAndPassword } = await getClientFirebaseAuth();
       await setPersistence(auth, browserLocalPersistence);
-      let credential: UserCredential;
-      try {
-        credential = await signInWithEmailAndPassword(auth, email, password);
-      } catch (err: any) {
-        if (isTempAdmin && err?.code === 'auth/user-not-found') {
-          credential = await createUserWithEmailAndPassword(auth, email, password);
-        } else {
-          throw err;
-        }
-      }
-      const userRef = doc(db, 'users', credential.user.uid);
-      const userDoc = await getDoc(userRef);
-      const adminOverride =
-        credential.user.uid === 'WK6WCuSueLN5M3Zq6D7WBbHyGPo1' ||
-        credential.user.email === 'ryan@pineappletapped.com' ||
-        credential.user.email === 'ryanadmin@pineappletapped.com';
-
-      let roles: UserRoles = {};
-      if (adminOverride) {
-        roles = { admin: true };
-        await setDoc(userRef, { email, roles }, { merge: true });
-      } else if (userDoc.exists()) {
-        roles = extractUserRoles(userDoc.data());
-        if (userDoc.data()?.isStaff === true && !roles.admin) {
-          roles = { ...roles, admin: true };
-          await setDoc(userRef, { roles }, { merge: true });
-        }
-        if (!userDoc.data()?.email) {
-          await setDoc(userRef, { email }, { merge: true });
-        }
-      } else {
-        await setDoc(userRef, { email }, { merge: true });
-      }
-
-      const hasBackofficeAccess = hasRole(roles, ROLE_KEYS);
+      const credential = await signInWithEmailAndPassword(auth, email, password);
       const token = await credential.user.getIdToken();
-      const maxAge = 60 * 60 * 24 * 7; // 7 days
-      const secureAttr = typeof window !== 'undefined' && window.location.protocol === 'https:' ? '; Secure' : '';
-      const baseAttrs = `Path=/; Max-Age=${maxAge}; SameSite=Strict${secureAttr}`;
-      document.cookie = `token=${encodeURIComponent(token)}; ${baseAttrs}`;
-      document.cookie = `uid=${encodeURIComponent(credential.user.uid)}; ${baseAttrs}`;
-      document.cookie = `roles=${encodeURIComponent(encodeRolesCookie(roles))}; ${baseAttrs}`;
-      document.cookie = `isStaff=${hasBackofficeAccess ? '1' : '0'}; ${baseAttrs}`;
-      const destination = hasBackofficeAccess ? getDefaultAdminRoute(roles) : '/dashboard';
+      const response = await fetch('/api/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ idToken: token }),
+      });
+
+      if (!response.ok) {
+        throw new Error('SESSION_CREATION_FAILED');
+      }
+
+      const data: { destination?: string | null } = await response.json();
+      const destination = data.destination && typeof data.destination === 'string'
+        ? data.destination
+        : '/dashboard';
       window.location.href = destination;
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to sign in with Firebase', err);
-      setError('Invalid credentials');
+      if (err?.code === 'auth/user-not-found') {
+        setError('No account exists for that username or email. Please contact an administrator.');
+      } else if (err?.code === 'auth/wrong-password') {
+        setError('Invalid email or password. Please try again.');
+      } else if (err?.code === 'auth/too-many-requests') {
+        setError('Too many unsuccessful attempts. Reset your password or try again later.');
+      } else {
+        setError('Unable to sign in right now. Please try again later.');
+      }
       setResetEmail(null);
     }
   };

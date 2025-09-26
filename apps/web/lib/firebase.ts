@@ -78,7 +78,6 @@ let sendSignInLinkToEmail: any;
 let isSignInWithEmailLink: any;
 let signInWithEmailLink: any;
 let signInWithEmailAndPassword: any;
-let createUserWithEmailAndPassword: any;
 let sendPasswordResetEmail: any;
 
 let authModulePromise: Promise<typeof import('firebase/auth')> | null = null;
@@ -123,7 +122,6 @@ async function initBrowserFirebase() {
     isSignInWithEmailLink,
     signInWithEmailLink,
     signInWithEmailAndPassword,
-    createUserWithEmailAndPassword,
     sendPasswordResetEmail,
   } = authMod);
 }
@@ -187,7 +185,6 @@ export async function getClientFirebaseAuth() {
     auth,
     db,
     signInWithEmailAndPassword,
-    createUserWithEmailAndPassword,
     sendPasswordResetEmail,
   };
 }
@@ -213,7 +210,6 @@ export {
   isSignInWithEmailLink,
   signInWithEmailLink,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
   sendPasswordResetEmail,
   ensureFirebase,
   loadAuthModule,
