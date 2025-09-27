@@ -73,6 +73,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
   const [hasClientOrders, setHasClientOrders] = useState(false);
   const [franchiseIds, setFranchiseIds] = useState<string[]>([]);
   const [hasFranchiseMembership, setHasFranchiseMembership] = useState(false);
+  const [hasClientAdminAccess, setHasClientAdminAccess] = useState(false);
   const authRef = useRef<Auth | null>(null);
   const dbRef = useRef<Firestore | null>(null);
   useEffect(() => {
@@ -112,6 +113,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
           setHasClientOrders(false);
           setFranchiseIds([]);
           setHasFranchiseMembership(false);
+          setHasClientAdminAccess(false);
           if (u) {
             try {
               const snap = await getDoc(doc(db, 'users', u.uid));
@@ -137,6 +139,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
               console.error('Failed to derive user roles', error);
               setRoles({});
               setProfile({ contractor: false, isStaff: false });
+              setHasClientAdminAccess(false);
             }
           } else {
             setRoles({});
@@ -145,6 +148,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
             setHasClientOrders(false);
             setFranchiseIds([]);
             setHasFranchiseMembership(false);
+            setHasClientAdminAccess(false);
           }
           setChecked(true);
         });
@@ -158,6 +162,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
           setHasClientOrders(false);
           setFranchiseIds([]);
           setHasFranchiseMembership(false);
+          setHasClientAdminAccess(false);
           setChecked(true);
         }
       }
@@ -178,6 +183,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
   );
   const profileLoaded = profile !== null;
   const isProfileContractor = profile?.contractor === true;
+  const hasStaffCrmRole = profile?.isStaff === true || hasRole(roles, ['admin', 'sales']);
 
   useEffect(() => {
     const db = dbRef.current;
@@ -304,6 +310,51 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
     };
   }, [franchiseIds, user]);
 
+  useEffect(() => {
+    const db = dbRef.current;
+    if (!user || !db) {
+      setHasClientAdminAccess(false);
+      return;
+    }
+
+    if (!profileLoaded) {
+      return;
+    }
+
+    if (hasStaffCrmRole) {
+      setHasClientAdminAccess(true);
+      return;
+    }
+
+    let cancelled = false;
+    setHasClientAdminAccess(false);
+
+    (async () => {
+      try {
+        const snapshot = await getDocs(
+          query(
+            collection(db, 'memberships'),
+            where('userId', '==', user.uid),
+            where('role', '==', 'client_admin'),
+            limit(1)
+          )
+        );
+        if (!cancelled) {
+          setHasClientAdminAccess(!snapshot.empty);
+        }
+      } catch (error) {
+        console.error('Failed to determine CRM access', error);
+        if (!cancelled) {
+          setHasClientAdminAccess(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasStaffCrmRole, profileLoaded, user]);
+
   const makeButtonClass = (variant: ButtonVariant) =>
     clsx(
       'inline-flex items-center justify-center rounded-full border font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2',
@@ -350,6 +401,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
       (isContractor && clientStatus && (hasClientMembership || hasClientOrders));
     const showFranchisePortal = isGodAdmin || hasFranchiseMembership;
     const showTeamPortal = isGodAdmin || isContractor;
+    const showCrmPortal = hasClientAdminAccess;
     const adminHref = getDefaultAdminRoute(roles);
     return (
       <div className={wrapperClass}>
@@ -366,6 +418,11 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
         {canAccessAdmin && (
           <Link href={adminHref} className={makeButtonClass('outline')}>
             Admin
+          </Link>
+        )}
+        {showCrmPortal && (
+          <Link href="/crm" className={makeButtonClass('outline')}>
+            CRM
           </Link>
         )}
         {showTeamPortal && (

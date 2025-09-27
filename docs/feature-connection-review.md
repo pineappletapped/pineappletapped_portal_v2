@@ -19,11 +19,10 @@ This note captures portal features that are implemented in the codebase but are 
 
 ## CRM workspace (`/crm`)
 - **What exists:** A dedicated CRM hub exposes links to leads, groups, opportunities, proposals, and quote requests for staff or client admins.【F:apps/web/app/crm/page.tsx†L1-L36】
-- **Connection gap:** No navigation element points to `/crm`. Auth controls only surface buttons for the client, franchise, team, and admin portals, so staff cannot discover the CRM workspace without typing the URL manually.【F:apps/web/components/AuthLinks.tsx†L342-L393】
-- **Follow-up tasks:**
-  1. Design and add a CRM entry point for authorised roles (e.g. within the admin dashboard quick links or the authenticated header menu).
-  2. Ensure CRM subpages inherit consistent layout and breadcrumbs when linked from new entry points.
-  3. Communicate the new navigation path to operations staff so they know where to find CRM tools.
+- **Status:** The authenticated header now surfaces a CRM button for staff members or users with a `client_admin` membership so eligible teams can open the workspace without guessing the URL.【F:apps/web/components/AuthLinks.tsx†L10-L18】【F:apps/web/components/AuthLinks.tsx†L209-L330】
+- **Remaining follow-up tasks:**
+  1. Ensure CRM subpages inherit consistent layout and breadcrumbs when linked from new entry points.
+  2. Communicate the new navigation path to operations staff so they know where to find CRM tools.
 
 ## Shared email workspace (`/emails`)
 - **What exists:** Authenticated users can review organisation email threads and send new outbound emails via the `emails_send` callable integration.【F:apps/web/app/emails/page.tsx†L1-L110】
