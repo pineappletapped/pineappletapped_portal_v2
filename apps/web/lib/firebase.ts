@@ -9,11 +9,17 @@ const cleanEnv = (value?: string) => {
 };
 
 const apiKey = cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_API_KEY);
-const authDomain = cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN);
-const projectId =
-  cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID) || 'ptfbportalbackend';
+const fallbackProjectId =
+  cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID) ||
+  cleanEnv(process.env.FIREBASE_ADMIN_PROJECT_ID) ||
+  cleanEnv(process.env.GCLOUD_PROJECT);
+const projectId = fallbackProjectId || 'ptfbportalbackend';
+const authDomain =
+  cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN) ||
+  (projectId ? `${projectId}.firebaseapp.com` : undefined);
 const storageBucket =
   cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET) ||
+  (projectId ? `${projectId}.appspot.com` : undefined) ||
   'pineapple-tapped---portal.appspot.com';
 const appId = cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_APP_ID);
 const measurementId = cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID);
