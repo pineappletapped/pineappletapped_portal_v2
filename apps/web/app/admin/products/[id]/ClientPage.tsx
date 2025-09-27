@@ -107,6 +107,15 @@ const deliverableIcons: Record<DeliverableType, IconType> = {
   document: FiFileText,
 };
 
+const DRONE_STANDARD_ID = "drone_compliance";
+
+const isDroneLabel = (value: unknown): boolean => {
+  if (typeof value !== "string") return false;
+  const label = value.trim().toLowerCase();
+  if (!label) return false;
+  return label.includes("drone") || label.includes("uav") || label.includes("uas");
+};
+
 type KitGroup = {
   groupId: string;
   items: string[];
@@ -554,6 +563,21 @@ export default function EditProductPage() {
   const [kitBags, setKitBags] = useState<KitBag[]>([]);
   const [standards, setStandards] = useState<EquipmentStandard[]>([]);
   const [productStandards, setProductStandards] = useState<string[]>([]);
+  const requiresDroneCoverage = useMemo(() => {
+    if (!Array.isArray(modifiers) || modifiers.length === 0) return false;
+    return modifiers.some((selection) => {
+      const group = allModifiers.find((entry) => entry.id === selection.groupId);
+      if (!group) return false;
+      const option = group.options.find((entry) => entry.id === selection.optionId);
+      if (!option) return false;
+      return (
+        isDroneLabel(group.name) ||
+        isDroneLabel(group.id) ||
+        isDroneLabel(option.name) ||
+        isDroneLabel(option.id)
+      );
+    });
+  }, [allModifiers, modifiers]);
   const [exampleVideos, setExampleVideos] = useState<ExampleVideoInput[]>([]);
   const [productSpec, setProductSpec] = useState<ProductSpecFormState>({
     overview: "",
@@ -780,6 +804,17 @@ export default function EditProductPage() {
       return changed ? next : prev;
     });
   }, [crewRoles]);
+
+  useEffect(() => {
+    if (!requiresDroneCoverage) return;
+    setProductStandards((prev) => {
+      const current = Array.isArray(prev) ? prev : [];
+      if (current.includes(DRONE_STANDARD_ID)) {
+        return current;
+      }
+      return [...current, DRONE_STANDARD_ID];
+    });
+  }, [requiresDroneCoverage]);
 
   const addCrewRole = () => {
     setCrewRoles((prev) => [...prev, createCrewRoleInput()]);
@@ -2020,6 +2055,10 @@ export default function EditProductPage() {
       .map((id) => lookup.get(id) || id)
       .filter((name, index, array) => array.indexOf(name) === index);
   }, [productStandards, standards]);
+  const droneStandardRecord = useMemo(
+    () => standards.find((standard) => standard.id === DRONE_STANDARD_ID) || null,
+    [standards]
+  );
   const crewCostValue = useMemo(() => {
     return crewRoles.reduce((total, role) => {
       if (!role.includeInBudget) return total;
@@ -3395,6 +3434,17 @@ export default function EditProductPage() {
             <p className="text-xs text-gray-500">
               Select the standards a crew must meet before they can pick up this product in the portal.
             </p>
+            {requiresDroneCoverage && (
+              <div className="rounded border border-sky-200 bg-sky-50 p-2 text-xs text-sky-900">
+                Drone coverage is enabled for this product, so it automatically requires
+                {" "}
+                {droneStandardRecord?.title || "drone compliance"}.
+                {" "}
+                {droneStandardRecord
+                  ? "Ensure at least one kit item is tagged with the drone compliance standard before launching sales."
+                  : "Add the drone compliance standard in the equipment register so kit and crews can be approved."}
+              </div>
+            )}
             {standards.length === 0 ? (
               <p className="text-xs text-gray-500">
                 No standards defined yet. Create standards in the equipment register to make them available here.

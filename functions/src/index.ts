@@ -2870,7 +2870,26 @@ export const reserveKit = functions.https.onCall(async (data) => {
   if (!prodSnap.exists) {
     throw new functions.https.HttpsError('not-found', 'product not found');
   }
-  const required = (prodSnap.data() as any).requiredKit || [];
+  const productData = prodSnap.data() as any;
+  const requiredKitRaw = Array.isArray(productData?.requiredKit)
+    ? productData.requiredKit
+    : [];
+  const rawStandards = Array.isArray(productData?.requiredStandards)
+    ? productData.requiredStandards
+    : [];
+  const requiredStandards = Array.from(
+    new Set(
+      rawStandards
+        .map((value: unknown) => (typeof value === 'string' ? value.trim() : ''))
+        .filter((value: string) => value.length > 0)
+    )
+  );
+  const standardsToEnforce = new Set(requiredStandards);
+  const standardMatches = new Map<string, Set<string>>();
+  requiredStandards.forEach((standard) => {
+    standardMatches.set(standard, new Set());
+  });
+  const required = requiredKitRaw;
   const eqIds: string[] = required.flatMap((g: any) => g.items || []);
   const conflicts: any[] = [];
   const kitItems: any[] = [];
@@ -2889,11 +2908,36 @@ export const reserveKit = functions.https.onCall(async (data) => {
       conflicts.push({ id, name: eq.name || id });
       continue;
     }
+    if (standardsToEnforce.size > 0) {
+      const meets = Array.isArray(eq.meetsStandards)
+        ? (eq.meetsStandards as unknown[])
+            .map((value) => (typeof value === 'string' ? value.trim() : ''))
+            .filter((value): value is string => value.length > 0)
+        : [];
+      meets.forEach((standardId) => {
+        if (!standardsToEnforce.has(standardId)) return;
+        const record = standardMatches.get(standardId);
+        if (record) {
+          record.add(id);
+        }
+      });
+    }
     kitItems.push({ id, start: start.toISOString(), end: end.toISOString() });
     rentalTotal += eq.rentalPrice || 0;
   }
   if (conflicts.length > 0) {
     return { conflicts };
+  }
+  if (standardsToEnforce.size > 0) {
+    const missingStandards = requiredStandards.filter((standard) => {
+      const matches = standardMatches.get(standard);
+      return !matches || matches.size === 0;
+    });
+    if (missingStandards.length > 0) {
+      throw new functions.https.HttpsError('failed-precondition', 'missing-required-standards', {
+        missingStandards,
+      });
+    }
   }
   const batch = db.batch();
   for (const item of kitItems) {
