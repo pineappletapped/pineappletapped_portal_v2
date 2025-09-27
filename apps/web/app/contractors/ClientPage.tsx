@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
 import PortalContainer from "@/components/PortalContainer";
+import PortalHero from "@/components/PortalHero";
 import AvailabilityCalendar, { AvailabilityStatus } from "@/components/AvailabilityCalendar";
 import WorkwearPortal from "@/components/WorkwearPortal";
 import ContractorProfileForm from "@/components/ContractorProfileForm";
@@ -385,27 +386,53 @@ export default function ContractorPortal() {
     },
   ];
 
+  const heroMetrics = [
+    { label: "Upcoming bookings", value: upcomingBookings.length },
+    { label: "Open tasks", value: openTasks.length },
+    { label: "Shifts available", value: availableBookings.length },
+    { label: "New notices", value: notices.length },
+  ];
+
+  const heroActions = [
+    {
+      label: "Review projects",
+      description: "Check briefs, files, and tasks for current shoots.",
+      onClick: () => setActiveTab("projects"),
+    },
+    {
+      label: "Update availability",
+      description: "Set your calendar so HQ can book you in.",
+      onClick: () => setActiveTab("availability"),
+    },
+    {
+      label: "Catch up on notices",
+      description: "Read updates from HQ and franchise leads.",
+      onClick: () => setActiveTab("notices"),
+    },
+    {
+      label: "Open messenger",
+      description: "Jump into conversations with HQ.",
+      href: "/admin/messages",
+    },
+  ];
+
   return (
     <PortalContainer>
-      <div className="flex flex-col gap-6">
-        <header className="flex flex-col gap-3 border-b border-slate-200 pb-6 md:flex-row md:items-start md:justify-between">
-          <div>
-            <h1 className="text-3xl font-semibold text-slate-900">Team Portal</h1>
-            <p className="mt-1 text-sm text-slate-600">
-              Track your bookings, tasks, kit and availability in one place. Tabs organise the tools you use most during a shoot week.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Link href="/admin/messages" className="btn-outline text-sm">
-              Messenger
-            </Link>
-            <Link href="/contractors/workwear" className="btn-outline text-sm">
-              Open workwear hub
-            </Link>
-          </div>
-        </header>
+      <div className="space-y-10">
+        <PortalHero
+          eyebrow="Team portal"
+          title="Your crew HQ"
+          description="Track bookings, stay ahead on tasks, and keep your kit details current so every shoot runs smoothly."
+          backgroundClass="bg-emerald-900"
+          metrics={heroMetrics}
+          quickActions={heroActions}
+        />
 
-        <nav className="flex flex-wrap gap-2" role="tablist" aria-label="Team workspace tabs">
+        <nav
+          className="flex flex-wrap gap-2 rounded-3xl border border-slate-200 bg-white p-4"
+          role="tablist"
+          aria-label="Team workspace tabs"
+        >
           {tabs.map((tab) => (
             <button
               key={tab.id}
@@ -433,7 +460,7 @@ export default function ContractorPortal() {
           hidden={activeTab !== "dashboard"}
           className="flex flex-col gap-6"
         >
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
               <div className="space-y-2">
                 <h2 className="text-2xl font-semibold text-slate-900">Welcome back</h2>
@@ -470,7 +497,7 @@ export default function ContractorPortal() {
           </article>
 
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
               <h3 className="text-sm font-semibold text-slate-900">Upcoming booking</h3>
               {nextBooking ? (
                 <div className="mt-2 space-y-1 text-xs text-slate-600">
@@ -489,7 +516,7 @@ export default function ContractorPortal() {
               )}
             </article>
 
-            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
               <h3 className="text-sm font-semibold text-slate-900">Outstanding tasks</h3>
               <p className="mt-2 text-3xl font-semibold text-slate-900">{openTasks.length}</p>
               <p className="text-xs text-slate-500">Waiting for your review</p>
@@ -502,7 +529,7 @@ export default function ContractorPortal() {
               </button>
             </article>
 
-            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
               <h3 className="text-sm font-semibold text-slate-900">Active products</h3>
               <p className="mt-2 text-3xl font-semibold text-slate-900">{products.length}</p>
               <p className="text-xs text-slate-500">Allocated to you</p>
@@ -515,7 +542,7 @@ export default function ContractorPortal() {
               </button>
             </article>
 
-            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
               <h3 className="text-sm font-semibold text-slate-900">New notices</h3>
               <p className="mt-2 text-3xl font-semibold text-slate-900">{notices.length}</p>
               <p className="text-xs text-slate-500">Latest updates from HQ</p>
@@ -537,7 +564,7 @@ export default function ContractorPortal() {
           hidden={activeTab !== "notices"}
           className="flex flex-col gap-6"
         >
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-base font-semibold text-slate-900">Team notice board</h2>
@@ -606,7 +633,7 @@ export default function ContractorPortal() {
           hidden={activeTab !== "availability"}
           className="flex flex-col gap-6"
         >
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-6">
               <h2 className="text-base font-semibold text-slate-900">Availability planner</h2>
               <p className="text-sm text-slate-500">
@@ -650,7 +677,7 @@ export default function ContractorPortal() {
           hidden={activeTab !== "projects"}
           className="flex flex-col gap-6"
         >
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <h2 className="text-base font-semibold text-slate-900">Project pipeline</h2>
@@ -698,7 +725,7 @@ export default function ContractorPortal() {
             )}
           </article>
 
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-semibold text-slate-900">Project tasks</h2>
             </div>
@@ -733,7 +760,7 @@ export default function ContractorPortal() {
             )}
           </article>
 
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h2 className="text-base font-semibold text-slate-900">Open opportunities</h2>
@@ -776,7 +803,7 @@ export default function ContractorPortal() {
           aria-labelledby={tabId("kit")}
           hidden={activeTab !== "kit"}
         >
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-base font-semibold text-slate-900">My kit register</h2>
             <p className="mt-1 text-sm text-slate-500">Log the equipment you hold so HQ can track availability.</p>
             <div className="mt-4">
@@ -791,7 +818,7 @@ export default function ContractorPortal() {
           aria-labelledby={tabId("workwear")}
           hidden={activeTab !== "workwear"}
         >
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-base font-semibold text-slate-900">Order workwear</h2>
             <p className="mt-1 text-sm text-slate-500">Request branded uniforms and replacements.</p>
             <div className="mt-4">

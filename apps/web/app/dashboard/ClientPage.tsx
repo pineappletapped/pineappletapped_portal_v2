@@ -16,6 +16,7 @@ import {
 import { db, auth } from '@/lib/firebase';
 import Link from 'next/link';
 import PortalContainer from '@/components/PortalContainer';
+import PortalHero from '@/components/PortalHero';
 import AssetReleaseBadge, { getAssetReleaseMeta } from '@/components/AssetReleaseBadge';
 
 /**
@@ -285,39 +286,13 @@ export default function DashboardPage() {
   return (
     <PortalContainer>
       <div className="space-y-10">
-        <header className="rounded-3xl bg-slate-900 text-white p-6 sm:p-8 shadow-sm">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-            <div className="space-y-3 max-w-2xl">
-              <p className="text-xs uppercase tracking-[0.35em] text-slate-300">Client portal</p>
-              <h1 className="text-3xl sm:text-4xl font-semibold leading-tight">Your production HQ</h1>
-              <p className="text-sm sm:text-base text-slate-200">
-                Check project progress, review upcoming shoots, and discover new campaigns built around your brand goals.
-              </p>
-            </div>
-            <dl className="grid grid-cols-2 gap-4 text-left sm:grid-cols-4">
-              {metrics.map((metric) => (
-                <div key={metric.label} className="rounded-2xl bg-slate-800/60 p-4">
-                  <dt className="text-xs uppercase tracking-wide text-slate-400">{metric.label}</dt>
-                  <dd className="mt-2 text-2xl font-semibold">{metric.value}</dd>
-                </div>
-              ))}
-            </dl>
-          </div>
-          <nav aria-label="Quick actions" className="mt-6">
-            <div className="flex flex-wrap gap-3">
-              {quickActions.map((action) => (
-                <Link
-                  key={action.href}
-                  href={action.href}
-                  className="group relative flex min-w-[200px] flex-1 flex-col justify-between gap-1 rounded-2xl border border-white/10 bg-white/5 p-4 text-left transition hover:border-white/40 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-                >
-                  <span className="text-sm font-semibold text-white group-hover:text-white">{action.label}</span>
-                  <span className="text-xs text-slate-200 group-hover:text-slate-100">{action.description}</span>
-                </Link>
-              ))}
-            </div>
-          </nav>
-        </header>
+        <PortalHero
+          eyebrow="Client portal"
+          title="Your production HQ"
+          description="Check project progress, review upcoming shoots, and discover new campaigns built around your brand goals."
+          metrics={metrics}
+          quickActions={quickActions}
+        />
 
         <div className="grid gap-8 lg:grid-cols-[2fr,1fr]">
           <div className="space-y-8">
