@@ -367,6 +367,24 @@ export default function ContractorPortal() {
     { id: "profile", label: "My Profile" },
   ];
 
+  const quickLinks: { tab: TeamTab; title: string; description: string }[] = [
+    {
+      tab: "projects",
+      title: "Projects",
+      description: "Check your current shoots, tasks and opportunities.",
+    },
+    {
+      tab: "availability",
+      title: "Availability",
+      description: "Update your calendar so HQ can line up the next job.",
+    },
+    {
+      tab: "notices",
+      title: "Notice board",
+      description: "Catch up on the latest updates from HQ and franchises.",
+    },
+  ];
+
   return (
     <PortalContainer>
       <div className="flex flex-col gap-6">
@@ -415,103 +433,101 @@ export default function ContractorPortal() {
           hidden={activeTab !== "dashboard"}
           className="flex flex-col gap-6"
         >
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-              <h2 className="text-base font-semibold text-slate-900">Next booking</h2>
-              {nextBooking ? (
-                <div className="mt-3 space-y-2 text-sm text-slate-600">
-                  <p className="text-lg font-semibold text-slate-900">{formatSlotLabel(nextBooking)}</p>
-                  <p className="text-sm text-slate-500">
-                    {nextBooking.clientName || nextBooking.projectName || "Client details to follow"}
-                  </p>
-                  <div className="flex items-center gap-3 text-xs text-slate-500">
-                    <span className="inline-flex rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700">
-                      {renderProjectStatus(nextBooking)}
-                    </span>
-                    {nextBooking.location && <span>{nextBooking.location}</span>}
-                  </div>
-                </div>
-              ) : (
-                <p className="mt-3 text-sm text-slate-500">No upcoming bookings yet. Check the open opportunities below.</p>
-              )}
-            </article>
-
-            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-              <h2 className="text-base font-semibold text-slate-900">Active products</h2>
-              {products.length > 0 ? (
-                <ul className="mt-3 space-y-2 text-sm text-slate-600">
-                  {products.map((product) => (
-                    <li key={product.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2">
-                      <span>{product.name || "Untitled product"}</span>
-                      {product.status && (
-                        <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                          {product.status}
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-3 text-sm text-slate-500">
-                  Products linked to your shoots will appear here once HQ assigns them to you.
-                </p>
-              )}
-            </article>
-
-            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm xl:col-span-1 md:col-span-2 xl:col-span-1">
-              <h2 className="text-base font-semibold text-slate-900">Assigned tasks</h2>
-              {openTasks.length ? (
-                <ul className="mt-3 space-y-3">
-                  {openTasks.map((task) => (
-                    <li key={task.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <p className="text-sm font-medium text-slate-900">{task.title || "Task"}</p>
-                      <p className="mt-1 text-xs text-slate-500">Status: {task.status || "in progress"}</p>
-                      <button
-                        type="button"
-                        className="mt-2 inline-flex items-center justify-center rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-700"
-                        onClick={() => markTaskComplete(task.id)}
-                      >
-                        Mark complete
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-3 text-sm text-slate-500">No outstanding tasks. We&apos;ll notify you when new work drops.</p>
-              )}
-            </article>
-          </div>
-
           <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div>
-                <h2 className="text-base font-semibold text-slate-900">Open opportunities</h2>
-                <p className="text-sm text-slate-500">Pick up extra shoots that match your skills.</p>
+            <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+              <div className="space-y-2">
+                <h2 className="text-2xl font-semibold text-slate-900">Welcome back</h2>
+                <p className="text-sm text-slate-600">
+                  Use the tabs above to jump into your work. We&apos;ve highlighted the key areas you&apos;ll need today so you can
+                  focus on the next shoot.
+                </p>
+                {nextBooking ? (
+                  <p className="text-sm text-slate-500">
+                    Your next booking is <span className="font-semibold text-slate-900">{formatSlotLabel(nextBooking)}</span>
+                    {nextBooking.location ? ` • ${nextBooking.location}` : ""}. Head to Projects when you&apos;re ready to review
+                    the brief.
+                  </p>
+                ) : (
+                  <p className="text-sm text-slate-500">
+                    No bookings are scheduled yet. Update your availability so HQ knows when you can take on new work.
+                  </p>
+                )}
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {quickLinks.map((link) => (
+                  <button
+                    key={link.tab}
+                    type="button"
+                    className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-slate-300 hover:bg-white"
+                    onClick={() => setActiveTab(link.tab)}
+                  >
+                    <p className="text-sm font-semibold text-slate-900">{link.title}</p>
+                    <p className="mt-1 text-xs text-slate-500">{link.description}</p>
+                  </button>
+                ))}
               </div>
             </div>
-            {availableBookings.length ? (
-              <ul className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {availableBookings.map((booking) => (
-                  <li key={booking.id} className="flex h-full flex-col justify-between rounded-xl border border-slate-200 bg-slate-50 p-4">
-                    <div className="space-y-2 text-sm text-slate-600">
-                      <p className="text-base font-semibold text-slate-900">{formatSlotLabel(booking)}</p>
-                      <p className="text-xs uppercase tracking-wide text-slate-500">{booking.serviceName || booking.projectName || "General assignment"}</p>
-                      {booking.location && <p className="text-xs text-slate-500">{booking.location}</p>}
-                    </div>
-                    <button
-                      type="button"
-                      className="mt-4 inline-flex items-center justify-center rounded-full bg-orange px-3 py-1 text-sm font-semibold text-white hover:bg-orange/80"
-                      onClick={() => applyForBooking(booking.id)}
-                    >
-                      Apply for this slot
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="mt-4 text-sm text-slate-500">No open opportunities right now. Check back soon or update your availability.</p>
-            )}
           </article>
+
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="text-sm font-semibold text-slate-900">Upcoming booking</h3>
+              {nextBooking ? (
+                <div className="mt-2 space-y-1 text-xs text-slate-600">
+                  <p className="text-base font-semibold text-slate-900">{formatSlotLabel(nextBooking)}</p>
+                  <p>{nextBooking.clientName || nextBooking.projectName || "Details to be confirmed"}</p>
+                  <button
+                    type="button"
+                    className="mt-3 inline-flex items-center justify-center rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-700"
+                    onClick={() => setActiveTab("projects")}
+                  >
+                    View project plan
+                  </button>
+                </div>
+              ) : (
+                <p className="mt-2 text-xs text-slate-500">We&apos;ll show your next confirmed slot here.</p>
+              )}
+            </article>
+
+            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="text-sm font-semibold text-slate-900">Outstanding tasks</h3>
+              <p className="mt-2 text-3xl font-semibold text-slate-900">{openTasks.length}</p>
+              <p className="text-xs text-slate-500">Waiting for your review</p>
+              <button
+                type="button"
+                className="mt-3 inline-flex items-center justify-center rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-700"
+                onClick={() => setActiveTab("projects")}
+              >
+                Go to tasks
+              </button>
+            </article>
+
+            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="text-sm font-semibold text-slate-900">Active products</h3>
+              <p className="mt-2 text-3xl font-semibold text-slate-900">{products.length}</p>
+              <p className="text-xs text-slate-500">Allocated to you</p>
+              <button
+                type="button"
+                className="mt-3 inline-flex items-center justify-center rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-700"
+                onClick={() => setActiveTab("projects")}
+              >
+                Review lineup
+              </button>
+            </article>
+
+            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="text-sm font-semibold text-slate-900">New notices</h3>
+              <p className="mt-2 text-3xl font-semibold text-slate-900">{notices.length}</p>
+              <p className="text-xs text-slate-500">Latest updates from HQ</p>
+              <button
+                type="button"
+                className="mt-3 inline-flex items-center justify-center rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-700"
+                onClick={() => setActiveTab("notices")}
+              >
+                Read notices
+              </button>
+            </article>
+          </div>
         </section>
 
         <section
@@ -684,7 +700,7 @@ export default function ContractorPortal() {
 
           <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold text-slate-900">My tasks</h2>
+              <h2 className="text-base font-semibold text-slate-900">Project tasks</h2>
             </div>
             {tasks.length ? (
               <ul className="mt-4 space-y-3">
@@ -714,6 +730,42 @@ export default function ContractorPortal() {
               </ul>
             ) : (
               <p className="mt-4 text-sm text-slate-500">No tasks assigned to you at the moment.</p>
+            )}
+          </article>
+
+          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-base font-semibold text-slate-900">Open opportunities</h2>
+                <p className="text-sm text-slate-500">Apply for shoots that match your availability.</p>
+              </div>
+            </div>
+            {availableBookings.length ? (
+              <ul className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {availableBookings.map((booking) => (
+                  <li
+                    key={booking.id}
+                    className="flex h-full flex-col justify-between rounded-xl border border-slate-200 bg-slate-50 p-4"
+                  >
+                    <div className="space-y-2 text-sm text-slate-600">
+                      <p className="text-base font-semibold text-slate-900">{formatSlotLabel(booking)}</p>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">
+                        {booking.serviceName || booking.projectName || "General assignment"}
+                      </p>
+                      {booking.location && <p className="text-xs text-slate-500">{booking.location}</p>}
+                    </div>
+                    <button
+                      type="button"
+                      className="mt-4 inline-flex items-center justify-center rounded-full bg-orange px-3 py-1 text-sm font-semibold text-white hover:bg-orange/80"
+                      onClick={() => applyForBooking(booking.id)}
+                    >
+                      Apply for this slot
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-4 text-sm text-slate-500">No open opportunities right now. Check back soon or update your availability.</p>
             )}
           </article>
         </section>
