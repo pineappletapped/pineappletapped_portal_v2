@@ -8,6 +8,7 @@ import Link from 'next/link';
 import StatusBadge from '@/components/StatusBadge';
 import PortalContainer from '@/components/PortalContainer';
 import VenueMap from '@/components/VenueMap';
+import AssetReleaseBadge, { getAssetReleaseMeta } from '@/components/AssetReleaseBadge';
 import type { Venue } from '@/lib/venues';
 
 export default function ProjectDetail({ params }: { params: { id: string } }) {
@@ -457,11 +458,43 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       ) : null}
       <div className="card">
         <h2 className="mb-2 text-base font-semibold text-gray-900">Assets</h2>
-        <div className="grid gap-2">
-          {assets.map(a => (
-            <Link key={a.id} href={`/projects/${project.id}/assets/${a.id}`} className="hover:underline">{a.name || a.storageKey}</Link>
-          )) || <p>No assets.</p>}
-        </div>
+        {assets.length === 0 ? (
+          <p className="text-sm text-gray-600">No assets have been uploaded yet.</p>
+        ) : (
+          <ul className="grid gap-3">
+            {assets.map((a) => {
+              const releaseMeta = getAssetReleaseMeta(a);
+              return (
+                <li key={a.id} className="rounded border border-gray-200 p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-1">
+                      <Link
+                        href={`/projects/${project.id}/assets/${a.id}`}
+                        className="text-sm font-semibold text-blue-600 hover:underline"
+                      >
+                        {a.name || a.storageKey || 'Asset'}
+                      </Link>
+                      <p className="text-xs text-gray-500">
+                        Status: {a.status || 'draft'}
+                        {typeof a.version === 'number' ? ` · Version ${a.version}` : ''}
+                      </p>
+                    </div>
+                    {releaseMeta ? (
+                      <div className="flex flex-col gap-1 sm:items-end">
+                        <AssetReleaseBadge asset={a} />
+                        {releaseMeta.description ? (
+                          <p className="text-xs text-gray-500 max-w-xs sm:text-right">
+                            {releaseMeta.description}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
         {/* Compare Versions */}
         {assets.length > 1 && (
           <div className="mt-2">

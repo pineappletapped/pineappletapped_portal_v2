@@ -951,6 +951,23 @@ export default function FranchisePortalPage() {
             <section className="card border border-slate-200 p-4">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
                 <div>
+                  <h2 className="text-lg font-semibold">Drive deliverable staging</h2>
+                  <p className="text-sm text-gray-600">
+                    Pull footage and edits from the shared Drive workspace and publish them straight to the client review queue without re-uploading.
+                  </p>
+                </div>
+                <Link href="/franchise/drive-staging" className="btn-sm">
+                  Open staging tool
+                </Link>
+              </div>
+              <p className="text-xs text-gray-500">
+                Files staged here respect the payment gate and automatically create review tasks so crews can track approvals and release readiness.
+              </p>
+            </section>
+
+            <section className="card border border-slate-200 p-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
+                <div>
                   <h2 className="text-lg font-semibold">Lead pipeline</h2>
                   <p className="text-sm text-gray-600">
                     Review the leads and clients assigned to your franchise without leaving the portal. The CRM workspace

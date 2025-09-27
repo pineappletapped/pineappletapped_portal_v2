@@ -16,6 +16,7 @@ import {
 import { db, auth } from '@/lib/firebase';
 import Link from 'next/link';
 import PortalContainer from '@/components/PortalContainer';
+import AssetReleaseBadge, { getAssetReleaseMeta } from '@/components/AssetReleaseBadge';
 
 /**
  * Enhanced dashboard showing a unified overview of projects, orders, bookings,
@@ -478,16 +479,29 @@ export default function DashboardPage() {
                 </p>
               ) : (
                 <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                  {assets.map((a) => (
-                    <Link
-                      key={a.id}
-                      href={`/projects/${a.projectId}/assets/${a.id}`}
-                      className="flex flex-col gap-2 rounded-2xl border border-gray-200 p-4 transition hover:border-gray-400 hover:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
-                    >
-                      <p className="text-sm font-semibold text-gray-900">{a.name || 'Asset'}</p>
-                      <p className="text-xs text-gray-500">Status: {a.status || 'draft'}</p>
-                    </Link>
-                  ))}
+                  {assets.map((a) => {
+                    const releaseMeta = getAssetReleaseMeta(a);
+                    return (
+                      <Link
+                        key={a.id}
+                        href={`/projects/${a.projectId}/assets/${a.id}`}
+                        className="flex flex-col gap-3 rounded-2xl border border-gray-200 p-4 transition hover:border-gray-400 hover:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                      >
+                        <div className="space-y-1">
+                          <p className="text-sm font-semibold text-gray-900">{a.name || 'Asset'}</p>
+                          <p className="text-xs text-gray-500">Status: {a.status || 'draft'}</p>
+                        </div>
+                        {releaseMeta ? (
+                          <div className="space-y-1">
+                            <AssetReleaseBadge asset={a} />
+                            {releaseMeta.description ? (
+                              <p className="text-xs text-gray-500">{releaseMeta.description}</p>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </Link>
+                    );
+                  })}
                 </div>
               )}
             </section>

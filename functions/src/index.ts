@@ -1550,6 +1550,348 @@ async function setupClientDriveStructure(context: DriveSetupContext): Promise<vo
   );
 }
 
+export const drive_listProjectFolder = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+  }
+
+  const projectId = typeof data?.projectId === 'string' ? data.projectId.trim() : '';
+  const requestedFolderId = typeof data?.folderId === 'string' ? data.folderId.trim() : '';
+  if (!projectId) {
+    throw new functions.https.HttpsError('invalid-argument', 'projectId is required');
+  }
+
+  const userContext = await loadUserContext(context.auth.uid);
+  if (!userContext.isStaff && userContext.franchiseIds.length === 0) {
+    throw new functions.https.HttpsError('permission-denied', 'Drive staging requires staff or franchise access');
+  }
+
+  const projectSnap = await db.collection('projects').doc(projectId).get();
+  if (!projectSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'Project not found');
+  }
+  const projectData = projectSnap.data() as Record<string, any>;
+  const projectFranchiseId =
+    typeof projectData.franchiseId === 'string' ? projectData.franchiseId : null;
+
+  if (
+    !userContext.isStaff &&
+    projectFranchiseId &&
+    !userContext.franchiseIds.includes(projectFranchiseId)
+  ) {
+    throw new functions.https.HttpsError('permission-denied', 'This project is not assigned to your franchise');
+  }
+
+  const orderId = typeof projectData.orderId === 'string' ? projectData.orderId : null;
+  if (!orderId) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'The project is not linked to an order with Drive provisioning.'
+    );
+  }
+
+  const orderSnap = await db.collection('orders').doc(orderId).get();
+  if (!orderSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'Linked order not found');
+  }
+  const orderData = orderSnap.data() as Record<string, any>;
+  const driveInfo = (orderData.drive as Record<string, any>) || {};
+
+  const drive = await createDriveService();
+  if (!drive) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'Google Drive service account credentials are not configured.'
+    );
+  }
+
+  const folderId =
+    normaliseDriveId(requestedFolderId) ?? normaliseDriveId(driveInfo.orderFolderId);
+  if (!folderId) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'The order does not have a Drive folder configured yet.'
+    );
+  }
+
+  let folderName: string | null = null;
+  if (requestedFolderId) {
+    try {
+      const folderMeta = await drive.files.get({
+        fileId: folderId,
+        fields: 'id, name',
+        supportsAllDrives: true,
+      });
+      folderName = typeof folderMeta.data.name === 'string' ? folderMeta.data.name : null;
+    } catch (error) {
+      console.warn('drive_listProjectFolder failed to resolve folder metadata', folderId, error);
+    }
+  } else if (typeof driveInfo.orderFolderName === 'string') {
+    folderName = driveInfo.orderFolderName;
+  } else {
+    try {
+      const folderMeta = await drive.files.get({
+        fileId: folderId,
+        fields: 'id, name',
+        supportsAllDrives: true,
+      });
+      folderName = typeof folderMeta.data.name === 'string' ? folderMeta.data.name : null;
+    } catch (error) {
+      console.warn('drive_listProjectFolder failed to resolve root folder name', folderId, error);
+    }
+  }
+
+  const listResponse = await drive.files.list({
+    q: `'${folderId}' in parents and trashed = false`,
+    fields: 'nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink)',
+    pageSize: 100,
+    includeItemsFromAllDrives: true,
+    supportsAllDrives: true,
+    orderBy: 'name_natural',
+  });
+
+  const items = (listResponse.data.files || [])
+    .map((file) => ({
+      id: file.id ?? '',
+      name: typeof file.name === 'string' ? file.name : 'Untitled',
+      mimeType: typeof file.mimeType === 'string' ? file.mimeType : null,
+      size: file.size ? Number(file.size) : null,
+      modifiedTime: typeof file.modifiedTime === 'string' ? file.modifiedTime : null,
+      webViewLink: typeof file.webViewLink === 'string' ? file.webViewLink : null,
+      kind:
+        file.mimeType === 'application/vnd.google-apps.folder'
+          ? 'folder'
+          : 'file',
+    }))
+    .filter((item) => item.id.length > 0);
+
+  const productFolders = Array.isArray(driveInfo.productFolders)
+    ? (driveInfo.productFolders as Array<Record<string, any>>)
+        .map((entry) => {
+          const entryFolderId = normaliseDriveId(entry.folderId);
+          if (!entryFolderId) {
+            return null;
+          }
+          return {
+            folderId: entryFolderId,
+            productId: typeof entry.productId === 'string' ? entry.productId : null,
+            folderName: typeof entry.folderName === 'string' ? entry.folderName : null,
+          };
+        })
+        .filter((value): value is { folderId: string; productId: string | null; folderName: string | null } => value !== null)
+    : [];
+
+  return {
+    folderId,
+    folderName,
+    items,
+    project: {
+      id: projectId,
+      name: typeof projectData.name === 'string' ? projectData.name : null,
+      orgId: typeof projectData.orgId === 'string' ? projectData.orgId : null,
+      franchiseId: projectFranchiseId,
+    },
+    order: {
+      id: orderId,
+      status: typeof orderData.status === 'string' ? orderData.status : null,
+    },
+    drive: {
+      orderFolderId: normaliseDriveId(driveInfo.orderFolderId),
+      orderFolderName: typeof driveInfo.orderFolderName === 'string' ? driveInfo.orderFolderName : null,
+      productFolders,
+    },
+  };
+});
+
+export const drive_stageAssetFromFile = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+  }
+
+  const projectId = typeof data?.projectId === 'string' ? data.projectId.trim() : '';
+  const driveFileId = typeof data?.fileId === 'string' ? data.fileId.trim() : '';
+  const overrideName = typeof data?.name === 'string' ? data.name.trim() : '';
+  if (!projectId || !driveFileId) {
+    throw new functions.https.HttpsError('invalid-argument', 'projectId and fileId are required');
+  }
+
+  const userContext = await loadUserContext(context.auth.uid);
+  if (!userContext.isStaff && userContext.franchiseIds.length === 0) {
+    throw new functions.https.HttpsError('permission-denied', 'Drive staging requires staff or franchise access');
+  }
+
+  const projectSnap = await db.collection('projects').doc(projectId).get();
+  if (!projectSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'Project not found');
+  }
+  const projectData = projectSnap.data() as Record<string, any>;
+  const projectFranchiseId =
+    typeof projectData.franchiseId === 'string' ? projectData.franchiseId : null;
+
+  if (
+    !userContext.isStaff &&
+    projectFranchiseId &&
+    !userContext.franchiseIds.includes(projectFranchiseId)
+  ) {
+    throw new functions.https.HttpsError('permission-denied', 'This project is not assigned to your franchise');
+  }
+
+  const orgId = typeof projectData.orgId === 'string' ? projectData.orgId : null;
+  if (!orgId) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'The project is missing organisation context.'
+    );
+  }
+
+  const orderId = typeof projectData.orderId === 'string' ? projectData.orderId : null;
+  let orderStatus: string | null = null;
+  if (orderId) {
+    try {
+      const orderSnap = await db.collection('orders').doc(orderId).get();
+      if (orderSnap.exists) {
+        const orderData = orderSnap.data() as Record<string, any>;
+        if (typeof orderData.status === 'string') {
+          orderStatus = orderData.status;
+        }
+      }
+    } catch (error) {
+      console.warn('drive_stageAssetFromFile order lookup failed', { projectId, orderId }, error);
+    }
+  }
+
+  const drive = await createDriveService();
+  if (!drive) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'Google Drive service account credentials are not configured.'
+    );
+  }
+
+  let fileMeta: drive_v3.Schema$File;
+  try {
+    const metadataRes = await drive.files.get({
+      fileId: driveFileId,
+      fields: 'id, name, mimeType, size, modifiedTime, webViewLink',
+      supportsAllDrives: true,
+    });
+    fileMeta = metadataRes.data;
+  } catch (error) {
+    throw new functions.https.HttpsError('not-found', 'Drive file could not be retrieved');
+  }
+
+  const sourceName = typeof fileMeta.name === 'string' ? fileMeta.name : `Drive file ${driveFileId}`;
+  const assetName = overrideName || sourceName;
+  const mimeType = typeof fileMeta.mimeType === 'string' ? fileMeta.mimeType : 'application/octet-stream';
+  const sizeBytes = fileMeta.size ? Number(fileMeta.size) : null;
+
+  const bucket = admin.storage().bucket();
+  const storageKey = `orgs/${orgId}/projects/${projectId}/assets/${Date.now()}-${encodeURIComponent(assetName)}`;
+  const tmpPath = `${os.tmpdir()}/${uuidv4()}-${assetName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+  const downloadToken = uuidv4();
+
+  try {
+    const mediaRes = await drive.files.get(
+      { fileId: driveFileId, alt: 'media' },
+      { responseType: 'stream' }
+    );
+    await new Promise<void>((resolve, reject) => {
+      const dest = fs.createWriteStream(tmpPath);
+      (mediaRes.data as Readable)
+        .on('error', (error) => reject(error))
+        .on('end', () => resolve())
+        .pipe(dest);
+    });
+    await bucket.upload(tmpPath, {
+      destination: storageKey,
+      metadata: {
+        contentType: mimeType,
+        metadata: {
+          firebaseStorageDownloadTokens: downloadToken,
+          source: 'drive',
+          driveFileId,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('drive_stageAssetFromFile copy failed', { projectId, driveFileId }, error);
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (cleanupError) {
+      console.warn('Failed to clean up temp file after copy failure', cleanupError);
+    }
+    throw new functions.https.HttpsError('internal', 'Failed to copy the Drive file into storage');
+  } finally {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {}
+  }
+
+  const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(
+    storageKey
+  )}?alt=media&token=${downloadToken}`;
+
+  let version = 1;
+  try {
+    const existingSnap = await db
+      .collection('assets')
+      .where('projectId', '==', projectId)
+      .where('name', '==', assetName)
+      .get();
+    version = existingSnap.size + 1;
+  } catch (error) {
+    console.warn('drive_stageAssetFromFile version lookup failed', { projectId, assetName }, error);
+  }
+
+  const assetDoc: Record<string, any> = {
+    orgId,
+    projectId,
+    name: assetName,
+    storageKey,
+    url: downloadUrl,
+    bytes: sizeBytes,
+    mime: mimeType,
+    status: 'ready',
+    version,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    uploadedBy: context.auth.uid,
+    source: 'drive',
+    driveFileId,
+    driveFileName: sourceName,
+    driveFileMimeType: mimeType,
+    driveFileSize: sizeBytes,
+    driveFileModifiedAt:
+      typeof fileMeta.modifiedTime === 'string'
+        ? admin.firestore.Timestamp.fromDate(new Date(fileMeta.modifiedTime))
+        : null,
+    driveFileWebViewLink: typeof fileMeta.webViewLink === 'string' ? fileMeta.webViewLink : null,
+    driveIngestedAt: admin.firestore.FieldValue.serverTimestamp(),
+    orderId: orderId || null,
+    orderStatus: orderStatus || null,
+  };
+
+  const assetRef = await db.collection('assets').add(assetDoc);
+
+  try {
+    await writeAuditLog({
+      actorUid: context.auth.uid,
+      action: 'assets.staged_from_drive',
+      entityType: 'project',
+      entityId: projectId,
+      metadata: {
+        assetId: assetRef.id,
+        driveFileId,
+        driveFileName: sourceName,
+        orderId,
+      },
+    });
+  } catch (auditError) {
+    console.warn('drive_stageAssetFromFile audit log failed', { projectId, driveFileId }, auditError);
+  }
+
+  return { assetId: assetRef.id, version };
+});
+
 type FranchiseAssignmentMatchType = 'exact' | 'prefix' | 'superset' | 'radius';
 
 interface FranchiseAssignmentResult {
@@ -3859,11 +4201,180 @@ export const onLogoUpload = functions.storage
     return;
   });
 
+function normaliseAssetStatus(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.trim().toLowerCase();
+}
+
+function isAssetApprovalStatus(value: unknown): boolean {
+  const status = normaliseAssetStatus(value);
+  return status === 'approved' || status === 'final' || status === 'final_approved';
+}
+
+function deriveAssetTaskStatus(
+  status: string,
+  deliverablesReleased: boolean,
+  releaseHoldReason: string | null
+): 'todo' | 'in_progress' | 'review' | 'done' {
+  if (deliverablesReleased) {
+    return 'done';
+  }
+  if (releaseHoldReason) {
+    return 'review';
+  }
+  switch (status) {
+    case 'draft':
+    case 'pending':
+    case 'uploading':
+      return 'todo';
+    case 'changes_requested':
+    case 'revision':
+    case 'revisions':
+    case 'in_progress':
+      return 'in_progress';
+    case 'approved':
+    case 'final':
+    case 'final_approved':
+    case 'ready':
+    default:
+      return 'review';
+  }
+}
+
+function normaliseOrderStatus(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.trim().toLowerCase();
+}
+
+function isPaidOrderStatus(value: unknown): boolean {
+  const status = normaliseOrderStatus(value);
+  return status === 'paid' || status === 'balance_paid';
+}
+
+interface AssetTaskSyncOptions {
+  projectId: string;
+  assetId: string;
+  assetName?: string | null;
+  assetStatus?: string | null;
+  deliverablesReleased?: boolean;
+  releaseHoldReason?: string | null;
+  orderId?: string | null;
+  orderStatus?: string | null;
+  projectData?: FirebaseFirestore.DocumentData | null;
+  orderData?: FirebaseFirestore.DocumentData | null;
+}
+
+async function syncAssetReviewTask(options: AssetTaskSyncOptions): Promise<void> {
+  const { projectId, assetId } = options;
+  if (!projectId || !assetId) {
+    return;
+  }
+
+  let projectData = options.projectData ?? null;
+  if (!projectData) {
+    try {
+      const projectSnap = await db.collection('projects').doc(projectId).get();
+      projectData = projectSnap.exists ? (projectSnap.data() as FirebaseFirestore.DocumentData) : null;
+    } catch (error) {
+      console.warn('syncAssetReviewTask project lookup failed', { projectId, assetId }, error);
+      projectData = null;
+    }
+  }
+
+  let orderId = options.orderId ?? null;
+  let orderData = options.orderData ?? null;
+  if (!orderId && projectData && typeof projectData.orderId === 'string') {
+    orderId = projectData.orderId;
+  }
+
+  let orderStatus = options.orderStatus ?? null;
+  if (orderId && !orderData) {
+    try {
+      const orderSnap = await db.collection('orders').doc(orderId).get();
+      if (orderSnap.exists) {
+        orderData = orderSnap.data() as FirebaseFirestore.DocumentData;
+      }
+    } catch (error) {
+      console.warn('syncAssetReviewTask order lookup failed', { orderId, assetId }, error);
+      orderData = null;
+    }
+  }
+  if (!orderStatus && orderData && typeof orderData.status === 'string') {
+    orderStatus = orderData.status;
+  }
+
+  const deliverablesReleased = options.deliverablesReleased === true;
+  const releaseHoldReason = options.releaseHoldReason ?? null;
+  const assetStatus = normaliseAssetStatus(options.assetStatus);
+  const derivedStatus = deriveAssetTaskStatus(assetStatus, deliverablesReleased, releaseHoldReason);
+
+  const tasksRef = db.collection('projects').doc(projectId).collection('tasks');
+  let existingTask: FirebaseFirestore.QueryDocumentSnapshot<FirebaseFirestore.DocumentData> | null = null;
+  try {
+    const existingSnap = await tasksRef
+      .where('type', '==', 'asset_review')
+      .where('assetId', '==', assetId)
+      .limit(1)
+      .get();
+    existingTask = existingSnap.empty ? null : existingSnap.docs[0];
+  } catch (error) {
+    console.warn('syncAssetReviewTask task query failed', { projectId, assetId }, error);
+    return;
+  }
+
+  const timestamp = admin.firestore.FieldValue.serverTimestamp();
+  const payload: Record<string, any> = {
+    title: options.assetName ? `Review ${options.assetName}` : 'Review deliverable',
+    description:
+      'Track review approvals and unlock the download once finance confirms payment.',
+    type: 'asset_review',
+    assetId,
+    assetName: options.assetName ?? null,
+    status: derivedStatus,
+    lastAssetStatus: assetStatus || null,
+    deliverablesReleased,
+    releaseHoldReason,
+    orderId: orderId ?? null,
+    orderStatus: orderStatus ?? null,
+    updatedAt: timestamp,
+    stage: 'review',
+    forCustomer: false,
+  };
+
+  if (releaseHoldReason === 'payment_pending') {
+    payload.releaseHoldNote = 'Awaiting balance payment before downloads unlock.';
+  } else if (releaseHoldReason) {
+    payload.releaseHoldNote = releaseHoldReason;
+  } else {
+    payload.releaseHoldNote = null;
+  }
+
+  if (deliverablesReleased) {
+    payload.completedAt = timestamp;
+  } else {
+    payload.completedAt = null;
+  }
+
+  try {
+    if (existingTask) {
+      await existingTask.ref.set(payload, { merge: true });
+    } else {
+      await tasksRef.doc().set({ ...payload, createdAt: timestamp });
+    }
+  } catch (error) {
+    console.error('syncAssetReviewTask persistence failed', { projectId, assetId }, error);
+  }
+}
+
 /**
  * Triggered on asset status change. When an asset is marked as approved (status === 'approved'
- * and final version), check if the associated order has its balance paid. If so, mark the
- * asset's deliverables as released to allow download. Also records an entry in the
- * audit log collection for traceability. Assumes assets have fields: projectId, version, status.
+ * or marked as a final version) and the linked order balance is paid, mark the deliverable as
+ * released. Otherwise capture the release hold so operations know why the download is blocked.
+ * Also keeps a project task in sync so producers can track review approvals.
  */
 export const onAssetUpdate = functions.firestore
   .document('assets/{assetId}')
@@ -3871,32 +4382,142 @@ export const onAssetUpdate = functions.firestore
     const before = change.before.data();
     const after = change.after.data();
     if (!after) return null;
-    // Only act when status transitions to approved and version is final (no numeric check here)
-    if (before?.status !== 'approved' && after.status === 'approved') {
-      // Look up the project and order
-      const projectRef = db.collection('projects').doc(after.projectId);
-      const projectDoc = await projectRef.get();
-      const project = projectDoc.data() as any;
-      if (!project) return null;
-      const orderId = project.orderId;
-      if (!orderId) return null;
-      const orderDoc = await db.collection('orders').doc(orderId).get();
-      const order = orderDoc.data() as any;
-      if (!order) return null;
-      // If order balance paid then release
-      if (order.status === 'balance_paid' || order.status === 'paid') {
-        await change.after.ref.set({ deliverablesReleased: true }, { merge: true });
-        // Write to audit log
-        await db.collection('auditLogs').add({
-          type: 'deliverable_release',
-          assetId: context.params.assetId,
-          projectId: after.projectId,
-          orderId,
-          timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          uid: after.uploadedBy || null
-        });
+
+    const assetId = context.params.assetId;
+    const projectId = typeof after.projectId === 'string' ? after.projectId : null;
+    if (!projectId) {
+      return null;
+    }
+
+    const beforeStatus = normaliseAssetStatus(before?.status);
+    const afterStatus = normaliseAssetStatus(after.status);
+    const statusChanged = beforeStatus !== afterStatus;
+
+    let projectData: FirebaseFirestore.DocumentData | null = null;
+    let orderData: FirebaseFirestore.DocumentData | null = null;
+    let orderId: string | null = null;
+    let orderStatus: string | null = null;
+
+    try {
+      const projectSnap = await db.collection('projects').doc(projectId).get();
+      if (projectSnap.exists) {
+        projectData = projectSnap.data() as FirebaseFirestore.DocumentData;
+        if (typeof projectData.orderId === 'string' && projectData.orderId.trim().length > 0) {
+          orderId = projectData.orderId.trim();
+          const orderSnap = await db.collection('orders').doc(orderId).get();
+          if (orderSnap.exists) {
+            orderData = orderSnap.data() as FirebaseFirestore.DocumentData;
+            if (typeof orderData.status === 'string') {
+              orderStatus = orderData.status;
+            }
+          }
+        }
+      }
+    } catch (lookupError) {
+      console.error('onAssetUpdate project/order lookup failed', { projectId, assetId }, lookupError);
+    }
+
+    const updates: Record<string, any> = {};
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    let deliverablesReleased = after.deliverablesReleased === true;
+    let releaseHoldReason =
+      typeof after.releaseHoldReason === 'string' ? after.releaseHoldReason : null;
+
+    if (statusChanged) {
+      if (isAssetApprovalStatus(afterStatus)) {
+        if (orderStatus === 'balance_paid' || orderStatus === 'paid') {
+          if (!deliverablesReleased) {
+            updates.deliverablesReleased = true;
+            updates.releaseHoldReason = null;
+            updates.releaseHoldNote = null;
+            updates.releaseReadyAt = timestamp;
+            updates.releaseHoldUpdatedAt = timestamp;
+            deliverablesReleased = true;
+            releaseHoldReason = null;
+          }
+        } else {
+          if (deliverablesReleased) {
+            updates.deliverablesReleased = false;
+            deliverablesReleased = false;
+          }
+          if (releaseHoldReason !== 'payment_pending') {
+            updates.releaseHoldReason = 'payment_pending';
+            updates.releaseHoldNote = 'Awaiting balance payment before downloads unlock.';
+            updates.releaseHoldUpdatedAt = timestamp;
+            releaseHoldReason = 'payment_pending';
+          }
+          if (after.releaseReadyAt) {
+            updates.releaseReadyAt = null;
+          }
+        }
+      } else if (deliverablesReleased || releaseHoldReason) {
+        updates.deliverablesReleased = false;
+        updates.releaseHoldReason = null;
+        updates.releaseHoldNote = null;
+        updates.releaseHoldUpdatedAt = timestamp;
+        updates.releaseReadyAt = null;
+        deliverablesReleased = false;
+        releaseHoldReason = null;
       }
     }
+
+    if (
+      !statusChanged &&
+      releaseHoldReason === 'payment_pending' &&
+      (orderStatus === 'balance_paid' || orderStatus === 'paid')
+    ) {
+      updates.deliverablesReleased = true;
+      updates.releaseHoldReason = null;
+      updates.releaseHoldNote = null;
+      updates.releaseReadyAt = timestamp;
+      updates.releaseHoldUpdatedAt = timestamp;
+      deliverablesReleased = true;
+      releaseHoldReason = null;
+    }
+
+    if (Object.keys(updates).length > 0) {
+      try {
+        await change.after.ref.set(updates, { merge: true });
+      } catch (writeError) {
+        console.error('onAssetUpdate failed to persist release updates', { assetId }, writeError);
+      }
+    }
+
+    try {
+      await syncAssetReviewTask({
+        projectId,
+        assetId,
+        assetName: typeof after.name === 'string' ? after.name : null,
+        assetStatus: afterStatus,
+        deliverablesReleased,
+        releaseHoldReason,
+        orderId,
+        orderStatus,
+        projectData,
+        orderData,
+      });
+    } catch (taskError) {
+      console.error('onAssetUpdate failed to sync review task', { assetId, projectId }, taskError);
+    }
+
+    if (
+      updates.deliverablesReleased === true &&
+      (orderStatus === 'balance_paid' || orderStatus === 'paid')
+    ) {
+      try {
+        await db.collection('auditLogs').add({
+          type: 'deliverable_release',
+          assetId,
+          projectId,
+          orderId,
+          timestamp,
+          uid: after.uploadedBy || null,
+        });
+      } catch (auditError) {
+        console.warn('onAssetUpdate failed to record audit log', { assetId }, auditError);
+      }
+    }
+
     return null;
   });
 
@@ -3984,6 +4605,157 @@ export const onAssetCreated = functions.firestore
     if (thumbnailKey) updates.thumbnailKey = thumbnailKey;
     if (palette) updates.palette = palette;
     await snap.ref.set(updates, { merge: true });
+    if (typeof asset.projectId === 'string' && asset.projectId.trim().length > 0) {
+      try {
+        await syncAssetReviewTask({
+          projectId: asset.projectId,
+          assetId: context.params.assetId,
+          assetName: typeof asset.name === 'string' ? asset.name : null,
+          assetStatus: typeof asset.status === 'string' ? asset.status : null,
+          deliverablesReleased: false,
+          releaseHoldReason: null,
+        });
+      } catch (taskError) {
+        console.error('onAssetCreated failed to seed review task', context.params.assetId, taskError);
+      }
+    }
+    return null;
+  });
+
+export const onOrderStatusUpdated = functions.firestore
+  .document('orders/{orderId}')
+  .onUpdate(async (change, context) => {
+    const before = change.before.data() as Record<string, any> | undefined;
+    const after = change.after.data() as Record<string, any> | undefined;
+    if (!after) {
+      return null;
+    }
+
+    const previousStatus = normaliseOrderStatus(before?.status);
+    const nextStatus = normaliseOrderStatus(after.status);
+    if (previousStatus === nextStatus || !isPaidOrderStatus(nextStatus)) {
+      return null;
+    }
+
+    const orderId = context.params.orderId;
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const releaseSummaries: Array<{
+      projectId: string;
+      projectName: string | null;
+      assetIds: string[];
+      projectData: FirebaseFirestore.DocumentData;
+    }> = [];
+
+    try {
+      const projectsSnap = await db.collection('projects').where('orderId', '==', orderId).get();
+      if (!projectsSnap.empty) {
+        for (const projectDoc of projectsSnap.docs) {
+          const projectId = projectDoc.id;
+          const projectData = projectDoc.data() as FirebaseFirestore.DocumentData;
+          const assetIds: string[] = [];
+          try {
+            const assetsSnap = await db
+              .collection('assets')
+              .where('projectId', '==', projectId)
+              .get();
+            for (const assetDoc of assetsSnap.docs) {
+              const assetData = assetDoc.data() as Record<string, any>;
+              if (!isAssetApprovalStatus(assetData.status) || assetData.deliverablesReleased === true) {
+                continue;
+              }
+              const updates: Record<string, any> = {
+                deliverablesReleased: true,
+                releaseHoldReason: null,
+                releaseHoldNote: null,
+                releaseReadyAt: timestamp,
+                releaseHoldUpdatedAt: timestamp,
+              };
+              try {
+                await assetDoc.ref.set(updates, { merge: true });
+              } catch (writeError) {
+                console.error('onOrderStatusUpdated failed to release asset', {
+                  orderId,
+                  assetId: assetDoc.id,
+                }, writeError);
+                continue;
+              }
+              assetIds.push(assetDoc.id);
+              try {
+                await syncAssetReviewTask({
+                  projectId,
+                  assetId: assetDoc.id,
+                  assetName: typeof assetData.name === 'string' ? assetData.name : null,
+                  assetStatus: typeof assetData.status === 'string' ? assetData.status : null,
+                  deliverablesReleased: true,
+                  releaseHoldReason: null,
+                  orderId,
+                  orderStatus: after.status ?? nextStatus,
+                  projectData,
+                  orderData: after,
+                });
+              } catch (taskError) {
+                console.error('onOrderStatusUpdated failed to sync review task', {
+                  projectId,
+                  assetId: assetDoc.id,
+                }, taskError);
+              }
+            }
+          } catch (assetError) {
+            console.error('onOrderStatusUpdated asset lookup failed', { projectId, orderId }, assetError);
+          }
+          if (assetIds.length > 0) {
+            releaseSummaries.push({
+              projectId,
+              projectName: typeof projectData.name === 'string' ? projectData.name : null,
+              assetIds,
+              projectData,
+            });
+          }
+        }
+      }
+    } catch (projectError) {
+      console.error('onOrderStatusUpdated project lookup failed', { orderId }, projectError);
+    }
+
+    if (releaseSummaries.length > 0) {
+      const orgId = typeof after.orgId === 'string' ? after.orgId : null;
+      if (orgId) {
+        try {
+          const membershipsSnap = await db
+            .collection('memberships')
+            .where('orgId', '==', orgId)
+            .limit(50)
+            .get();
+          if (!membershipsSnap.empty) {
+            const batch = db.batch();
+            const notificationTimestamp = admin.firestore.FieldValue.serverTimestamp();
+            membershipsSnap.docs.forEach((membershipDoc) => {
+              const membership = membershipDoc.data() as Record<string, any>;
+              const userId = typeof membership.userId === 'string' ? membership.userId : null;
+              if (!userId) {
+                return;
+              }
+              releaseSummaries.forEach((summary) => {
+                const notificationRef = db.collection('notifications').doc();
+                batch.set(notificationRef, {
+                  userId,
+                  message: `Final files for ${summary.projectName || 'your project'} are ready to download.`,
+                  projectId: summary.projectId,
+                  orderId,
+                  assetIds: summary.assetIds,
+                  createdAt: notificationTimestamp,
+                  kind: 'asset_release',
+                });
+              });
+            });
+            await batch.commit();
+          }
+        } catch (notifyError) {
+          console.error('onOrderStatusUpdated notification dispatch failed', { orderId, orgId }, notifyError);
+        }
+      }
+    }
+
     return null;
   });
 

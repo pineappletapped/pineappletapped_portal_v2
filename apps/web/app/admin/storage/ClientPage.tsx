@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import DriveAssetStager from "@/components/storage/DriveAssetStager";
 
 export default function AdminStoragePage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
@@ -223,6 +224,7 @@ export default function AdminStoragePage() {
           )}
         </div>
       </section>
+      <DriveAssetStager className="mt-6" />
     </div>
   );
 }
