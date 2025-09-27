@@ -14,8 +14,11 @@ export interface Equipment {
   id?: string;
   name: string;
   serialNumber: string;
+  assetTag?: string | null;
   category: string;
   ownerId: string; // 'company' or user uid
+  ownerType?: "company" | "user" | "franchise";
+  franchiseId?: string | null;
   newValue: number;
   currentValue: number;
   rentalPrice: number;

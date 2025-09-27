@@ -21,6 +21,7 @@ export default function AdminEquipmentPage() {
   const [isStaff, setIsStaff] = useState(false);
   const [items, setItems] = useState<Equipment[]>([]);
   const [users, setUsers] = useState<any[]>([]);
+  const [franchises, setFranchises] = useState<{ id: string; name: string }[]>([]);
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [ownerFilter, setOwnerFilter] = useState("");
@@ -78,7 +79,9 @@ export default function AdminEquipmentPage() {
       setIsStaff(!!me?.isStaff);
       if (ok) {
         const uSnap = await getDocs(collection(db, "users"));
-        const list = uSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) })).filter(u => u.isStaff || u.contractor);
+        const list = uSnap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as any) }))
+          .filter((u) => u.isStaff || u.contractor);
         setUsers(list);
         let eqSnap;
         if (me?.isStaff) {
@@ -89,10 +92,11 @@ export default function AdminEquipmentPage() {
         setItems(eqSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) })) as Equipment[]);
         try {
           if (me?.isStaff) {
-            const [bagSnap, standardSnap, productSnap] = await Promise.all([
+            const [bagSnap, standardSnap, productSnap, franchiseSnap] = await Promise.all([
               getDocs(collection(db, "kitBags")),
               getDocs(collection(db, "equipmentStandards")),
               getDocs(collection(db, "products")),
+              getDocs(collection(db, "franchises")),
             ]);
             setKitBags(
               (bagSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as KitBag[]).sort(
@@ -112,6 +116,15 @@ export default function AdminEquipmentPage() {
                 .map((d) => {
                   const data = d.data() as any;
                   return { id: d.id, name: data.name || d.id };
+                })
+                .sort((a, b) => a.name.localeCompare(b.name))
+            );
+            setFranchises(
+              franchiseSnap.docs
+                .map((docSnap) => {
+                  const data = docSnap.data() as any;
+                  const rawName = typeof data?.name === "string" ? data.name.trim() : "";
+                  return { id: docSnap.id, name: rawName || docSnap.id };
                 })
                 .sort((a, b) => a.name.localeCompare(b.name))
             );
@@ -536,12 +549,64 @@ export default function AdminEquipmentPage() {
     }
   };
 
-  const filtered = items.filter((i) => {
-    const matchSearch = !search ||
-      i.name.toLowerCase().includes(search.toLowerCase()) ||
-      i.serialNumber.toLowerCase().includes(search.toLowerCase());
-    const matchCategory = !categoryFilter || i.category === categoryFilter;
-    const matchOwner = !ownerFilter || i.ownerId === ownerFilter || (ownerFilter === "company" && i.ownerId === "company");
+  const userLookup = useMemo(() => {
+    return new Map(users.map((user) => [user.id, user] as const));
+  }, [users]);
+
+  const franchiseLookup = useMemo(() => {
+    return new Map(franchises.map((franchise) => [franchise.id, franchise] as const));
+  }, [franchises]);
+
+  const resolveOwnerType = (item: Equipment): "company" | "user" | "franchise" => {
+    if (item.ownerType === "company" || item.ownerType === "user" || item.ownerType === "franchise") {
+      return item.ownerType;
+    }
+    if ((item.ownerId || "").startsWith("franchise:")) return "franchise";
+    return item.ownerId === "company" || !item.ownerId ? "company" : "user";
+  };
+
+  const resolveFranchiseId = (item: Equipment): string => {
+    if (typeof item.franchiseId === "string" && item.franchiseId.trim()) {
+      return item.franchiseId.trim();
+    }
+    const ownerId = item.ownerId || "";
+    if (ownerId.startsWith("franchise:")) {
+      return ownerId.slice("franchise:".length);
+    }
+    return "";
+  };
+
+  const resolveOwnerLabel = (item: Equipment): string => {
+    const type = resolveOwnerType(item);
+    if (type === "company") return "Pineapple Tapped";
+    if (type === "franchise") {
+      const franchiseId = resolveFranchiseId(item);
+      if (!franchiseId) return "Franchise";
+      return franchiseLookup.get(franchiseId)?.name || `Franchise ${franchiseId}`;
+    }
+    const owner = item.ownerId ? userLookup.get(item.ownerId) : undefined;
+    return owner?.fullName || owner?.email || item.ownerId || "Team member";
+  };
+
+  const filtered = items.filter((item) => {
+    const term = search.trim().toLowerCase();
+    const matchSearch =
+      !term ||
+      item.name.toLowerCase().includes(term) ||
+      item.serialNumber.toLowerCase().includes(term) ||
+      (item.assetTag || "").toLowerCase().includes(term);
+    const matchCategory = !categoryFilter || item.category === categoryFilter;
+    const matchOwner = (() => {
+      if (!ownerFilter) return true;
+      const type = resolveOwnerType(item);
+      if (ownerFilter === "company") return type === "company";
+      if (ownerFilter.startsWith("franchise:")) {
+        const filterId = ownerFilter.slice("franchise:".length);
+        const franchiseId = resolveFranchiseId(item);
+        return franchiseId === filterId || item.ownerId === ownerFilter;
+      }
+      return item.ownerId === ownerFilter;
+    })();
     return matchSearch && matchCategory && matchOwner;
   });
 
@@ -554,8 +619,11 @@ export default function AdminEquipmentPage() {
       "id",
       "name",
       "serialNumber",
+      "assetTag",
       "category",
+      "ownerType",
       "ownerId",
+      "franchiseId",
       "newValue",
       "currentValue",
       "rentalPrice",
@@ -566,6 +634,12 @@ export default function AdminEquipmentPage() {
     const rows = filtered.map((item) =>
       headers
         .map((header) => {
+          if (header === "ownerType") {
+            return resolveOwnerType(item);
+          }
+          if (header === "franchiseId") {
+            return resolveFranchiseId(item);
+          }
           if (header === "meetsStandards") {
             return Array.isArray(item.meetsStandards)
               ? item.meetsStandards.join("|")
@@ -651,6 +725,11 @@ export default function AdminEquipmentPage() {
           {users.map((u) => (
             <option key={u.id} value={u.id}>{u.fullName || u.email}</option>
           ))}
+          {franchises.map((franchise) => (
+            <option key={`franchise-${franchise.id}`} value={`franchise:${franchise.id}`}>
+              {franchise.name}
+            </option>
+          ))}
         </select>
         {carnetMode ? (
           <>
@@ -677,6 +756,7 @@ export default function AdminEquipmentPage() {
                 {carnetMode && <th className="p-2"></th>}
                 <th className="p-2">Name</th>
                 <th className="p-2">Serial</th>
+                <th className="p-2">Asset Tag</th>
                 <th className="p-2">Category</th>
                 <th className="p-2">Owner</th>
                 <th className="p-2">Standards</th>
@@ -698,12 +778,9 @@ export default function AdminEquipmentPage() {
                   )}
                   <td className="p-2">{item.name}</td>
                   <td className="p-2">{item.serialNumber}</td>
+                  <td className="p-2">{item.assetTag || <span className="text-xs text-gray-500">—</span>}</td>
                   <td className="p-2">{item.category}</td>
-                  <td className="p-2">
-                    {item.ownerId === 'company'
-                      ? 'Pineapple Tapped'
-                      : users.find(u => u.id === item.ownerId)?.fullName || item.ownerId}
-                  </td>
+                  <td className="p-2">{resolveOwnerLabel(item)}</td>
                   <td className="p-2">
                     {Array.isArray(item.meetsStandards) && item.meetsStandards.length ? (
                       <ul className="flex flex-wrap gap-1">
