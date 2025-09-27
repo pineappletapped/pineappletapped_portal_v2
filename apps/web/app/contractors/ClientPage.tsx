@@ -8,7 +8,14 @@ import AvailabilityCalendar, { AvailabilityStatus } from "@/components/Availabil
 import WorkwearPortal from "@/components/WorkwearPortal";
 import ContractorProfileForm from "@/components/ContractorProfileForm";
 import ContractorKitManager from "@/components/ContractorKitManager";
-import { auth, db, functions } from "@/lib/firebase";
+import ComplianceBadge from "@/components/ComplianceBadge";
+import {
+  complianceDateToDisplay,
+  complianceDateToInputValue,
+  deriveComplianceState,
+  type ComplianceRecord,
+} from "@/lib/compliance";
+import { auth, db, ensureFirebase, functions } from "@/lib/firebase";
 import {
   addDoc,
   collection,
@@ -23,12 +30,14 @@ import {
 } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { extractUserRoles, hasRole } from "@/lib/roles";
+import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 
 type TeamTab =
   | "dashboard"
   | "notices"
   | "availability"
   | "projects"
+  | "compliance"
   | "kit"
   | "workwear"
   | "profile";
@@ -165,6 +174,14 @@ export default function ContractorPortal() {
   const [isStaff, setIsStaff] = useState(false);
   const [noticeTitle, setNoticeTitle] = useState("");
   const [noticeMessage, setNoticeMessage] = useState("");
+  const [complianceRecord, setComplianceRecord] = useState<ComplianceRecord | null>(null);
+  const [complianceLoading, setComplianceLoading] = useState(true);
+  const [complianceError, setComplianceError] = useState<string | null>(null);
+  const [licenceFile, setLicenceFile] = useState<File | null>(null);
+  const [insuranceFile, setInsuranceFile] = useState<File | null>(null);
+  const [licenceExpiry, setLicenceExpiry] = useState("");
+  const [insuranceExpiry, setInsuranceExpiry] = useState("");
+  const [submittingCompliance, setSubmittingCompliance] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -175,6 +192,8 @@ export default function ContractorPortal() {
       }
 
       try {
+        setComplianceLoading(true);
+        setComplianceError(null);
         const profileSnap = await getDoc(doc(db, "users", user.uid));
         const profile = profileSnap.data() as any;
         const profileDoc = {
@@ -186,7 +205,15 @@ export default function ContractorPortal() {
         const roles = extractUserRoles(profileDoc);
         setIsStaff(hasRole(roles, ["admin", "operations", "projects"]));
 
-        const [taskSnap, bookingSnap, openSnap, availabilitySnap, noticeSnap, productSnap] = await Promise.all([
+        const [
+          taskSnap,
+          bookingSnap,
+          openSnap,
+          availabilitySnap,
+          noticeSnap,
+          productSnap,
+          complianceSnap,
+        ] = await Promise.all([
           getDocs(query(collection(db, "contractorTasks"), where("uid", "==", user.uid))),
           getDocs(query(collection(db, "bookings"), where("contractorUid", "==", user.uid))),
           getDocs(query(collection(db, "bookings"), where("contractorUid", "==", null))),
@@ -195,6 +222,10 @@ export default function ContractorPortal() {
           getDocs(query(collection(db, "contractorProducts"), where("uid", "==", user.uid))).catch((error) => {
             console.warn("Failed to load contractor products", error);
             return { docs: [] } as any;
+          }),
+          getDoc(doc(db, "users", user.uid, "compliance", "profile")).catch((error) => {
+            console.warn("Failed to load compliance record", error);
+            return null;
           }),
         ]);
 
@@ -219,8 +250,22 @@ export default function ContractorPortal() {
         } else {
           setProducts([]);
         }
+
+        if (complianceSnap && "exists" in complianceSnap && complianceSnap?.exists()) {
+          setComplianceRecord({
+            id: complianceSnap.id,
+            uid: user.uid,
+            ...(complianceSnap.data() as Record<string, unknown>),
+          } as ComplianceRecord);
+        } else {
+          setComplianceRecord(null);
+        }
+        setComplianceLoading(false);
       } catch (error) {
         console.warn("Failed to load team workspace", error);
+        setComplianceLoading(false);
+        setComplianceError("We couldn't load your compliance record. Please refresh the page.");
+        setComplianceRecord(null);
       }
 
       setLoading(false);
@@ -283,11 +328,141 @@ export default function ContractorPortal() {
     }
   };
 
+  const submitCompliance = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const user = auth.currentUser;
+    if (!user) {
+      setComplianceError("You need to be signed in to submit compliance documents.");
+      return;
+    }
+
+    setSubmittingCompliance(true);
+    setComplianceError(null);
+
+    try {
+      const { db: ensuredDb, storage } = await ensureFirebase();
+      const database = ensuredDb || db;
+      if (!database) {
+        throw new Error("Firestore is unavailable. Please try again shortly.");
+      }
+      if (!storage || (storage as any).__isPlaceholder) {
+        throw new Error("File storage is unavailable. Please refresh and retry.");
+      }
+
+      const licenceExpiryDate = licenceExpiry ? new Date(licenceExpiry) : null;
+      if (!licenceExpiryDate || Number.isNaN(licenceExpiryDate.getTime())) {
+        throw new Error("Enter the expiry date for your pilot licence.");
+      }
+
+      const insuranceExpiryDate = insuranceExpiry ? new Date(insuranceExpiry) : null;
+      if (!insuranceExpiryDate || Number.isNaN(insuranceExpiryDate.getTime())) {
+        throw new Error("Enter the expiry date for your insurance policy.");
+      }
+
+      const hasExistingLicence = Boolean(complianceRecord?.licenceUrl);
+      const hasExistingInsurance = Boolean(complianceRecord?.insuranceUrl);
+
+      if (!licenceFile && !hasExistingLicence) {
+        throw new Error("Upload your pilot licence before submitting for review.");
+      }
+
+      if (!insuranceFile && !hasExistingInsurance) {
+        throw new Error("Upload your insurance certificate before submitting for review.");
+      }
+
+      const complianceRef = doc(database, "users", user.uid, "compliance", "profile");
+      const timestamp = serverTimestamp();
+
+      let licenceUrl = complianceRecord?.licenceUrl ?? null;
+      let insuranceUrl = complianceRecord?.insuranceUrl ?? null;
+
+      const payload: Record<string, unknown> = {
+        uid: user.uid,
+        status: "pending",
+        licenceExpiry: licenceExpiryDate.toISOString(),
+        insuranceExpiry: insuranceExpiryDate.toISOString(),
+        reviewerUid: null,
+        reviewNotes: null,
+        reviewedAt: null,
+        submittedAt: timestamp,
+        updatedAt: timestamp,
+      };
+
+      if (licenceFile) {
+        const licenceRef = ref(
+          storage,
+          `users/${user.uid}/compliance/licence-${Date.now()}-${licenceFile.name}`
+        );
+        await uploadBytes(licenceRef, licenceFile);
+        licenceUrl = await getDownloadURL(licenceRef);
+        payload.licenceUploadedAt = timestamp;
+        payload.licenceName = licenceFile.name;
+      } else if (complianceRecord?.licenceName) {
+        payload.licenceName = complianceRecord.licenceName;
+      }
+
+      if (insuranceFile) {
+        const insuranceRef = ref(
+          storage,
+          `users/${user.uid}/compliance/insurance-${Date.now()}-${insuranceFile.name}`
+        );
+        await uploadBytes(insuranceRef, insuranceFile);
+        insuranceUrl = await getDownloadURL(insuranceRef);
+        payload.insuranceUploadedAt = timestamp;
+        payload.insuranceName = insuranceFile.name;
+      } else if (complianceRecord?.insuranceName) {
+        payload.insuranceName = complianceRecord.insuranceName;
+      }
+
+      if (licenceUrl) {
+        payload.licenceUrl = licenceUrl;
+      }
+      if (insuranceUrl) {
+        payload.insuranceUrl = insuranceUrl;
+      }
+
+      await setDoc(complianceRef, payload, { merge: true });
+
+      const refreshed = await getDoc(complianceRef);
+      if (refreshed.exists()) {
+        setComplianceRecord({
+          id: refreshed.id,
+          uid: user.uid,
+          ...(refreshed.data() as Record<string, unknown>),
+        } as ComplianceRecord);
+      } else {
+        setComplianceRecord(null);
+      }
+
+      alert("Compliance documents submitted. HQ will confirm once approved.");
+    } catch (error: any) {
+      console.warn("submitCompliance failed", error);
+      setComplianceError(error?.message || "Failed to submit compliance documents.");
+    } finally {
+      setSubmittingCompliance(false);
+    }
+  };
+
+  useEffect(() => {
+    setLicenceExpiry(complianceDateToInputValue(complianceRecord?.licenceExpiry));
+    setInsuranceExpiry(
+      complianceDateToInputValue(complianceRecord?.insuranceExpiry)
+    );
+    setLicenceFile(null);
+    setInsuranceFile(null);
+  }, [complianceRecord]);
+
   const today = useMemo(() => {
     const now = new Date();
     now.setHours(0, 0, 0, 0);
     return now;
   }, []);
+
+  const complianceState = useMemo(
+    () => deriveComplianceState(complianceRecord),
+    [complianceRecord]
+  );
+  const complianceBadgeTitle = complianceState.issues.join("\n");
 
   const upcomingBookings = useMemo(() => {
     const items = bookings
@@ -363,12 +538,18 @@ export default function ContractorPortal() {
     { id: "notices", label: "Notice Board" },
     { id: "availability", label: "Availability" },
     { id: "projects", label: "Projects" },
+    { id: "compliance", label: "Compliance" },
     { id: "kit", label: "My Kit" },
     { id: "workwear", label: "Order Workwear" },
     { id: "profile", label: "My Profile" },
   ];
 
   const quickLinks: { tab: TeamTab; title: string; description: string }[] = [
+    {
+      tab: "compliance",
+      title: "Compliance",
+      description: "Upload your drone licence and insurance for HQ approval.",
+    },
     {
       tab: "projects",
       title: "Projects",
@@ -387,6 +568,15 @@ export default function ContractorPortal() {
   ];
 
   const heroMetrics = [
+    {
+      label: "Drone compliance",
+      value: (
+        <ComplianceBadge
+          status={complianceState.status}
+          title={complianceBadgeTitle}
+        />
+      ),
+    },
     { label: "Upcoming bookings", value: upcomingBookings.length },
     { label: "Open tasks", value: openTasks.length },
     { label: "Shifts available", value: availableBookings.length },
@@ -394,6 +584,11 @@ export default function ContractorPortal() {
   ];
 
   const heroActions = [
+    {
+      label: "Update compliance",
+      description: "Upload your drone licence and insurance for review.",
+      onClick: () => setActiveTab("compliance"),
+    },
     {
       label: "Review projects",
       description: "Check briefs, files, and tasks for current shoots.",
@@ -793,6 +988,140 @@ export default function ContractorPortal() {
               </ul>
             ) : (
               <p className="mt-4 text-sm text-slate-500">No open opportunities right now. Check back soon or update your availability.</p>
+            )}
+          </article>
+        </section>
+
+        <section
+          id={panelId("compliance")}
+          role="tabpanel"
+          aria-labelledby={tabId("compliance")}
+          hidden={activeTab !== "compliance"}
+        >
+          <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h2 className="text-base font-semibold text-slate-900">Drone compliance</h2>
+                <p className="text-sm text-slate-500">
+                  Upload your pilot licence and insurance so HQ can approve you for drone work.
+                </p>
+              </div>
+              <ComplianceBadge status={complianceState.status} title={complianceBadgeTitle} />
+            </div>
+
+            {complianceLoading ? (
+              <p className="mt-6 text-sm text-slate-500">Loading your compliance record…</p>
+            ) : (
+              <>
+                {complianceError && (
+                  <p className="mt-4 text-sm text-red-600">{complianceError}</p>
+                )}
+
+                {complianceState.issues.length > 0 && (
+                  <ul className="mt-4 list-disc space-y-1 pl-5 text-xs text-slate-600">
+                    {complianceState.issues.map((issue) => (
+                      <li key={issue}>{issue}</li>
+                    ))}
+                  </ul>
+                )}
+
+                <form className="mt-6 grid gap-6" onSubmit={submitCompliance}>
+                  <fieldset className="grid gap-3 rounded-2xl border border-slate-200 p-4">
+                    <legend className="text-sm font-semibold text-slate-900">Pilot licence</legend>
+                    {complianceRecord?.licenceUrl ? (
+                      <div className="flex flex-col gap-1 text-xs text-slate-600">
+                        <a
+                          className="text-blue-600 hover:underline"
+                          href={complianceRecord.licenceUrl as string}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                        >
+                          View current licence ({complianceRecord.licenceName || "Download"})
+                        </a>
+                        <span>
+                          Expires {complianceDateToDisplay(complianceRecord.licenceExpiry)}
+                        </span>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500">
+                        Upload your pilot licence (PDF or image).
+                      </p>
+                    )}
+                    <input
+                      type="file"
+                      accept=".pdf,.png,.jpg,.jpeg"
+                      onChange={(event) =>
+                        setLicenceFile(event.target.files?.[0] ?? null)
+                      }
+                    />
+                    <label className="grid gap-1 text-xs text-slate-600" htmlFor="licence-expiry">
+                      <span className="font-medium text-slate-700">Expiry date</span>
+                      <input
+                        id="licence-expiry"
+                        type="date"
+                        className="input"
+                        value={licenceExpiry}
+                        onChange={(event) => setLicenceExpiry(event.target.value)}
+                        required
+                      />
+                    </label>
+                  </fieldset>
+
+                  <fieldset className="grid gap-3 rounded-2xl border border-slate-200 p-4">
+                    <legend className="text-sm font-semibold text-slate-900">Insurance certificate</legend>
+                    {complianceRecord?.insuranceUrl ? (
+                      <div className="flex flex-col gap-1 text-xs text-slate-600">
+                        <a
+                          className="text-blue-600 hover:underline"
+                          href={complianceRecord.insuranceUrl as string}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                        >
+                          View current policy ({complianceRecord.insuranceName || "Download"})
+                        </a>
+                        <span>
+                          Expires {complianceDateToDisplay(complianceRecord.insuranceExpiry)}
+                        </span>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-500">
+                        Upload your insurance certificate (PDF or image).
+                      </p>
+                    )}
+                    <input
+                      type="file"
+                      accept=".pdf,.png,.jpg,.jpeg"
+                      onChange={(event) =>
+                        setInsuranceFile(event.target.files?.[0] ?? null)
+                      }
+                    />
+                    <label className="grid gap-1 text-xs text-slate-600" htmlFor="insurance-expiry">
+                      <span className="font-medium text-slate-700">Expiry date</span>
+                      <input
+                        id="insurance-expiry"
+                        type="date"
+                        className="input"
+                        value={insuranceExpiry}
+                        onChange={(event) => setInsuranceExpiry(event.target.value)}
+                        required
+                      />
+                    </label>
+                  </fieldset>
+
+                  {complianceRecord?.reviewNotes && (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900">
+                      <p className="font-semibold">HQ feedback</p>
+                      <p className="mt-1 whitespace-pre-line">{complianceRecord.reviewNotes as string}</p>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end">
+                    <button type="submit" className="btn" disabled={submittingCompliance}>
+                      {submittingCompliance ? "Submitting…" : "Submit for review"}
+                    </button>
+                  </div>
+                </form>
+              </>
             )}
           </article>
         </section>
