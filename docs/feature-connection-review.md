@@ -24,6 +24,14 @@ This note captures portal features that are implemented in the codebase but are 
   1. Ensure CRM subpages inherit consistent layout and breadcrumbs when linked from new entry points.
   2. Communicate the new navigation path to operations staff so they know where to find CRM tools.
 
+## Storage automation (`/admin/storage`)
+- **What exists:** Administrators can configure the Google Drive automation defaults that provision client folders and assign HQ access for new orders.【F:apps/web/app/admin/storage/ClientPage.tsx†L1-L202】
+- **Status:** The admin dashboard quick links now include a dedicated “Storage Automation” entry so operations teams can launch the settings without diving through the product catalogue.【F:apps/web/app/admin/ClientPage.tsx†L244-L286】
+- **Remaining follow-up tasks:**
+  1. Audit additional storage backends (e.g. OneDrive) and surface their settings within the same workspace when ready.
+  2. Provide runbooks for operations covering required Drive IDs and permission hygiene.
+  3. Add telemetry to confirm when storage settings change and alert the integrations team if automation fails.
+
 ## Shared email workspace (`/emails`)
 - **What exists:** Authenticated users can review organisation email threads and send new outbound emails via the `emails_send` callable integration.【F:apps/web/app/emails/page.tsx†L1-L110】
 - **Connection gap:** The client dashboard's quick actions focus on projects, bookings, and planner tools, leaving no way to reach the email workspace through the UI.【F:apps/web/app/dashboard/ClientPage.tsx†L223-L240】

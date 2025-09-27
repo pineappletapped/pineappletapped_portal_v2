@@ -264,6 +264,12 @@ export default function AdminPage() {
               ],
             },
             {
+              title: 'Storage',
+              links: [
+                { href: '/admin/storage', label: 'Storage Automation' },
+              ],
+            },
+            {
               title: 'People',
               links: [
                 { href: '/admin/users', label: 'CRM' },
