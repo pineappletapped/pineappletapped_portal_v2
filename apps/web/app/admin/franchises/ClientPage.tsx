@@ -437,6 +437,10 @@ export default function AdminFranchisesPage() {
     role: "franchisee" as FranchiseMemberRole,
     primary: false,
   });
+  const [stripeActionLoading, setStripeActionLoading] = useState(false);
+  const [stripeActionMessage, setStripeActionMessage] = useState<
+    { tone: "success" | "error"; text: string } | null
+  >(null);
 
   const updateNewOnboarding = (updates: Partial<OnboardingState>) => {
     setNewFranchise((prev) => ({ ...prev, onboarding: { ...prev.onboarding, ...updates } }));
@@ -453,6 +457,56 @@ export default function AdminFranchisesPage() {
   const updateEditingQuickBooks = (updates: Partial<QuickBooksState>) => {
     setEditingFranchise((prev) => ({ ...prev, quickbooks: { ...prev.quickbooks, ...updates } }));
   };
+
+  const launchStripeConnect = useCallback(
+    async (franchiseId: string, mode: 'onboarding' | 'login' = 'onboarding') => {
+      if (!franchiseId) {
+        setStripeActionMessage({
+          tone: 'error',
+          text: 'Save the franchise record before launching Stripe onboarding.',
+        });
+        return;
+      }
+      setStripeActionLoading(true);
+      setStripeActionMessage(null);
+      try {
+        const response = await fetch('/api/stripe/connect/accounts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ franchiseId, linkMode: mode }),
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          const message = typeof payload.error === 'string' ? payload.error : 'Failed to prepare Stripe Connect.';
+          throw new Error(message);
+        }
+        const payload = await response.json();
+        const linkUrl: string | undefined =
+          typeof payload.linkUrl === 'string' && payload.linkUrl.trim().length > 0
+            ? payload.linkUrl
+            : undefined;
+        if (linkUrl && typeof window !== 'undefined') {
+          window.open(linkUrl, '_blank', 'noopener,noreferrer');
+        }
+        setStripeActionMessage({
+          tone: 'success',
+          text:
+            mode === 'login'
+              ? 'Stripe Express dashboard opened in a new tab.'
+              : 'Stripe Connect onboarding launched in a new tab.',
+        });
+      } catch (error) {
+        console.error('Stripe Connect action failed', error);
+        setStripeActionMessage({
+          tone: 'error',
+          text: error instanceof Error ? error.message : 'Failed to launch Stripe Connect.',
+        });
+      } finally {
+        setStripeActionLoading(false);
+      }
+    },
+    []
+  );
 
   const loadAll = useCallback(async (cancelRef?: { current: boolean }) => {
     const [franchiseSnap, territorySnap, memberSnap, usersSnap, categorySnap] = await Promise.all([
@@ -539,6 +593,11 @@ export default function AdminFranchisesPage() {
       cancelRef.current = true;
     };
   }, [allowed, guardLoading, loadAll]);
+
+  useEffect(() => {
+    setStripeActionMessage(null);
+    setStripeActionLoading(false);
+  }, [editingFranchiseId]);
 
   const franchiseMap = useMemo(() => {
     const map = new Map<string, Franchise>();
@@ -1464,11 +1523,7 @@ export default function AdminFranchisesPage() {
                 <button
                   type="button"
                   className="btn btn-xs"
-                  onClick={() =>
-                    alert(
-                      "Stripe Connect onboarding placeholder – integration will hand off to Stripe Hosted onboarding in a later iteration."
-                    )
-                  }
+                  onClick={() => launchStripeConnect('')}
                 >
                   Launch Stripe flow
                 </button>
@@ -2016,15 +2071,32 @@ export default function AdminFranchisesPage() {
                                 <button
                                   type="button"
                                   className="btn btn-xs"
-                                  onClick={() =>
-                                    alert(
-                                      "Stripe Connect onboarding placeholder – integration will hand off to Stripe Hosted onboarding in a later iteration."
-                                    )
-                                  }
+                                  onClick={() => launchStripeConnect(editingFranchiseId || '')}
+                                  disabled={stripeActionLoading}
                                 >
-                                  Launch Stripe flow
+                                  {stripeActionLoading ? 'Preparing…' : 'Launch Stripe onboarding'}
                                 </button>
+                                {editingFranchise.stripeAccountId ? (
+                                  <button
+                                    type="button"
+                                    className="btn btn-xs btn-ghost"
+                                    onClick={() => launchStripeConnect(editingFranchiseId || '', 'login')}
+                                    disabled={stripeActionLoading}
+                                  >
+                                    Open Stripe dashboard
+                                  </button>
+                                ) : null}
                               </div>
+                              {stripeActionMessage ? (
+                                <p
+                                  className={clsx(
+                                    'text-xs',
+                                    stripeActionMessage.tone === 'error' ? 'text-red-600' : 'text-emerald-600'
+                                  )}
+                                >
+                                  {stripeActionMessage.text}
+                                </p>
+                              ) : null}
                               <div className="grid gap-2">
                                 <label className="grid gap-1 text-xs">
                                   <span className="font-medium">KYC verification</span>

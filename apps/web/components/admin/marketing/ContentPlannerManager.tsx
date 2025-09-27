@@ -87,6 +87,9 @@ type ProductSummary = {
   name: string;
   category: string | null;
   price: number | null;
+  priceMin: number | null;
+  priceMax: number | null;
+  tags: string[];
 };
 
 type ContentPlanRequestDoc = {
@@ -95,8 +98,13 @@ type ContentPlanRequestDoc = {
   status: string;
   month: string | null;
   theme: string | null;
+  goals: string | null;
+  productLaunches: string | null;
+  keyEvents: string | null;
   deliverables: string | null;
   budget: number | null;
+  budgetMin: number | null;
+  budgetMax: number | null;
   priority: string | null;
   productIds: string[];
   note: string | null;
@@ -104,6 +112,13 @@ type ContentPlanRequestDoc = {
   createdAt: Date | null;
   updatedAt: Date | null;
   templateId: string | null;
+  suggestedProduct: {
+    id: string;
+    name: string;
+    reason: string | null;
+    priceMin: number | null;
+    priceMax: number | null;
+  } | null;
 };
 
 type ContentPlanNarrativeDoc = {
@@ -118,6 +133,44 @@ type ContentPlanNarrativeDoc = {
 
 function randomId() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+function normalisePrice(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value.replace(/[^0-9.]/g, ""));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function normaliseProductTags(data: Record<string, unknown>): string[] {
+  const tags = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value === "string") {
+      value
+        .split(/[,/]|\n|\r|\t/)
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .forEach((entry) => tags.add(entry.toLowerCase()));
+    } else if (Array.isArray(value)) {
+      value
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .forEach((entry) => tags.add(entry.toLowerCase()));
+    }
+  };
+  [data.tags, data.goalTags, data.goals, data.focusAreas, data.useCases, data.personas, data.audience].forEach(add);
+  if (typeof data.category === "string") {
+    tags.add(data.category.toLowerCase());
+  }
+  if (typeof data.type === "string") {
+    tags.add(data.type.toLowerCase());
+  }
+  return Array.from(tags);
 }
 
 function normaliseTemplates(value: unknown): PlannerTemplate[] {
@@ -209,17 +262,32 @@ export default function ContentPlannerManager() {
         if (!active) return;
         const list: ProductSummary[] = snap.docs.map((docSnap) => {
           const data = docSnap.data() || {};
-          const priceCandidate = (
-            (typeof data.price === "number" && data.price) ||
-            (typeof data.basePrice === "number" && data.basePrice) ||
-            (typeof data.startingPrice === "number" && data.startingPrice) ||
-            null
-          );
+          const priceCandidate =
+            normalisePrice(data.price) ??
+            normalisePrice(data.basePrice) ??
+            normalisePrice(data.startingPrice) ??
+            null;
+          const priceMin =
+            normalisePrice(data.priceMin) ??
+            normalisePrice(data.minPrice) ??
+            normalisePrice(data.priceFrom) ??
+            normalisePrice(data.budgetFrom) ??
+            (priceCandidate ?? null);
+          const priceMax =
+            normalisePrice(data.priceMax) ??
+            normalisePrice(data.maxPrice) ??
+            normalisePrice(data.priceTo) ??
+            normalisePrice(data.budgetTo) ??
+            (priceCandidate ?? null);
+          const tags = normaliseProductTags(data as Record<string, unknown>);
           return {
             id: docSnap.id,
             name: typeof data.name === "string" && data.name.trim() ? data.name.trim() : "Untitled product",
             category: typeof data.category === "string" ? data.category : null,
             price: priceCandidate,
+            priceMin,
+            priceMax,
+            tags,
           };
         });
         list.sort((a, b) => a.name.localeCompare(b.name));
@@ -248,8 +316,13 @@ export default function ContentPlannerManager() {
             status: typeof data.status === "string" ? data.status : "requested",
             month: typeof data.month === "string" ? data.month : null,
             theme: typeof data.theme === "string" ? data.theme : null,
+            goals: typeof data.goals === "string" ? data.goals : null,
+            productLaunches: typeof data.productLaunches === "string" ? data.productLaunches : null,
+            keyEvents: typeof data.keyEvents === "string" ? data.keyEvents : null,
             deliverables: typeof data.deliverables === "string" ? data.deliverables : null,
             budget: typeof data.budget === "number" ? data.budget : null,
+            budgetMin: normalisePrice(data.budgetMin),
+            budgetMax: normalisePrice(data.budgetMax),
             priority: typeof data.priority === "string" ? data.priority : null,
             productIds: Array.isArray(data.productIds)
               ? data.productIds.filter((item: unknown): item is string => typeof item === "string")
@@ -259,6 +332,16 @@ export default function ContentPlannerManager() {
             createdAt,
             updatedAt,
             templateId: typeof data.templateId === "string" ? data.templateId : null,
+            suggestedProduct:
+              data.suggestedProduct && typeof data.suggestedProduct === "object"
+                ? {
+                    id: typeof data.suggestedProduct.id === "string" ? data.suggestedProduct.id : "",
+                    name: typeof data.suggestedProduct.name === "string" ? data.suggestedProduct.name : "Recommendation",
+                    reason: typeof data.suggestedProduct.reason === "string" ? data.suggestedProduct.reason : null,
+                    priceMin: normalisePrice((data.suggestedProduct as Record<string, unknown>).priceMin),
+                    priceMax: normalisePrice((data.suggestedProduct as Record<string, unknown>).priceMax),
+                  }
+                : null,
           };
         });
         setRequests(list);

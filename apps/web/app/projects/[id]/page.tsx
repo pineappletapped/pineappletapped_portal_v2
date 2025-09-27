@@ -1,6 +1,6 @@
 
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { db, auth } from '@/lib/firebase';
 import { doc, getDoc, collection, query, where, getDocs, addDoc, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { extractUserRoles, hasRole } from '@/lib/roles';
@@ -24,6 +24,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [venues, setVenues] = useState<Venue[]>([]);
   const [venueSelection, setVenueSelection] = useState('');
   const [savingVenue, setSavingVenue] = useState(false);
+  const [order, setOrder] = useState<any | null>(null);
 
   // Signature request
   const [pendingSignature, setPendingSignature] = useState<any | null>(null);
@@ -98,6 +99,22 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       const data = pd.data();
       setProject({ id: pd.id, ...data });
       setVenueSelection(((data as any)?.venueId as string) || '');
+      if (data?.orderId) {
+        try {
+          const orderSnap = await getDoc(doc(db, 'orders', data.orderId));
+          if (orderSnap.exists()) {
+            const orderData = orderSnap.data();
+            setOrder(orderData ? { id: orderSnap.id, ...orderData } : null);
+          } else {
+            setOrder(null);
+          }
+        } catch (orderErr) {
+          console.error('Failed to load linked order', orderErr);
+          setOrder(null);
+        }
+      } else {
+        setOrder(null);
+      }
       const aq = query(collection(db,'assets'), where('projectId','==', params.id));
       const ad = await getDocs(aq);
       setAssets(ad.docs.map(d=>({id:d.id, ...d.data()})));
@@ -196,6 +213,25 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
     setProject({ ...project, brandPackId: packId || null });
   };
 
+  const fallbackLocationName = useMemo(() => {
+    if (typeof project?.location === 'string' && project.location.trim()) {
+      return project.location.trim();
+    }
+    if (typeof order?.location === 'string' && order.location.trim()) {
+      return order.location.trim();
+    }
+    return '';
+  }, [order?.location, project?.location]);
+  const fallbackPostalCode = useMemo(() => {
+    if (typeof project?.clientPostalCode === 'string' && project.clientPostalCode.trim()) {
+      return project.clientPostalCode.trim();
+    }
+    if (typeof order?.clientPostalCode === 'string' && order.clientPostalCode.trim()) {
+      return order.clientPostalCode.trim();
+    }
+    return '';
+  }, [order?.clientPostalCode, project?.clientPostalCode]);
+
   if (!project) return <div>Loading…</div>;
   const projectVenueId = project?.venueId || '';
   const savedVenue = projectVenueId
@@ -213,19 +249,22 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   return (
     <PortalContainer>
       <div className="grid gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">{project.name}</h1>
-          <div className="text-sm text-gray-500">{project.reference || '—'} · <StatusBadge status={project.status || 'draft'} /></div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <h1 className="text-lg font-semibold text-gray-900">{project.name || 'Project overview'}</h1>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-500">
+              <span>{project.reference || 'No reference'}</span>
+              <StatusBadge status={project.status || 'draft'} />
+            </div>
+          </div>
+          <Link href={`/projects/${project.id}/upload`} className="btn self-start">Upload Asset</Link>
         </div>
-        <Link href={`/projects/${project.id}/upload`} className="btn">Upload Asset</Link>
-      </div>
-      <div className="card">
-        <h2 className="font-semibold mb-2">Venue</h2>
+        <div className="card space-y-3">
+          <h2 className="text-base font-semibold text-gray-900">Venue</h2>
         {currentVenueName ? (
           <div className="grid gap-2 text-sm text-gray-700">
             <p>
-              <span className="font-medium">Current Venue:</span> {currentVenueName}
+              <span className="font-medium">Current venue:</span> {currentVenueName}
             </p>
             {savedVenue?.address && (
               <p>
@@ -241,23 +280,23 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
               )}
             {savedVenue?.parkingRate !== null && savedVenue?.parkingRate !== undefined && (
               <p>
-                <span className="font-medium">Fixed Parking Rate:</span> £
+                <span className="font-medium">Fixed parking rate:</span> £
                 {Number(savedVenue.parkingRate).toFixed(2)}
               </p>
             )}
             {savedVenue?.parkingTips && (
               <p className="whitespace-pre-line">
-                <span className="font-medium">Parking Tips:</span> {savedVenue.parkingTips}
+                <span className="font-medium">Parking tips:</span> {savedVenue.parkingTips}
               </p>
             )}
             {savedVenue?.accessInfo && (
               <p className="whitespace-pre-line">
-                <span className="font-medium">Access Information:</span> {savedVenue.accessInfo}
+                <span className="font-medium">Access information:</span> {savedVenue.accessInfo}
               </p>
             )}
             {savedVenue?.internetInfo && (
               <p className="whitespace-pre-line">
-                <span className="font-medium">Internet Details:</span> {savedVenue.internetInfo}
+                <span className="font-medium">Internet details:</span> {savedVenue.internetInfo}
               </p>
             )}
             {savedVenue?.notes && (
@@ -267,12 +306,26 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
             )}
             <VenueMap venue={savedVenue} className="mt-2" />
           </div>
+        ) : fallbackLocationName ? (
+          <div className="grid gap-2 text-sm text-gray-700">
+            <p>
+              <span className="font-medium">Filming address:</span> {fallbackLocationName}
+            </p>
+            {fallbackPostalCode && (
+              <p>
+                <span className="font-medium">Postcode:</span> {fallbackPostalCode}
+              </p>
+            )}
+            <p className="text-xs text-gray-500">
+              This location was provided during checkout. Link a saved venue once production is confirmed.
+            </p>
+          </div>
         ) : (
-          <p className="text-sm text-gray-600">No venue linked to this project.</p>
+          <p className="text-sm text-gray-600">No venue information has been provided yet.</p>
         )}
         {isStaffUser && (
-          <form onSubmit={handleVenueSave} className="mt-4 grid gap-2">
-            <label className="text-sm font-medium">Update Venue</label>
+          <form onSubmit={handleVenueSave} className="mt-4 grid gap-3 text-sm">
+            <label className="font-medium text-gray-900">Link a saved venue</label>
             <select
               className="input"
               value={venueSelection}
@@ -286,10 +339,10 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
               ))}
             </select>
             <p className="text-xs text-gray-500">
-              Choose &ldquo;Custom / none&rdquo; to remove the linked venue from this project.
+              Choose &ldquo;Custom / none&rdquo; to keep using the client supplied address.
             </p>
             {editingVenue && (
-              <div className="rounded bg-slate-100 p-2 text-xs text-gray-600 grid gap-1">
+              <div className="grid gap-1 rounded bg-slate-100 p-2 text-xs text-gray-600">
                 {editingVenue.mileageFromWellingborough !== null &&
                   editingVenue.mileageFromWellingborough !== undefined && (
                     <div>
@@ -337,7 +390,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       </div>
       {budgetTotals ? (
         <div className="card p-4">
-          <h2 className="font-semibold mb-2">Budget</h2>
+          <h2 className="mb-2 text-base font-semibold text-gray-900">Budget</h2>
           <div className="space-y-1 text-sm">
             <div className="flex justify-between">
               <span>Net Revenue</span>
@@ -403,7 +456,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
         </div>
       ) : null}
       <div className="card">
-        <h2 className="font-semibold mb-2">Assets</h2>
+        <h2 className="mb-2 text-base font-semibold text-gray-900">Assets</h2>
         <div className="grid gap-2">
           {assets.map(a => (
             <Link key={a.id} href={`/projects/${project.id}/assets/${a.id}`} className="hover:underline">{a.name || a.storageKey}</Link>
@@ -418,7 +471,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       </div>
       {/* Brand pack selector */}
       <div className="card">
-        <h2 className="font-semibold mb-2">Brand Pack</h2>
+        <h2 className="mb-2 text-base font-semibold text-gray-900">Brand Pack</h2>
         {brandPacks.length === 0 ? (
           <p className="text-sm">No brand packs available for this organisation.</p>
         ) : (
@@ -445,7 +498,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
 
       {/* Brand guidelines task */}
       <div className="card">
-        <h2 className="font-semibold mb-2">Brand Guidelines</h2>
+        <h2 className="mb-2 text-base font-semibold text-gray-900">Brand Guidelines</h2>
         {project.brandGuidelinesCompleted ? (
           <div className="grid gap-2 text-sm">
             <p className="text-green-700">Completed</p>
@@ -485,11 +538,11 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
 
       {/* Tasks link */}
       <div className="card">
-        <h2 className="font-semibold mb-2">Project Tasks</h2>
+        <h2 className="mb-2 text-base font-semibold text-gray-900">Project Tasks</h2>
         <Link href={`/projects/${project.id}/tasks`} className="btn-sm w-fit">View Tasks</Link>
       </div>
       <div className="card">
-        <h2 className="font-semibold mb-2">Messages</h2>
+        <h2 className="mb-2 text-base font-semibold text-gray-900">Messages</h2>
         <div className="grid gap-2 mb-3">
           {messages.length === 0 ? (
             <p>No messages.</p>
@@ -514,7 +567,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       </div>
       {isStaffUser && (
         <div className="card">
-          <h2 className="font-semibold mb-2">Internal Notes</h2>
+          <h2 className="mb-2 text-base font-semibold text-gray-900">Internal Notes</h2>
           <div className="grid gap-2 mb-3">
             {internalMessages.length === 0 ? (
               <p>No internal messages.</p>
@@ -540,7 +593,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       {/* Signature request */}
       {pendingSignature && (
         <div className="card">
-          <h2 className="font-semibold mb-2">Signature Required</h2>
+          <h2 className="mb-2 text-base font-semibold text-gray-900">Signature Required</h2>
           <p className="text-sm mb-2">A document requires your signature for this project.</p>
           <Link href={`/projects/${project.id}/signature`} className="btn-sm">Review & Sign</Link>
         </div>

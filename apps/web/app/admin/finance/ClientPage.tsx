@@ -110,6 +110,9 @@ export default function AdminFinancePage() {
         <Link href="/admin/finance/expenses/new" className="btn">
           Log Expense
         </Link>
+        <Link href="/admin/finance/stripe-connect" className="btn btn-outline">
+          Stripe Connect Settings
+        </Link>
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">

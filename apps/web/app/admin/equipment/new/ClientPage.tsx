@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db, storage } from "@/lib/firebase";
 import { collection, addDoc, getDocs, getDoc, doc } from "firebase/firestore";
@@ -11,13 +11,18 @@ export default function NewEquipmentPage() {
   const router = useRouter();
   const [allowed, setAllowed] = useState<boolean | null>(null);
   const [users, setUsers] = useState<any[]>([]);
+  const [franchises, setFranchises] = useState<{ id: string; name: string }[]>([]);
+  const [isStaff, setIsStaff] = useState(false);
   const [categories, setCategories] = useState<string[]>([]);
   const [standards, setStandards] = useState<EquipmentStandard[]>([]);
   const [form, setForm] = useState({
     name: "",
     serialNumber: "",
+    assetTag: "",
     category: "",
     ownerId: "company",
+    ownerType: "company" as "company" | "user" | "franchise",
+    franchiseId: "",
     newValue: "",
     currentValue: "",
     rentalPrice: "",
@@ -42,6 +47,7 @@ export default function NewEquipmentPage() {
       const me = snap.data() as any;
       const ok = me?.isStaff || me?.contractor;
       setAllowed(!!ok);
+      setIsStaff(!!me?.isStaff);
       if (ok) {
         const uSnap = await getDocs(collection(db, "users"));
         const list = uSnap.docs
@@ -49,13 +55,21 @@ export default function NewEquipmentPage() {
           .filter((u) => u.isStaff || u.contractor);
         setUsers(list);
         if (!me?.isStaff) {
-          setForm((f) => ({ ...f, ownerId: user.uid }));
+          setForm((f) => ({ ...f, ownerId: user.uid, ownerType: "user" }));
         }
         try {
-          const [equipmentSnap, standardSnap] = await Promise.all([
+          const basePromises = [
             getDocs(collection(db, "equipment")),
             getDocs(collection(db, "equipmentStandards")),
-          ]);
+          ] as const;
+          const results = await Promise.all(
+            me?.isStaff
+              ? [...basePromises, getDocs(collection(db, "franchises"))]
+              : basePromises
+          );
+          const equipmentSnap = results[0];
+          const standardSnap = results[1];
+          const franchiseSnap = me?.isStaff ? results[2] : undefined;
           const categorySet = new Set<string>();
           equipmentSnap.docs.forEach((docSnap) => {
             const rawCategory = (docSnap.data() as any)?.category;
@@ -76,12 +90,25 @@ export default function NewEquipmentPage() {
               )
               .sort((a, b) => (a.title || "").localeCompare(b.title || ""))
           );
+          if (franchiseSnap) {
+            setFranchises(
+              franchiseSnap.docs
+                .map((docSnap) => {
+                  const data = docSnap.data() as any;
+                  const rawName = typeof data?.name === "string" ? data.name.trim() : "";
+                  return { id: docSnap.id, name: rawName || docSnap.id };
+                })
+                .sort((a, b) => a.name.localeCompare(b.name))
+            );
+          }
         } catch (error) {
           console.error("Failed to load equipment metadata", error);
         }
       }
     })();
   }, []);
+
+  const defaultFranchiseId = useMemo(() => franchises[0]?.id ?? "", [franchises]);
 
   const toggleStandard = (standardId: string) => {
     setForm((prev) => {
@@ -101,6 +128,29 @@ export default function NewEquipmentPage() {
   const submit = async () => {
     setLoading(true);
     try {
+      const ownerType = form.ownerType;
+      let ownerId = "company";
+      let franchiseId: string | null = null;
+      if (ownerType === "company") {
+        ownerId = "company";
+      } else if (ownerType === "user") {
+        if (!form.ownerId) {
+          alert("Select the team member who owns this equipment.");
+          setLoading(false);
+          return;
+        }
+        ownerId = form.ownerId;
+      } else {
+        const selectedFranchiseId = form.franchiseId || defaultFranchiseId;
+        if (!selectedFranchiseId) {
+          alert("Select the franchise that owns this equipment.");
+          setLoading(false);
+          return;
+        }
+        franchiseId = selectedFranchiseId;
+        ownerId = `franchise:${selectedFranchiseId}`;
+      }
+
       let photoUrl = "";
       if (photoFile) {
         const r = ref(storage, `equipment/${Date.now()}-${photoFile.name}`);
@@ -128,6 +178,10 @@ export default function NewEquipmentPage() {
         photo: photoUrl,
         createdAt: new Date(),
         available: form.available,
+        ownerType,
+        ownerId,
+        franchiseId,
+        assetTag: form.assetTag.trim() ? form.assetTag.trim() : null,
       };
       const docRef = await addDoc(collection(db, "equipment"), data);
       router.push(`/admin/equipment/${docRef.id}`);
@@ -145,6 +199,7 @@ export default function NewEquipmentPage() {
       <h1 className="text-xl font-semibold">Add Equipment</h1>
       <input className="input input-bordered" placeholder="Name" value={form.name} onChange={e=>setForm({...form,name:e.target.value})} />
       <input className="input input-bordered" placeholder="Serial Number" value={form.serialNumber} onChange={e=>setForm({...form,serialNumber:e.target.value})} />
+      <input className="input input-bordered" placeholder="Asset Tag" value={form.assetTag} onChange={e=>setForm({...form,assetTag:e.target.value})} />
       <div className="grid gap-2">
         <label className="text-sm font-medium" htmlFor="equipment-category">
           Category
@@ -168,11 +223,69 @@ export default function NewEquipmentPage() {
           </p>
         )}
       </div>
-      {users.length > 0 && (
-        <select className="select select-bordered" value={form.ownerId} onChange={e=>setForm({...form,ownerId:e.target.value})} disabled={!users.some(u=>u.id===form.ownerId) && form.ownerId!=="company"}>
+      <div className="grid gap-2">
+        <span className="text-sm font-medium">Owner type</span>
+        <select
+          className="select select-bordered"
+          value={form.ownerType}
+          onChange={(event) => {
+            const nextType = event.target.value as "company" | "user" | "franchise";
+            setForm((prev) => {
+              if (nextType === "company") {
+                return { ...prev, ownerType: nextType, ownerId: "company", franchiseId: "" };
+              }
+              if (nextType === "user") {
+                const defaultOwner = prev.ownerId && users.some((user) => user.id === prev.ownerId)
+                  ? prev.ownerId
+                  : users[0]?.id || "";
+                return { ...prev, ownerType: nextType, ownerId: defaultOwner, franchiseId: "" };
+              }
+              const fallbackFranchise = prev.franchiseId || defaultFranchiseId;
+              return {
+                ...prev,
+                ownerType: nextType,
+                franchiseId: fallbackFranchise,
+                ownerId: fallbackFranchise ? `franchise:${fallbackFranchise}` : "",
+              };
+            });
+          }}
+          disabled={!isStaff}
+        >
           <option value="company">Pineapple Tapped</option>
-          {users.map(u=> (
+          <option value="user">Team member</option>
+          <option value="franchise">Franchise</option>
+        </select>
+        {!isStaff && (
+          <span className="text-xs text-gray-500">Only HQ can reassign owner type.</span>
+        )}
+      </div>
+      {form.ownerType === "user" && (
+        <select
+          className="select select-bordered"
+          value={form.ownerId}
+          onChange={(event) => setForm({ ...form, ownerId: event.target.value })}
+        >
+          {users.map((u) => (
             <option key={u.id} value={u.id}>{u.fullName || u.email}</option>
+          ))}
+        </select>
+      )}
+      {form.ownerType === "franchise" && (
+        <select
+          className="select select-bordered"
+          value={form.franchiseId}
+          onChange={(event) => {
+            const value = event.target.value;
+            setForm((prev) => ({
+              ...prev,
+              franchiseId: value,
+              ownerId: value ? `franchise:${value}` : "",
+            }));
+          }}
+        >
+          <option value="">Select franchise…</option>
+          {franchises.map((franchise) => (
+            <option key={franchise.id} value={franchise.id}>{franchise.name}</option>
           ))}
         </select>
       )}

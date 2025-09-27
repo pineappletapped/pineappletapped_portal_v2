@@ -3,8 +3,21 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { auth, db, ensureFirebase, functions, httpsCallable } from '@/lib/firebase';
-import { collection, getDoc, doc, getDocs, addDoc, updateDoc, serverTimestamp, query, where, orderBy } from 'firebase/firestore';
+import {
+  collection,
+  getDoc,
+  doc,
+  getDocs,
+  addDoc,
+  updateDoc,
+  serverTimestamp,
+  query,
+  where,
+  orderBy,
+  Timestamp,
+} from 'firebase/firestore';
 import { extractUserRoles, hasRole } from '@/lib/roles';
+import PortalContainer from '@/components/PortalContainer';
 
 type PaymentMode = 'deposit_balance' | 'balance_on_completion';
 
@@ -27,6 +40,14 @@ interface CounterFormState {
   paymentMode: PaymentMode;
   currency: string;
   notes: string;
+}
+
+interface TaskComment {
+  id: string;
+  body: string;
+  uid?: string | null;
+  userName?: string | null;
+  createdAt?: Timestamp | Date | string | null;
 }
 
 interface UserContextState {
@@ -57,6 +78,58 @@ const COUNTER_FORM_DEFAULTS: CounterFormState = {
   currency: 'GBP',
   notes: '',
 };
+
+const DETAIL_FORM_DEFAULT = {
+  title: '',
+  description: '',
+  dueDate: '',
+  assignedTo: '',
+  status: 'todo',
+};
+
+function coerceTaskDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (value instanceof Timestamp) {
+    try {
+      return value.toDate();
+    } catch {
+      return null;
+    }
+  }
+  if (value && typeof value === 'object' && typeof value.toDate === 'function') {
+    try {
+      return value.toDate();
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value === 'string') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return null;
+}
+
+function toDateInputValue(value: any): string {
+  const date = coerceTaskDate(value);
+  if (!date) return '';
+  return new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+    .toISOString()
+    .slice(0, 10);
+}
+
+function formatTaskDateDisplay(value: any): string {
+  const date = coerceTaskDate(value);
+  if (!date) return '';
+  return date.toLocaleDateString();
+}
+
+function formatCommentTimestamp(value: any): string {
+  const date = coerceTaskDate(value);
+  if (!date) return '';
+  return date.toLocaleString();
+}
 
 /**
  * Project Tasks Board
@@ -90,6 +163,15 @@ export default function ProjectTasksPage() {
   const [offerSubmitting, setOfferSubmitting] = useState(false);
   const [actionState, setActionState] = useState<string | null>(null);
   const [counterState, setCounterState] = useState<CounterFormState>({ ...COUNTER_FORM_DEFAULTS });
+  const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
+  const [detailForm, setDetailForm] = useState({ ...DETAIL_FORM_DEFAULT });
+  const [detailSaving, setDetailSaving] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailComments, setDetailComments] = useState<TaskComment[]>([]);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [newCommentBody, setNewCommentBody] = useState('');
+  const [commentError, setCommentError] = useState<string | null>(null);
+  const [commentSubmitting, setCommentSubmitting] = useState(false);
 
   const franchiseMap = useMemo(() => {
     const map = new Map<string, any>();
@@ -100,6 +182,15 @@ export default function ProjectTasksPage() {
     });
     return map;
   }, [franchises]);
+  const membersMap = useMemo(() => {
+    const map = new Map<string, string>();
+    members.forEach((member: any) => {
+      if (member?.uid) {
+        map.set(member.uid, member.name || member.uid);
+      }
+    });
+    return map;
+  }, [members]);
 
   const formatCurrency = useCallback((value: unknown, currency?: string | null) => {
     const numeric = typeof value === 'number' ? value : Number(value);
@@ -139,6 +230,37 @@ export default function ProjectTasksPage() {
     );
     setTasks(tSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
   }, [projectId]);
+
+  const loadTaskComments = useCallback(
+    async (taskId: string) => {
+      if (!projectId) return;
+      setCommentsLoading(true);
+      try {
+        const snap = await getDocs(
+          query(
+            collection(db, 'projects', projectId, 'tasks', taskId, 'comments'),
+            orderBy('createdAt', 'asc')
+          )
+        );
+        const items: TaskComment[] = snap.docs.map((docSnap) => {
+          const data = docSnap.data() as any;
+          return {
+            id: docSnap.id,
+            body: typeof data?.body === 'string' ? data.body : '',
+            uid: typeof data?.uid === 'string' ? data.uid : null,
+            userName: typeof data?.userName === 'string' ? data.userName : null,
+            createdAt: data?.createdAt ?? null,
+          };
+        });
+        setDetailComments(items);
+      } catch (err) {
+        console.error('Failed to load task comments', err);
+      } finally {
+        setCommentsLoading(false);
+      }
+    },
+    [projectId]
+  );
 
   const primaryActionClasses =
     'rounded bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50';
@@ -274,6 +396,11 @@ export default function ProjectTasksPage() {
     };
   }, [projectId, userContext.canOutsource]);
 
+  useEffect(() => {
+    if (!detailTaskId) return;
+    void loadTaskComments(detailTaskId);
+  }, [detailTaskId, loadTaskComments]);
+
   const addTask = async () => {
     if (!title.trim()) { alert('Task title is required'); return; }
     if (!projectId) { alert('Project is unavailable.'); return; }
@@ -358,6 +485,99 @@ export default function ProjectTasksPage() {
   const closeOfferForm = () => {
     setActiveOfferTaskId(null);
     setOfferForm({ ...OFFER_FORM_DEFAULTS });
+  };
+
+  const openTaskDetails = (taskId: string) => {
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task) return;
+    setDetailTaskId(taskId);
+    setDetailForm({
+      title: typeof task.title === 'string' ? task.title : '',
+      description: typeof task.description === 'string' ? task.description : '',
+      dueDate: toDateInputValue(task.dueDate),
+      assignedTo: typeof task.assignedTo === 'string' ? task.assignedTo : '',
+      status: typeof task.status === 'string' ? task.status : 'todo',
+    });
+    setDetailError(null);
+    setCommentError(null);
+    setNewCommentBody('');
+    void loadTaskComments(taskId);
+  };
+
+  const closeTaskDetails = () => {
+    setDetailTaskId(null);
+    setDetailForm({ ...DETAIL_FORM_DEFAULT });
+    setDetailError(null);
+    setCommentError(null);
+    setDetailComments([]);
+    setNewCommentBody('');
+  };
+
+  const saveTaskDetails = async () => {
+    if (!projectId || !detailTaskId) return;
+    const trimmedTitle = detailForm.title.trim();
+    if (!trimmedTitle) {
+      setDetailError('Task title is required.');
+      return;
+    }
+    const currentTask = tasks.find((t) => t.id === detailTaskId);
+    const statusBefore = typeof currentTask?.status === 'string' ? currentTask!.status : 'todo';
+    const statusChanged = detailForm.status !== statusBefore;
+    const assignee = detailForm.assignedTo
+      ? membersMap.get(detailForm.assignedTo) || null
+      : null;
+    setDetailSaving(true);
+    try {
+      await updateDoc(doc(db, 'projects', projectId, 'tasks', detailTaskId), {
+        title: trimmedTitle,
+        description: detailForm.description.trim() || '',
+        dueDate: detailForm.dueDate || null,
+        assignedTo: detailForm.assignedTo || null,
+        assigneeName: assignee,
+      });
+      if (statusChanged) {
+        await updateTaskStatus(detailTaskId, detailForm.status);
+      } else {
+        await reloadTasks();
+      }
+      setDetailError(null);
+    } catch (err) {
+      console.error('Failed to save task details', err);
+      setDetailError('Failed to save changes. Please try again.');
+    } finally {
+      setDetailSaving(false);
+    }
+  };
+
+  const submitComment = async () => {
+    if (!projectId || !detailTaskId) return;
+    const user = auth.currentUser;
+    if (!user) {
+      setCommentError('You must be signed in to comment.');
+      return;
+    }
+    const body = newCommentBody.trim();
+    if (!body) {
+      setCommentError('Enter a comment before posting.');
+      return;
+    }
+    setCommentSubmitting(true);
+    try {
+      await addDoc(collection(db, 'projects', projectId, 'tasks', detailTaskId, 'comments'), {
+        body,
+        uid: user.uid,
+        userName: user.displayName || user.email || null,
+        createdAt: serverTimestamp(),
+      });
+      setNewCommentBody('');
+      setCommentError(null);
+      await loadTaskComments(detailTaskId);
+    } catch (err) {
+      console.error('Failed to post comment', err);
+      setCommentError('Could not post comment. Please try again.');
+    } finally {
+      setCommentSubmitting(false);
+    }
   };
 
   const submitOffer = async (taskId: string) => {
@@ -491,35 +711,66 @@ export default function ProjectTasksPage() {
 
   if (loading) return <p>Loading…</p>;
   if (!project) return <p>Project not found.</p>;
+  const selectedTask = detailTaskId ? tasks.find((t) => t.id === detailTaskId) || null : null;
+  const canEditTask = !!userContext.canManage;
+
   return (
-    <div className="grid gap-6">
-      <h1 className="text-xl font-semibold">Project Tasks</h1>
-      {isStaffOrAdmin ? (
-        <div className="card p-4 grid gap-3 max-w-md">
-          <h2 className="font-semibold">Add Task</h2>
-          <input type="text" className="input" placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
-          <textarea className="input" placeholder="Description (optional)" value={description} onChange={(e) => setDescription(e.target.value)} />
-          <input type="date" className="input" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
-          <select className="input" value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)}>
-            <option value="">Unassigned</option>
-            {members.map((m) => (
-              <option key={m.uid} value={m.uid}>{m.name}</option>
-            ))}
-          </select>
-          <button className="btn w-fit" onClick={addTask}>Create Task</button>
-        </div>
-      ) : null}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        {['todo','in_progress','review','done'].map((status) => (
-          <div key={status} className="border rounded-md p-3 min-h-[200px]">
-            <h3 className="font-semibold mb-2 capitalize">{status.replace('_', ' ')}</h3>
-            {tasks.filter((t) => t.status === status).length === 0 ? (
-              <p className="text-sm text-gray-500">No tasks</p>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {tasks
-                  .filter((t) => t.status === status)
-                  .map((task) => {
+    <>
+      <PortalContainer>
+        <div className="grid gap-6">
+          <h1 className="text-lg font-semibold text-gray-900">Project Tasks</h1>
+          {isStaffOrAdmin ? (
+            <div className="card grid max-w-md gap-3 p-4">
+              <h2 className="text-base font-semibold text-gray-900">Add Task</h2>
+              <input
+                type="text"
+                className="input"
+                placeholder="Title"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+              />
+              <textarea
+                className="input"
+                placeholder="Description (optional)"
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+              />
+              <input
+                type="date"
+                className="input"
+                value={dueDate}
+                onChange={(event) => setDueDate(event.target.value)}
+              />
+              <select
+                className="input"
+                value={assignedTo}
+                onChange={(event) => setAssignedTo(event.target.value)}
+              >
+                <option value="">Unassigned</option>
+                {members.map((member) => (
+                  <option key={member.uid} value={member.uid}>
+                    {member.name}
+                  </option>
+                ))}
+              </select>
+              <button className="btn w-fit" onClick={addTask}>
+                Create Task
+              </button>
+            </div>
+          ) : null}
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+            {['todo', 'in_progress', 'review', 'done'].map((status) => (
+              <div key={status} className="min-h-[200px] rounded-md border p-3">
+                <h3 className="mb-2 font-semibold capitalize">
+                  {status.replace('_', ' ')}
+                </h3>
+                {tasks.filter((task) => task.status === status).length === 0 ? (
+                  <p className="text-sm text-gray-500">No tasks</p>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    {tasks
+                      .filter((task) => task.status === status)
+                      .map((task) => {
                     const proposal = task.outsourcingProposal as any;
                     const agreement = task.outsourcingAgreement as any;
                     const offerId = typeof proposal?.offerId === 'string' ? proposal.offerId : null;
@@ -551,6 +802,7 @@ export default function ProjectTasksPage() {
                         ? franchiseMap.get(proposal.targetFranchiseId)?.name || proposal.targetFranchiseId
                         : 'Head Office';
                     const statusLabel = offerStatus ? offerStatus.replace(/_/g, ' ') : 'pending';
+                    const dueDisplay = formatTaskDateDisplay(task.dueDate);
 
                     return (
                       <div key={task.id} className="card grid gap-2 p-3">
@@ -558,8 +810,8 @@ export default function ProjectTasksPage() {
                         {task.description && (
                           <p className="text-xs text-gray-600">{task.description}</p>
                         )}
-                        {task.dueDate && (
-                          <p className="text-xs text-gray-500">Due: {task.dueDate}</p>
+                        {dueDisplay && (
+                          <p className="text-xs text-gray-500">Due: {dueDisplay}</p>
                         )}
                         <p className="text-xs text-gray-600">
                           Assigned: {task.assigneeName || 'Unassigned'}
@@ -590,6 +842,12 @@ export default function ProjectTasksPage() {
                             </select>
                           </div>
                         )}
+                        <button
+                          className={secondaryActionClasses}
+                          onClick={() => openTaskDetails(task.id)}
+                        >
+                          View details
+                        </button>
 
                         {proposal && (
                           <div className="mt-2 space-y-2 rounded border border-dashed border-gray-300 p-2 text-xs text-gray-600">
@@ -1063,11 +1321,199 @@ export default function ProjectTasksPage() {
                       </div>
                     );
                   })}
-              </div>
-            )}
-          </div>
-        ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
+      </PortalContainer>
+
+      {detailTaskId && selectedTask ? (
+        <div className="fixed inset-0 z-50 flex items-start justify-end bg-black/40 p-4">
+          <div className="flex h-full w-full max-w-lg flex-col overflow-hidden rounded-lg bg-white shadow-xl">
+            <div className="flex items-start justify-between gap-3 border-b p-4">
+              <div className="min-w-0 space-y-1">
+                <h2 className="text-lg font-semibold text-gray-900">
+                  {detailForm.title || selectedTask.title || 'Task details'}
+                </h2>
+                <p className="text-xs text-gray-500">
+                  Status: {detailForm.status.replace('_', ' ')}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline"
+                onClick={closeTaskDetails}
+              >
+                Close
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              <div className="grid gap-4">
+                <div className="grid gap-2">
+                  <label className="text-xs font-semibold uppercase text-gray-500">Title</label>
+                  <input
+                    className="input"
+                    value={detailForm.title}
+                    onChange={(event) =>
+                      setDetailForm((prev) => ({ ...prev, title: event.target.value }))
+                    }
+                    disabled={!canEditTask}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-xs font-semibold uppercase text-gray-500">Description</label>
+                  <textarea
+                    className="input min-h-[96px] resize-y"
+                    value={detailForm.description}
+                    onChange={(event) =>
+                      setDetailForm((prev) => ({ ...prev, description: event.target.value }))
+                    }
+                    disabled={!canEditTask}
+                  />
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="grid gap-2 text-xs font-semibold uppercase text-gray-500">
+                    Due date
+                    <input
+                      type="date"
+                      className="input"
+                      value={detailForm.dueDate}
+                      onChange={(event) =>
+                        setDetailForm((prev) => ({ ...prev, dueDate: event.target.value }))
+                      }
+                      disabled={!canEditTask}
+                    />
+                  </label>
+                  <label className="grid gap-2 text-xs font-semibold uppercase text-gray-500">
+                    Assigned to
+                    <select
+                      className="input"
+                      value={detailForm.assignedTo}
+                      onChange={(event) =>
+                        setDetailForm((prev) => ({ ...prev, assignedTo: event.target.value }))
+                      }
+                      disabled={!canEditTask}
+                    >
+                      <option value="">Unassigned</option>
+                      {members.map((m) => (
+                        <option key={m.uid} value={m.uid}>
+                          {m.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="grid gap-2">
+                  <label className="text-xs font-semibold uppercase text-gray-500">Status</label>
+                  <select
+                    className="input"
+                    value={detailForm.status}
+                    onChange={(event) =>
+                      setDetailForm((prev) => ({ ...prev, status: event.target.value }))
+                    }
+                    disabled={!canEditTask}
+                  >
+                    <option value="todo">To Do</option>
+                    <option value="in_progress">In Progress</option>
+                    <option value="review">Review</option>
+                    <option value="done">Done</option>
+                  </select>
+                </div>
+                <div className="grid gap-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-gray-900">Comments</h3>
+                    {commentsLoading && <span className="text-xs text-gray-500">Loading…</span>}
+                  </div>
+                  {detailComments.length ? (
+                    <ul className="grid gap-3">
+                      {detailComments.map((comment) => {
+                        const authorLabel =
+                          comment.userName ||
+                          (comment.uid ? membersMap.get(comment.uid) : null) ||
+                          'Team member';
+                        const timestamp = formatCommentTimestamp(comment.createdAt);
+                        return (
+                          <li
+                            key={comment.id}
+                            className="rounded border border-gray-200 p-3"
+                          >
+                            <p className="whitespace-pre-wrap text-sm text-gray-800">{comment.body}</p>
+                            <div className="mt-2 flex justify-between text-xs text-gray-500">
+                              <span>{authorLabel}</span>
+                              {timestamp && <span>{timestamp}</span>}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : !commentsLoading ? (
+                    <p className="text-xs text-gray-500">No comments yet.</p>
+                  ) : null}
+                  <div className="grid gap-2">
+                    <label className="text-xs font-semibold uppercase text-gray-500">
+                      Add a comment
+                    </label>
+                    <textarea
+                      className="input min-h-[80px] resize-y"
+                      value={newCommentBody}
+                      onChange={(event) => setNewCommentBody(event.target.value)}
+                    />
+                    {commentError && <p className="text-xs text-red-600">{commentError}</p>}
+                    <div className="flex justify-end gap-2">
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline"
+                        onClick={() => setNewCommentBody('')}
+                        disabled={commentSubmitting || !newCommentBody.trim()}
+                      >
+                        Clear
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={submitComment}
+                        disabled={commentSubmitting}
+                      >
+                        {commentSubmitting ? 'Posting…' : 'Add comment'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-4 border-t bg-gray-50 p-4">
+              {detailError ? (
+                <p className="text-sm text-red-600">{detailError}</p>
+              ) : (
+                <span className="text-sm text-gray-500">
+                  {formatTaskDateDisplay(selectedTask?.dueDate)
+                    ? `Due ${formatTaskDateDisplay(selectedTask?.dueDate)}`
+                    : ''}
+                </span>
+              )}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline"
+                  onClick={closeTaskDetails}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={saveTaskDetails}
+                  disabled={!canEditTask || detailSaving}
+                >
+                  {detailSaving ? 'Saving…' : 'Save changes'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }

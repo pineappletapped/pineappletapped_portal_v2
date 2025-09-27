@@ -66,7 +66,7 @@
   }
 
   .input {
-    @apply border rounded px-3 py-2 w-full;
+    @apply border rounded px-3 py-2 w-full min-w-0 max-w-full;
   }
 
   .badge {
