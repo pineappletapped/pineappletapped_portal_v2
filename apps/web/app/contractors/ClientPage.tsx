@@ -197,10 +197,10 @@ export default function ContractorPortal() {
           }),
         ]);
 
-        setTasks(taskSnap.docs.map((d) => ({ id: d.id, ...(d.data() as TaskRecord) })));
-        const bookingDocs = bookingSnap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRecord) }));
+        setTasks(taskSnap.docs.map((d) => ({ ...(d.data() as TaskRecord), id: d.id })));
+        const bookingDocs = bookingSnap.docs.map((d) => ({ ...(d.data() as BookingRecord), id: d.id }));
         setBookings(bookingDocs);
-        setAvailableBookings(openSnap.docs.map((d) => ({ id: d.id, ...(d.data() as BookingRecord) })));
+        setAvailableBookings(openSnap.docs.map((d) => ({ ...(d.data() as BookingRecord), id: d.id })));
 
         const availabilityMap: Record<string, AvailabilityStatus> = {};
         availabilitySnap.docs.forEach((docSnap) => {
@@ -211,10 +211,10 @@ export default function ContractorPortal() {
         });
         setAvailability(availabilityMap);
 
-        setNotices(noticeSnap.docs.map((d) => ({ id: d.id, ...(d.data() as NoticeRecord) })));
+        setNotices(noticeSnap.docs.map((d) => ({ ...(d.data() as NoticeRecord), id: d.id })));
 
         if ("docs" in productSnap) {
-          setProducts(productSnap.docs.map((d: any) => ({ id: d.id, ...(d.data() as ProductRecord) })));
+          setProducts(productSnap.docs.map((d: any) => ({ ...(d.data() as ProductRecord), id: d.id })));
         } else {
           setProducts([]);
         }
@@ -276,7 +276,7 @@ export default function ContractorPortal() {
       setNoticeTitle("");
       setNoticeMessage("");
       const refresh = await getDocs(query(collection(db, "teamNotices"), orderBy("createdAt", "desc")));
-      setNotices(refresh.docs.map((d) => ({ id: d.id, ...(d.data() as NoticeRecord) })));
+      setNotices(refresh.docs.map((d) => ({ ...(d.data() as NoticeRecord), id: d.id })));
     } catch (error) {
       console.warn("submitNotice failed", error);
     }

@@ -342,7 +342,7 @@ export default function AdminUsersPage() {
         }
       });
 
-      const sanitised: Record<string, unknown> = {};
+      const sanitised: Partial<AdminUser> & Record<string, unknown> = {};
       Object.entries(payload).forEach(([key, value]) => {
         if (value instanceof File) {
           return;
@@ -383,7 +383,8 @@ export default function AdminUsersPage() {
 
       const newRecord: AdminUser = {
         id,
-        ...sanitised,
+        email: emailValue,
+        ...(sanitised as Partial<AdminUser>),
       };
 
       setUsers((prev) => [...prev, newRecord]);
