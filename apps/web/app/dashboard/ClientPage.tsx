@@ -13,7 +13,7 @@ import {
   serverTimestamp,
   orderBy,
 } from 'firebase/firestore';
-import { db, auth, functions, httpsCallable } from '@/lib/firebase';
+import { db, auth } from '@/lib/firebase';
 import Link from 'next/link';
 import PortalContainer from '@/components/PortalContainer';
 
@@ -45,15 +45,6 @@ export default function DashboardPage() {
         return;
       }
       try {
-        // Record login once per dashboard load. If the request fails it's non-blocking.
-        try {
-          if (functions && httpsCallable) {
-            const call = httpsCallable(functions, 'recordLogin');
-            await call({ timestamp: new Date().toISOString() });
-          }
-        } catch (err) {
-          console.warn('Failed to record login', err);
-        }
         // Orders belonging to the user
         try {
           const oq = query(

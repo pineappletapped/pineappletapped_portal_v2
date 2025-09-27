@@ -12,11 +12,10 @@ This note captures portal features that are implemented in the codebase but are 
 
 ## Login history telemetry
 - **What exists:** A callable `recordLogin` function appends login events to the `loginHistory` collection, and the admin login history screen lists these events with timestamps and user email resolution.【F:functions/src/index.ts†L6675-L6688】【F:apps/web/app/admin/login-history/ClientPage.tsx†L1-L73】
-- **Connection gap:** Login events are only recorded when a user reaches the client dashboard, because `recordLogin` is invoked inside that page's effect. Franchise, contractor, or admin users who sign in and remain in their respective portals never trigger the logging call.【F:apps/web/app/dashboard/ClientPage.tsx†L40-L56】
-- **Follow-up tasks:**
-  1. Move the `recordLogin` invocation into a shared auth initialisation hook so every successful interactive session is logged regardless of which portal a user lands on.
-  2. Backfill recent login events (if required) by replaying authentication audit logs or prompting affected users.
-  3. Verify that the admin login history page respects role-based access and shows scoped results for non-staff viewers after the change.
+- **Status:** Login telemetry now runs from a global session listener so every authenticated portal mounts the `recordLogin` callable during auth initialisation, regardless of the landing page.【F:apps/web/app/layout.tsx†L6-L47】【F:apps/web/components/LoginTelemetryListener.tsx†L1-L7】【F:apps/web/hooks/useLoginTelemetry.ts†L1-L79】
+- **Remaining follow-up tasks:**
+  1. Backfill recent login events (if required) by replaying authentication audit logs or prompting affected users.
+  2. Verify that the admin login history page respects role-based access and shows scoped results for non-staff viewers after the change.
 
 ## CRM workspace (`/crm`)
 - **What exists:** A dedicated CRM hub exposes links to leads, groups, opportunities, proposals, and quote requests for staff or client admins.【F:apps/web/app/crm/page.tsx†L1-L36】
