@@ -209,256 +209,422 @@ export default function DashboardPage() {
     }
   };
 
-  if (loading) return <p>Loading…</p>;
+  const metrics = [
+    { label: 'Active projects', value: projects.length },
+    { label: 'Open tasks', value: tasks.length },
+    { label: 'Upcoming bookings', value: bookings.length },
+    { label: 'New assets', value: assets.length },
+  ];
+
+  const quickActions = [
+    {
+      href: '/projects/new',
+      label: 'Start a project',
+      description: 'Brief our producers and outline deliverables.',
+    },
+    {
+      href: '/bookings',
+      label: 'Book a shoot',
+      description: 'Secure production time that suits your team.',
+    },
+    {
+      href: '/categories',
+      label: 'Explore services',
+      description: 'Browse packaged shoots and add-ons.',
+    },
+    {
+      href: '/projects',
+      label: 'View projects',
+      description: 'Catch up on milestones and approvals.',
+    },
+    {
+      href: '/analytics',
+      label: 'Insights dashboard',
+      description: 'Track campaign impact in real time.',
+    },
+    {
+      href: '/emails',
+      label: 'Shared inbox',
+      description: 'Coordinate feedback with Pineapple Tapped.',
+    },
+    {
+      href: '/orgs',
+      label: 'Manage organisations',
+      description: 'Switch teams or invite collaborators.',
+    },
+  ];
+
+  const formatDate = (value: any) => {
+    if (!value) return null;
+    if (typeof value === 'string') {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed.toLocaleDateString();
+    }
+    if (value?.toDate) {
+      return value.toDate().toLocaleDateString();
+    }
+    if (value?.toMillis) {
+      return new Date(value.toMillis()).toLocaleDateString();
+    }
+    return null;
+  };
+
+  if (loading) {
+    return (
+      <PortalContainer>
+        <div className="py-16 flex justify-center">
+          <p role="status" aria-live="polite" className="text-sm text-gray-600">
+            Loading your workspace…
+          </p>
+        </div>
+      </PortalContainer>
+    );
+  }
+
   return (
     <PortalContainer>
-      <div className="grid gap-8">
-      <h1 className="text-xl font-semibold">Dashboard</h1>
-      {/* Quick actions */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Link href="/categories" className="card p-4 text-center hover:bg-gray-100">
-          <div className="font-medium">Browse Products</div>
-        </Link>
-        <Link href="/projects/new" className="card p-4 text-center hover:bg-gray-100">
-          <div className="font-medium">New Project</div>
-        </Link>
-        <Link href="/bookings" className="card p-4 text-center hover:bg-gray-100">
-          <div className="font-medium">Book Session</div>
-        </Link>
-        <Link href="/projects" className="card p-4 text-center hover:bg-gray-100">
-          <div className="font-medium">View Projects</div>
-        </Link>
-      </div>
-      <section className="card p-6 border border-dashed border-amber-200 bg-amber-50 space-y-4">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="space-y-1">
-            <h2 className="text-lg font-semibold text-amber-900">Annual content planner</h2>
-            <p className="text-sm text-amber-800">
-              Build your campaign roadmap with deliverables, budgets, and linked services without leaving the dashboard.
-            </p>
-          </div>
-          <Link href="/dashboard/content-planner" className="btn-sm">
-            Open planner
-          </Link>
-        </div>
-        <ul className="space-y-1 text-xs text-amber-900">
-          <li>• Auto-connect initiatives to live Pineapple Tapped products and pricing.</li>
-          <li>• Brief HQ on bespoke concepts with a single click.</li>
-          <li>• Generate AI storyboards to keep your stakeholders aligned.</li>
-        </ul>
-      </section>
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-      {/* Customer Tasks */}
-      <section className="card p-4">
-        <h3 className="text-lg font-medium mb-2">Your Tasks</h3>
-        {tasks.length === 0 ? (
-          <p>No tasks.</p>
-        ) : (
-          <div className="grid gap-3">
-            <div className="flex items-center gap-2 mb-1">
-              <label className="text-sm">Project:</label>
-              <select
-                className="input w-auto"
-                value={taskFilter}
-                onChange={(e) => setTaskFilter(e.target.value)}
-              >
-                <option value="all">All</option>
-                {taskProjects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name || 'Untitled'}
-                  </option>
-                ))}
-              </select>
+      <div className="space-y-10">
+        <header className="rounded-3xl bg-slate-900 text-white p-6 sm:p-8 shadow-sm">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+            <div className="space-y-3 max-w-2xl">
+              <p className="text-xs uppercase tracking-[0.35em] text-slate-300">Client portal</p>
+              <h1 className="text-3xl sm:text-4xl font-semibold leading-tight">Your production HQ</h1>
+              <p className="text-sm sm:text-base text-slate-200">
+                Check project progress, review upcoming shoots, and discover new campaigns built around your brand goals.
+              </p>
             </div>
-            <ul className="grid gap-2">
-              {(taskFilter === 'all'
-                ? tasks
-                : tasks.filter((t) => t.projectId === taskFilter)
-              ).map((t) => (
-                <li
-                  key={t.id}
-                  className="card p-3 flex justify-between items-start gap-2"
-                >
-                  <div>
-                    <p className="font-medium">{t.title}</p>
-                    <p className="text-sm text-gray-500">{t.projectName}</p>
-                    {t.dueDate && (
-                      <p className="text-xs text-gray-500">Due {t.dueDate}</p>
-                    )}
-                  </div>
-                  <div className="flex gap-2 items-center">
-                    <Link
-                      href={`/projects/${t.projectId}/tasks`}
-                      className="btn-sm"
-                    >
-                      View
-                    </Link>
-                    <button
-                      className="btn-sm"
-                      onClick={() => completeTask(t)}
-                    >
-                      Complete
-                    </button>
-                  </div>
-                </li>
+            <dl className="grid grid-cols-2 gap-4 text-left sm:grid-cols-4">
+              {metrics.map((metric) => (
+                <div key={metric.label} className="rounded-2xl bg-slate-800/60 p-4">
+                  <dt className="text-xs uppercase tracking-wide text-slate-400">{metric.label}</dt>
+                  <dd className="mt-2 text-2xl font-semibold">{metric.value}</dd>
+                </div>
               ))}
-            </ul>
+            </dl>
           </div>
-        )}
-      </section>
-      {/* Projects */}
-      <section className="card p-4">
-        <h3 className="text-lg font-medium mb-2">Recent Projects</h3>
-        {projects.length === 0 ? <p>No projects.</p> : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {projects.map((p) => (
-              <Link
-                key={p.id}
-                href={`/projects/${p.id}`}
-                className="card p-4 hover:shadow-md transition flex flex-col gap-2"
-              >
-                <div className="font-medium">{p.name || 'Untitled'}</div>
-                <div className="text-sm text-gray-500">{p.status || 'draft'}</div>
-              </Link>
-            ))}
-          </div>
-        )}
-      </section>
-      {/* Orders */}
-      <section className="card p-4">
-        <h3 className="text-lg font-medium mb-2">Recent Orders</h3>
-        {orders.length === 0 ? <p>No orders.</p> : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {orders.map((o) => (
-              <Link
-                key={o.id}
-                href={`/orders/${o.id}`}
-                className="card p-4 hover:shadow-md transition flex flex-col gap-2"
-              >
-                <div className="font-medium">
-                  {o.projectName || `Order #${o.id.substring(0, 6)}`}
-                </div>
-                <div className="text-sm text-gray-500">{o.status}</div>
-              </Link>
-            ))}
-          </div>
-          )}
-        </section>
-      {/* Bookings */}
-      <section className="card p-4">
-        <h3 className="text-lg font-medium mb-2">My Bookings</h3>
-        {bookings.length === 0 ? <p>No bookings.</p> : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {bookings.map((b) => (
-              <div
-                key={b.id}
-                className="card p-4 hover:shadow-md transition flex flex-col gap-2"
-              >
-                <div className="font-medium">{b.slot?.date} {b.slot?.start}-{b.slot?.end}</div>
-                <div className="text-sm text-gray-500">{b.status}</div>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-      {/* Recent Assets & Approvals */}
-      <section className="card p-4">
-        <h3 className="text-lg font-medium mb-2">Recent Assets</h3>
-        {assets.length === 0 ? <p>No assets yet.</p> : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {assets.map((a) => (
-              <Link
-                key={a.id}
-                href={`/projects/${a.projectId}/assets/${a.id}`}
-                className="card p-4 hover:shadow-md transition flex flex-col gap-2"
-              >
-                <div className="font-medium">{a.name || 'Asset'}</div>
-                <div className="text-sm text-gray-500">{a.status || 'draft'}</div>
-              </Link>
-            ))}
-          </div>
-        )}
-      </section>
-      {/* Remarketing Suggestions */}
-      <section className="card p-4">
-        <h3 className="text-lg font-medium mb-2">Suggested Projects</h3>
-        {suggestedProjects.length === 0 ? (
-          <p className="text-sm text-gray-600">No suggestions yet. Once HQ drafts ideas you will see them here.</p>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {suggestedProjects.map((suggestion) => {
-              const createdLabel = suggestion.createdAt?.toDate
-                ? suggestion.createdAt.toDate().toLocaleDateString()
-                : '';
-              return (
-                <div
-                  key={suggestion.id}
-                  className="card p-4 hover:shadow-md transition flex flex-col gap-3"
+          <nav aria-label="Quick actions" className="mt-6">
+            <div className="flex flex-wrap gap-3">
+              {quickActions.map((action) => (
+                <Link
+                  key={action.href}
+                  href={action.href}
+                  className="group relative flex min-w-[200px] flex-1 flex-col justify-between gap-1 rounded-2xl border border-white/10 bg-white/5 p-4 text-left transition hover:border-white/40 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
                 >
-                  <div className="flex items-center justify-between text-xs text-gray-500 uppercase tracking-wide">
-                    <span>{(suggestion.status || 'draft').toString()}</span>
-                    {createdLabel && <span>{createdLabel}</span>}
-                  </div>
-                  <div>
-                    <h3 className="font-medium text-gray-900">
-                      {suggestion.headline || suggestion.summary || 'Project idea'}
-                    </h3>
-                    {suggestion.summary && (
-                      <p className="text-sm text-gray-600 mt-1 line-clamp-4">{suggestion.summary}</p>
-                    )}
-                    {!suggestion.summary && suggestion.articleDraft && (
-                      <p className="text-sm text-gray-600 mt-1 line-clamp-4">{suggestion.articleDraft}</p>
-                    )}
-                  </div>
-                  {suggestion.highlightProduct?.name && (
-                    <p className="text-xs text-gray-500">Featured product: {suggestion.highlightProduct.name}</p>
-                  )}
-                  {suggestion.emailSubject && (
-                    <p className="text-xs text-gray-500">Email: {suggestion.emailSubject}</p>
-                  )}
-                  <p className="text-xs text-gray-500">Research status: {suggestion.researchStatus || 'pending'}</p>
+                  <span className="text-sm font-semibold text-white group-hover:text-white">{action.label}</span>
+                  <span className="text-xs text-slate-200 group-hover:text-slate-100">{action.description}</span>
+                </Link>
+              ))}
+            </div>
+          </nav>
+        </header>
+
+        <div className="grid gap-8 lg:grid-cols-[2fr,1fr]">
+          <div className="space-y-8">
+            <section aria-labelledby="tasks-heading" className="card divide-y divide-gray-100 overflow-hidden rounded-3xl border border-gray-200">
+              <div className="flex flex-wrap items-center justify-between gap-4 p-6">
+                <div>
+                  <h2 id="tasks-heading" className="text-lg font-semibold text-gray-900">
+                    Tasks waiting on you
+                  </h2>
+                  <p className="text-sm text-gray-600">
+                    Approve feedback, upload files, or mark deliverables complete to keep each timeline moving.
+                  </p>
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </section>
-      {/* Recommendations */}
-      <section className="card p-4">
-        <h3 className="text-lg font-medium mb-2">Suggested Campaigns</h3>
-        {recommendations.length === 0 ? <p>No suggestions at this time.</p> : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {recommendations.map((rec) => (
-              <div
-                key={rec.id}
-                className="card p-4 hover:shadow-md transition flex flex-col gap-2"
-              >
-                <h3 className="font-medium">{rec.title}</h3>
-                <p className="text-sm text-gray-700 flex-1">{rec.body}</p>
-                {rec.cta && <Link href={rec.cta} className="btn-sm">Learn more</Link>}
+                {tasks.length > 0 && (
+                  <label className="flex flex-col text-xs text-gray-500">
+                    Filter by project
+                    <select
+                      className="input mt-1 w-48"
+                      value={taskFilter}
+                      onChange={(e) => setTaskFilter(e.target.value)}
+                    >
+                      <option value="all">All projects</option>
+                      {taskProjects.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name || 'Untitled'}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
               </div>
-            ))}
-          </div>
-        )}
-      </section>
-      {/* Notifications */}
-      <section className="card p-4">
-        <h3 className="text-lg font-medium mb-2">Notifications</h3>
-        {notifications.length === 0 ? <p>No notifications.</p> : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {notifications.map((n) => (
-              <div
-                key={n.id}
-                className="card p-4 hover:shadow-md transition flex flex-col gap-2"
-              >
-                <div className="font-medium">{n.message || n.body}</div>
-                <div className="text-sm text-gray-500">{n.createdAt && n.createdAt.toDate && n.createdAt.toDate().toLocaleDateString()}</div>
+              <div className="p-6">
+                {tasks.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-gray-200 p-6 text-sm text-gray-600">
+                    Nothing needs your attention right now. We’ll surface new approvals and briefs here as soon as HQ updates a project.
+                  </div>
+                ) : (
+                  <ul className="space-y-4" role="list">
+                    {(taskFilter === 'all' ? tasks : tasks.filter((t) => t.projectId === taskFilter)).map((t) => (
+                      <li key={t.id} className="flex flex-col gap-3 rounded-2xl border border-gray-200 p-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="space-y-1">
+                          <p className="text-sm font-semibold text-gray-900">{t.title}</p>
+                          <p className="text-xs text-gray-500">{t.projectName}</p>
+                          {t.dueDate && (
+                            <p className="text-xs text-gray-500">Due {t.dueDate}</p>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Link
+                            href={`/projects/${t.projectId}/tasks`}
+                            className="btn-sm"
+                          >
+                            View task
+                          </Link>
+                          <button
+                            className="btn-sm"
+                            onClick={() => completeTask(t)}
+                            type="button"
+                          >
+                            Mark complete
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
-            ))}
+            </section>
+
+            <section aria-labelledby="projects-heading" className="card rounded-3xl border border-gray-200 p-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 id="projects-heading" className="text-lg font-semibold text-gray-900">
+                    Active projects
+                  </h2>
+                  <p className="text-sm text-gray-600">Jump back into briefs, deliverables, and approvals.</p>
+                </div>
+                <Link href="/projects" className="btn-sm">
+                  View all projects
+                </Link>
+              </div>
+              {projects.length === 0 ? (
+                <p className="mt-6 rounded-2xl border border-dashed border-gray-200 p-6 text-sm text-gray-600">
+                  When your first project kicks off we’ll showcase each milestone and approval here.
+                </p>
+              ) : (
+                <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                  {projects.map((p) => (
+                    <Link
+                      key={p.id}
+                      href={`/projects/${p.id}`}
+                      className="flex flex-col justify-between gap-3 rounded-2xl border border-gray-200 p-4 transition hover:border-gray-400 hover:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                    >
+                      <div>
+                        <p className="text-sm font-semibold text-gray-900">{p.name || 'Untitled project'}</p>
+                        <p className="text-xs text-gray-500">Status: {p.status || 'draft'}</p>
+                      </div>
+                      {p.nextMilestone && (
+                        <p className="text-xs text-gray-500">Next milestone: {p.nextMilestone}</p>
+                      )}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section aria-labelledby="orders-heading" className="card rounded-3xl border border-gray-200 p-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 id="orders-heading" className="text-lg font-semibold text-gray-900">
+                    Orders & billing
+                  </h2>
+                  <p className="text-sm text-gray-600">Track fulfilment progress and pull receipts when you need them.</p>
+                </div>
+                <Link href="/orders" className="btn-sm">
+                  View all orders
+                </Link>
+              </div>
+              {orders.length === 0 ? (
+                <p className="mt-6 rounded-2xl border border-dashed border-gray-200 p-6 text-sm text-gray-600">
+                  No orders yet. Once you check out or approve a proposal, we’ll summarise the fulfilment status here.
+                </p>
+              ) : (
+                <ul className="mt-6 space-y-4" role="list">
+                  {orders.map((o) => {
+                    const createdOn = formatDate(o.createdAt);
+                    return (
+                      <li key={o.id} className="flex flex-col gap-3 rounded-2xl border border-gray-200 p-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900">{o.projectName || `Order #${o.id.substring(0, 6)}`}</p>
+                          <p className="text-xs text-gray-500">Status: {o.status || 'processing'}</p>
+                          {createdOn && <p className="text-xs text-gray-500">Placed {createdOn}</p>}
+                        </div>
+                        <Link href={`/orders/${o.id}`} className="btn-sm">
+                          View details
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+
+            <section aria-labelledby="assets-heading" className="card rounded-3xl border border-gray-200 p-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 id="assets-heading" className="text-lg font-semibold text-gray-900">
+                    Latest deliveries
+                  </h2>
+                  <p className="text-sm text-gray-600">Download approvals and final files the moment they land.</p>
+                </div>
+                <Link href="/projects" className="btn-sm">
+                  Open asset library
+                </Link>
+              </div>
+              {assets.length === 0 ? (
+                <p className="mt-6 rounded-2xl border border-dashed border-gray-200 p-6 text-sm text-gray-600">
+                  Assets that are ready for review or download will appear here once production uploads them.
+                </p>
+              ) : (
+                <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                  {assets.map((a) => (
+                    <Link
+                      key={a.id}
+                      href={`/projects/${a.projectId}/assets/${a.id}`}
+                      className="flex flex-col gap-2 rounded-2xl border border-gray-200 p-4 transition hover:border-gray-400 hover:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                    >
+                      <p className="text-sm font-semibold text-gray-900">{a.name || 'Asset'}</p>
+                      <p className="text-xs text-gray-500">Status: {a.status || 'draft'}</p>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </section>
           </div>
-        )}
-      </section>
-      </div>
+
+          <aside className="space-y-8">
+            <section aria-labelledby="bookings-heading" className="card rounded-3xl border border-gray-200 p-6">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 id="bookings-heading" className="text-lg font-semibold text-gray-900">
+                    Upcoming bookings
+                  </h2>
+                  <p className="text-sm text-gray-600">Reschedule or add context before your crew arrives on site.</p>
+                </div>
+                <Link href="/bookings" className="btn-sm">
+                  Manage
+                </Link>
+              </div>
+              {bookings.length === 0 ? (
+                <p className="mt-6 rounded-2xl border border-dashed border-gray-200 p-6 text-sm text-gray-600">
+                  When a session is confirmed you’ll see the call time, crew, and location details here.
+                </p>
+              ) : (
+                <ul className="mt-6 space-y-4" role="list">
+                  {bookings.map((b) => (
+                    <li key={b.id} className="rounded-2xl border border-gray-200 p-4">
+                      <p className="text-sm font-semibold text-gray-900">
+                        {b.slot?.date} {b.slot?.start && `· ${b.slot.start}`}
+                      </p>
+                      <p className="text-xs text-gray-500">{b.status}</p>
+                      {b.location && <p className="text-xs text-gray-500">Location: {b.location}</p>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section aria-labelledby="upsell-heading" className="card rounded-3xl border border-gray-200 p-6">
+              <div className="space-y-2">
+                <h2 id="upsell-heading" className="text-lg font-semibold text-gray-900">
+                  Growth opportunities
+                </h2>
+                <p className="text-sm text-gray-600">
+                  Explore campaigns, remarketing ideas, and partner services tailored to your organisation.
+                </p>
+              </div>
+              {suggestedProjects.length === 0 && recommendations.length === 0 ? (
+                <p className="mt-6 rounded-2xl border border-dashed border-gray-200 p-6 text-sm text-gray-600">
+                  We’ll curate new opportunities for you once the team has reviewed your recent activity.
+                </p>
+              ) : (
+                <div className="mt-6 space-y-5">
+                  {suggestedProjects.slice(0, 4).map((suggestion) => {
+                    const createdLabel = formatDate(suggestion.createdAt);
+                    return (
+                      <article key={suggestion.id} className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                        <header className="flex items-center justify-between gap-2 text-[11px] font-medium uppercase tracking-wide text-amber-700">
+                          <span>{(suggestion.status || 'Draft').toString()}</span>
+                          {createdLabel && <span>{createdLabel}</span>}
+                        </header>
+                        <h3 className="mt-2 text-sm font-semibold text-amber-900">
+                          {suggestion.headline || suggestion.summary || 'New project idea'}
+                        </h3>
+                        {(suggestion.summary || suggestion.articleDraft) && (
+                          <p className="mt-1 text-xs text-amber-800 line-clamp-4">
+                            {suggestion.summary || suggestion.articleDraft}
+                          </p>
+                        )}
+                        {suggestion.highlightProduct?.name && (
+                          <p className="mt-2 text-[11px] text-amber-700">Featured: {suggestion.highlightProduct.name}</p>
+                        )}
+                      </article>
+                    );
+                  })}
+                  {recommendations.slice(0, 3).map((rec) => (
+                    <article key={rec.id} className="rounded-2xl border border-slate-200 p-4">
+                      <h3 className="text-sm font-semibold text-gray-900">{rec.title}</h3>
+                      <p className="mt-1 text-xs text-gray-600">{rec.body}</p>
+                      {rec.cta && (
+                        <Link href={rec.cta} className="mt-3 inline-flex text-xs font-semibold text-slate-900 underline">
+                          Learn more
+                        </Link>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section aria-labelledby="planner-heading" className="card rounded-3xl border border-gray-200 p-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 id="planner-heading" className="text-lg font-semibold text-gray-900">
+                    Annual content planner
+                  </h2>
+                  <p className="text-sm text-gray-600">
+                    Build campaign roadmaps, link deliverables to services, and brief HQ in a single workspace.
+                  </p>
+                </div>
+                <Link href="/dashboard/content-planner" className="btn-sm">
+                  Open planner
+                </Link>
+              </div>
+              <ul className="mt-6 space-y-2 text-xs text-gray-600">
+                <li>• Connect initiatives to active Pineapple Tapped products and pricing.</li>
+                <li>• Capture stakeholder feedback with shared timelines and notes.</li>
+                <li>• Generate AI storyboards to align creative teams quickly.</li>
+              </ul>
+            </section>
+
+            <section aria-labelledby="notifications-heading" className="card rounded-3xl border border-gray-200 p-6">
+              <div className="space-y-2">
+                <h2 id="notifications-heading" className="text-lg font-semibold text-gray-900">
+                  Notifications
+                </h2>
+                <p className="text-sm text-gray-600">Stay on top of approvals, comments, and milestone changes.</p>
+              </div>
+              {notifications.length === 0 ? (
+                <p className="mt-6 rounded-2xl border border-dashed border-gray-200 p-6 text-sm text-gray-600">
+                  No notifications right now. We’ll let you know as soon as there’s new activity.
+                </p>
+              ) : (
+                <ul className="mt-6 space-y-4" role="list">
+                  {notifications.map((n) => {
+                    const createdLabel = formatDate(n.createdAt);
+                    return (
+                      <li key={n.id} className="rounded-2xl border border-gray-200 p-4">
+                        <p className="text-sm font-semibold text-gray-900">{n.message || n.body}</p>
+                        {createdLabel && <p className="mt-1 text-xs text-gray-500">{createdLabel}</p>}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+          </aside>
+        </div>
       </div>
     </PortalContainer>
   );
