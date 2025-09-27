@@ -316,27 +316,83 @@ export default function AdminUsersPage() {
     : outreach;
 
   const handleAddRecord = async (data: Record<string, unknown>) => {
+    setError(null);
     try {
-      const id = crypto.randomUUID();
+      const id =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `crm_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
       const payload = { ...data, crmStatus: activeTab } as Partial<AdminUser> & Record<string, unknown>;
       if ('suggestedProductId' in payload && !payload.suggestedProductId) {
         payload.suggestedProductId = null;
       }
+
       const emailValue = typeof payload.email === 'string' ? payload.email.trim() : '';
       if (!emailValue) {
         throw new Error('Email is required');
       }
+
+      payload.email = emailValue;
+
+      const fileEntries: Array<[string, File]> = [];
+      Object.entries(payload).forEach(([key, value]) => {
+        if (value instanceof File) {
+          fileEntries.push([key, value]);
+        }
+      });
+
+      const sanitised: Record<string, unknown> = {};
+      Object.entries(payload).forEach(([key, value]) => {
+        if (value instanceof File) {
+          return;
+        }
+        if (typeof value === 'string') {
+          sanitised[key] = value.trim();
+        } else if (value !== undefined) {
+          sanitised[key] = value;
+        }
+      });
+
+      sanitised.crmStatus = activeTab;
+      sanitised.email = emailValue;
+      const timestampIso = new Date().toISOString();
+      sanitised.createdAt = timestampIso;
+      sanitised.updatedAt = timestampIso;
+
+      if (fileEntries.length > 0) {
+        const { storage } = await ensureFirebase();
+        if (!storage || (storage as any).__isPlaceholder) {
+          throw new Error('Firebase storage is unavailable.');
+        }
+
+        const { ref, uploadBytes, getDownloadURL } = await import('firebase/storage');
+        await Promise.all(
+          fileEntries.map(async ([key, file]) => {
+            const safeName = encodeURIComponent(file.name || key);
+            const objectRef = ref(storage, `crm/${id}/${Date.now()}_${safeName}`);
+            await uploadBytes(objectRef, file);
+            const url = await getDownloadURL(objectRef);
+            sanitised[key] = url;
+            sanitised[`${key}Name`] = file.name;
+          })
+        );
+      }
+
+      await adminUpdateUser({ userId: id, updates: sanitised });
+
       const newRecord: AdminUser = {
         id,
-        ...payload,
-        email: emailValue,
+        ...sanitised,
       };
-      await adminUpdateUser({ userId: id, updates: payload });
-      setUsers([...users, newRecord]);
+
+      setUsers((prev) => [...prev, newRecord]);
       setShowForm(false);
     } catch (err: any) {
       console.error(err);
-      alert(err.message || 'Error creating record');
+      const message = err?.message || 'Error creating record';
+      setError(message);
+      alert(message);
     }
   };
 

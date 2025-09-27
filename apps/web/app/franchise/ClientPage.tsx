@@ -951,6 +951,30 @@ export default function FranchisePortalPage() {
             <section className="card border border-slate-200 p-4">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
                 <div>
+                  <h2 className="text-lg font-semibold">Lead pipeline</h2>
+                  <p className="text-sm text-gray-600">
+                    Review the leads and clients assigned to your franchise without leaving the portal. The CRM workspace
+                    automatically filters records to the organisations you belong to.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Link href="/crm/leads" className="btn-sm">
+                    Leads view
+                  </Link>
+                  <Link href="/crm" className="btn-sm btn-outline">
+                    Open CRM workspace
+                  </Link>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500">
+                Use the workspace to capture outreach notes, store collateral, and monitor recent orders for accounts within
+                your territory.
+              </p>
+            </section>
+
+            <section className="card border border-slate-200 p-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
+                <div>
                   <h2 className="text-lg font-semibold">Orders & earnings</h2>
                   <p className="text-sm text-gray-600">Track the latest franchise work and royalty splits.</p>
                 </div>

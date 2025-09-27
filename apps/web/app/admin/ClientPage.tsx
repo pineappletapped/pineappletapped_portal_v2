@@ -272,7 +272,8 @@ export default function AdminPage() {
             {
               title: 'People',
               links: [
-                { href: '/admin/users', label: 'CRM' },
+                { href: '/crm', label: 'CRM Workspace' },
+                { href: '/admin/users', label: 'Client Directory' },
                 { href: '/admin/team', label: 'Manage Team' },
                 { href: '/admin/join-team-steps', label: 'Join Team Form' },
                 { href: '/admin/franchises', label: 'Franchise Network' },
