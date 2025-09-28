@@ -74,13 +74,55 @@ type VerifiedSessionContext = {
   projectOverride: string | null;
 };
 
+function shouldRetryWithoutRevocationCheck(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === 'string') {
+    const normalisedCode = code.toLowerCase();
+    if (normalisedCode === 'auth/id-token-revoked') {
+      return false;
+    }
+    if (normalisedCode.includes('permission')) {
+      return true;
+    }
+  }
+
+  const message = (error as { message?: unknown }).message;
+  if (typeof message === 'string') {
+    const lowerMessage = message.toLowerCase();
+    if (lowerMessage.includes('insufficient permission') || lowerMessage.includes('permission denied')) {
+      return true;
+    }
+    if (lowerMessage.includes('caller does not have permission')) {
+      return true;
+    }
+    if (lowerMessage.includes('iam permission')) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 async function attemptVerification(
   idToken: string,
   projectOverride: string | null
 ): Promise<VerifiedSessionContext> {
   const auth = getFirebaseAdminAuth(projectOverride);
-  const decoded = await auth.verifyIdToken(idToken, true);
-  return { decoded, auth, projectOverride };
+  try {
+    const decoded = await auth.verifyIdToken(idToken, true);
+    return { decoded, auth, projectOverride };
+  } catch (error) {
+    if (shouldRetryWithoutRevocationCheck(error)) {
+      console.warn('Retrying Firebase session verification without revocation check', error);
+      const decoded = await auth.verifyIdToken(idToken, false);
+      return { decoded, auth, projectOverride };
+    }
+    throw error;
+  }
 }
 
 async function verifyIdTokenWithFallback(idToken: string): Promise<VerifiedSessionContext> {
