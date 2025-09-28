@@ -49,6 +49,9 @@ function resolveSessionFailure(error: unknown): SessionErrorResolution {
 
   if (code) {
     if (UNAUTHORIZED_ERROR_CODES.has(code)) {
+      if (code === 'auth/id-token-revoked' && looksLikePermissionError(message)) {
+        return { status: 500, message: DEFAULT_SERVER_ERROR_MESSAGE };
+      }
       return { status: 401, message: DEFAULT_UNAUTHORIZED_MESSAGE };
     }
 
@@ -127,26 +130,48 @@ type VerifiedSessionContext = {
   projectOverride: string | null;
 };
 
+function looksLikePermissionError(message: string | undefined | null) {
+  if (!message) {
+    return false;
+  }
+
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('permission denied') ||
+    lower.includes('insufficient permission') ||
+    lower.includes('does not have permission') ||
+    lower.includes('the caller does not have permission') ||
+    lower.includes('permission to access the requested resource')
+  );
+}
+
 function shouldRetryWithoutRevocationCheck(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
     return true;
   }
 
-  const code = (error as { code?: unknown }).code;
-  if (typeof code === 'string') {
-    const normalisedCode = code.toLowerCase();
-    if (normalisedCode === 'auth/id-token-revoked') {
-      return false;
-    }
-    if (normalisedCode.startsWith('auth/')) {
+  const codeRaw = (error as { code?: unknown }).code;
+  const messageRaw = (error as { message?: unknown }).message;
+  const code = typeof codeRaw === 'string' ? codeRaw.toLowerCase() : '';
+  const message = typeof messageRaw === 'string' ? messageRaw : '';
+
+  if (code === 'auth/id-token-revoked') {
+    if (looksLikePermissionError(message)) {
+      console.warn(
+        'Firebase session verification reported id-token-revoked but message indicates permission issues; retrying without revocation check'
+      );
       return true;
     }
+    return false;
   }
 
-  const message = (error as { message?: unknown }).message;
-  if (typeof message === 'string') {
+  if (code.startsWith('auth/')) {
+    return true;
+  }
+
+  if (message) {
     const lowerMessage = message.toLowerCase();
-    if (lowerMessage.includes('revoked')) {
+    if (lowerMessage.includes('revoked') && !looksLikePermissionError(message)) {
       return false;
     }
   }
