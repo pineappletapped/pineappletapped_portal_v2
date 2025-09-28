@@ -845,6 +845,11 @@ export default function FranchisePortalPage() {
 
   const heroActions = [
     {
+      label: "Launch training",
+      description: "Access franchise onboarding lessons and playbooks.",
+      href: "/training",
+    },
+    {
       label: "Review performance",
       description: "Track sales, earnings, and order health.",
       href: "#orders-earnings",

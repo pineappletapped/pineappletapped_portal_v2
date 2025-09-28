@@ -585,6 +585,11 @@ export default function ContractorPortal() {
 
   const heroActions = [
     {
+      label: "Start training",
+      description: "Brush up on workflows, kit prep, and edit tips.",
+      href: "/training",
+    },
+    {
       label: "Update compliance",
       description: "Upload your drone licence and insurance for review.",
       onClick: () => setActiveTab("compliance"),
