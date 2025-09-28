@@ -74,28 +74,71 @@ type VerifiedSessionContext = {
   projectOverride: string | null;
 };
 
+async function attemptVerification(
+  idToken: string,
+  projectOverride: string | null
+): Promise<VerifiedSessionContext> {
+  const auth = getFirebaseAdminAuth(projectOverride);
+  const decoded = await auth.verifyIdToken(idToken, true);
+  return { decoded, auth, projectOverride };
+}
+
 async function verifyIdTokenWithFallback(idToken: string): Promise<VerifiedSessionContext> {
-  let auth = getFirebaseAdminAuth();
+  const attempted = new Set<string>();
+  const errors: unknown[] = [];
+  const fallbackProjectId = extractProjectIdFromIdToken(idToken);
+  const candidateProjects: (string | null)[] = [];
 
-  try {
-    const decoded = await auth.verifyIdToken(idToken, true);
-    return { decoded, auth, projectOverride: null };
-  } catch (error) {
-    const fallbackProjectId = extractProjectIdFromIdToken(idToken);
-    if (!fallbackProjectId || !shouldRetryWithProjectOverride(error)) {
-      throw error;
-    }
-
-    console.warn(
-      'Retrying Firebase session verification with token project ID override',
-      fallbackProjectId,
-      error
-    );
-
-    auth = getFirebaseAdminAuth(fallbackProjectId);
-    const decoded = await auth.verifyIdToken(idToken, true);
-    return { decoded, auth, projectOverride: fallbackProjectId };
+  if (fallbackProjectId) {
+    candidateProjects.push(fallbackProjectId);
   }
+  candidateProjects.push(null);
+
+  for (const project of candidateProjects) {
+    const cacheKey = project ?? '__default__';
+    if (attempted.has(cacheKey)) {
+      continue;
+    }
+    attempted.add(cacheKey);
+
+    try {
+      if (project) {
+        console.warn(
+          'Attempting Firebase session verification with token project override',
+          project
+        );
+      }
+      return await attemptVerification(idToken, project);
+    } catch (error) {
+      errors.push(error);
+
+      if (!project) {
+        throw error;
+      }
+
+      const shouldRetry = shouldRetryWithProjectOverride(error);
+      if (!shouldRetry) {
+        console.error(
+          'Firebase session verification failed for override project',
+          project,
+          error
+        );
+        continue;
+      }
+
+      console.warn(
+        'Retrying Firebase session verification with default project after override failure',
+        project,
+        error
+      );
+    }
+  }
+
+  const finalError = errors[errors.length - 1];
+  if (finalError instanceof Error) {
+    throw finalError;
+  }
+  throw new Error('Unable to verify Firebase ID token.');
 }
 
 export async function POST(req: NextRequest) {
