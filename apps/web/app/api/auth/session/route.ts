@@ -14,8 +14,61 @@ import {
 
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
-function createUnauthorizedResponse(message = 'Unauthorized') {
+const DEFAULT_UNAUTHORIZED_MESSAGE =
+  'We could not validate your sign-in credentials. Please try signing in again.';
+const DEFAULT_SERVER_ERROR_MESSAGE =
+  'Unable to establish a secure session. Please try again later.';
+
+function createUnauthorizedResponse(message = DEFAULT_UNAUTHORIZED_MESSAGE) {
   return NextResponse.json({ error: message }, { status: 401 });
+}
+
+type SessionErrorResolution = { status: number; message: string };
+
+const UNAUTHORIZED_ERROR_CODES = new Set([
+  'auth/id-token-expired',
+  'auth/id-token-revoked',
+  'auth/invalid-claims',
+  'auth/invalid-id-token',
+  'auth/invalid-session-cookie',
+  'auth/session-cookie-expired',
+  'auth/session-cookie-revoked',
+  'auth/user-disabled',
+  'auth/user-not-found',
+]);
+
+function resolveSessionFailure(error: unknown): SessionErrorResolution {
+  if (!error || typeof error !== 'object') {
+    return { status: 500, message: DEFAULT_SERVER_ERROR_MESSAGE };
+  }
+
+  const codeRaw = (error as { code?: unknown }).code;
+  const code = typeof codeRaw === 'string' ? codeRaw.trim().toLowerCase() : '';
+  const messageRaw = (error as { message?: unknown }).message;
+  const message = typeof messageRaw === 'string' ? messageRaw.trim() : '';
+
+  if (code) {
+    if (UNAUTHORIZED_ERROR_CODES.has(code)) {
+      return { status: 401, message: DEFAULT_UNAUTHORIZED_MESSAGE };
+    }
+
+    if (code.startsWith('auth/')) {
+      return { status: 500, message: DEFAULT_SERVER_ERROR_MESSAGE };
+    }
+  }
+
+  if (message) {
+    const normalizedMessage = message.toLowerCase();
+    if (/\b(token|session)\b/.test(normalizedMessage) && normalizedMessage.includes('revoked')) {
+      return { status: 401, message: DEFAULT_UNAUTHORIZED_MESSAGE };
+    }
+
+    if (/not configured/i.test(message) || /credential implementation provided/i.test(message)) {
+      return { status: 500, message };
+    }
+  }
+
+  return { status: 500, message: DEFAULT_SERVER_ERROR_MESSAGE };
 }
 
 function extractProjectIdFromIdToken(idToken: string): string | null {
@@ -268,14 +321,8 @@ export async function POST(req: NextRequest) {
     return response;
   } catch (error) {
     console.error('Failed to establish Firebase session', error);
-    if (
-      error instanceof Error &&
-      (/not configured/i.test(error.message) ||
-        /credential implementation provided/i.test(error.message))
-    ) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-    return createUnauthorizedResponse();
+    const { status, message } = resolveSessionFailure(error);
+    return NextResponse.json({ error: message }, { status });
   }
 }
 
