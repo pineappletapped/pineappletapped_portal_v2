@@ -2,6 +2,7 @@ import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { onRequest } from 'firebase-functions/v2/https';
 import Stripe from 'stripe';
+import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import sharp from 'sharp';
 import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
@@ -31,7 +32,169 @@ admin.initializeApp({
         'pineapple-tapped---portal.firebasestorage.app',
 });
 const db = admin.firestore();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' });
+const STRIPE_SETTINGS_COLLECTION = 'settings';
+const STRIPE_SETTINGS_DOC_ID = 'stripeConnect';
+const STRIPE_API_VERSION = '2024-06-20';
+let cachedStripeClient = null;
+let cachedStripeSecret = typeof process.env.STRIPE_SECRET_KEY === 'string' && process.env.STRIPE_SECRET_KEY.trim().length > 0
+    ? process.env.STRIPE_SECRET_KEY.trim()
+    : undefined;
+let cachedStripeWebhookSecret = typeof process.env.STRIPE_WEBHOOK_SECRET === 'string' && process.env.STRIPE_WEBHOOK_SECRET.trim().length > 0
+    ? process.env.STRIPE_WEBHOOK_SECRET.trim()
+    : undefined;
+let cachedOperationalSettings = null;
+function normaliseString(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+function parseNumber(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return value;
+    }
+    if (typeof value === 'string') {
+        const parsed = Number.parseFloat(value.trim());
+        if (Number.isFinite(parsed)) {
+            return parsed;
+        }
+    }
+    return null;
+}
+function parseInteger(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return Math.trunc(value);
+    }
+    if (typeof value === 'string') {
+        const parsed = Number.parseInt(value.trim(), 10);
+        if (Number.isFinite(parsed)) {
+            return Math.trunc(parsed);
+        }
+    }
+    return null;
+}
+function parseSplitTerms(raw) {
+    if (!Array.isArray(raw)) {
+        return [];
+    }
+    return raw
+        .map((entry) => {
+        if (!entry || typeof entry !== 'object') {
+            return null;
+        }
+        const data = entry;
+        const label = normaliseString(data.label ?? data.name ?? data.title);
+        const percentage = parseNumber(data.percentage ?? data.percent ?? data.share);
+        const dueDays = parseInteger(data.dueDays ?? data.days ?? data.offsetDays ?? data.dueInDays);
+        if (!label || percentage === null) {
+            return null;
+        }
+        return {
+            label,
+            percentage,
+            dueDays: dueDays ?? null,
+        };
+    })
+        .filter((term) => Boolean(term));
+}
+const secretManagerClient = new SecretManagerServiceClient();
+const STRIPE_SECRET_KEY_RESOURCE = normaliseString(process.env.STRIPE_SECRET_KEY_SECRET_NAME);
+const STRIPE_WEBHOOK_SECRET_RESOURCE = normaliseString(process.env.STRIPE_WEBHOOK_SECRET_SECRET_NAME);
+function parseSecretResource(resource) {
+    const trimmed = resource.trim();
+    if (!trimmed.startsWith('projects/')) {
+        throw new Error(`Secret resource must start with "projects/". Received: ${resource}`);
+    }
+    if (trimmed.includes('/versions/')) {
+        const [parent, version] = trimmed.split('/versions/');
+        const versionName = version && version.length > 0 ? version : 'latest';
+        return { parent, versionName: `${parent}/versions/${versionName}` };
+    }
+    return { parent: trimmed, versionName: `${trimmed}/versions/latest` };
+}
+async function readSecretValue(resource, fallbackEnv, label) {
+    const fallback = normaliseString(fallbackEnv);
+    if (!resource) {
+        return fallback;
+    }
+    try {
+        const { versionName } = parseSecretResource(resource);
+        const [response] = await secretManagerClient.accessSecretVersion({ name: versionName });
+        const data = response.payload?.data;
+        if (!data || data.length === 0) {
+            return null;
+        }
+        const decoded = Buffer.from(data).toString('utf8').trim();
+        return decoded.length > 0 ? decoded : null;
+    }
+    catch (error) {
+        if (error.code === 5) {
+            return fallback;
+        }
+        throw new Error(`Unable to read ${label} from Secret Manager: ${error.message}`);
+    }
+}
+async function loadStripeSettingsFromFirestore() {
+    const docRef = db.collection(STRIPE_SETTINGS_COLLECTION).doc(STRIPE_SETTINGS_DOC_ID);
+    const snapshot = await docRef.get();
+    const data = snapshot.data() || {};
+    const platformFeePercent = parseNumber(data.platformFeePercent ?? data.platformFee ?? data.applicationFeePercent);
+    const splitTerms = parseSplitTerms(data.splitTerms ?? data.splitPaymentTerms ?? data.paymentSchedule);
+    return { platformFeePercent, splitTerms };
+}
+async function getStripeSecretKey() {
+    if (cachedStripeSecret !== undefined) {
+        if (!cachedStripeSecret) {
+            throw new Error('Stripe secret key is not configured.');
+        }
+        return cachedStripeSecret;
+    }
+    const secret = await readSecretValue(STRIPE_SECRET_KEY_RESOURCE, process.env.STRIPE_SECRET_KEY ?? null, 'Stripe secret key');
+    cachedStripeSecret = secret ?? null;
+    if (!cachedStripeSecret) {
+        throw new Error('Stripe secret key is not configured.');
+    }
+    return cachedStripeSecret;
+}
+async function getStripeWebhookSecret() {
+    if (cachedStripeWebhookSecret !== undefined) {
+        return cachedStripeWebhookSecret;
+    }
+    try {
+        const secret = await readSecretValue(STRIPE_WEBHOOK_SECRET_RESOURCE, process.env.STRIPE_WEBHOOK_SECRET ?? null, 'Stripe webhook secret');
+        cachedStripeWebhookSecret = secret ?? null;
+        return cachedStripeWebhookSecret;
+    }
+    catch (error) {
+        console.warn('Unable to load Stripe webhook secret', error);
+        cachedStripeWebhookSecret = null;
+        return null;
+    }
+}
+async function getStripeClient() {
+    const secret = await getStripeSecretKey();
+    if (cachedStripeClient) {
+        return cachedStripeClient;
+    }
+    cachedStripeClient = new Stripe(secret, { apiVersion: STRIPE_API_VERSION });
+    return cachedStripeClient;
+}
+async function getStripeOperationalSettings() {
+    if (cachedOperationalSettings && Date.now() - cachedOperationalSettings.fetchedAt < 5 * 60 * 1000) {
+        return {
+            platformFeePercent: cachedOperationalSettings.platformFeePercent,
+            splitTerms: cachedOperationalSettings.splitTerms,
+        };
+    }
+    const settings = await loadStripeSettingsFromFirestore();
+    cachedOperationalSettings = {
+        platformFeePercent: settings.platformFeePercent,
+        splitTerms: settings.splitTerms,
+        fetchedAt: Date.now(),
+    };
+    return { platformFeePercent: settings.platformFeePercent, splitTerms: settings.splitTerms };
+}
 const VAT_RATE = 0.2;
 const DAY_IN_MS = 86_400_000;
 const DEFAULT_FILMING_SLA_DAYS = 7;
@@ -1080,6 +1243,358 @@ async function setupClientDriveStructure(context) {
         },
     }, { merge: true });
 }
+export const drive_listProjectFolder = functions.https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+    }
+    const projectId = typeof data?.projectId === 'string' ? data.projectId.trim() : '';
+    const requestedFolderId = typeof data?.folderId === 'string' ? data.folderId.trim() : '';
+    if (!projectId) {
+        throw new functions.https.HttpsError('invalid-argument', 'projectId is required');
+    }
+    const userContext = await loadUserContext(context.auth.uid);
+    if (!userContext.isStaff && userContext.franchiseIds.length === 0) {
+        throw new functions.https.HttpsError('permission-denied', 'Drive staging requires staff or franchise access');
+    }
+    const projectSnap = await db.collection('projects').doc(projectId).get();
+    if (!projectSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Project not found');
+    }
+    const projectData = projectSnap.data();
+    const projectFranchiseId = typeof projectData.franchiseId === 'string' ? projectData.franchiseId : null;
+    if (!userContext.isStaff &&
+        projectFranchiseId &&
+        !userContext.franchiseIds.includes(projectFranchiseId)) {
+        throw new functions.https.HttpsError('permission-denied', 'This project is not assigned to your franchise');
+    }
+    const orderId = typeof projectData.orderId === 'string' ? projectData.orderId : null;
+    if (!orderId) {
+        throw new functions.https.HttpsError('failed-precondition', 'The project is not linked to an order with Drive provisioning.');
+    }
+    const orderSnap = await db.collection('orders').doc(orderId).get();
+    if (!orderSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Linked order not found');
+    }
+    const orderData = orderSnap.data();
+    const driveInfo = orderData.drive || {};
+    const drive = await createDriveService();
+    if (!drive) {
+        throw new functions.https.HttpsError('failed-precondition', 'Google Drive service account credentials are not configured.');
+    }
+    const folderId = normaliseDriveId(requestedFolderId) ?? normaliseDriveId(driveInfo.orderFolderId);
+    if (!folderId) {
+        throw new functions.https.HttpsError('failed-precondition', 'The order does not have a Drive folder configured yet.');
+    }
+    let folderName = null;
+    if (requestedFolderId) {
+        try {
+            const folderMeta = await drive.files.get({
+                fileId: folderId,
+                fields: 'id, name',
+                supportsAllDrives: true,
+            });
+            folderName = typeof folderMeta.data.name === 'string' ? folderMeta.data.name : null;
+        }
+        catch (error) {
+            console.warn('drive_listProjectFolder failed to resolve folder metadata', folderId, error);
+        }
+    }
+    else if (typeof driveInfo.orderFolderName === 'string') {
+        folderName = driveInfo.orderFolderName;
+    }
+    else {
+        try {
+            const folderMeta = await drive.files.get({
+                fileId: folderId,
+                fields: 'id, name',
+                supportsAllDrives: true,
+            });
+            folderName = typeof folderMeta.data.name === 'string' ? folderMeta.data.name : null;
+        }
+        catch (error) {
+            console.warn('drive_listProjectFolder failed to resolve root folder name', folderId, error);
+        }
+    }
+    const listResponse = await drive.files.list({
+        q: `'${folderId}' in parents and trashed = false`,
+        fields: 'nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink)',
+        pageSize: 100,
+        includeItemsFromAllDrives: true,
+        supportsAllDrives: true,
+        orderBy: 'name_natural',
+    });
+    const items = (listResponse.data.files || [])
+        .map((file) => ({
+        id: file.id ?? '',
+        name: typeof file.name === 'string' ? file.name : 'Untitled',
+        mimeType: typeof file.mimeType === 'string' ? file.mimeType : null,
+        size: file.size ? Number(file.size) : null,
+        modifiedTime: typeof file.modifiedTime === 'string' ? file.modifiedTime : null,
+        webViewLink: typeof file.webViewLink === 'string' ? file.webViewLink : null,
+        kind: file.mimeType === 'application/vnd.google-apps.folder'
+            ? 'folder'
+            : 'file',
+    }))
+        .filter((item) => item.id.length > 0);
+    const productFolders = Array.isArray(driveInfo.productFolders)
+        ? driveInfo.productFolders
+            .map((entry) => {
+            const entryFolderId = normaliseDriveId(entry.folderId);
+            if (!entryFolderId) {
+                return null;
+            }
+            return {
+                folderId: entryFolderId,
+                productId: typeof entry.productId === 'string' ? entry.productId : null,
+                folderName: typeof entry.folderName === 'string' ? entry.folderName : null,
+            };
+        })
+            .filter((value) => value !== null)
+        : [];
+    return {
+        folderId,
+        folderName,
+        items,
+        project: {
+            id: projectId,
+            name: typeof projectData.name === 'string' ? projectData.name : null,
+            orgId: typeof projectData.orgId === 'string' ? projectData.orgId : null,
+            franchiseId: projectFranchiseId,
+        },
+        order: {
+            id: orderId,
+            status: typeof orderData.status === 'string' ? orderData.status : null,
+        },
+        drive: {
+            orderFolderId: normaliseDriveId(driveInfo.orderFolderId),
+            orderFolderName: typeof driveInfo.orderFolderName === 'string' ? driveInfo.orderFolderName : null,
+            productFolders,
+        },
+    };
+});
+export const drive_stageAssetFromFile = functions.https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+    }
+    const projectId = typeof data?.projectId === 'string' ? data.projectId.trim() : '';
+    const driveFileId = typeof data?.fileId === 'string' ? data.fileId.trim() : '';
+    const overrideName = typeof data?.name === 'string' ? data.name.trim() : '';
+    const assetTypeInput = typeof data?.assetType === 'string' ? data.assetType.trim().toLowerCase() : '';
+    const assetType = assetTypeInput === 'flight_plan' ? 'flight_plan' : 'deliverable';
+    if (!projectId || !driveFileId) {
+        throw new functions.https.HttpsError('invalid-argument', 'projectId and fileId are required');
+    }
+    const userContext = await loadUserContext(context.auth.uid);
+    if (!userContext.isStaff && userContext.franchiseIds.length === 0) {
+        throw new functions.https.HttpsError('permission-denied', 'Drive staging requires staff or franchise access');
+    }
+    const projectSnap = await db.collection('projects').doc(projectId).get();
+    if (!projectSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Project not found');
+    }
+    const projectData = projectSnap.data();
+    const projectFranchiseId = typeof projectData.franchiseId === 'string' ? projectData.franchiseId : null;
+    if (!userContext.isStaff &&
+        projectFranchiseId &&
+        !userContext.franchiseIds.includes(projectFranchiseId)) {
+        throw new functions.https.HttpsError('permission-denied', 'This project is not assigned to your franchise');
+    }
+    const orgId = typeof projectData.orgId === 'string' ? projectData.orgId : null;
+    if (!orgId) {
+        throw new functions.https.HttpsError('failed-precondition', 'The project is missing organisation context.');
+    }
+    const orderId = typeof projectData.orderId === 'string' ? projectData.orderId : null;
+    let orderStatus = null;
+    let orderData = null;
+    if (orderId) {
+        try {
+            const orderSnap = await db.collection('orders').doc(orderId).get();
+            if (orderSnap.exists) {
+                orderData = orderSnap.data();
+                if (typeof orderData.status === 'string') {
+                    orderStatus = orderData.status;
+                }
+            }
+        }
+        catch (error) {
+            console.warn('drive_stageAssetFromFile order lookup failed', { projectId, orderId }, error);
+        }
+    }
+    const drive = await createDriveService();
+    if (!drive) {
+        throw new functions.https.HttpsError('failed-precondition', 'Google Drive service account credentials are not configured.');
+    }
+    let fileMeta;
+    try {
+        const metadataRes = await drive.files.get({
+            fileId: driveFileId,
+            fields: 'id, name, mimeType, size, modifiedTime, webViewLink',
+            supportsAllDrives: true,
+        });
+        fileMeta = metadataRes.data;
+    }
+    catch (error) {
+        throw new functions.https.HttpsError('not-found', 'Drive file could not be retrieved');
+    }
+    const sourceName = typeof fileMeta.name === 'string' ? fileMeta.name : `Drive file ${driveFileId}`;
+    const assetName = overrideName || sourceName;
+    const mimeType = typeof fileMeta.mimeType === 'string' ? fileMeta.mimeType : 'application/octet-stream';
+    const sizeBytes = fileMeta.size ? Number(fileMeta.size) : null;
+    const bucket = admin.storage().bucket();
+    const storageKey = `orgs/${orgId}/projects/${projectId}/assets/${Date.now()}-${encodeURIComponent(assetName)}`;
+    const tmpPath = `${os.tmpdir()}/${uuidv4()}-${assetName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const downloadToken = uuidv4();
+    try {
+        const mediaRes = await drive.files.get({ fileId: driveFileId, alt: 'media' }, { responseType: 'stream' });
+        await new Promise((resolve, reject) => {
+            const dest = fs.createWriteStream(tmpPath);
+            mediaRes.data
+                .on('error', (error) => reject(error))
+                .on('end', () => resolve())
+                .pipe(dest);
+        });
+        await bucket.upload(tmpPath, {
+            destination: storageKey,
+            metadata: {
+                contentType: mimeType,
+                metadata: {
+                    firebaseStorageDownloadTokens: downloadToken,
+                    source: 'drive',
+                    driveFileId,
+                },
+            },
+        });
+    }
+    catch (error) {
+        console.error('drive_stageAssetFromFile copy failed', { projectId, driveFileId }, error);
+        try {
+            fs.unlinkSync(tmpPath);
+        }
+        catch (cleanupError) {
+            console.warn('Failed to clean up temp file after copy failure', cleanupError);
+        }
+        throw new functions.https.HttpsError('internal', 'Failed to copy the Drive file into storage');
+    }
+    finally {
+        try {
+            fs.unlinkSync(tmpPath);
+        }
+        catch { }
+    }
+    const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(storageKey)}?alt=media&token=${downloadToken}`;
+    let version = 1;
+    try {
+        const existingSnap = await db
+            .collection('assets')
+            .where('projectId', '==', projectId)
+            .where('name', '==', assetName)
+            .get();
+        version = existingSnap.size + 1;
+    }
+    catch (error) {
+        console.warn('drive_stageAssetFromFile version lookup failed', { projectId, assetName }, error);
+    }
+    const assetDoc = {
+        orgId,
+        projectId,
+        name: assetName,
+        storageKey,
+        url: downloadUrl,
+        bytes: sizeBytes,
+        mime: mimeType,
+        status: 'ready',
+        version,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        uploadedBy: context.auth.uid,
+        source: 'drive',
+        driveFileId,
+        driveFileName: sourceName,
+        driveFileMimeType: mimeType,
+        driveFileSize: sizeBytes,
+        driveFileModifiedAt: typeof fileMeta.modifiedTime === 'string'
+            ? admin.firestore.Timestamp.fromDate(new Date(fileMeta.modifiedTime))
+            : null,
+        driveFileWebViewLink: typeof fileMeta.webViewLink === 'string' ? fileMeta.webViewLink : null,
+        driveIngestedAt: admin.firestore.FieldValue.serverTimestamp(),
+        orderId: orderId || null,
+        orderStatus: orderStatus || null,
+        assetType,
+    };
+    const assetRef = await db.collection('assets').add(assetDoc);
+    try {
+        await writeAuditLog({
+            actorUid: context.auth.uid,
+            action: 'assets.staged_from_drive',
+            entityType: 'project',
+            entityId: projectId,
+            metadata: {
+                assetId: assetRef.id,
+                driveFileId,
+                driveFileName: sourceName,
+                orderId,
+                assetType,
+            },
+        });
+    }
+    catch (auditError) {
+        console.warn('drive_stageAssetFromFile audit log failed', { projectId, driveFileId }, auditError);
+    }
+    try {
+        await syncAssetReviewTask({
+            projectId,
+            assetId: assetRef.id,
+            assetName,
+            assetStatus: 'ready',
+            deliverablesReleased: false,
+            releaseHoldReason: null,
+            orderId,
+            orderStatus,
+            projectData,
+            orderData,
+            assetType,
+        });
+    }
+    catch (taskError) {
+        console.warn('drive_stageAssetFromFile failed to seed review task', {
+            projectId,
+            assetId: assetRef.id,
+            assetType,
+        }, taskError);
+    }
+    return { assetId: assetRef.id, version };
+});
+function normalisePriceTierLevel(value) {
+    const num = Number(value);
+    if (num === 2 || num === 3) {
+        return num;
+    }
+    return 1;
+}
+function resolveTierPrice(basePrice, tiers, tier) {
+    const base = Number(basePrice);
+    const safeBase = Number.isFinite(base) ? base : 0;
+    if (!tiers || typeof tiers !== 'object') {
+        return safeBase;
+    }
+    const map = tiers;
+    if (tier === 3) {
+        const value = Number(map.tier3);
+        if (Number.isFinite(value)) {
+            return value;
+        }
+    }
+    if (tier === 2) {
+        const value = Number(map.tier2);
+        if (Number.isFinite(value)) {
+            return value;
+        }
+    }
+    const tier1Value = Number(map.tier1);
+    if (Number.isFinite(tier1Value)) {
+        return tier1Value;
+    }
+    return safeBase;
+}
 function normalisePostalCode(value) {
     if (typeof value !== 'string') {
         return null;
@@ -1241,6 +1756,7 @@ async function resolveTerritoryForPostalCode(postalCode) {
                             territoryPostalCode: code.normalised,
                             matchType,
                             exclusive: data.exclusive !== false,
+                            priceTier: normalisePriceTierLevel(data.priceTier),
                             radiusMatch: null,
                         },
                     };
@@ -1286,6 +1802,7 @@ async function resolveTerritoryForPostalCode(postalCode) {
                     territoryPostalCode: normalisedInput,
                     matchType: 'radius',
                     exclusive: data.exclusive !== false,
+                    priceTier: normalisePriceTierLevel(data.priceTier),
                     radiusMatch: {
                         distanceKm,
                         radiusKm,
@@ -1951,7 +2468,22 @@ export const reserveKit = functions.https.onCall(async (data) => {
     if (!prodSnap.exists) {
         throw new functions.https.HttpsError('not-found', 'product not found');
     }
-    const required = prodSnap.data().requiredKit || [];
+    const productData = prodSnap.data();
+    const requiredKitRaw = Array.isArray(productData?.requiredKit)
+        ? productData.requiredKit
+        : [];
+    const rawStandards = Array.isArray(productData?.requiredStandards)
+        ? productData.requiredStandards
+        : [];
+    const requiredStandards = Array.from(new Set(rawStandards
+        .map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .filter((value) => value.length > 0)));
+    const standardsToEnforce = new Set(requiredStandards);
+    const standardMatches = new Map();
+    requiredStandards.forEach((standard) => {
+        standardMatches.set(standard, new Set());
+    });
+    const required = requiredKitRaw;
     const eqIds = required.flatMap((g) => g.items || []);
     const conflicts = [];
     const kitItems = [];
@@ -1971,11 +2503,49 @@ export const reserveKit = functions.https.onCall(async (data) => {
             conflicts.push({ id, name: eq.name || id });
             continue;
         }
-        kitItems.push({ id, start: start.toISOString(), end: end.toISOString() });
+        if (standardsToEnforce.size > 0) {
+            const meets = Array.isArray(eq.meetsStandards)
+                ? eq.meetsStandards
+                    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+                    .filter((value) => value.length > 0)
+                : [];
+            meets.forEach((standardId) => {
+                if (!standardsToEnforce.has(standardId))
+                    return;
+                const record = standardMatches.get(standardId);
+                if (record) {
+                    record.add(id);
+                }
+            });
+        }
+        const equipmentName = typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : null;
+        const equipmentCategory = typeof eq.category === 'string' && eq.category.trim().length > 0
+            ? eq.category.trim()
+            : typeof eq.type === 'string' && eq.type.trim().length > 0
+                ? eq.type.trim()
+                : null;
+        kitItems.push({
+            id,
+            name: equipmentName,
+            category: equipmentCategory,
+            start: start.toISOString(),
+            end: end.toISOString(),
+        });
         rentalTotal += eq.rentalPrice || 0;
     }
     if (conflicts.length > 0) {
         return { conflicts };
+    }
+    if (standardsToEnforce.size > 0) {
+        const missingStandards = requiredStandards.filter((standard) => {
+            const matches = standardMatches.get(standard);
+            return !matches || matches.size === 0;
+        });
+        if (missingStandards.length > 0) {
+            throw new functions.https.HttpsError('failed-precondition', 'missing-required-standards', {
+                missingStandards,
+            });
+        }
     }
     const batch = db.batch();
     for (const item of kitItems) {
@@ -3084,11 +3654,180 @@ export const onLogoUpload = functions.storage
     await bucket.file(destPath).save(processedBuffer, { contentType: 'image/png' });
     return;
 });
+function normaliseAssetStatus(value) {
+    if (typeof value !== 'string') {
+        return '';
+    }
+    return value.trim().toLowerCase();
+}
+function isAssetApprovalStatus(value) {
+    const status = normaliseAssetStatus(value);
+    return status === 'approved' || status === 'final' || status === 'final_approved';
+}
+function deriveAssetTaskStatus(status, deliverablesReleased, releaseHoldReason) {
+    if (deliverablesReleased) {
+        return 'done';
+    }
+    if (releaseHoldReason) {
+        return 'review';
+    }
+    switch (status) {
+        case 'draft':
+        case 'pending':
+        case 'uploading':
+            return 'todo';
+        case 'changes_requested':
+        case 'revision':
+        case 'revisions':
+        case 'in_progress':
+            return 'in_progress';
+        case 'approved':
+        case 'final':
+        case 'final_approved':
+        case 'ready':
+        default:
+            return 'review';
+    }
+}
+function normaliseOrderStatus(value) {
+    if (typeof value !== 'string') {
+        return '';
+    }
+    return value.trim().toLowerCase();
+}
+function isPaidOrderStatus(value) {
+    const status = normaliseOrderStatus(value);
+    return status === 'paid' || status === 'balance_paid';
+}
+async function syncAssetReviewTask(options) {
+    const { projectId, assetId } = options;
+    if (!projectId || !assetId) {
+        return;
+    }
+    let projectData = options.projectData ?? null;
+    if (!projectData) {
+        try {
+            const projectSnap = await db.collection('projects').doc(projectId).get();
+            projectData = projectSnap.exists ? projectSnap.data() : null;
+        }
+        catch (error) {
+            console.warn('syncAssetReviewTask project lookup failed', { projectId, assetId }, error);
+            projectData = null;
+        }
+    }
+    let orderId = options.orderId ?? null;
+    let orderData = options.orderData ?? null;
+    if (!orderId && projectData && typeof projectData.orderId === 'string') {
+        orderId = projectData.orderId;
+    }
+    let orderStatus = options.orderStatus ?? null;
+    if (orderId && !orderData) {
+        try {
+            const orderSnap = await db.collection('orders').doc(orderId).get();
+            if (orderSnap.exists) {
+                orderData = orderSnap.data();
+            }
+        }
+        catch (error) {
+            console.warn('syncAssetReviewTask order lookup failed', { orderId, assetId }, error);
+            orderData = null;
+        }
+    }
+    if (!orderStatus && orderData && typeof orderData.status === 'string') {
+        orderStatus = orderData.status;
+    }
+    const deliverablesReleased = options.deliverablesReleased === true;
+    const releaseHoldReason = options.releaseHoldReason ?? null;
+    const assetStatus = normaliseAssetStatus(options.assetStatus);
+    const assetTypeValue = typeof options.assetType === 'string' ? options.assetType.trim().toLowerCase() : '';
+    const isFlightPlan = assetTypeValue === 'flight_plan';
+    let derivedStatus = deriveAssetTaskStatus(assetStatus, deliverablesReleased, releaseHoldReason);
+    if (isFlightPlan) {
+        if (isAssetApprovalStatus(assetStatus)) {
+            derivedStatus = 'done';
+        }
+        else if (!assetStatus || assetStatus === 'ready' || assetStatus === 'draft') {
+            derivedStatus = 'todo';
+        }
+        else {
+            derivedStatus = 'in_progress';
+        }
+    }
+    const tasksRef = db.collection('projects').doc(projectId).collection('tasks');
+    let existingTask = null;
+    try {
+        const existingSnap = await tasksRef
+            .where('type', '==', isFlightPlan ? 'flight_plan_review' : 'asset_review')
+            .where('assetId', '==', assetId)
+            .limit(1)
+            .get();
+        existingTask = existingSnap.empty ? null : existingSnap.docs[0];
+    }
+    catch (error) {
+        console.warn('syncAssetReviewTask task query failed', { projectId, assetId }, error);
+        return;
+    }
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const payload = {
+        title: options.assetName
+            ? isFlightPlan
+                ? `Approve flight plan: ${options.assetName}`
+                : `Review ${options.assetName}`
+            : isFlightPlan
+                ? 'Approve flight plan'
+                : 'Review deliverable',
+        description: isFlightPlan
+            ? 'Verify airspace, weather, and compliance before signing off this flight plan.'
+            : 'Track review approvals and unlock the download once finance confirms payment.',
+        type: isFlightPlan ? 'flight_plan_review' : 'asset_review',
+        assetId,
+        assetName: options.assetName ?? null,
+        status: derivedStatus,
+        lastAssetStatus: assetStatus || null,
+        deliverablesReleased,
+        releaseHoldReason,
+        orderId: orderId ?? null,
+        orderStatus: orderStatus ?? null,
+        updatedAt: timestamp,
+        stage: isFlightPlan ? 'planning' : 'review',
+        forCustomer: false,
+        assetType: isFlightPlan ? 'flight_plan' : assetTypeValue || null,
+    };
+    if (releaseHoldReason === 'payment_pending') {
+        payload.releaseHoldNote = 'Awaiting balance payment before downloads unlock.';
+    }
+    else if (releaseHoldReason) {
+        payload.releaseHoldNote = releaseHoldReason;
+    }
+    else if (isFlightPlan) {
+        payload.releaseHoldNote = 'Flight operations must approve the plan before launch.';
+    }
+    else {
+        payload.releaseHoldNote = null;
+    }
+    if (deliverablesReleased || (isFlightPlan && derivedStatus === 'done')) {
+        payload.completedAt = timestamp;
+    }
+    else {
+        payload.completedAt = null;
+    }
+    try {
+        if (existingTask) {
+            await existingTask.ref.set(payload, { merge: true });
+        }
+        else {
+            await tasksRef.doc().set({ ...payload, createdAt: timestamp });
+        }
+    }
+    catch (error) {
+        console.error('syncAssetReviewTask persistence failed', { projectId, assetId }, error);
+    }
+}
 /**
  * Triggered on asset status change. When an asset is marked as approved (status === 'approved'
- * and final version), check if the associated order has its balance paid. If so, mark the
- * asset's deliverables as released to allow download. Also records an entry in the
- * audit log collection for traceability. Assumes assets have fields: projectId, version, status.
+ * or marked as a final version) and the linked order balance is paid, mark the deliverable as
+ * released. Otherwise capture the release hold so operations know why the download is blocked.
+ * Also keeps a project task in sync so producers can track review approvals.
  */
 export const onAssetUpdate = functions.firestore
     .document('assets/{assetId}')
@@ -3097,33 +3836,132 @@ export const onAssetUpdate = functions.firestore
     const after = change.after.data();
     if (!after)
         return null;
-    // Only act when status transitions to approved and version is final (no numeric check here)
-    if (before?.status !== 'approved' && after.status === 'approved') {
-        // Look up the project and order
-        const projectRef = db.collection('projects').doc(after.projectId);
-        const projectDoc = await projectRef.get();
-        const project = projectDoc.data();
-        if (!project)
-            return null;
-        const orderId = project.orderId;
-        if (!orderId)
-            return null;
-        const orderDoc = await db.collection('orders').doc(orderId).get();
-        const order = orderDoc.data();
-        if (!order)
-            return null;
-        // If order balance paid then release
-        if (order.status === 'balance_paid' || order.status === 'paid') {
-            await change.after.ref.set({ deliverablesReleased: true }, { merge: true });
-            // Write to audit log
+    const assetId = context.params.assetId;
+    const projectId = typeof after.projectId === 'string' ? after.projectId : null;
+    if (!projectId) {
+        return null;
+    }
+    const assetType = typeof after.assetType === 'string' ? after.assetType.trim().toLowerCase() : '';
+    const beforeStatus = normaliseAssetStatus(before?.status);
+    const afterStatus = normaliseAssetStatus(after.status);
+    const statusChanged = beforeStatus !== afterStatus;
+    let projectData = null;
+    let orderData = null;
+    let orderId = null;
+    let orderStatus = null;
+    try {
+        const projectSnap = await db.collection('projects').doc(projectId).get();
+        if (projectSnap.exists) {
+            projectData = projectSnap.data();
+            if (typeof projectData.orderId === 'string' && projectData.orderId.trim().length > 0) {
+                orderId = projectData.orderId.trim();
+                const orderSnap = await db.collection('orders').doc(orderId).get();
+                if (orderSnap.exists) {
+                    orderData = orderSnap.data();
+                    if (typeof orderData.status === 'string') {
+                        orderStatus = orderData.status;
+                    }
+                }
+            }
+        }
+    }
+    catch (lookupError) {
+        console.error('onAssetUpdate project/order lookup failed', { projectId, assetId }, lookupError);
+    }
+    const updates = {};
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    let deliverablesReleased = after.deliverablesReleased === true;
+    let releaseHoldReason = typeof after.releaseHoldReason === 'string' ? after.releaseHoldReason : null;
+    if (statusChanged) {
+        if (isAssetApprovalStatus(afterStatus)) {
+            if (orderStatus === 'balance_paid' || orderStatus === 'paid') {
+                if (!deliverablesReleased) {
+                    updates.deliverablesReleased = true;
+                    updates.releaseHoldReason = null;
+                    updates.releaseHoldNote = null;
+                    updates.releaseReadyAt = timestamp;
+                    updates.releaseHoldUpdatedAt = timestamp;
+                    deliverablesReleased = true;
+                    releaseHoldReason = null;
+                }
+            }
+            else {
+                if (deliverablesReleased) {
+                    updates.deliverablesReleased = false;
+                    deliverablesReleased = false;
+                }
+                if (releaseHoldReason !== 'payment_pending') {
+                    updates.releaseHoldReason = 'payment_pending';
+                    updates.releaseHoldNote = 'Awaiting balance payment before downloads unlock.';
+                    updates.releaseHoldUpdatedAt = timestamp;
+                    releaseHoldReason = 'payment_pending';
+                }
+                if (after.releaseReadyAt) {
+                    updates.releaseReadyAt = null;
+                }
+            }
+        }
+        else if (deliverablesReleased || releaseHoldReason) {
+            updates.deliverablesReleased = false;
+            updates.releaseHoldReason = null;
+            updates.releaseHoldNote = null;
+            updates.releaseHoldUpdatedAt = timestamp;
+            updates.releaseReadyAt = null;
+            deliverablesReleased = false;
+            releaseHoldReason = null;
+        }
+    }
+    if (!statusChanged &&
+        releaseHoldReason === 'payment_pending' &&
+        (orderStatus === 'balance_paid' || orderStatus === 'paid')) {
+        updates.deliverablesReleased = true;
+        updates.releaseHoldReason = null;
+        updates.releaseHoldNote = null;
+        updates.releaseReadyAt = timestamp;
+        updates.releaseHoldUpdatedAt = timestamp;
+        deliverablesReleased = true;
+        releaseHoldReason = null;
+    }
+    if (Object.keys(updates).length > 0) {
+        try {
+            await change.after.ref.set(updates, { merge: true });
+        }
+        catch (writeError) {
+            console.error('onAssetUpdate failed to persist release updates', { assetId }, writeError);
+        }
+    }
+    try {
+        await syncAssetReviewTask({
+            projectId,
+            assetId,
+            assetName: typeof after.name === 'string' ? after.name : null,
+            assetStatus: afterStatus,
+            deliverablesReleased,
+            releaseHoldReason,
+            orderId,
+            orderStatus,
+            projectData,
+            orderData,
+            assetType,
+        });
+    }
+    catch (taskError) {
+        console.error('onAssetUpdate failed to sync review task', { assetId, projectId }, taskError);
+    }
+    if (updates.deliverablesReleased === true &&
+        (orderStatus === 'balance_paid' || orderStatus === 'paid')) {
+        try {
             await db.collection('auditLogs').add({
                 type: 'deliverable_release',
-                assetId: context.params.assetId,
-                projectId: after.projectId,
+                assetId,
+                projectId,
                 orderId,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                uid: after.uploadedBy || null
+                timestamp,
+                uid: after.uploadedBy || null,
             });
+        }
+        catch (auditError) {
+            console.warn('onAssetUpdate failed to record audit log', { assetId }, auditError);
         }
     }
     return null;
@@ -3223,6 +4061,154 @@ export const onAssetCreated = functions.firestore
     if (palette)
         updates.palette = palette;
     await snap.ref.set(updates, { merge: true });
+    if (typeof asset.projectId === 'string' && asset.projectId.trim().length > 0) {
+        try {
+            await syncAssetReviewTask({
+                projectId: asset.projectId,
+                assetId: context.params.assetId,
+                assetName: typeof asset.name === 'string' ? asset.name : null,
+                assetStatus: typeof asset.status === 'string' ? asset.status : null,
+                deliverablesReleased: false,
+                releaseHoldReason: null,
+                assetType: typeof asset.assetType === 'string' ? asset.assetType : null,
+            });
+        }
+        catch (taskError) {
+            console.error('onAssetCreated failed to seed review task', context.params.assetId, taskError);
+        }
+    }
+    return null;
+});
+export const onOrderStatusUpdated = functions.firestore
+    .document('orders/{orderId}')
+    .onUpdate(async (change, context) => {
+    const before = change.before.data();
+    const after = change.after.data();
+    if (!after) {
+        return null;
+    }
+    const previousStatus = normaliseOrderStatus(before?.status);
+    const nextStatus = normaliseOrderStatus(after.status);
+    if (previousStatus === nextStatus || !isPaidOrderStatus(nextStatus)) {
+        return null;
+    }
+    const orderId = context.params.orderId;
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const releaseSummaries = [];
+    try {
+        const projectsSnap = await db.collection('projects').where('orderId', '==', orderId).get();
+        if (!projectsSnap.empty) {
+            for (const projectDoc of projectsSnap.docs) {
+                const projectId = projectDoc.id;
+                const projectData = projectDoc.data();
+                const assetIds = [];
+                try {
+                    const assetsSnap = await db
+                        .collection('assets')
+                        .where('projectId', '==', projectId)
+                        .get();
+                    for (const assetDoc of assetsSnap.docs) {
+                        const assetData = assetDoc.data();
+                        if (!isAssetApprovalStatus(assetData.status) || assetData.deliverablesReleased === true) {
+                            continue;
+                        }
+                        const updates = {
+                            deliverablesReleased: true,
+                            releaseHoldReason: null,
+                            releaseHoldNote: null,
+                            releaseReadyAt: timestamp,
+                            releaseHoldUpdatedAt: timestamp,
+                        };
+                        try {
+                            await assetDoc.ref.set(updates, { merge: true });
+                        }
+                        catch (writeError) {
+                            console.error('onOrderStatusUpdated failed to release asset', {
+                                orderId,
+                                assetId: assetDoc.id,
+                            }, writeError);
+                            continue;
+                        }
+                        assetIds.push(assetDoc.id);
+                        try {
+                            await syncAssetReviewTask({
+                                projectId,
+                                assetId: assetDoc.id,
+                                assetName: typeof assetData.name === 'string' ? assetData.name : null,
+                                assetStatus: typeof assetData.status === 'string' ? assetData.status : null,
+                                deliverablesReleased: true,
+                                releaseHoldReason: null,
+                                orderId,
+                                orderStatus: after.status ?? nextStatus,
+                                projectData,
+                                orderData: after,
+                                assetType: typeof assetData.assetType === 'string' ? assetData.assetType : null,
+                            });
+                        }
+                        catch (taskError) {
+                            console.error('onOrderStatusUpdated failed to sync review task', {
+                                projectId,
+                                assetId: assetDoc.id,
+                            }, taskError);
+                        }
+                    }
+                }
+                catch (assetError) {
+                    console.error('onOrderStatusUpdated asset lookup failed', { projectId, orderId }, assetError);
+                }
+                if (assetIds.length > 0) {
+                    releaseSummaries.push({
+                        projectId,
+                        projectName: typeof projectData.name === 'string' ? projectData.name : null,
+                        assetIds,
+                        projectData,
+                    });
+                }
+            }
+        }
+    }
+    catch (projectError) {
+        console.error('onOrderStatusUpdated project lookup failed', { orderId }, projectError);
+    }
+    if (releaseSummaries.length > 0) {
+        const orgId = typeof after.orgId === 'string' ? after.orgId : null;
+        if (orgId) {
+            try {
+                const membershipsSnap = await db
+                    .collection('memberships')
+                    .where('orgId', '==', orgId)
+                    .limit(50)
+                    .get();
+                if (!membershipsSnap.empty) {
+                    const batch = db.batch();
+                    const notificationTimestamp = admin.firestore.FieldValue.serverTimestamp();
+                    membershipsSnap.docs.forEach((membershipDoc) => {
+                        const membership = membershipDoc.data();
+                        const userId = typeof membership.userId === 'string' ? membership.userId : null;
+                        if (!userId) {
+                            return;
+                        }
+                        releaseSummaries.forEach((summary) => {
+                            const notificationRef = db.collection('notifications').doc();
+                            batch.set(notificationRef, {
+                                userId,
+                                message: `Final files for ${summary.projectName || 'your project'} are ready to download.`,
+                                projectId: summary.projectId,
+                                orderId,
+                                assetIds: summary.assetIds,
+                                createdAt: notificationTimestamp,
+                                kind: 'asset_release',
+                            });
+                        });
+                    });
+                    await batch.commit();
+                }
+            }
+            catch (notifyError) {
+                console.error('onOrderStatusUpdated notification dispatch failed', { orderId, orgId }, notifyError);
+            }
+        }
+    }
     return null;
 });
 /**
@@ -3725,10 +4711,40 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     const parseOptional = (value) => value === undefined || value === null ? undefined : toNumber(value);
     const DEFAULT_TRAVEL_MILES = 100;
     const DEFAULT_TRAVEL_RATE = 0.3;
-    const { items, userEmail, customerName, companyName, location, postalCode, projectName, voucher, kitItems = [], rentalSubtotal = 0, leadSource: leadSourceInput, } = data;
+    const { items, userEmail, customerName, companyName, location, postalCode, projectName, voucher, kitItems: kitItemsInput = [], rentalSubtotal = 0, leadSource: leadSourceInput, } = data;
     if (!items || !Array.isArray(items) || items.length === 0) {
         throw new functions.https.HttpsError('invalid-argument', 'items are required');
     }
+    const normaliseKitItem = (raw) => {
+        if (!raw || typeof raw !== 'object') {
+            return null;
+        }
+        const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+        if (!id) {
+            return null;
+        }
+        const name = typeof raw.name === 'string' && raw.name.trim().length > 0 ? raw.name.trim() : null;
+        const category = typeof raw.category === 'string' && raw.category.trim().length > 0
+            ? raw.category.trim()
+            : null;
+        const start = typeof raw.start === 'string' ? raw.start : null;
+        const end = typeof raw.end === 'string' ? raw.end : null;
+        return { id, name, category, start, end };
+    };
+    const kitItems = Array.isArray(kitItemsInput)
+        ? kitItemsInput
+            .map(normaliseKitItem)
+            .filter((item) => !!item)
+        : [];
+    const postalCodeValue = typeof postalCode === 'string' ? postalCode : null;
+    const normalisedPostalCode = normalisePostalCode(postalCodeValue);
+    const assignmentResult = normalisedPostalCode
+        ? await resolveTerritoryForPostalCode(normalisedPostalCode)
+        : null;
+    const territoryPriceTier = assignmentResult?.priceTier ?? 1;
+    const assignmentMember = assignmentResult
+        ? await resolvePrimaryFranchiseMember(assignmentResult.franchiseId)
+        : null;
     const productRefs = items.map((i) => db.collection('products').doc(i.id));
     const leadSourceRaw = typeof leadSourceInput === 'string' ? leadSourceInput.trim() : '';
     const leadSourceTag = leadSourceRaw || 'hq';
@@ -3770,13 +4786,64 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         if (!snap.exists)
             return;
         const prod = snap.data();
-        const qty = items[idx].quantity || 0;
-        const price = prod.price || 0;
+        const qtyRaw = toNumber(items[idx].quantity, 0);
+        const qty = qtyRaw > 0 ? qtyRaw : 0;
         const category = prod.category || prod.categoryId || null;
-        const rental = items[idx].rentalTotal || 0;
-        const modifiers = Array.isArray(items[idx].modifiers)
+        const rental = toNumber(items[idx].rentalTotal, 0);
+        const variationId = items[idx] && typeof items[idx].variation === 'string'
+            ? items[idx].variation
+            : null;
+        const variations = Array.isArray(prod.variations)
+            ? prod.variations
+            : [];
+        const variation = variationId
+            ? variations.find((entry) => entry && typeof entry === 'object' && typeof entry.id === 'string' && entry.id === variationId)
+            : null;
+        let unitPrice = resolveTierPrice(prod.price, prod.priceTiers, territoryPriceTier);
+        if (variation) {
+            unitPrice = resolveTierPrice(variation.price ?? unitPrice, variation.priceTiers, territoryPriceTier);
+        }
+        const configuredModifiers = Array.isArray(prod.modifiers)
+            ? prod.modifiers
+            : [];
+        const rawModifiers = Array.isArray(items[idx].modifiers)
             ? items[idx].modifiers
             : [];
+        const resolvedModifiers = [];
+        let modifiersTotal = 0;
+        rawModifiers.forEach((selection) => {
+            if (!selection || typeof selection !== 'object') {
+                return;
+            }
+            const groupId = typeof selection.groupId === 'string' ? selection.groupId : null;
+            const optionId = typeof selection.optionId === 'string' ? selection.optionId : null;
+            if (!groupId || !optionId) {
+                return;
+            }
+            const configured = configuredModifiers.find((modifier) => modifier &&
+                typeof modifier === 'object' &&
+                typeof modifier.groupId === 'string' &&
+                modifier.groupId === groupId &&
+                typeof modifier.optionId === 'string' &&
+                modifier.optionId === optionId);
+            let resolvedPrice = null;
+            if (configured) {
+                resolvedPrice = resolveTierPrice(configured.price ?? null, configured.priceTiers, territoryPriceTier);
+            }
+            else if (selection.price !== undefined && selection.price !== null) {
+                const parsed = Number(selection.price);
+                resolvedPrice = Number.isFinite(parsed) ? parsed : null;
+            }
+            if (resolvedPrice !== null) {
+                modifiersTotal += resolvedPrice;
+            }
+            const payload = { ...selection, groupId, optionId };
+            if (resolvedPrice !== null) {
+                payload.price = resolvedPrice;
+            }
+            resolvedModifiers.push(payload);
+        });
+        const price = unitPrice + modifiersTotal;
         const budget = prod.budget || {};
         const labourFilming = parseOptional(budget.labourFilming);
         const labourEditing = parseOptional(budget.labourEditing);
@@ -3808,7 +4875,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             quantity: qty,
             category,
             rentalTotal: rental,
-            modifiers,
+            modifiers: resolvedModifiers,
             budget: {
                 perUnit: {
                     labour,
@@ -3910,14 +4977,6 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         grossRevenue: price,
         profit,
     };
-    const postalCodeValue = typeof postalCode === 'string' ? postalCode : null;
-    const normalisedPostalCode = normalisePostalCode(postalCodeValue);
-    const assignmentResult = normalisedPostalCode
-        ? await resolveTerritoryForPostalCode(normalisedPostalCode)
-        : null;
-    const assignmentMember = assignmentResult
-        ? await resolvePrimaryFranchiseMember(assignmentResult.franchiseId)
-        : null;
     const assignmentMeta = {
         strategy: 'postal_code_auto_route',
         inputPostalCode: postalCodeValue || null,
@@ -4005,6 +5064,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         clientRoyaltyKey: clientRoyaltyKey || null,
         clientRoyaltyKeyType: clientRoyaltyKeyType || null,
         clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
+        priceTierLevel: territoryPriceTier,
     };
     if (assignmentResult) {
         orderData.franchiseId = assignmentResult.franchiseId;
@@ -4015,6 +5075,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         assignmentMeta.territoryPostalCode = assignmentResult.territoryPostalCode;
         assignmentMeta.territoryLabel = assignmentResult.territoryLabel;
         assignmentMeta.exclusive = assignmentResult.exclusive;
+        assignmentMeta.priceTierLevel = territoryPriceTier;
         if (assignmentResult.matchType === 'radius') {
             assignmentMeta.strategy = 'radius_auto_route';
             assignmentMeta.radiusMatch = assignmentResult.radiusMatch
@@ -4062,6 +5123,42 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     else {
         orderData.royalty = null;
         orderData.royaltyPercentage = null;
+    }
+    if (!Array.isArray(orderData.paymentSchedule) || orderData.paymentSchedule.length === 0) {
+        try {
+            const { splitTerms } = await getStripeOperationalSettings();
+            if (splitTerms.length > 0) {
+                const scheduleEntries = splitTerms.map((term, index) => {
+                    const grossAmount = Number((price * (term.percentage / 100)).toFixed(2));
+                    const netAmount = Number((finalTotal * (term.percentage / 100)).toFixed(2));
+                    let dueAt = null;
+                    if (term.dueDays !== null) {
+                        if (term.dueDays <= 0) {
+                            dueAt = admin.firestore.FieldValue.serverTimestamp();
+                        }
+                        else {
+                            const dueDate = new Date(Date.now() + term.dueDays * DAY_IN_MS);
+                            dueAt = admin.firestore.Timestamp.fromDate(dueDate);
+                        }
+                    }
+                    return {
+                        id: uuidv4(),
+                        label: term.label,
+                        percentage: term.percentage,
+                        dueDays: term.dueDays,
+                        grossAmount,
+                        netAmount,
+                        status: index === 0 ? 'due' : 'scheduled',
+                        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                        dueAt,
+                    };
+                });
+                orderData.paymentSchedule = scheduleEntries;
+            }
+        }
+        catch (scheduleError) {
+            console.warn('Failed to apply default Stripe payment schedule', scheduleError);
+        }
     }
     const orderRef = await db.collection('orders').add(orderData);
     const driveClientKeyBase = clientRoyaltyKey ?? (normalisedEmail ? `email:${normalisedEmail}` : null);
@@ -4798,46 +5895,123 @@ export const orders_refund = functions.https.onCall(async (data, context) => {
 export const stripe_createPaymentIntent = functions.https.onCall(async (data, context) => {
     if (!context.auth)
         throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
-    const { orderId, type } = data;
-    if (!orderId || !type)
+    const { orderId, type } = data || {};
+    if (!orderId || !type) {
         throw new functions.https.HttpsError('invalid-argument', 'orderId and type are required');
+    }
     const orderDoc = await db.collection('orders').doc(orderId).get();
-    if (!orderDoc.exists)
+    if (!orderDoc.exists) {
         throw new functions.https.HttpsError('not-found', 'Order not found');
+    }
     const order = orderDoc.data();
-    const price = order.price || 0;
-    const depositPercentage = order.depositPercentage || 0;
-    const depositAmount = order.depositAmount || (price * (depositPercentage / 100));
-    const balanceAmount = order.balanceAmount || (price - depositAmount);
-    let amount;
+    const price = Number(order.price) || 0;
+    const depositPercentage = Number(order.depositPercentage) || 0;
+    const depositAmount = Number(order.depositAmount) || price * (depositPercentage / 100);
+    const balanceAmount = Number(order.balanceAmount) || price - depositAmount;
+    let amountCents;
     let description;
     if (type === 'deposit') {
-        amount = Math.round(depositAmount * 100);
+        amountCents = Math.round(Math.max(depositAmount, 0) * 100);
         description = `Deposit for order ${orderId}`;
     }
     else if (type === 'balance') {
-        amount = Math.round(balanceAmount * 100);
+        amountCents = Math.round(Math.max(balanceAmount, 0) * 100);
         description = `Balance for order ${orderId}`;
+    }
+    else if (type === 'custom') {
+        const customAmountInput = data?.customAmount;
+        const parsedAmount = typeof customAmountInput === 'number'
+            ? customAmountInput
+            : typeof customAmountInput === 'string'
+                ? Number.parseFloat(customAmountInput)
+                : NaN;
+        if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+            throw new functions.https.HttpsError('invalid-argument', 'customAmount must be a positive number');
+        }
+        amountCents = Math.round(parsedAmount * 100);
+        const customDescription = typeof data?.customDescription === 'string' && data.customDescription.trim().length > 0
+            ? data.customDescription.trim()
+            : `Payment for order ${orderId}`;
+        description = customDescription;
     }
     else {
         throw new functions.https.HttpsError('invalid-argument', 'Invalid payment type');
     }
-    // Create PaymentIntent
+    if (!Number.isFinite(amountCents) || amountCents <= 0) {
+        throw new functions.https.HttpsError('failed-precondition', 'Payment amount must be greater than zero.');
+    }
+    const stripe = await getStripeClient();
+    const { platformFeePercent } = await getStripeOperationalSettings();
+    let applicationFeeAmount = null;
+    let destinationAccountId = null;
+    const rawFranchiseId = typeof order.franchiseId === 'string' ? order.franchiseId.trim() : '';
+    if (rawFranchiseId) {
+        try {
+            const franchiseSnap = await db.collection('franchises').doc(rawFranchiseId).get();
+            if (franchiseSnap.exists) {
+                const franchiseData = franchiseSnap.data() || {};
+                const accountId = normaliseString(franchiseData.stripeAccountId ?? franchiseData.connectAccountId);
+                if (accountId) {
+                    destinationAccountId = accountId;
+                    const franchiseFee = parseNumber(franchiseData.platformFee);
+                    const feePercentage = franchiseFee ?? platformFeePercent;
+                    if (feePercentage !== null && Number.isFinite(feePercentage) && feePercentage > 0) {
+                        applicationFeeAmount = Math.round((amountCents * feePercentage) / 100);
+                        if (applicationFeeAmount < 0) {
+                            applicationFeeAmount = 0;
+                        }
+                        if (applicationFeeAmount > amountCents) {
+                            applicationFeeAmount = amountCents;
+                        }
+                    }
+                }
+            }
+        }
+        catch (franchiseError) {
+            console.warn('Unable to resolve franchise Stripe account', rawFranchiseId, franchiseError);
+        }
+    }
+    const metadata = {
+        orderId: String(orderId),
+        type: String(type),
+    };
+    if (rawFranchiseId) {
+        metadata.franchiseId = rawFranchiseId;
+    }
+    if (applicationFeeAmount !== null) {
+        metadata.applicationFeeAmount = String(applicationFeeAmount);
+    }
+    if (destinationAccountId) {
+        metadata.destinationAccountId = destinationAccountId;
+    }
     const paymentIntent = await stripe.paymentIntents.create({
-        amount,
+        amount: amountCents,
         currency: 'gbp',
         description,
-        metadata: { orderId, type },
+        metadata,
         automatic_payment_methods: { enabled: true },
+        transfer_data: destinationAccountId ? { destination: destinationAccountId } : undefined,
+        application_fee_amount: applicationFeeAmount !== null && applicationFeeAmount > 0 ? applicationFeeAmount : undefined,
     });
     return { clientSecret: paymentIntent.client_secret };
 });
 // Stripe webhook (deposit/balance) — skeleton
 export const stripe_webhook = functions.https.onRequest(async (req, res) => {
     const sig = req.headers['stripe-signature'];
+    let stripe;
+    let webhookSecret = null;
+    try {
+        stripe = await getStripeClient();
+        webhookSecret = await getStripeWebhookSecret();
+    }
+    catch (clientError) {
+        console.error('Unable to initialise Stripe client for webhook processing', clientError);
+        res.status(500).send('Stripe configuration error');
+        return;
+    }
     let event;
     try {
-        event = stripe.webhooks.constructEvent(req.rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET || '');
+        event = stripe.webhooks.constructEvent(req.rawBody, sig, webhookSecret || '');
     }
     catch (err) {
         console.error('Webhook signature verification failed.', err.message);
@@ -5255,6 +6429,7 @@ export const stripe_createPlan = functions.https.onCall(async (data, context) =>
     if (!name || !amount || !interval)
         throw new functions.https.HttpsError('invalid-argument', 'Missing plan parameters');
     try {
+        const stripe = await getStripeClient();
         const product = await stripe.products.create({ name });
         const price = await stripe.prices.create({
             unit_amount: Math.round(amount * 100),
@@ -5300,6 +6475,7 @@ export const stripe_createSubscription = functions.https.onCall(async (data, con
         priceId = planData.priceId;
     }
     try {
+        const stripe = await getStripeClient();
         let customerId = orgSnap.data().stripeCustomerId;
         if (!customerId) {
             const customer = await stripe.customers.create({ email: customerEmail });
@@ -5333,6 +6509,7 @@ export const stripe_cancelSubscription = functions.https.onCall(async (data, con
     if (!subscriptionId)
         throw new functions.https.HttpsError('invalid-argument', 'Subscription ID required');
     try {
+        const stripe = await getStripeClient();
         await stripe.subscriptions.cancel(subscriptionId);
         const snap = await db
             .collection('orgs')
@@ -5362,6 +6539,7 @@ export const stripe_createCheckoutSession = functions.https.onCall(async (data, 
         throw new functions.https.HttpsError('invalid-argument', 'orderId and lineItems required');
     }
     try {
+        const stripe = await getStripeClient();
         const session = await stripe.checkout.sessions.create({
             mode: 'payment',
             line_items: lineItems,

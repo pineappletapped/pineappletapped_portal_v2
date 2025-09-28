@@ -30,6 +30,8 @@ const LABELS: Record<string, string> = {
   'content-planner': 'Content Planner',
   workwear: 'Workwear Hub',
   'marketing-materials': 'Marketing Materials',
+  training: 'Training',
+  engagements: 'Engagement Log',
 };
 
 function formatSegment(seg: string): string {

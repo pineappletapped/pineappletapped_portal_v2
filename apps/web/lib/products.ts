@@ -1,4 +1,5 @@
 import { db, getDb } from "./firebase";
+import type { PriceTiers } from "./pricing";
 
 async function loadFirestore() {
   try {
@@ -123,6 +124,7 @@ export interface ProductModifierSelection {
   groupId: string;
   optionId: string;
   price?: number;
+  priceTiers?: PriceTiers | null;
   budgetOverrides?: ProductBudgetOverride;
   crewOverrides?: ProductCrewRoleOverride[];
 }
@@ -131,6 +133,7 @@ export interface ProductVariation {
   id: string;
   name: string;
   price: number;
+  priceTiers?: PriceTiers | null;
   features?: string[];
   budgetOverrides?: ProductBudgetOverride;
   crewOverrides?: ProductCrewRoleOverride[];
@@ -199,6 +202,7 @@ export interface Product {
   description: string;
   tagline?: string;
   price: number;
+  priceTiers?: PriceTiers | null;
   imageUrl?: string;
   requirements?: string;
   deliveryTime?: string;

@@ -270,6 +270,11 @@ export default function DashboardPage() {
       description: 'Brief our producers and outline deliverables.',
     },
     {
+      href: '/training',
+      label: 'Visit training hub',
+      description: 'Refresh portal tips and best-practice workflows.',
+    },
+    {
       href: '/bookings',
       label: 'Book a shoot',
       description: 'Secure production time that suits your team.',

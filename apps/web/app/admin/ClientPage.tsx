@@ -55,6 +55,11 @@ export default function AdminPage() {
       href: '/admin/orders',
     },
     {
+      label: 'Training library',
+      description: 'Create and curate onboarding content for every audience.',
+      href: '/admin/training',
+    },
+    {
       label: 'Launch analytics',
       description: 'Monitor marketing and production performance.',
       href: '/admin/analytics',
