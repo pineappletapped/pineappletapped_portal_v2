@@ -245,27 +245,42 @@ export async function POST(req: NextRequest) {
   try {
     const { decoded, auth, projectOverride } = await verifyIdTokenWithFallback(idToken);
 
-    const firestore = getFirebaseAdminFirestore(projectOverride);
-    const userRef = firestore.collection('users').doc(decoded.uid);
-    const snapshot = await userRef.get();
-    let userData = snapshot.exists ? snapshot.data() ?? {} : {};
-
     const decodedEmail = decoded.email ?? null;
-
-    if (!snapshot.exists) {
-      await userRef.set({ email: decodedEmail }, { merge: true });
-      userData = { email: decodedEmail };
-    } else if (decodedEmail && userData?.email !== decodedEmail) {
-      await userRef.set({ email: decodedEmail }, { merge: true });
-      userData = { ...userData, email: decodedEmail };
-    }
-
-    const enrichedUserDoc = {
-      ...userData,
-      id: snapshot.id || decoded.uid,
-      uid: decoded.uid,
-      email: decodedEmail ?? userData?.email ?? null,
+    type EnrichedUserDoc = Record<string, unknown> & {
+      id: string;
+      uid: string;
+      email: string | null;
     };
+
+    let enrichedUserDoc: EnrichedUserDoc = {
+      id: decoded.uid,
+      uid: decoded.uid,
+      email: decodedEmail,
+    };
+
+    try {
+      const firestore = getFirebaseAdminFirestore(projectOverride);
+      const userRef = firestore.collection('users').doc(decoded.uid);
+      const snapshot = await userRef.get();
+      let userData = snapshot.exists ? snapshot.data() ?? {} : {};
+
+      if (!snapshot.exists) {
+        await userRef.set({ email: decodedEmail }, { merge: true });
+        userData = { email: decodedEmail };
+      } else if (decodedEmail && userData?.email !== decodedEmail) {
+        await userRef.set({ email: decodedEmail }, { merge: true });
+        userData = { ...userData, email: decodedEmail };
+      }
+
+      enrichedUserDoc = {
+        ...userData,
+        id: snapshot.id || decoded.uid,
+        uid: decoded.uid,
+        email: decodedEmail ?? userData?.email ?? null,
+      };
+    } catch (firestoreError) {
+      console.error('Failed to synchronise user profile during session creation', firestoreError);
+    }
 
     const roles: UserRoles = extractUserRoles(enrichedUserDoc);
     const hasBackofficeAccess = hasRole(roles, ROLE_KEYS);
