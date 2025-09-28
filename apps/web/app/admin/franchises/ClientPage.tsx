@@ -32,6 +32,7 @@ import {
   parseTerritory,
   territorySummary,
 } from "@/lib/franchises";
+import { DEFAULT_PRICE_TIER, PRICE_TIER_OPTIONS, normalisePriceTierLevel } from "@/lib/pricing";
 
 interface UserSummary {
   id: string;
@@ -414,6 +415,7 @@ export default function AdminFranchisesPage() {
     categories: [] as string[],
     licenseFee: "",
     notes: "",
+    priceTier: String(DEFAULT_PRICE_TIER),
   });
   const [editingTerritoryId, setEditingTerritoryId] = useState<string | null>(null);
   const [editingTerritory, setEditingTerritory] = useState({
@@ -428,6 +430,7 @@ export default function AdminFranchisesPage() {
     categories: [] as string[],
     licenseFee: "",
     notes: "",
+    priceTier: String(DEFAULT_PRICE_TIER),
   });
 
   const [showCreateMember, setShowCreateMember] = useState(false);
@@ -826,6 +829,7 @@ export default function AdminFranchisesPage() {
       categories: [],
       licenseFee: "",
       notes: "",
+      priceTier: String(DEFAULT_PRICE_TIER),
     });
   };
 
@@ -840,6 +844,7 @@ export default function AdminFranchisesPage() {
       const parsedLat = Number.parseFloat(newTerritory.centerLat);
       const parsedLng = Number.parseFloat(newTerritory.centerLng);
       const parsedLicense = Number.parseFloat(newTerritory.licenseFee);
+      const priceTier = normalisePriceTierLevel(newTerritory.priceTier);
       const payload = {
         franchiseId: newTerritory.franchiseId,
         label: newTerritory.label.trim() || "Unnamed Territory",
@@ -864,6 +869,7 @@ export default function AdminFranchisesPage() {
             ? parsedLicense
             : null,
         notes: newTerritory.notes.trim() || null,
+        priceTier,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
@@ -916,6 +922,7 @@ export default function AdminFranchisesPage() {
       categories: territory.categories || [],
       licenseFee: territory.licenseFee != null ? String(territory.licenseFee) : "",
       notes: territory.notes || "",
+      priceTier: String(territory.priceTier ?? DEFAULT_PRICE_TIER),
     });
   };
 
@@ -933,6 +940,7 @@ export default function AdminFranchisesPage() {
       categories: [],
       licenseFee: "",
       notes: "",
+      priceTier: String(DEFAULT_PRICE_TIER),
     });
   };
 
@@ -948,6 +956,7 @@ export default function AdminFranchisesPage() {
       const parsedLat = Number.parseFloat(editingTerritory.centerLat);
       const parsedLng = Number.parseFloat(editingTerritory.centerLng);
       const parsedLicense = Number.parseFloat(editingTerritory.licenseFee);
+      const priceTier = normalisePriceTierLevel(editingTerritory.priceTier);
       const payload = {
         franchiseId: editingTerritory.franchiseId,
         label: editingTerritory.label.trim() || "Unnamed Territory",
@@ -972,6 +981,7 @@ export default function AdminFranchisesPage() {
             ? parsedLicense
             : null,
         notes: editingTerritory.notes.trim() || null,
+        priceTier,
         updatedAt: serverTimestamp(),
       };
       const conflicts = findExclusiveTerritoryConflicts(
@@ -1193,6 +1203,14 @@ export default function AdminFranchisesPage() {
                                     </div>
                                   </div>
                                 )}
+                                <div>
+                                  <span className="text-[11px] font-semibold uppercase text-gray-500">
+                                    Price tier
+                                  </span>
+                                  <div className="mt-0.5 text-xs text-gray-700">
+                                    Tier {territory.priceTier}
+                                  </div>
+                                </div>
                                 <div>
                                   <span className="text-[11px] font-semibold uppercase text-gray-500">
                                     License fee
@@ -2353,6 +2371,25 @@ export default function AdminFranchisesPage() {
                   Exclusive lock for this territory
                 </label>
                 <label className="grid gap-1 text-sm">
+                  <span className="font-medium">Price tier</span>
+                  <select
+                    className="input"
+                    value={newTerritory.priceTier}
+                    onChange={(event) =>
+                      setNewTerritory({ ...newTerritory, priceTier: event.target.value })
+                    }
+                  >
+                    {PRICE_TIER_OPTIONS.map((option) => (
+                      <option key={option.value} value={String(option.value)}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-gray-500">
+                    Tier 1 is applied automatically unless customised per territory.
+                  </span>
+                </label>
+                <label className="grid gap-1 text-sm">
                   <span className="font-medium">Service categories</span>
                   <select
                     multiple
@@ -2422,12 +2459,13 @@ export default function AdminFranchisesPage() {
               </form>
             )}
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px] text-sm border">
+              <table className="w-full min-w-[700px] text-sm border">
             <thead>
               <tr className="bg-gray-100 text-left">
                 <th className="p-2">Territory</th>
                 <th className="p-2">Franchise</th>
                 <th className="p-2">Exclusive</th>
+                <th className="p-2">Price tier</th>
                 <th className="p-2">Summary</th>
                 <th className="p-2">Actions</th>
               </tr>
@@ -2435,7 +2473,7 @@ export default function AdminFranchisesPage() {
             <tbody>
               {territories.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="p-4 text-center text-gray-500">
+                  <td colSpan={6} className="p-4 text-center text-gray-500">
                     No territories configured.
                   </td>
                 </tr>
@@ -2457,6 +2495,7 @@ export default function AdminFranchisesPage() {
                       <td className="p-2 font-medium">{territory.label}</td>
                       <td className="p-2">{franchise ? franchise.name : territory.franchiseId}</td>
                       <td className="p-2">{territory.exclusive ? "Yes" : "No"}</td>
+                      <td className="p-2">Tier {territory.priceTier}</td>
                       <td className="p-2 text-xs text-gray-600">
                         <div className="grid gap-2">
                           <div>{territorySummary(territory)}</div>
@@ -2630,6 +2669,28 @@ export default function AdminFranchisesPage() {
                                 }
                               />
                               Exclusive lock
+                            </label>
+                            <label className="grid gap-1 text-xs">
+                              <span className="font-medium">Price tier</span>
+                              <select
+                                className="input"
+                                value={editingTerritory.priceTier}
+                                onChange={(event) =>
+                                  setEditingTerritory({
+                                    ...editingTerritory,
+                                    priceTier: event.target.value,
+                                  })
+                                }
+                              >
+                                {PRICE_TIER_OPTIONS.map((option) => (
+                                  <option key={option.value} value={String(option.value)}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <span className="text-[10px] text-gray-500">
+                                Determines which product pricing tier this territory uses.
+                              </span>
                             </label>
                             <label className="grid gap-1 text-xs">
                               <span className="font-medium">Service categories</span>

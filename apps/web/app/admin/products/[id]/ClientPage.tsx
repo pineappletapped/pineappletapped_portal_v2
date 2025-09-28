@@ -31,6 +31,7 @@ import type {
   ProductCrewRoleOverride,
   ProductModifierSelection,
 } from "@/lib/products";
+import type { PriceTiers } from "@/lib/pricing";
 import type { Venue } from "@/lib/venues";
 import type { KitBag, EquipmentStandard } from "@/lib/equipment";
 import type { IconType } from "react-icons";
@@ -64,6 +65,7 @@ interface ModifierOption {
   id: string;
   name: string;
   price: number;
+  priceTiers?: PriceTiers | null;
   budgetAdjustments?: ProductBudgetOverride | null;
   crewAdjustments?: ModifierCrewAdjustment[] | null;
 }
@@ -463,6 +465,8 @@ type VariationFormState = {
   id: string;
   name: string;
   price: string;
+  tier2Price: string;
+  tier3Price: string;
   featuresText: string;
   budgetOverrides: BudgetOverrideFormState;
   crewOverrides: Record<string, CrewOverrideFormState>;
@@ -472,6 +476,8 @@ type ModifierSelectionFormState = {
   groupId: string;
   optionId: string;
   price: string;
+  tier2Price: string;
+  tier3Price: string;
   budgetOverrides: BudgetOverrideFormState;
   crewOverrides: Record<string, CrewOverrideFormState>;
   templateAdjustments: ModifierCrewAdjustment[];
@@ -507,6 +513,8 @@ export default function EditProductPage() {
   const [description, setDescription] = useState("");
   const [tagline, setTagline] = useState("");
   const [price, setPrice] = useState("0");
+  const [priceTier2, setPriceTier2] = useState("");
+  const [priceTier3, setPriceTier3] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [requirements, setRequirements] = useState("");
@@ -621,6 +629,8 @@ export default function EditProductPage() {
       const features = Array.isArray(variation?.features)
         ? variation!.features!
         : [];
+      const tier2 = variation?.priceTiers?.tier2;
+      const tier3 = variation?.priceTiers?.tier3;
       return {
         id: variation?.id || generateFormId(),
         name: variation?.name || "",
@@ -628,6 +638,10 @@ export default function EditProductPage() {
           variation && typeof variation.price === "number"
             ? String(variation.price)
             : "0",
+        tier2Price:
+          typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : "",
+        tier3Price:
+          typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
         featuresText: features.join("\n"),
         budgetOverrides: createBudgetForm(variation?.budgetOverrides ?? null),
         crewOverrides: createCrewOverrideMap(
@@ -669,10 +683,30 @@ export default function EditProductPage() {
           : option
           ? String(option.price ?? 0)
           : "";
+      const tier2Value =
+        typeof selection.priceTiers?.tier2 === "number"
+          ? selection.priceTiers.tier2
+          : option && typeof option.priceTiers?.tier2 === "number"
+          ? option.priceTiers.tier2
+          : null;
+      const tier3Value =
+        typeof selection.priceTiers?.tier3 === "number"
+          ? selection.priceTiers.tier3
+          : option && typeof option.priceTiers?.tier3 === "number"
+          ? option.priceTiers.tier3
+          : null;
       return {
         groupId: selection.groupId,
         optionId: selection.optionId,
         price: priceString,
+        tier2Price:
+          typeof tier2Value === "number" && Number.isFinite(tier2Value)
+            ? String(tier2Value)
+            : "",
+        tier3Price:
+          typeof tier3Value === "number" && Number.isFinite(tier3Value)
+            ? String(tier3Value)
+            : "",
         budgetOverrides: createBudgetForm(budgetSource),
         crewOverrides: crewOverrideMap,
         templateAdjustments,
@@ -703,10 +737,16 @@ export default function EditProductPage() {
         crewRoleState,
         templateAdjustments
       );
+      const tier2 = option.priceTiers?.tier2;
+      const tier3 = option.priceTiers?.tier3;
       return {
         groupId,
         optionId: option.id,
         price: String(option.price ?? 0),
+        tier2Price:
+          typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : "",
+        tier3Price:
+          typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
         budgetOverrides: createBudgetForm(option.budgetAdjustments ?? null),
         crewOverrides: crewOverrideMap,
         templateAdjustments,
@@ -725,6 +765,26 @@ export default function EditProductPage() {
   };
   const formatCurrency = (value: number) =>
     `£${(Number.isFinite(value) ? value : 0).toFixed(2)}`;
+  const parseOptionalPrice = (value: string): number | null => {
+    if (!value || value.trim().length === 0) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const buildPriceTierPayload = (
+    tier1: number | null,
+    tier2: string,
+    tier3: string
+  ): PriceTiers => {
+    const tiers: PriceTiers = {};
+    if (tier1 !== null) {
+      tiers.tier1 = tier1;
+    }
+    const parsedTier2 = parseOptionalPrice(tier2);
+    if (parsedTier2 !== null) tiers.tier2 = parsedTier2;
+    const parsedTier3 = parseOptionalPrice(tier3);
+    if (parsedTier3 !== null) tiers.tier3 = parsedTier3;
+    return tiers;
+  };
 
   const computeRoleCost = (role: CrewRoleFormState) => {
     const quantity = Number(role.quantity);
@@ -1028,6 +1088,14 @@ export default function EditProductPage() {
           setDescription(p.description);
           setTagline(p.tagline || "");
           setPrice(String(p.price));
+          const tier2 = p.priceTiers?.tier2;
+          const tier3 = p.priceTiers?.tier3;
+          setPriceTier2(
+            typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : ""
+          );
+          setPriceTier3(
+            typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : ""
+          );
           const budget = (p as any).budget || {};
           const labourFilming =
             budget.labourFilming ?? budget.labour ?? (p as any).labourCost ?? 0;
@@ -1422,10 +1490,16 @@ export default function EditProductPage() {
             .map((f) => f.trim())
             .filter(Boolean)
         : [];
+      const basePrice = parseMoney(variation.price);
       const entry: ProductVariation = {
         id: variation.id,
         name,
-        price: Number(variation.price) || 0,
+        price: basePrice,
+        priceTiers: buildPriceTierPayload(
+          basePrice,
+          variation.tier2Price,
+          variation.tier3Price
+        ),
       };
       if (features.length) entry.features = features;
       const budgetOverrides = parseBudgetFormToOverride(
@@ -1511,9 +1585,22 @@ export default function EditProductPage() {
           groupId: selection.groupId,
           optionId: selection.optionId,
         };
-        const priceValue = Number(selection.price);
-        if (selection.price && Number.isFinite(priceValue)) {
-          entry.price = priceValue;
+        const priceOverride = parseOptionalPrice(selection.price);
+        const tier2Override = parseOptionalPrice(selection.tier2Price);
+        const tier3Override = parseOptionalPrice(selection.tier3Price);
+        if (priceOverride !== null) {
+          entry.price = priceOverride;
+          entry.priceTiers = buildPriceTierPayload(
+            priceOverride,
+            selection.tier2Price,
+            selection.tier3Price
+          );
+        } else if (tier2Override !== null || tier3Override !== null) {
+          entry.priceTiers = buildPriceTierPayload(
+            null,
+            selection.tier2Price,
+            selection.tier3Price
+          );
         }
         const budgetOverrides = parseBudgetFormToOverride(
           selection.budgetOverrides
@@ -1543,11 +1630,18 @@ export default function EditProductPage() {
       })
       .filter((entry): entry is ProductVideoLink => !!entry);
     const primaryExampleVideo = videoData.length > 0 ? videoData[0].url : null;
+    const baseProductPrice = parseMoney(price);
+    const productPriceTiers = buildPriceTierPayload(
+      baseProductPrice,
+      priceTier2,
+      priceTier3
+    );
     await updateDoc(doc(db, "products", id), {
       name,
       description,
       tagline: tagline || null,
-      price: Number(price) || 0,
+      price: baseProductPrice,
+      priceTiers: productPriceTiers,
       labourCost: labourValue,
       defaultKitCost: kitValue,
       budget: {
@@ -2672,13 +2766,41 @@ export default function EditProductPage() {
       {tab === "pnl" && (
         <div className="grid gap-6">
           <div className="grid gap-2">
-            <label className="text-sm font-medium">Price (GBP)</label>
-            <input
-              type="number"
-              className="input"
-              value={price}
-              onChange={(e) => setPrice(e.target.value)}
-            />
+            <label className="text-sm font-medium">Customer price tiers (GBP)</label>
+            <div className="grid gap-2 md:grid-cols-3">
+              <label className="grid gap-1 text-xs">
+                <span className="font-medium text-gray-600">Tier 1</span>
+                <input
+                  type="number"
+                  className="input"
+                  value={price}
+                  onChange={(e) => setPrice(e.target.value)}
+                />
+              </label>
+              <label className="grid gap-1 text-xs">
+                <span className="font-medium text-gray-600">Tier 2</span>
+                <input
+                  type="number"
+                  className="input"
+                  value={priceTier2}
+                  onChange={(e) => setPriceTier2(e.target.value)}
+                  placeholder="Defaults to Tier 1"
+                />
+              </label>
+              <label className="grid gap-1 text-xs">
+                <span className="font-medium text-gray-600">Tier 3</span>
+                <input
+                  type="number"
+                  className="input"
+                  value={priceTier3}
+                  onChange={(e) => setPriceTier3(e.target.value)}
+                  placeholder="Defaults to Tier 1"
+                />
+              </label>
+            </div>
+            <span className="text-xs text-gray-500">
+              Territories use Tier 1 by default unless a territory override is applied.
+            </span>
           </div>
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
             <div className="grid gap-6">
@@ -2898,23 +3020,23 @@ export default function EditProductPage() {
                   key={variation.id}
                   className="grid gap-3 rounded border bg-white p-4 shadow-sm"
                 >
-                  <div className="grid gap-2 md:grid-cols-2">
+                  <label className="grid gap-1">
+                    <span className="text-xs font-medium text-gray-600">
+                      Variation name
+                    </span>
+                    <input
+                      className="input"
+                      value={variation.name}
+                      onChange={(e) =>
+                        updateVariation(index, { name: e.target.value })
+                      }
+                      placeholder="e.g. Two day shoot"
+                    />
+                  </label>
+                  <div className="grid gap-2 md:grid-cols-3">
                     <label className="grid gap-1">
                       <span className="text-xs font-medium text-gray-600">
-                        Variation name
-                      </span>
-                      <input
-                        className="input"
-                        value={variation.name}
-                        onChange={(e) =>
-                          updateVariation(index, { name: e.target.value })
-                        }
-                        placeholder="e.g. Two day shoot"
-                      />
-                    </label>
-                    <label className="grid gap-1">
-                      <span className="text-xs font-medium text-gray-600">
-                        Customer price
+                        Tier 1 price
                       </span>
                       <input
                         type="number"
@@ -2926,7 +3048,38 @@ export default function EditProductPage() {
                         placeholder="Defaults to the base product price"
                       />
                     </label>
+                    <label className="grid gap-1">
+                      <span className="text-xs font-medium text-gray-600">
+                        Tier 2 price
+                      </span>
+                      <input
+                        type="number"
+                        className="input"
+                        value={variation.tier2Price}
+                        onChange={(e) =>
+                          updateVariation(index, { tier2Price: e.target.value })
+                        }
+                        placeholder="Leave blank to match Tier 1"
+                      />
+                    </label>
+                    <label className="grid gap-1">
+                      <span className="text-xs font-medium text-gray-600">
+                        Tier 3 price
+                      </span>
+                      <input
+                        type="number"
+                        className="input"
+                        value={variation.tier3Price}
+                        onChange={(e) =>
+                          updateVariation(index, { tier3Price: e.target.value })
+                        }
+                        placeholder="Leave blank to match Tier 1"
+                      />
+                    </label>
                   </div>
+                  <p className="text-[11px] text-gray-500">
+                    Tier values default to the base product price when left blank.
+                  </p>
                   <label className="grid gap-1">
                     <span className="text-xs font-medium text-gray-600">
                       Feature highlights
@@ -3834,23 +3987,62 @@ export default function EditProductPage() {
                         </div>
                         {selected && (
                           <div className="grid gap-3 text-sm">
-                            <label className="grid gap-1">
-                              <span className="text-xs font-medium text-gray-600">
-                                Price override
-                              </span>
-                              <input
-                                type="number"
-                                className="input"
-                                value={selected.price}
-                                disabled={!enabled}
-                                onChange={(e) =>
-                                  updateModifierSelection(group.id, option.id, {
-                                    price: e.target.value,
-                                  })
-                                }
-                                placeholder={`Defaults to £${Number(option.price || 0).toFixed(2)}`}
-                              />
-                            </label>
+                            <div className="grid gap-2 md:grid-cols-3">
+                              <label className="grid gap-1">
+                                <span className="text-xs font-medium text-gray-600">
+                                  Tier 1 override
+                                </span>
+                                <input
+                                  type="number"
+                                  className="input"
+                                  value={selected.price}
+                                  disabled={!enabled}
+                                  onChange={(e) =>
+                                    updateModifierSelection(group.id, option.id, {
+                                      price: e.target.value,
+                                    })
+                                  }
+                                  placeholder={`Defaults to £${Number(option.price || 0).toFixed(2)}`}
+                                />
+                              </label>
+                              <label className="grid gap-1">
+                                <span className="text-xs font-medium text-gray-600">
+                                  Tier 2 override
+                                </span>
+                                <input
+                                  type="number"
+                                  className="input"
+                                  value={selected.tier2Price}
+                                  disabled={!enabled}
+                                  onChange={(e) =>
+                                    updateModifierSelection(group.id, option.id, {
+                                      tier2Price: e.target.value,
+                                    })
+                                  }
+                                  placeholder="Leave blank to match Tier 1"
+                                />
+                              </label>
+                              <label className="grid gap-1">
+                                <span className="text-xs font-medium text-gray-600">
+                                  Tier 3 override
+                                </span>
+                                <input
+                                  type="number"
+                                  className="input"
+                                  value={selected.tier3Price}
+                                  disabled={!enabled}
+                                  onChange={(e) =>
+                                    updateModifierSelection(group.id, option.id, {
+                                      tier3Price: e.target.value,
+                                    })
+                                  }
+                                  placeholder="Leave blank to match Tier 1"
+                                />
+                              </label>
+                            </div>
+                            <p className="text-[11px] text-gray-500">
+                              Remove values to inherit the base modifier pricing for each tier.
+                            </p>
                             <details
                               className="rounded border border-dashed p-3"
                               open={budgetHasValues}

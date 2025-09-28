@@ -12,6 +12,7 @@ import {
 } from "firebase/firestore";
 import { useRoleGate } from "@/hooks/useRoleGate";
 import type { CrewRoleTemplate, ProductBudgetOverride } from "@/lib/products";
+import type { PriceTiers } from "@/lib/pricing";
 
 interface ModifierCrewAdjustment {
   templateId: string;
@@ -24,6 +25,7 @@ interface ModifierOption {
   id: string;
   name: string;
   price: number;
+  priceTiers?: PriceTiers | null;
   budgetAdjustments?: ProductBudgetOverride | null;
   crewAdjustments?: ModifierCrewAdjustment[] | null;
 }
@@ -247,14 +249,24 @@ export default function ModifiersPage() {
     groupId: string,
     name: string,
     price: string,
+    tier2Price: string,
+    tier3Price: string,
     reset: () => void
   ) => {
     const trimmed = name.trim();
     if (!trimmed) return;
+    const basePrice = parseNumberInput(price) ?? 0;
+    const tier2 = parseNumberInput(tier2Price);
+    const tier3 = parseNumberInput(tier3Price);
     const option: ModifierOption = {
       id: crypto.randomUUID(),
       name: trimmed,
-      price: Number(price) || 0,
+      price: basePrice,
+    };
+    option.priceTiers = {
+      tier1: basePrice,
+      ...(tier2 !== undefined ? { tier2 } : {}),
+      ...(tier3 !== undefined ? { tier3 } : {}),
     };
     const ref = doc(db, "modifiers", groupId);
     const group = groups.find((g) => g.id === groupId);
@@ -368,17 +380,28 @@ function OptionForm({
   onAdd,
 }: {
   groupId: string;
-  onAdd: (groupId: string, name: string, price: string, reset: () => void) => void;
+  onAdd: (
+    groupId: string,
+    name: string,
+    price: string,
+    tier2Price: string,
+    tier3Price: string,
+    reset: () => void
+  ) => void;
 }) {
   const [name, setName] = useState("");
   const [price, setPrice] = useState("0");
+  const [tier2Price, setTier2Price] = useState("");
+  const [tier3Price, setTier3Price] = useState("");
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        onAdd(groupId, name, price, () => {
+        onAdd(groupId, name, price, tier2Price, tier3Price, () => {
           setName("");
           setPrice("0");
+          setTier2Price("");
+          setTier3Price("");
         });
       }}
       className="grid gap-2 rounded border border-dashed p-3"
@@ -391,13 +414,29 @@ function OptionForm({
         onChange={(e) => setName(e.target.value)}
         required
       />
-      <input
-        type="number"
-        className="input"
-        placeholder="Price"
-        value={price}
-        onChange={(e) => setPrice(e.target.value)}
-      />
+      <div className="grid gap-2 md:grid-cols-3">
+        <input
+          type="number"
+          className="input"
+          placeholder="Tier 1"
+          value={price}
+          onChange={(e) => setPrice(e.target.value)}
+        />
+        <input
+          type="number"
+          className="input"
+          placeholder="Tier 2"
+          value={tier2Price}
+          onChange={(e) => setTier2Price(e.target.value)}
+        />
+        <input
+          type="number"
+          className="input"
+          placeholder="Tier 3"
+          value={tier3Price}
+          onChange={(e) => setTier3Price(e.target.value)}
+        />
+      </div>
       <button type="submit" className="btn btn-sm w-fit">
         Add Option
       </button>
@@ -420,6 +459,16 @@ function EditableOptionRow({
 }) {
   const [name, setName] = useState(option.name);
   const [price, setPrice] = useState(option.price.toString());
+  const [tier2Price, setTier2Price] = useState(
+    option.priceTiers?.tier2 != null && Number.isFinite(option.priceTiers.tier2)
+      ? String(option.priceTiers.tier2)
+      : ""
+  );
+  const [tier3Price, setTier3Price] = useState(
+    option.priceTiers?.tier3 != null && Number.isFinite(option.priceTiers.tier3)
+      ? String(option.priceTiers.tier3)
+      : ""
+  );
   const [budgetForm, setBudgetForm] = useState<BudgetFormState>(() =>
     toBudgetForm(option.budgetAdjustments)
   );
@@ -430,6 +479,16 @@ function EditableOptionRow({
   useEffect(() => {
     setName(option.name);
     setPrice(option.price.toString());
+    setTier2Price(
+      option.priceTiers?.tier2 != null && Number.isFinite(option.priceTiers.tier2)
+        ? String(option.priceTiers.tier2)
+        : ""
+    );
+    setTier3Price(
+      option.priceTiers?.tier3 != null && Number.isFinite(option.priceTiers.tier3)
+        ? String(option.priceTiers.tier3)
+        : ""
+    );
     setBudgetForm(toBudgetForm(option.budgetAdjustments));
     setCrewRows(toCrewAdjustmentRows(option.crewAdjustments));
   }, [option]);
@@ -487,10 +546,18 @@ function EditableOptionRow({
     e.preventDefault();
     const trimmed = name.trim();
     if (!trimmed) return;
+    const basePrice = parseNumberInput(price) ?? 0;
+    const tier2 = parseNumberInput(tier2Price);
+    const tier3 = parseNumberInput(tier3Price);
     const payload: ModifierOption = {
       ...option,
       name: trimmed,
-      price: Number(price) || 0,
+      price: basePrice,
+      priceTiers: {
+        tier1: basePrice,
+        ...(tier2 !== undefined ? { tier2 } : {}),
+        ...(tier3 !== undefined ? { tier3 } : {}),
+      },
     };
     const budgetOverrides = toBudgetOverride(budgetForm);
     if (budgetOverrides) payload.budgetAdjustments = budgetOverrides;
@@ -513,12 +580,29 @@ function EditableOptionRow({
           onChange={(e) => setName(e.target.value)}
           required
         />
-        <input
-          type="number"
-          className="input w-28"
-          value={price}
-          onChange={(e) => setPrice(e.target.value)}
-        />
+        <div className="grid gap-2 md:grid-cols-3 flex-1 min-w-[220px]">
+          <input
+            type="number"
+            className="input"
+            value={price}
+            onChange={(e) => setPrice(e.target.value)}
+            placeholder="Tier 1"
+          />
+          <input
+            type="number"
+            className="input"
+            value={tier2Price}
+            onChange={(e) => setTier2Price(e.target.value)}
+            placeholder="Tier 2"
+          />
+          <input
+            type="number"
+            className="input"
+            value={tier3Price}
+            onChange={(e) => setTier3Price(e.target.value)}
+            placeholder="Tier 3"
+          />
+        </div>
         <div className="flex items-center gap-2">
           <button type="submit" className="btn btn-sm w-fit">
             Save
@@ -817,7 +901,14 @@ function ModifierGroupCard({
 }: {
   group: ModifierGroup;
   templates: CrewRoleTemplate[];
-  onAddOption: (groupId: string, name: string, price: string, reset: () => void) => void;
+  onAddOption: (
+    groupId: string,
+    name: string,
+    price: string,
+    tier2Price: string,
+    tier3Price: string,
+    reset: () => void
+  ) => void;
   onUpdateGroup: (groupId: string, name: string, multiple: boolean) => void;
   onDeleteGroup: (groupId: string) => void;
   onUpdateOption: (groupId: string, option: ModifierOption) => void;

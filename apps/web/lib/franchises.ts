@@ -1,5 +1,6 @@
 import type { Timestamp } from 'firebase/firestore';
 import type { DocumentData, QueryDocumentSnapshot } from 'firebase/firestore';
+import { DEFAULT_PRICE_TIER, normalisePriceTierLevel, type PriceTierLevel } from './pricing';
 
 export type FranchiseStatus = 'prospect' | 'active' | 'paused' | 'suspended';
 
@@ -77,6 +78,7 @@ export interface FranchiseTerritory {
   categories: string[];
   licenseFee?: number | null;
   notes?: string | null;
+  priceTier: PriceTierLevel;
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
 }
@@ -325,6 +327,7 @@ export function parseTerritory(doc: SnapshotWithId): FranchiseTerritory {
       : [],
     licenseFee: typeof data.licenseFee === 'number' ? (data.licenseFee as number) : null,
     notes: (data.notes as string) ?? null,
+    priceTier: normalisePriceTierLevel(data.priceTier ?? DEFAULT_PRICE_TIER),
     createdAt: (data.createdAt as Timestamp) ?? null,
     updatedAt: (data.updatedAt as Timestamp) ?? null,
   };

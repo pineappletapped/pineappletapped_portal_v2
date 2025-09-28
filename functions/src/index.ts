@@ -327,6 +327,7 @@ type FranchiseTerritoryDoc = {
   radiusKm?: number;
   centerLat?: number;
   centerLng?: number;
+  priceTier?: number | string | null;
 };
 
 type FranchiseMemberDoc = {
@@ -1922,6 +1923,46 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
 
 type FranchiseAssignmentMatchType = 'exact' | 'prefix' | 'superset' | 'radius';
 
+type PriceTierLevel = 1 | 2 | 3;
+
+function normalisePriceTierLevel(value: unknown): PriceTierLevel {
+  const num = Number(value);
+  if (num === 2 || num === 3) {
+    return num as PriceTierLevel;
+  }
+  return 1;
+}
+
+function resolveTierPrice(
+  basePrice: unknown,
+  tiers: unknown,
+  tier: PriceTierLevel
+): number {
+  const base = Number(basePrice);
+  const safeBase = Number.isFinite(base) ? base : 0;
+  if (!tiers || typeof tiers !== 'object') {
+    return safeBase;
+  }
+  const map = tiers as { tier1?: unknown; tier2?: unknown; tier3?: unknown };
+  if (tier === 3) {
+    const value = Number(map.tier3);
+    if (Number.isFinite(value)) {
+      return value;
+    }
+  }
+  if (tier === 2) {
+    const value = Number(map.tier2);
+    if (Number.isFinite(value)) {
+      return value;
+    }
+  }
+  const tier1Value = Number(map.tier1);
+  if (Number.isFinite(tier1Value)) {
+    return tier1Value;
+  }
+  return safeBase;
+}
+
 interface FranchiseAssignmentResult {
   franchiseId: string;
   territoryId: string;
@@ -1929,6 +1970,7 @@ interface FranchiseAssignmentResult {
   territoryPostalCode: string;
   matchType: FranchiseAssignmentMatchType;
   exclusive: boolean;
+  priceTier: PriceTierLevel;
   radiusMatch?: {
     distanceKm: number;
     radiusKm: number;
@@ -2112,6 +2154,7 @@ async function resolveTerritoryForPostalCode(postalCode: string): Promise<Franch
               territoryPostalCode: code.normalised,
               matchType,
               exclusive: data.exclusive !== false,
+              priceTier: normalisePriceTierLevel(data.priceTier),
               radiusMatch: null,
             },
           };
@@ -2156,17 +2199,18 @@ async function resolveTerritoryForPostalCode(postalCode: string): Promise<Franch
     if (!best || score > best.score) {
       best = {
         score,
-        result: {
-          franchiseId: data.franchiseId as string,
-          territoryId: territoryDoc.id,
-          territoryLabel: typeof data.label === 'string' ? data.label : null,
-          territoryPostalCode: normalisedInput,
-          matchType: 'radius',
-          exclusive: data.exclusive !== false,
-          radiusMatch: {
-            distanceKm,
-            radiusKm,
-            centerLat,
+            result: {
+              franchiseId: data.franchiseId as string,
+              territoryId: territoryDoc.id,
+              territoryLabel: typeof data.label === 'string' ? data.label : null,
+              territoryPostalCode: normalisedInput,
+              matchType: 'radius',
+              exclusive: data.exclusive !== false,
+              priceTier: normalisePriceTierLevel(data.priceTier),
+              radiusMatch: {
+                distanceKm,
+                radiusKm,
+                centerLat,
             centerLng,
           },
         },
@@ -2905,8 +2949,8 @@ export const reserveKit = functions.https.onCall(async (data) => {
   const rawStandards = Array.isArray(productData?.requiredStandards)
     ? productData.requiredStandards
     : [];
-  const requiredStandards = Array.from(
-    new Set(
+  const requiredStandards: string[] = Array.from(
+    new Set<string>(
       rawStandards
         .map((value: unknown) => (typeof value === 'string' ? value.trim() : ''))
         .filter((value: string) => value.length > 0)
@@ -5421,6 +5465,16 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         )
     : [];
 
+  const postalCodeValue = typeof postalCode === 'string' ? postalCode : null;
+  const normalisedPostalCode = normalisePostalCode(postalCodeValue);
+  const assignmentResult = normalisedPostalCode
+    ? await resolveTerritoryForPostalCode(normalisedPostalCode)
+    : null;
+  const territoryPriceTier: PriceTierLevel = assignmentResult?.priceTier ?? 1;
+  const assignmentMember = assignmentResult
+    ? await resolvePrimaryFranchiseMember(assignmentResult.franchiseId)
+    : null;
+
   const productRefs = items.map((i: any) => db.collection('products').doc(i.id));
   const leadSourceRaw =
     typeof leadSourceInput === 'string' ? (leadSourceInput as string).trim() : '';
@@ -5467,13 +5521,78 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   productSnaps.forEach((snap, idx) => {
     if (!snap.exists) return;
     const prod = snap.data() as any;
-    const qty = items[idx].quantity || 0;
-    const price = prod.price || 0;
+    const qtyRaw = toNumber(items[idx].quantity, 0);
+    const qty = qtyRaw > 0 ? qtyRaw : 0;
     const category = prod.category || prod.categoryId || null;
-    const rental = items[idx].rentalTotal || 0;
-    const modifiers = Array.isArray(items[idx].modifiers)
-      ? items[idx].modifiers
+    const rental = toNumber(items[idx].rentalTotal, 0);
+    const variationId =
+      items[idx] && typeof items[idx].variation === 'string'
+        ? (items[idx].variation as string)
+        : null;
+    const variations = Array.isArray((prod as any).variations)
+      ? ((prod as any).variations as any[])
       : [];
+    const variation = variationId
+      ? variations.find(
+          (entry) =>
+            entry && typeof entry === 'object' && typeof entry.id === 'string' && entry.id === variationId
+        )
+      : null;
+    let unitPrice = resolveTierPrice((prod as any).price, (prod as any).priceTiers, territoryPriceTier);
+    if (variation) {
+      unitPrice = resolveTierPrice(
+        (variation as any).price ?? unitPrice,
+        (variation as any).priceTiers,
+        territoryPriceTier
+      );
+    }
+    const configuredModifiers = Array.isArray((prod as any).modifiers)
+      ? ((prod as any).modifiers as any[])
+      : [];
+    const rawModifiers = Array.isArray(items[idx].modifiers)
+      ? (items[idx].modifiers as any[])
+      : [];
+    const resolvedModifiers: any[] = [];
+    let modifiersTotal = 0;
+    rawModifiers.forEach((selection) => {
+      if (!selection || typeof selection !== 'object') {
+        return;
+      }
+      const groupId = typeof selection.groupId === 'string' ? selection.groupId : null;
+      const optionId = typeof selection.optionId === 'string' ? selection.optionId : null;
+      if (!groupId || !optionId) {
+        return;
+      }
+      const configured = configuredModifiers.find(
+        (modifier) =>
+          modifier &&
+          typeof modifier === 'object' &&
+          typeof modifier.groupId === 'string' &&
+          modifier.groupId === groupId &&
+          typeof modifier.optionId === 'string' &&
+          modifier.optionId === optionId
+      );
+      let resolvedPrice: number | null = null;
+      if (configured) {
+        resolvedPrice = resolveTierPrice(
+          (configured as any).price ?? null,
+          (configured as any).priceTiers,
+          territoryPriceTier
+        );
+      } else if (selection.price !== undefined && selection.price !== null) {
+        const parsed = Number(selection.price);
+        resolvedPrice = Number.isFinite(parsed) ? parsed : null;
+      }
+      if (resolvedPrice !== null) {
+        modifiersTotal += resolvedPrice;
+      }
+      const payload: Record<string, any> = { ...selection, groupId, optionId };
+      if (resolvedPrice !== null) {
+        payload.price = resolvedPrice;
+      }
+      resolvedModifiers.push(payload);
+    });
+    const price = unitPrice + modifiersTotal;
     const budget = (prod as any).budget || {};
     const labourFilming = parseOptional(budget.labourFilming);
     const labourEditing = parseOptional(budget.labourEditing);
@@ -5510,7 +5629,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       quantity: qty,
       category,
       rentalTotal: rental,
-      modifiers,
+      modifiers: resolvedModifiers,
       budget: {
         perUnit: {
           labour,
@@ -5621,15 +5740,6 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     profit,
   };
 
-  const postalCodeValue = typeof postalCode === 'string' ? postalCode : null;
-  const normalisedPostalCode = normalisePostalCode(postalCodeValue);
-  const assignmentResult = normalisedPostalCode
-    ? await resolveTerritoryForPostalCode(normalisedPostalCode)
-    : null;
-  const assignmentMember = assignmentResult
-    ? await resolvePrimaryFranchiseMember(assignmentResult.franchiseId)
-    : null;
-
   const assignmentMeta: Record<string, any> = {
     strategy: 'postal_code_auto_route',
     inputPostalCode: postalCodeValue || null,
@@ -5718,6 +5828,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     clientRoyaltyKey: clientRoyaltyKey || null,
     clientRoyaltyKeyType: clientRoyaltyKeyType || null,
     clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
+    priceTierLevel: territoryPriceTier,
   };
 
   if (assignmentResult) {
@@ -5729,6 +5840,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     assignmentMeta.territoryPostalCode = assignmentResult.territoryPostalCode;
     assignmentMeta.territoryLabel = assignmentResult.territoryLabel;
     assignmentMeta.exclusive = assignmentResult.exclusive;
+    assignmentMeta.priceTierLevel = territoryPriceTier;
     if (assignmentResult.matchType === 'radius') {
       assignmentMeta.strategy = 'radius_auto_route';
       assignmentMeta.radiusMatch = assignmentResult.radiusMatch
@@ -5777,7 +5889,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     orderData.royaltyPercentage = null;
   }
 
-  if (!Array.isArray(order.paymentSchedule) || order.paymentSchedule.length === 0) {
+  if (!Array.isArray(orderData.paymentSchedule) || orderData.paymentSchedule.length === 0) {
     try {
       const { splitTerms } = await getStripeOperationalSettings();
       if (splitTerms.length > 0) {
