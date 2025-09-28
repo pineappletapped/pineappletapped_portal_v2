@@ -1,13 +1,14 @@
 
 'use client';
 import Image from 'next/image';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { db } from '@/lib/firebase';
 import { doc, getDoc, addDoc, collection, serverTimestamp, query, where, getDocs, updateDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { storage, auth, functions } from '@/lib/firebase';
 import { httpsCallable } from 'firebase/functions';
 import Link from 'next/link';
+import AssetReleaseBadge, { getAssetReleaseMeta } from '@/components/AssetReleaseBadge';
 
 export default function AssetView({ params }: { params: { id: string, assetId: string } }) {
   const [asset, setAsset] = useState<any>(null);
@@ -151,21 +152,32 @@ export default function AssetView({ params }: { params: { id: string, assetId: s
     }
   };
 
+  const releaseMeta = useMemo(() => (asset ? getAssetReleaseMeta(asset) : null), [asset]);
+  const releaseDescription = releaseMeta?.description ||
+    (!asset?.deliverablesReleased
+      ? 'Downloads will unlock automatically once the asset is approved and the outstanding balance has been marked as paid.'
+      : null);
+
   if (!asset) return <div>Loading…</div>;
 
   return (
     <div className="grid gap-4">
-      <h1 className="text-xl font-semibold">{asset.name || 'Asset'}</h1>
-      {/* Status & actions */}
-      <div className="flex items-center gap-3 mb-2">
-        <span className="text-sm text-gray-600">Status:</span>
-        <span className="font-medium">{asset.status || 'draft'}</span>
-        <div className="flex gap-2">
+      <header className="space-y-2">
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-xl font-semibold">{asset.name || 'Asset'}</h1>
+          <AssetReleaseBadge asset={asset} />
+        </div>
+        {/* Status & actions */}
+        <div className="flex flex-wrap items-center gap-3 text-sm text-gray-600">
+          <span className="font-medium text-gray-900">Status:</span>
+          <span className="font-semibold text-gray-900">{asset.status || 'draft'}</span>
+          <div className="flex flex-wrap gap-2 text-xs">
           <button className="btn-sm" disabled={statusUpdating} onClick={() => updateStatus('changes_requested')}>Request Changes</button>
           <button className="btn-sm" disabled={statusUpdating} onClick={() => updateStatus('approved')}>Approve</button>
           <button className="btn-sm" disabled={statusUpdating} onClick={() => updateStatus('final')}>Final Approve</button>
         </div>
-      </div>
+        </div>
+      </header>
       {/* Media display: handle video with aspect ratio and watermark, or image/pdf link */}
       <div className="flex flex-col gap-2">
         {asset.mime?.startsWith('video/') ? (
@@ -223,27 +235,40 @@ export default function AssetView({ params }: { params: { id: string, assetId: s
       </div>
 
       {/* Final Deliverable Download */}
-      <div className="card p-4">
-        <h2 className="font-semibold mb-2">Final Deliverable</h2>
+      <div className="card space-y-3 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-semibold">Final Deliverable</h2>
+          <AssetReleaseBadge asset={asset} />
+        </div>
+        {releaseDescription && (
+          <p className="text-sm text-gray-600">{releaseDescription}</p>
+        )}
         {asset.deliverablesReleased ? (
-          <div>
+          <div className="flex flex-wrap gap-2">
             {downloadUrl ? (
-              <a href={downloadUrl} target="_blank" rel="noopener" className="btn-sm">Download</a>
+              <a href={downloadUrl} target="_blank" rel="noopener" className="btn-sm">
+                Download
+              </a>
             ) : (
-              <button className="btn-sm" onClick={async () => {
-                try {
-                  const call = httpsCallable(functions, 'getDownloadUrl');
-                  const res: any = await call({ key: asset.storageKey });
-                  setDownloadUrl(res.data.url);
-                } catch (err:any) {
-                  console.error(err);
-                  alert(err.message || 'Error generating download link');
-                }
-              }}>Get Download Link</button>
+              <button
+                className="btn-sm"
+                onClick={async () => {
+                  try {
+                    const call = httpsCallable(functions, 'getDownloadUrl');
+                    const res: any = await call({ key: asset.storageKey });
+                    setDownloadUrl(res.data.url);
+                  } catch (err:any) {
+                    console.error(err);
+                    alert(err.message || 'Error generating download link');
+                  }
+                }}
+              >
+                Get Download Link
+              </button>
             )}
           </div>
         ) : (
-          <p className="text-sm text-gray-600">The final deliverable will be available once the project is approved and the balance is paid.</p>
+          <p className="text-sm text-gray-600">Downloads are currently locked.</p>
         )}
       </div>
 

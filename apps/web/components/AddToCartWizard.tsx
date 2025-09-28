@@ -28,6 +28,21 @@ interface Props {
   onClose: () => void;
 }
 
+const DRONE_STANDARD_ID = "drone_compliance";
+
+type FunctionsError = {
+  code: string;
+  message: string;
+  details?: unknown;
+};
+
+const isFunctionsError = (error: unknown): error is FunctionsError => {
+  if (!error || typeof error !== "object") return false;
+  if (!("code" in error)) return false;
+  const code = (error as any).code;
+  return typeof code === "string" && code.length > 0;
+};
+
 export default function AddToCartWizard({
   product,
   variationId,
@@ -222,9 +237,31 @@ export default function AddToCartWizard({
       onClose();
     } catch (err) {
       console.error(err);
+      setSubmitting(false);
+      if (isFunctionsError(err) && err.code === "failed-precondition") {
+        const details = (err as FunctionsError).details as any;
+        const missingStandards = Array.isArray(details?.missingStandards)
+          ? details.missingStandards.filter(
+              (value: unknown): value is string => typeof value === "string"
+            )
+          : [];
+        if (missingStandards.includes(DRONE_STANDARD_ID)) {
+          setError(
+            "Drone coverage isn't available yet because no registered kit meets the drone compliance standard. Please upload pilot licences and insurance on your equipment before trying again."
+          );
+          setLiveMessage("Drone compliance missing – reservation blocked");
+          return;
+        }
+        if (missingStandards.length > 0) {
+          setError(
+            "We need equipment that meets the required standards before this package can be scheduled. Update your kit register or contact the operations team."
+          );
+          setLiveMessage("Missing required equipment standards");
+          return;
+        }
+      }
       setError("We couldn't reserve the equipment right now. Try again in a moment.");
       setLiveMessage("Reservation failed");
-      setSubmitting(false);
     }
   };
 

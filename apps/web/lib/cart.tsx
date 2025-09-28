@@ -19,7 +19,13 @@ export interface CartItem {
   date: string;
   quantity: number;
   modifiers?: ProductModifierSelection[];
-  kitItems?: { id: string; start: string; end: string }[];
+  kitItems?: {
+    id: string;
+    name?: string | null;
+    category?: string | null;
+    start: string;
+    end: string;
+  }[];
   rentalTotal?: number;
 }
 
@@ -30,7 +36,13 @@ interface ProductInput {
   variation?: string;
   date: string;
   modifiers?: ProductModifierSelection[];
-  kitItems?: { id: string; start: string; end: string }[];
+  kitItems?: {
+    id: string;
+    name?: string | null;
+    category?: string | null;
+    start: string;
+    end: string;
+  }[];
   rentalTotal?: number;
 }
 

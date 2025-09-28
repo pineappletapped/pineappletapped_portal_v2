@@ -8,6 +8,7 @@ import { FaLinkedin, FaInstagram, FaYoutube, FaTiktok } from 'react-icons/fa6';
 import CookieBanner from '@/components/CookieBanner';
 import AnalyticsScripts from '@/components/AnalyticsScripts';
 import AnalyticsTracker from '@/components/AnalyticsTracker';
+import LoginTelemetryListener from '@/components/LoginTelemetryListener';
 
 export const metadata = {
   title: 'Pineapple Portal',
@@ -26,6 +27,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     <html lang="en">
       <body className="min-h-screen flex flex-col bg-light-gray text-charcoal">
         <CartProvider>
+          <LoginTelemetryListener />
           <SiteHeader categories={categories} products={products} />
           <main className="flex-1">{children}</main>
           <footer className="border-t bg-white">

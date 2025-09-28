@@ -24,6 +24,13 @@ import {
   uploadBytes,
   type FirebaseStorage,
 } from "firebase/storage";
+import ComplianceBadge from "@/components/ComplianceBadge";
+import {
+  DRONE_STANDARD_ID,
+  type ComplianceRecord,
+  deriveComplianceState,
+  isComplianceApproved,
+} from "@/lib/compliance";
 
 interface FormState {
   name: string;
@@ -158,10 +165,22 @@ export default function ContractorKitManager() {
   const [bookingsLoading, setBookingsLoading] = useState(false);
   const [bookingsError, setBookingsError] = useState<string | null>(null);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(() => new Set());
+  const [complianceRecord, setComplianceRecord] = useState<ComplianceRecord | null>(
+    null
+  );
 
+  const complianceState = useMemo(
+    () => deriveComplianceState(complianceRecord),
+    [complianceRecord]
+  );
+  const hasActiveCompliance = useMemo(
+    () => isComplianceApproved(complianceState),
+    [complianceState]
+  );
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
     let stopAuth: (() => void) | undefined;
+    let complianceUnsubscribe: (() => void) | undefined;
     let cancelled = false;
 
     const markUnavailable = (
@@ -211,16 +230,38 @@ export default function ContractorKitManager() {
 
         stopAuth = onAuthStateChanged(auth, (user: User | null) => {
           unsubscribe?.();
+          complianceUnsubscribe?.();
           if (!user) {
             setItems([]);
             setLoading(false);
             setAuthReady(true);
+            setComplianceRecord(null);
             return;
           }
 
           setError(null);
           setAuthReady(true);
           setLoading(true);
+
+          const complianceRef = doc(db, "users", user.uid, "compliance", "profile");
+          complianceUnsubscribe = onSnapshot(
+            complianceRef,
+            (snapshot) => {
+              if (snapshot.exists()) {
+                setComplianceRecord({
+                  id: snapshot.id,
+                  uid: user.uid,
+                  ...(snapshot.data() as Record<string, unknown>),
+                } as ComplianceRecord);
+              } else {
+                setComplianceRecord(null);
+              }
+            },
+            (err) => {
+              console.error("Failed to load compliance profile", err);
+              setComplianceRecord(null);
+            }
+          );
 
           const equipmentQuery = query(
             collection(db, "equipment"),
@@ -256,6 +297,7 @@ export default function ContractorKitManager() {
       cancelled = true;
       stopAuth?.();
       unsubscribe?.();
+      complianceUnsubscribe?.();
     };
   }, []);
 
@@ -486,6 +528,16 @@ export default function ContractorKitManager() {
   };
 
   const toggleStandard = (id: string) => {
+    if (
+      id === DRONE_STANDARD_ID &&
+      !hasActiveCompliance &&
+      !form.meetsStandards.includes(DRONE_STANDARD_ID)
+    ) {
+      setError(
+        "HQ must approve your drone compliance before you can tag kit with the drone standard."
+      );
+      return;
+    }
     setForm((prev) => {
       const exists = prev.meetsStandards.includes(id);
       return {
@@ -499,7 +551,18 @@ export default function ContractorKitManager() {
 
   const handleFieldChange = (name: keyof FormState, value: string | boolean) => {
     if (name === "available") {
-      setForm((prev) => ({ ...prev, available: value as boolean } as FormState));
+      const nextAvailable = value as boolean;
+      if (
+        nextAvailable &&
+        form.meetsStandards.includes(DRONE_STANDARD_ID) &&
+        !hasActiveCompliance
+      ) {
+        setError(
+          "HQ must approve your drone compliance before this kit can be listed as available for hire."
+        );
+        return;
+      }
+      setForm((prev) => ({ ...prev, available: nextAvailable } as FormState));
       return;
     }
 
@@ -575,6 +638,23 @@ export default function ContractorKitManager() {
     const validationError = validate();
     if (validationError) {
       setError(validationError);
+      return;
+    }
+
+    const requiresDroneCompliance = form.meetsStandards.includes(
+      DRONE_STANDARD_ID
+    );
+    if (requiresDroneCompliance && !hasActiveCompliance) {
+      setError(
+        "Drone kit can only be listed after HQ approves your compliance documents."
+      );
+      return;
+    }
+
+    if (form.available && requiresDroneCompliance && !hasActiveCompliance) {
+      setError(
+        "Set this kit to unavailable or wait for HQ to approve your drone compliance before saving."
+      );
       return;
     }
 
@@ -689,6 +769,20 @@ export default function ContractorKitManager() {
             Equipment listed here appears in the admin equipment register with
             you recorded as the owner.
           </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Drone compliance
+            </span>
+            <ComplianceBadge
+              status={complianceState.status}
+              title={complianceState.issues.join("\n")}
+            />
+            {complianceState.status !== "approved" && complianceState.issues.length > 0 && (
+              <span className="text-xs text-red-600">
+                {complianceState.issues[0]}
+              </span>
+            )}
+          </div>
           {bookingsError && (
             <p className="mt-1 text-xs text-red-600">{bookingsError}</p>
           )}
@@ -825,12 +919,23 @@ export default function ContractorKitManager() {
                   {applicableStandards.map((standard) => {
                     if (!standard.id) return null;
                     const checked = form.meetsStandards.includes(standard.id);
+                    const isDroneStandard = standard.id === DRONE_STANDARD_ID;
+                    const disableDroneToggle =
+                      isDroneStandard && !hasActiveCompliance && !checked;
+                    const labelTitle =
+                      isDroneStandard && !hasActiveCompliance
+                        ? "HQ needs to approve your compliance documents before you can claim this standard."
+                        : undefined;
                     return (
                       <li key={`standard-${standard.id}`}>
-                        <label className="flex items-start gap-2 text-sm">
+                        <label
+                          className="flex items-start gap-2 text-sm"
+                          title={labelTitle}
+                        >
                           <input
                             type="checkbox"
                             checked={checked}
+                            disabled={disableDroneToggle}
                             onChange={() => toggleStandard(standard.id!)}
                           />
                           <span>
@@ -848,6 +953,11 @@ export default function ContractorKitManager() {
                             {standard.requiresApproval && (
                               <span className="mt-1 inline-flex rounded bg-yellow-100 px-2 py-0.5 text-[11px] font-medium text-yellow-900">
                                 Requires approval
+                              </span>
+                            )}
+                            {isDroneStandard && !hasActiveCompliance && (
+                              <span className="mt-1 block text-xs text-red-600">
+                                Submit and obtain approval for your licence and insurance before marking kit as drone compliant.
                               </span>
                             )}
                           </span>
@@ -996,9 +1106,13 @@ export default function ContractorKitManager() {
               </tr>
             </thead>
             <tbody>
-              {items.map((item) => (
-                <Fragment key={item.id}>
-                  <tr className="border-t">
+              {items.map((item) => {
+                const hasDroneStandard = Array.isArray(item.meetsStandards)
+                  ? item.meetsStandards.includes(DRONE_STANDARD_ID)
+                  : false;
+                return (
+                  <Fragment key={item.id}>
+                    <tr className="border-t">
                     <td className="p-2 align-top">
                       {item.photo ? (
                         <Image
@@ -1057,6 +1171,11 @@ export default function ContractorKitManager() {
                   </td>
                   <td className="p-2 align-top">
                     {item.available === false ? "No" : "Yes"}
+                    {hasDroneStandard && !hasActiveCompliance && (
+                      <span className="mt-1 block text-xs text-red-600">
+                        Drone kit will remain unavailable until your compliance is approved.
+                      </span>
+                    )}
                   </td>
                     <td className="p-2 align-top">
                       <div className="flex flex-col gap-1">
@@ -1213,7 +1332,8 @@ export default function ContractorKitManager() {
                     </tr>
                   )}
                 </Fragment>
-              ))}
+              );
+              })}
             </tbody>
           </table>
         </div>

@@ -126,6 +126,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         })),
         kitItems: orderInput.kitItems.map((kit) => ({
           id: kit.id,
+          name: kit.name ?? null,
+          category: kit.category ?? null,
           start: kit.start,
           end: kit.end,
         })),

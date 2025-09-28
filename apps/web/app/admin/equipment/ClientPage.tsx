@@ -16,6 +16,8 @@ import {
 } from "firebase/firestore";
 import type { Equipment, KitBag, EquipmentStandard } from "@/lib/equipment";
 
+const DRONE_STANDARD_ID = "drone_compliance";
+
 export default function AdminEquipmentPage() {
   const [allowed, setAllowed] = useState<boolean | null>(null);
   const [isStaff, setIsStaff] = useState(false);
@@ -56,6 +58,10 @@ export default function AdminEquipmentPage() {
   const [standardSaving, setStandardSaving] = useState(false);
   const [standardError, setStandardError] = useState<string | null>(null);
   const [showStandardForm, setShowStandardForm] = useState(false);
+  const [droneStandardMessage, setDroneStandardMessage] = useState<string | null>(
+    null
+  );
+  const [ensuringDroneStandard, setEnsuringDroneStandard] = useState(false);
 
   const formatDate = (value?: string | null) => {
     if (!value) return null;
@@ -162,6 +168,11 @@ export default function AdminEquipmentPage() {
     return map;
   }, [standards]);
 
+  const droneStandard = useMemo(
+    () => standards.find((standard) => standard.id === DRONE_STANDARD_ID) || null,
+    [standards]
+  );
+
   const productLookup = useMemo(() => {
     const map = new Map<string, string>();
     products.forEach((product) => {
@@ -211,6 +222,37 @@ export default function AdminEquipmentPage() {
       );
     } catch (err) {
       console.error("Failed to refresh equipment standards", err);
+    }
+  };
+
+  const ensureDroneStandard = async () => {
+    if (!isStaff) return;
+    setStandardError(null);
+    setDroneStandardMessage(null);
+    setEnsuringDroneStandard(true);
+    try {
+      const payload = {
+        title: "Drone compliance",
+        category: "Aviation",
+        minimumSpec: "CAA-licensed pilot, insured aircraft, logged flight plan",
+        description:
+          "Tag kits and kit bags that meet Civil Aviation Authority licence and insurance requirements before selling drone coverage.",
+        requiresApproval: true,
+      };
+      await setDoc(doc(db, "equipmentStandards", DRONE_STANDARD_ID), payload, {
+        merge: true,
+      });
+      await refreshStandards();
+      setDroneStandardMessage(
+        "Drone compliance standard ready. Mark pilot-ready kit to unlock drone bookings."
+      );
+    } catch (err) {
+      console.error("Failed to ensure drone compliance standard", err);
+      setStandardError(
+        "We couldn't prepare the drone compliance standard. Please try again."
+      );
+    } finally {
+      setEnsuringDroneStandard(false);
     }
   };
 
@@ -1112,6 +1154,25 @@ export default function AdminEquipmentPage() {
           </div>
           {standardError && (
             <p className="text-sm text-red-600">{standardError}</p>
+          )}
+          {droneStandardMessage && (
+            <p className="text-sm text-green-600">{droneStandardMessage}</p>
+          )}
+          {!droneStandard && (
+            <div className="rounded border border-dashed border-sky-300 bg-sky-50 p-3 text-sm text-sky-900">
+              <p className="font-medium">Drone compliance standard missing</p>
+              <p className="mt-1 text-sky-800">
+                Create a dedicated standard to tag pilots, kit bags, and aircraft that are cleared for drone work.
+              </p>
+              <button
+                type="button"
+                className="btn btn-sm mt-3"
+                disabled={ensuringDroneStandard}
+                onClick={ensureDroneStandard}
+              >
+                {ensuringDroneStandard ? "Preparing standard…" : "Create drone compliance"}
+              </button>
+            </div>
           )}
           {showStandardForm && (
             <form

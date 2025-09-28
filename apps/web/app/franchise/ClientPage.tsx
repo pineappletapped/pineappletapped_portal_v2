@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import PortalContainer from "@/components/PortalContainer";
+import PortalHero from "@/components/PortalHero";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import type { User } from "firebase/auth";
 import { httpsCallable, type Functions } from "firebase/functions";
@@ -835,44 +836,84 @@ export default function FranchisePortalPage() {
   };
   const busy = initialising || dataLoading;
 
+  const heroMetrics = [
+    { label: "Total orders", value: orderMetrics.totalOrders },
+    { label: "Open orders", value: orderMetrics.openOrders },
+    { label: "Net revenue", value: currencyFormatter.format(orderMetrics.totalNet) },
+    { label: "Franchise share", value: currencyFormatter.format(orderMetrics.totalFranchiseShare) },
+  ];
+
+  const heroActions = [
+    {
+      label: "Review performance",
+      description: "Track sales, earnings, and order health.",
+      href: "#orders-earnings",
+    },
+    {
+      label: "Stage Drive files",
+      description: "Import deliverables from your shared folders.",
+      href: "/franchise/drive-staging",
+    },
+    {
+      label: "Coordinate leads",
+      description: "Manage CRM activity for your territory.",
+      href: "/crm",
+    },
+    {
+      label: "Plan upcoming events",
+      description: "Submit expo and marketing support requests.",
+      href: "#expo-support",
+    },
+  ];
+
   return (
     <PortalContainer>
-      <div className="grid gap-6">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold">Franchise Portal</h1>
-            <p className="text-sm text-gray-600">
-              Monitor orders, upload deliverables, and stay on top of upcoming jobs for your territory.
-            </p>
-          </div>
-          {franchises.length > 1 ? (
-            <select
-              className="select select-bordered max-w-xs"
-              value={activeFranchiseId ?? ""}
-              onChange={(event) => setActiveFranchiseId(event.target.value || null)}
-            >
-              {franchises.map((franchise) => (
-                <option key={franchise.id} value={franchise.id}>
-                  {franchise.name}
-                  {franchise.code ? ` (${franchise.code})` : ""}
-                </option>
-              ))}
-            </select>
-          ) : activeFranchise ? (
-            <div className="text-sm text-right">
-              <p className="font-medium">{activeFranchise.name}</p>
-              {activeFranchise.code && <p className="text-gray-600">Code: {activeFranchise.code}</p>}
+      <div className="space-y-10">
+        <PortalHero
+          eyebrow="Franchise portal"
+          title="Your territory command centre"
+          description="Monitor performance, stage deliverables, and coordinate local marketing without leaving your workspace."
+          backgroundClass="bg-indigo-900"
+          metrics={heroMetrics}
+          quickActions={heroActions}
+        />
+
+        <div className="space-y-6">
+          <div className="rounded-3xl border border-gray-200 bg-white p-4 sm:p-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Franchise selection</h2>
+              <p className="text-sm text-gray-600">
+                Switch territories to load the latest orders, storage, and client context for each franchise you manage.
+              </p>
             </div>
-          ) : null}
-        </div>
-
-        {error && (
-          <div className="alert alert-warning">
-            <span>{error}</span>
+            {franchises.length > 1 ? (
+              <select
+                className="input w-full max-w-xs"
+                value={activeFranchiseId ?? ""}
+                onChange={(event) => setActiveFranchiseId(event.target.value || null)}
+              >
+                {franchises.map((franchise) => (
+                  <option key={franchise.id} value={franchise.id}>
+                    {franchise.name}
+                    {franchise.code ? ` (${franchise.code})` : ""}
+                  </option>
+                ))}
+              </select>
+            ) : activeFranchise ? (
+              <div className="text-sm text-right">
+                <p className="font-medium text-gray-900">{activeFranchise.name}</p>
+                {activeFranchise.code && <p className="text-gray-600">Code: {activeFranchise.code}</p>}
+              </div>
+            ) : null}
           </div>
-        )}
 
-        {busy && <p>Loading franchise data…</p>}
+          {error && (
+            <div className="alert alert-warning">
+              <span>{error}</span>
+            </div>
+          )}
+
+          {busy && <p className="text-sm text-gray-600">Loading franchise data…</p>}
 
         {!busy && !activeFranchiseId && (
           <div className="card bg-amber-50 border border-amber-200 p-6">
@@ -885,7 +926,7 @@ export default function FranchisePortalPage() {
 
         {!busy && activeFranchise && (
           <>
-            <section className="grid gap-4 lg:grid-cols-4 sm:grid-cols-2">
+            <section id="orders-earnings" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <div className="card bg-blue-50 border border-blue-200 p-4">
                 <p className="text-sm text-blue-600">Orders this franchise</p>
                 <p className="text-2xl font-semibold text-blue-900">{orderMetrics.totalOrders}</p>
@@ -910,7 +951,7 @@ export default function FranchisePortalPage() {
               </div>
             </section>
 
-            <section className="card border border-slate-200 p-4">
+            <section id="operations-toolkit" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
                 <div>
                   <h2 className="text-lg font-semibold">Operations toolkit</h2>
@@ -948,7 +989,48 @@ export default function FranchisePortalPage() {
               </div>
             </section>
 
-            <section className="card border border-slate-200 p-4">
+            <section id="drive-staging" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-semibold">Drive deliverable staging</h2>
+                  <p className="text-sm text-gray-600">
+                    Pull footage and edits from the shared Drive workspace and publish them straight to the client review queue without re-uploading.
+                  </p>
+                </div>
+                <Link href="/franchise/drive-staging" className="btn-sm">
+                  Open staging tool
+                </Link>
+              </div>
+              <p className="text-xs text-gray-500">
+                Files staged here respect the payment gate and automatically create review tasks so crews can track approvals and release readiness.
+              </p>
+            </section>
+
+            <section id="lead-pipeline" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-semibold">Lead pipeline</h2>
+                  <p className="text-sm text-gray-600">
+                    Review the leads and clients assigned to your franchise without leaving the portal. The CRM workspace
+                    automatically filters records to the organisations you belong to.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Link href="/crm/leads" className="btn-sm">
+                    Leads view
+                  </Link>
+                  <Link href="/crm" className="btn-sm btn-outline">
+                    Open CRM workspace
+                  </Link>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500">
+                Use the workspace to capture outreach notes, store collateral, and monitor recent orders for accounts within
+                your territory.
+              </p>
+            </section>
+
+            <section id="orders-pipeline" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
                 <div>
                   <h2 className="text-lg font-semibold">Orders & earnings</h2>
@@ -1013,7 +1095,7 @@ export default function FranchisePortalPage() {
               )}
             </section>
 
-            <section className="card border border-slate-200 p-4">
+            <section id="upcoming-schedule" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
                 <div>
                   <h2 className="text-lg font-semibold">Upcoming schedule</h2>
@@ -1035,7 +1117,7 @@ export default function FranchisePortalPage() {
               )}
             </section>
 
-            <section className="card border border-slate-200 p-4">
+            <section id="expo-support" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
                 <div>
                   <h2 className="text-lg font-semibold">Head Office expo support</h2>
@@ -1220,7 +1302,7 @@ export default function FranchisePortalPage() {
               )}
             </section>
 
-            <section className="card border border-slate-200 p-4">
+            <section id="upload-deliverables" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
                 <div>
                   <h2 className="text-lg font-semibold">Upload deliverables</h2>
@@ -1282,7 +1364,7 @@ export default function FranchisePortalPage() {
               )}
             </section>
 
-            <section className="card border border-slate-200 p-4">
+            <section id="client-directory" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
                 <div>
                   <h2 className="text-lg font-semibold">Client directory</h2>
@@ -1330,6 +1412,7 @@ export default function FranchisePortalPage() {
             </section>
           </>
         )}
+        </div>
       </div>
     </PortalContainer>
   );

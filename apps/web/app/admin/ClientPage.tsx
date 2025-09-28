@@ -3,6 +3,8 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import PortalContainer from '@/components/PortalContainer';
+import PortalHero from '@/components/PortalHero';
 import { db } from '@/lib/firebase';
 import {
   collection,
@@ -38,6 +40,36 @@ export default function AdminPage() {
   });
   const [alerts, setAlerts] = useState<DashboardAlert[]>([]);
   const [tasks, setTasks] = useState<any[]>([]);
+
+  const heroMetrics = [
+    { label: 'Orders', value: stats.orders },
+    { label: 'Projects', value: stats.projects },
+    { label: 'Quotes pending', value: stats.quotesPending },
+    { label: 'Proposals pending', value: stats.proposalsPending },
+  ];
+
+  const heroActions = [
+    {
+      label: 'Manage orders',
+      description: 'Review fulfilment and release status.',
+      href: '/admin/orders',
+    },
+    {
+      label: 'Launch analytics',
+      description: 'Monitor marketing and production performance.',
+      href: '/admin/analytics',
+    },
+    {
+      label: 'Open CRM workspace',
+      description: 'Support sales follow-up and client care.',
+      href: '/crm',
+    },
+    {
+      label: 'Audit login history',
+      description: 'Check recent sign-ins across the platform.',
+      href: '/admin/login-history',
+    },
+  ];
   useEffect(() => {
     if (guardLoading || !allowed) return;
 
@@ -174,156 +206,188 @@ export default function AdminPage() {
       active = false;
     };
   }, [allowed, guardLoading]);
-  if (guardLoading) return <p>Loading…</p>;
-  if (!allowed) return <p>You do not have permission to view the admin dashboard.</p>;
+  if (guardLoading) {
+    return (
+      <PortalContainer>
+        <div className="py-16 text-center text-sm text-gray-500">Preparing admin workspace…</div>
+      </PortalContainer>
+    );
+  }
+  if (!allowed) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">
+          You do not have permission to view the admin dashboard.
+        </p>
+      </PortalContainer>
+    );
+  }
   return (
-    <div className="grid gap-6">
-      <h1 className="text-xl font-semibold">Admin Dashboard</h1>
+    <PortalContainer>
+      <div className="space-y-10">
+        <PortalHero
+          eyebrow="Admin portal"
+          title="Production HQ oversight"
+          description="Monitor orders, unlock analytics, and coordinate teams across the Pineapple Tapped network."
+          backgroundClass="bg-stone-900"
+          metrics={heroMetrics}
+          quickActions={heroActions}
+        />
 
-      {alerts.length > 0 && (
-        <div className="rounded-md border border-amber-400 bg-amber-50 p-4">
-          <div className="flex items-start gap-3">
-            <ExclamationTriangleIcon className="mt-0.5 h-5 w-5 text-amber-600" />
-            <div>
-              <h2 className="font-semibold text-amber-800">Attention needed</h2>
-              <ul className="mt-2 space-y-1 text-sm text-amber-700">
-                {alerts.map((alert) => (
-                  <li key={alert.id} className="leading-snug">
-                    • {alert.message}
-                  </li>
-                ))}
-              </ul>
+        <div className="space-y-6">
+          {alerts.length > 0 && (
+            <div className="rounded-3xl border border-amber-300 bg-amber-50 p-6">
+              <div className="flex items-start gap-3">
+                <ExclamationTriangleIcon className="mt-0.5 h-5 w-5 text-amber-600" />
+                <div>
+                  <h2 className="font-semibold text-amber-900">Attention needed</h2>
+                  <ul className="mt-2 space-y-1 text-sm text-amber-800">
+                    {alerts.map((alert) => (
+                      <li key={alert.id} className="leading-snug">
+                        • {alert.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
             </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
+            <StatCard label="Orders" value={stats.orders} trend={trends.orders} trendLabel="Orders/week" />
+            <StatCard
+              label="Projects"
+              value={stats.projects}
+              trend={trends.projects}
+              trendLabel="Projects/week"
+            />
+            <StatCard label="Clients" value={stats.users} />
+            <StatCard label="Products" value={stats.products} />
+            <StatCard
+              label="Quotes Pending"
+              value={stats.quotesPending}
+              trend={trends.quotes}
+              trendLabel="New quotes/week"
+              warning={stats.quotesPending > QUOTE_WARNING_THRESHOLD}
+            />
+            <StatCard
+              label="Proposals Pending"
+              value={stats.proposalsPending}
+              trend={trends.proposals}
+              trendLabel="Proposals/week"
+              warning={stats.proposalsPending > PROPOSAL_WARNING_THRESHOLD}
+            />
           </div>
-        </div>
-      )}
 
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        <StatCard label="Orders" value={stats.orders} trend={trends.orders} trendLabel="Orders/week" />
-        <StatCard
-          label="Projects"
-          value={stats.projects}
-          trend={trends.projects}
-          trendLabel="Projects/week"
-        />
-        <StatCard label="Clients" value={stats.users} />
-        <StatCard label="Products" value={stats.products} />
-        <StatCard
-          label="Quotes Pending"
-          value={stats.quotesPending}
-          trend={trends.quotes}
-          trendLabel="New quotes/week"
-          warning={stats.quotesPending > QUOTE_WARNING_THRESHOLD}
-        />
-        <StatCard
-          label="Proposals Pending"
-          value={stats.proposalsPending}
-          trend={trends.proposals}
-          trendLabel="Proposals/week"
-          warning={stats.proposalsPending > PROPOSAL_WARNING_THRESHOLD}
-        />
-      </div>
-
-      <section>
-        <h2 className="text-lg font-semibold mb-2">Recent Tasks</h2>
-        {tasks.length === 0 ? (
-          <p className="text-sm text-gray-500">No tasks found.</p>
-        ) : (
-          <ul className="divide-y rounded border">
-            {tasks.map((t) => (
-              <li key={t.id} className="flex items-center justify-between p-2">
-                <span>{t.title}</span>
-                <span className="text-sm capitalize text-gray-500">{t.status}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section>
-        <h2 className="text-lg font-semibold mb-2">Quick Links</h2>
-        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          {[
-            {
-              title: 'Orders & Projects',
-              links: [
-                { href: '/admin/orders', label: 'Manage Orders' },
-                { href: '/admin/projects', label: 'Project Management' },
-                { href: '/admin/workflows', label: 'Manage Workflows' },
-                { href: '/admin/proposals', label: 'Quotes & Proposals' },
-                { href: '/admin/availability', label: 'Manage Availability' },
-              ],
-            },
-            {
-              title: 'Products',
-              links: [
-                { href: '/admin/categories', label: 'Manage Categories' },
-                { href: '/admin/products', label: 'Product Management' },
-                { href: '/admin/modifiers', label: 'Manage Modifiers' },
-                { href: '/admin/venues', label: 'Venue Library' },
-              ],
-            },
-            {
-              title: 'People',
-              links: [
-                { href: '/admin/users', label: 'CRM' },
-                { href: '/admin/team', label: 'Manage Team' },
-                { href: '/admin/join-team-steps', label: 'Join Team Form' },
-                { href: '/admin/franchises', label: 'Franchise Network' },
-              ],
-            },
-            {
-              title: 'Brand & Content',
-              links: [
-                { href: '/admin/client-logos', label: 'Manage Client Logos' },
-                { href: '/admin/blog', label: 'Blog Management' },
-                { href: '/admin/website-design', label: 'Website Design' },
-              ],
-            },
-            {
-              title: 'Marketing',
-              links: [
-                { href: '/admin/exhibitions', label: 'Exhibitions' },
-                { href: '/admin/marketing/content-planner', label: 'Content Planner' },
-                { href: '/admin/marketing/remarketing', label: 'Remarketing' },
-                { href: '/admin/voucher-codes', label: 'Voucher Management' },
-                { href: '/admin/email-schedules', label: 'Email Schedules' },
-              ],
-            },
-            {
-              title: 'Policies & Docs',
-              links: [
-                { href: '/admin/agreements', label: 'Agreements & Policies' },
-              ],
-            },
-            { title: 'Finance', links: [ { href: '/admin/finance', label: 'Finance & Expenses' } ] },
-            { title: 'Reports', links: [ { href: '/admin/analytics', label: 'Analytics Dashboard' } ] },
-            {
-              title: 'Logs & Comms',
-              links: [
-                { href: '/admin/audit-logs', label: 'Audit Logs' },
-                { href: '/admin/login-history', label: 'Login History' },
-                { href: '/admin/messages', label: 'Messages' },
-              ],
-            },
-            { title: 'Equipment', links: [ { href: '/admin/equipment', label: 'Equipment Register' } ] },
-          ].map((group) => (
-            <div key={group.title}>
-              <h3 className="font-medium">{group.title}</h3>
-              <ul className="mt-1 grid gap-1 list-disc list-inside">
-                {group.links.map((l) => (
-                  <li key={l.href}>
-                    <Link href={l.href} className="text-orange">
-                      {l.label}
-                    </Link>
+          <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold mb-2">Recent Tasks</h2>
+            {tasks.length === 0 ? (
+              <p className="text-sm text-gray-500">No tasks found.</p>
+            ) : (
+              <ul className="divide-y rounded border">
+                {tasks.map((t) => (
+                  <li key={t.id} className="flex items-center justify-between p-2">
+                    <span>{t.title}</span>
+                    <span className="text-sm capitalize text-gray-500">{t.status}</span>
                   </li>
                 ))}
               </ul>
+            )}
+          </section>
+
+          <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold mb-2">Quick Links</h2>
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              {[
+                {
+                  title: 'Orders & Projects',
+                  links: [
+                    { href: '/admin/orders', label: 'Manage Orders' },
+                    { href: '/admin/projects', label: 'Project Management' },
+                    { href: '/admin/workflows', label: 'Manage Workflows' },
+                    { href: '/admin/proposals', label: 'Quotes & Proposals' },
+                    { href: '/admin/availability', label: 'Manage Availability' },
+                  ],
+                },
+                {
+                  title: 'Products',
+                  links: [
+                    { href: '/admin/categories', label: 'Manage Categories' },
+                    { href: '/admin/products', label: 'Product Management' },
+                    { href: '/admin/modifiers', label: 'Manage Modifiers' },
+                    { href: '/admin/venues', label: 'Venue Library' },
+                  ],
+                },
+                {
+                  title: 'Storage',
+                  links: [
+                    { href: '/admin/storage', label: 'Storage Automation' },
+                  ],
+                },
+                {
+                  title: 'People',
+                  links: [
+                    { href: '/crm', label: 'CRM Workspace' },
+                    { href: '/admin/users', label: 'Client Directory' },
+                    { href: '/admin/team', label: 'Manage Team' },
+                    { href: '/admin/join-team-steps', label: 'Join Team Form' },
+                    { href: '/admin/franchises', label: 'Franchise Network' },
+                  ],
+                },
+                {
+                  title: 'Brand & Content',
+                  links: [
+                    { href: '/admin/client-logos', label: 'Manage Client Logos' },
+                    { href: '/admin/blog', label: 'Blog Management' },
+                    { href: '/admin/website-design', label: 'Website Design' },
+                  ],
+                },
+                {
+                  title: 'Marketing',
+                  links: [
+                    { href: '/admin/exhibitions', label: 'Exhibitions' },
+                    { href: '/admin/marketing/content-planner', label: 'Content Planner' },
+                    { href: '/admin/marketing/remarketing', label: 'Remarketing' },
+                    { href: '/admin/voucher-codes', label: 'Voucher Management' },
+                    { href: '/admin/email-schedules', label: 'Email Schedules' },
+                  ],
+                },
+                {
+                  title: 'Policies & Docs',
+                  links: [
+                    { href: '/admin/agreements', label: 'Agreements & Policies' },
+                  ],
+                },
+                { title: 'Finance', links: [ { href: '/admin/finance', label: 'Finance & Expenses' } ] },
+                { title: 'Reports', links: [ { href: '/admin/analytics', label: 'Analytics Dashboard' } ] },
+                {
+                  title: 'Logs & Comms',
+                  links: [
+                    { href: '/admin/audit-logs', label: 'Audit Logs' },
+                    { href: '/admin/login-history', label: 'Login History' },
+                    { href: '/admin/messages', label: 'Messages' },
+                  ],
+                },
+                { title: 'Equipment', links: [ { href: '/admin/equipment', label: 'Equipment Register' } ] },
+              ].map((group) => (
+                <div key={group.title}>
+                  <h3 className="font-medium text-gray-900">{group.title}</h3>
+                  <ul className="mt-1 grid gap-1 list-disc list-inside text-sm text-gray-600">
+                    {group.links.map((l) => (
+                      <li key={l.href}>
+                        <Link href={l.href} className="text-orange-600 hover:underline">
+                          {l.label}
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
             </div>
-          ))}
+          </section>
         </div>
-      </section>
-    </div>
+      </div>
+    </PortalContainer>
   );
 }
 

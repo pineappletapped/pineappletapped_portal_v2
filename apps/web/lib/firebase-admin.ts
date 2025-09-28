@@ -1,58 +1,111 @@
 import 'server-only';
 
-import { cert, getApp, getApps, initializeApp, type App } from 'firebase-admin/app';
+import {
+  applicationDefault,
+  cert,
+  getApp,
+  getApps,
+  initializeApp,
+  type App,
+} from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 
-let cachedApp: App | null = null;
+const DEFAULT_APP_KEY = '__default__';
+const appCache = new Map<string, App>();
 
-function createAdminApp(): App {
-  if (cachedApp) {
-    return cachedApp;
+function normalise(value: string | undefined | null) {
+  return value?.trim() || undefined;
+}
+
+function resolveProjectId(override?: string | null): string | undefined {
+  return (
+    override?.trim() ||
+    normalise(process.env.FIREBASE_ADMIN_PROJECT_ID) ||
+    normalise(process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID) ||
+    normalise(process.env.GOOGLE_CLOUD_PROJECT) ||
+    normalise(process.env.GCLOUD_PROJECT)
+  );
+}
+
+function getExistingAppByName(name: string | undefined): App | null {
+  if (!name) {
+    try {
+      return getApp();
+    } catch (error) {
+      return null;
+    }
   }
 
-  const existing = getApps();
-  if (existing.length > 0) {
-    cachedApp = getApp();
-    return cachedApp;
+  const match = getApps().find((app) => app.name === name);
+  return match ?? null;
+}
+
+function getAppCacheKey(projectIdOverride?: string | null) {
+  return projectIdOverride ? `project:${projectIdOverride}` : DEFAULT_APP_KEY;
+}
+
+function createAdminApp(projectIdOverride?: string | null): App {
+  const trimmedOverride = projectIdOverride?.trim() || undefined;
+  const cacheKey = getAppCacheKey(trimmedOverride);
+  const cached = appCache.get(cacheKey);
+  if (cached) {
+    return cached;
   }
 
-  const projectId =
-    process.env.FIREBASE_ADMIN_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
-  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
-  const privateKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY;
+  const appName = trimmedOverride ? `project-${trimmedOverride}` : undefined;
+  const existing = getExistingAppByName(appName);
+  if (existing) {
+    appCache.set(cacheKey, existing);
+    return existing;
+  }
 
-  if (!projectId) {
+  const resolvedProjectId = resolveProjectId(trimmedOverride);
+  const clientEmail = normalise(process.env.FIREBASE_ADMIN_CLIENT_EMAIL);
+  const privateKey = normalise(process.env.FIREBASE_ADMIN_PRIVATE_KEY);
+  const hasServiceAccount = Boolean(clientEmail && privateKey);
+
+  if (hasServiceAccount && !resolvedProjectId) {
     throw new Error('Firebase admin project ID is not configured.');
   }
-  if (!clientEmail) {
-    throw new Error('Firebase admin client email is not configured.');
-  }
-  if (!privateKey) {
-    throw new Error('Firebase admin private key is not configured.');
-  }
 
-  const cleanedKey = privateKey.replace(/\\n/g, '\n');
+  const initialise = () => {
+    if (hasServiceAccount) {
+      const cleanedKey = privateKey!.replace(/\\n/g, '\n');
+      return initializeApp(
+        {
+          credential: cert({
+            projectId: resolvedProjectId!,
+            clientEmail: clientEmail!,
+            privateKey: cleanedKey,
+          }),
+          projectId: resolvedProjectId!,
+        },
+        appName
+      );
+    }
 
-  cachedApp = initializeApp({
-    credential: cert({
-      projectId,
-      clientEmail,
-      privateKey: cleanedKey,
-    }),
-  });
+    const options: Parameters<typeof initializeApp>[0] = {
+      credential: applicationDefault(),
+      ...(resolvedProjectId ? { projectId: resolvedProjectId } : {}),
+    };
 
-  return cachedApp;
+    return initializeApp(options, appName);
+  };
+
+  const app = initialise();
+  appCache.set(cacheKey, app);
+  return app;
 }
 
-export function getFirebaseAdminApp(): App {
-  return createAdminApp();
+export function getFirebaseAdminApp(projectIdOverride?: string | null): App {
+  return createAdminApp(projectIdOverride);
 }
 
-export function getFirebaseAdminAuth() {
-  return getAuth(getFirebaseAdminApp());
+export function getFirebaseAdminAuth(projectIdOverride?: string | null) {
+  return getAuth(getFirebaseAdminApp(projectIdOverride));
 }
 
-export function getFirebaseAdminFirestore() {
-  return getFirestore(getFirebaseAdminApp());
+export function getFirebaseAdminFirestore(projectIdOverride?: string | null) {
+  return getFirestore(getFirebaseAdminApp(projectIdOverride));
 }

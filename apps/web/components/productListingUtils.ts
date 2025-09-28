@@ -47,7 +47,7 @@ export function getProductPriceExtents(product: Product):
 export function getListingPriceLabel(product: Product): string | null {
   const range = getProductPriceExtents(product);
   if (!range) return null;
-  const baseLabel = `From £${range.min.toFixed(2)} (listing price)`;
+  const baseLabel = `From £${range.min.toFixed(2)} (login for accurate instant quote)`;
   if (range.max > range.min) {
     return `${baseLabel} · Packages up to £${range.max.toFixed(2)}`;
   }

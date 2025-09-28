@@ -47,7 +47,36 @@ export default function Login() {
       });
 
       if (!response.ok) {
-        throw new Error('SESSION_CREATION_FAILED');
+        let message = 'Unable to sign in right now. Please try again later.';
+        try {
+          const payload: unknown = await response.json();
+          const extracted =
+            payload && typeof payload === 'object' && 'error' in payload && typeof (payload as any).error === 'string'
+              ? (payload as any).error.trim()
+              : '';
+          if (extracted) {
+            message = extracted;
+          } else if (response.status === 401) {
+            message = 'We could not establish a secure session for your account. Please contact an administrator.';
+          }
+        } catch (parseError) {
+          console.warn('Failed to parse session creation error response', parseError);
+        }
+
+        try {
+          await credential.user.reload();
+        } catch (reloadError) {
+          console.warn('Failed to reload user after session failure', reloadError);
+        }
+
+        try {
+          await auth.signOut();
+        } catch (signOutError) {
+          console.warn('Failed to clear Firebase session after session creation error', signOutError);
+        }
+
+        setError(message);
+        return;
       }
 
       const data: { destination?: string | null } = await response.json();
@@ -67,6 +96,12 @@ export default function Login() {
         setError('Unable to sign in right now. Please try again later.');
       }
       setResetEmail(null);
+      try {
+        const { auth } = await getClientFirebaseAuth();
+        await auth.signOut();
+      } catch (cleanupError) {
+        console.warn('Failed to ensure Firebase session cleared after login error', cleanupError);
+      }
     }
   };
 

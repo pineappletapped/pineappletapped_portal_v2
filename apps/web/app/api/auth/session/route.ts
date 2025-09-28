@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
+import type { Auth, DecodedIdToken } from 'firebase-admin/auth';
+
 import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from '@/lib/firebase-admin';
 import {
   encodeRolesCookie,
@@ -16,6 +18,86 @@ function createUnauthorizedResponse(message = 'Unauthorized') {
   return NextResponse.json({ error: message }, { status: 401 });
 }
 
+function extractProjectIdFromIdToken(idToken: string): string | null {
+  const parts = idToken.split('.');
+  if (parts.length < 2) {
+    return null;
+  }
+
+  try {
+    const payloadJson = Buffer.from(parts[1], 'base64url').toString('utf8');
+    const payload = JSON.parse(payloadJson) as {
+      aud?: unknown;
+      iss?: unknown;
+      firebase?: { project_id?: unknown };
+    };
+
+    const firebaseProject = payload?.firebase?.project_id;
+    if (typeof firebaseProject === 'string' && firebaseProject.trim()) {
+      return firebaseProject.trim();
+    }
+
+    if (typeof payload.aud === 'string' && payload.aud.trim()) {
+      return payload.aud.trim();
+    }
+
+    if (typeof payload.iss === 'string') {
+      const match = payload.iss.match(/securetoken\.google\.com\/([^/]+)/i);
+      if (match?.[1]) {
+        return match[1];
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to decode Firebase ID token payload for project extraction', error);
+  }
+
+  return null;
+}
+
+function shouldRetryWithProjectOverride(error: unknown): boolean {
+  if (!(error instanceof Error) || !error.message) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('incorrect "aud"') ||
+    message.includes('project mismatch') ||
+    message.includes('make sure the id token comes from the same firebase project') ||
+    message.includes('ensure the id token comes from the same firebase project')
+  );
+}
+
+type VerifiedSessionContext = {
+  decoded: DecodedIdToken;
+  auth: Auth;
+  projectOverride: string | null;
+};
+
+async function verifyIdTokenWithFallback(idToken: string): Promise<VerifiedSessionContext> {
+  let auth = getFirebaseAdminAuth();
+
+  try {
+    const decoded = await auth.verifyIdToken(idToken, true);
+    return { decoded, auth, projectOverride: null };
+  } catch (error) {
+    const fallbackProjectId = extractProjectIdFromIdToken(idToken);
+    if (!fallbackProjectId || !shouldRetryWithProjectOverride(error)) {
+      throw error;
+    }
+
+    console.warn(
+      'Retrying Firebase session verification with token project ID override',
+      fallbackProjectId,
+      error
+    );
+
+    auth = getFirebaseAdminAuth(fallbackProjectId);
+    const decoded = await auth.verifyIdToken(idToken, true);
+    return { decoded, auth, projectOverride: fallbackProjectId };
+  }
+}
+
 export async function POST(req: NextRequest) {
   let idToken: unknown;
   try {
@@ -29,10 +111,9 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const auth = getFirebaseAdminAuth();
-    const decoded = await auth.verifyIdToken(idToken, true);
+    const { decoded, auth, projectOverride } = await verifyIdTokenWithFallback(idToken);
 
-    const firestore = getFirebaseAdminFirestore();
+    const firestore = getFirebaseAdminFirestore(projectOverride);
     const userRef = firestore.collection('users').doc(decoded.uid);
     const snapshot = await userRef.get();
     let userData = snapshot.exists ? snapshot.data() ?? {} : {};
@@ -108,7 +189,11 @@ export async function POST(req: NextRequest) {
     return response;
   } catch (error) {
     console.error('Failed to establish Firebase session', error);
-    if (error instanceof Error && /not configured/i.test(error.message)) {
+    if (
+      error instanceof Error &&
+      (/not configured/i.test(error.message) ||
+        /credential implementation provided/i.test(error.message))
+    ) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
     return createUnauthorizedResponse();
