@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import type { Auth, DecodedIdToken } from 'firebase-admin/auth';
 
+import { FieldValue, type Firestore } from 'firebase-admin/firestore';
+
 import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from '@/lib/firebase-admin';
 import {
   encodeRolesCookie,
@@ -14,8 +16,64 @@ import {
 
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
-function createUnauthorizedResponse(message = 'Unauthorized') {
+const DEFAULT_UNAUTHORIZED_MESSAGE =
+  'We could not validate your sign-in credentials. Please try signing in again.';
+const DEFAULT_SERVER_ERROR_MESSAGE =
+  'Unable to establish a secure session. Please try again later.';
+
+function createUnauthorizedResponse(message = DEFAULT_UNAUTHORIZED_MESSAGE) {
   return NextResponse.json({ error: message }, { status: 401 });
+}
+
+type SessionErrorResolution = { status: number; message: string };
+
+const UNAUTHORIZED_ERROR_CODES = new Set([
+  'auth/id-token-expired',
+  'auth/id-token-revoked',
+  'auth/invalid-claims',
+  'auth/invalid-id-token',
+  'auth/invalid-session-cookie',
+  'auth/session-cookie-expired',
+  'auth/session-cookie-revoked',
+  'auth/user-disabled',
+  'auth/user-not-found',
+]);
+
+function resolveSessionFailure(error: unknown): SessionErrorResolution {
+  if (!error || typeof error !== 'object') {
+    return { status: 500, message: DEFAULT_SERVER_ERROR_MESSAGE };
+  }
+
+  const codeRaw = (error as { code?: unknown }).code;
+  const code = typeof codeRaw === 'string' ? codeRaw.trim().toLowerCase() : '';
+  const messageRaw = (error as { message?: unknown }).message;
+  const message = typeof messageRaw === 'string' ? messageRaw.trim() : '';
+
+  if (code) {
+    if (UNAUTHORIZED_ERROR_CODES.has(code)) {
+      if (code === 'auth/id-token-revoked' && looksLikePermissionError(message)) {
+        return { status: 500, message: DEFAULT_SERVER_ERROR_MESSAGE };
+      }
+      return { status: 401, message: DEFAULT_UNAUTHORIZED_MESSAGE };
+    }
+
+    if (code.startsWith('auth/')) {
+      return { status: 500, message: DEFAULT_SERVER_ERROR_MESSAGE };
+    }
+  }
+
+  if (message) {
+    const normalizedMessage = message.toLowerCase();
+    if (/\b(token|session)\b/.test(normalizedMessage) && normalizedMessage.includes('revoked')) {
+      return { status: 401, message: DEFAULT_UNAUTHORIZED_MESSAGE };
+    }
+
+    if (/not configured/i.test(message) || /credential implementation provided/i.test(message)) {
+      return { status: 500, message };
+    }
+  }
+
+  return { status: 500, message: DEFAULT_SERVER_ERROR_MESSAGE };
 }
 
 function extractProjectIdFromIdToken(idToken: string): string | null {
@@ -74,13 +132,71 @@ type VerifiedSessionContext = {
   projectOverride: string | null;
 };
 
+function looksLikePermissionError(message: string | undefined | null) {
+  if (!message) {
+    return false;
+  }
+
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('permission denied') ||
+    lower.includes('insufficient permission') ||
+    lower.includes('does not have permission') ||
+    lower.includes('the caller does not have permission') ||
+    lower.includes('permission to access the requested resource')
+  );
+}
+
+function shouldRetryWithoutRevocationCheck(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return true;
+  }
+
+  const codeRaw = (error as { code?: unknown }).code;
+  const messageRaw = (error as { message?: unknown }).message;
+  const code = typeof codeRaw === 'string' ? codeRaw.toLowerCase() : '';
+  const message = typeof messageRaw === 'string' ? messageRaw : '';
+
+  if (code === 'auth/id-token-revoked') {
+    if (looksLikePermissionError(message)) {
+      console.warn(
+        'Firebase session verification reported id-token-revoked but message indicates permission issues; retrying without revocation check'
+      );
+      return true;
+    }
+    return false;
+  }
+
+  if (code.startsWith('auth/')) {
+    return true;
+  }
+
+  if (message) {
+    const lowerMessage = message.toLowerCase();
+    if (lowerMessage.includes('revoked') && !looksLikePermissionError(message)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 async function attemptVerification(
   idToken: string,
   projectOverride: string | null
 ): Promise<VerifiedSessionContext> {
   const auth = getFirebaseAdminAuth(projectOverride);
-  const decoded = await auth.verifyIdToken(idToken, true);
-  return { decoded, auth, projectOverride };
+  try {
+    const decoded = await auth.verifyIdToken(idToken, true);
+    return { decoded, auth, projectOverride };
+  } catch (error) {
+    if (shouldRetryWithoutRevocationCheck(error)) {
+      console.warn('Retrying Firebase session verification without revocation check after error', error);
+      const decoded = await auth.verifyIdToken(idToken, false);
+      return { decoded, auth, projectOverride };
+    }
+    throw error;
+  }
 }
 
 async function verifyIdTokenWithFallback(idToken: string): Promise<VerifiedSessionContext> {
@@ -156,27 +272,55 @@ export async function POST(req: NextRequest) {
   try {
     const { decoded, auth, projectOverride } = await verifyIdTokenWithFallback(idToken);
 
-    const firestore = getFirebaseAdminFirestore(projectOverride);
-    const userRef = firestore.collection('users').doc(decoded.uid);
-    const snapshot = await userRef.get();
-    let userData = snapshot.exists ? snapshot.data() ?? {} : {};
-
     const decodedEmail = decoded.email ?? null;
+    type EnrichedUserDoc = Record<string, unknown> & {
+      id: string;
+      uid: string;
+      email: string | null;
+    };
 
-    if (!snapshot.exists) {
-      await userRef.set({ email: decodedEmail }, { merge: true });
-      userData = { email: decodedEmail };
-    } else if (decodedEmail && userData?.email !== decodedEmail) {
-      await userRef.set({ email: decodedEmail }, { merge: true });
-      userData = { ...userData, email: decodedEmail };
+    let enrichedUserDoc: EnrichedUserDoc = {
+      id: decoded.uid,
+      uid: decoded.uid,
+      email: decodedEmail,
+    };
+
+    let firestore: Firestore | null = null;
+    try {
+      firestore = getFirebaseAdminFirestore(projectOverride);
+      const userRef = firestore.collection('users').doc(decoded.uid);
+      const snapshot = await userRef.get();
+      let userData = snapshot.exists ? snapshot.data() ?? {} : {};
+
+      if (!snapshot.exists) {
+        await userRef.set({ email: decodedEmail }, { merge: true });
+        userData = { email: decodedEmail };
+      } else if (decodedEmail && userData?.email !== decodedEmail) {
+        await userRef.set({ email: decodedEmail }, { merge: true });
+        userData = { ...userData, email: decodedEmail };
+      }
+
+      enrichedUserDoc = {
+        ...userData,
+        id: snapshot.id || decoded.uid,
+        uid: decoded.uid,
+        email: decodedEmail ?? userData?.email ?? null,
+      };
+    } catch (firestoreError) {
+      console.error('Failed to synchronise user profile during session creation', firestoreError);
     }
 
-    const enrichedUserDoc = {
-      ...userData,
-      id: snapshot.id || decoded.uid,
-      uid: decoded.uid,
-      email: decodedEmail ?? userData?.email ?? null,
-    };
+    if (firestore) {
+      try {
+        await firestore.collection('loginHistory').add({
+          uid: decoded.uid,
+          timestamp: FieldValue.serverTimestamp(),
+          email: decodedEmail,
+        });
+      } catch (loginHistoryError) {
+        console.error('Failed to record login history entry during session creation', loginHistoryError);
+      }
+    }
 
     const roles: UserRoles = extractUserRoles(enrichedUserDoc);
     const hasBackofficeAccess = hasRole(roles, ROLE_KEYS);
@@ -232,14 +376,8 @@ export async function POST(req: NextRequest) {
     return response;
   } catch (error) {
     console.error('Failed to establish Firebase session', error);
-    if (
-      error instanceof Error &&
-      (/not configured/i.test(error.message) ||
-        /credential implementation provided/i.test(error.message))
-    ) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-    return createUnauthorizedResponse();
+    const { status, message } = resolveSessionFailure(error);
+    return NextResponse.json({ error: message }, { status });
   }
 }
 

@@ -4,6 +4,47 @@ import { useEffect, useRef } from 'react';
 import type { User } from 'firebase/auth';
 import { ensureFirebase, httpsCallable, loadAuthModule } from '@/lib/firebase';
 
+const DEFAULT_LOGIN_TELEMETRY_ALLOWED_ORIGINS = ['http://localhost:3000'];
+
+const parseAllowedOrigins = () => {
+  const raw = process.env.NEXT_PUBLIC_LOGIN_TELEMETRY_ALLOWED_ORIGINS;
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return DEFAULT_LOGIN_TELEMETRY_ALLOWED_ORIGINS;
+  }
+
+  return raw
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+};
+
+const LOGIN_TELEMETRY_ALLOWED_ORIGINS = new Set(parseAllowedOrigins());
+
+const shouldEnableLoginTelemetry = () => {
+  if (process.env.NEXT_PUBLIC_ENABLE_LOGIN_TELEMETRY === 'true') {
+    return true;
+  }
+
+  if (process.env.NEXT_PUBLIC_DISABLE_LOGIN_TELEMETRY === 'true') {
+    return false;
+  }
+
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  if (LOGIN_TELEMETRY_ALLOWED_ORIGINS.size === 0) {
+    return false;
+  }
+
+  const origin = window.location.origin;
+  if (!LOGIN_TELEMETRY_ALLOWED_ORIGINS.has(origin)) {
+    return false;
+  }
+
+  return true;
+};
+
 const makeSessionKey = (user: User) => {
   const lastSignIn =
     typeof user.metadata?.lastSignInTime === 'string' ? user.metadata.lastSignInTime : '';
@@ -17,6 +58,10 @@ export function useLoginTelemetry() {
   const lastRecordedSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
+    if (!shouldEnableLoginTelemetry()) {
+      return;
+    }
+
     let unsubscribe: (() => void) | null = null;
     let cancelled = false;
 
