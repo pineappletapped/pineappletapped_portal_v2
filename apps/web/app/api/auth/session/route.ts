@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import type { Auth, DecodedIdToken } from 'firebase-admin/auth';
 
+import { FieldValue, type Firestore } from 'firebase-admin/firestore';
+
 import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from '@/lib/firebase-admin';
 import {
   encodeRolesCookie,
@@ -283,8 +285,9 @@ export async function POST(req: NextRequest) {
       email: decodedEmail,
     };
 
+    let firestore: Firestore | null = null;
     try {
-      const firestore = getFirebaseAdminFirestore(projectOverride);
+      firestore = getFirebaseAdminFirestore(projectOverride);
       const userRef = firestore.collection('users').doc(decoded.uid);
       const snapshot = await userRef.get();
       let userData = snapshot.exists ? snapshot.data() ?? {} : {};
@@ -305,6 +308,18 @@ export async function POST(req: NextRequest) {
       };
     } catch (firestoreError) {
       console.error('Failed to synchronise user profile during session creation', firestoreError);
+    }
+
+    if (firestore) {
+      try {
+        await firestore.collection('loginHistory').add({
+          uid: decoded.uid,
+          timestamp: FieldValue.serverTimestamp(),
+          email: decodedEmail,
+        });
+      } catch (loginHistoryError) {
+        console.error('Failed to record login history entry during session creation', loginHistoryError);
+      }
     }
 
     const roles: UserRoles = extractUserRoles(enrichedUserDoc);
