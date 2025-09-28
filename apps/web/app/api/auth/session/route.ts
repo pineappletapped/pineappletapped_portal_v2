@@ -76,7 +76,7 @@ type VerifiedSessionContext = {
 
 function shouldRetryWithoutRevocationCheck(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
-    return false;
+    return true;
   }
 
   const code = (error as { code?: unknown }).code;
@@ -85,7 +85,7 @@ function shouldRetryWithoutRevocationCheck(error: unknown): boolean {
     if (normalisedCode === 'auth/id-token-revoked') {
       return false;
     }
-    if (normalisedCode.includes('permission')) {
+    if (normalisedCode.startsWith('auth/')) {
       return true;
     }
   }
@@ -93,18 +93,12 @@ function shouldRetryWithoutRevocationCheck(error: unknown): boolean {
   const message = (error as { message?: unknown }).message;
   if (typeof message === 'string') {
     const lowerMessage = message.toLowerCase();
-    if (lowerMessage.includes('insufficient permission') || lowerMessage.includes('permission denied')) {
-      return true;
-    }
-    if (lowerMessage.includes('caller does not have permission')) {
-      return true;
-    }
-    if (lowerMessage.includes('iam permission')) {
-      return true;
+    if (lowerMessage.includes('revoked')) {
+      return false;
     }
   }
 
-  return false;
+  return true;
 }
 
 async function attemptVerification(
@@ -117,7 +111,7 @@ async function attemptVerification(
     return { decoded, auth, projectOverride };
   } catch (error) {
     if (shouldRetryWithoutRevocationCheck(error)) {
-      console.warn('Retrying Firebase session verification without revocation check', error);
+      console.warn('Retrying Firebase session verification without revocation check after error', error);
       const decoded = await auth.verifyIdToken(idToken, false);
       return { decoded, auth, projectOverride };
     }
