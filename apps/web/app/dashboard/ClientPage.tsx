@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   collection,
   query,
@@ -8,6 +8,7 @@ import {
   getDocs,
   limit,
   doc,
+  getDoc,
   updateDoc,
   addDoc,
   serverTimestamp,
@@ -18,6 +19,7 @@ import Link from 'next/link';
 import PortalContainer from '@/components/PortalContainer';
 import PortalHero from '@/components/PortalHero';
 import AssetReleaseBadge, { getAssetReleaseMeta } from '@/components/AssetReleaseBadge';
+import { KitSummary, summariseKitItems } from '@/lib/kit-summary';
 
 /**
  * Enhanced dashboard showing a unified overview of projects, orders, bookings,
@@ -37,6 +39,7 @@ export default function DashboardPage() {
   const [tasks, setTasks] = useState<any[]>([]);
   const [taskProjects, setTaskProjects] = useState<any[]>([]);
   const [taskFilter, setTaskFilter] = useState('all');
+  const [projectKitSummaries, setProjectKitSummaries] = useState<Record<string, KitSummary>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -80,6 +83,29 @@ export default function DashboardPage() {
               const projDocs = pSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
               setProjects(projDocs.slice(0, 5));
               setTaskProjects(projDocs);
+              const kitSummaryMap: Record<string, KitSummary> = {};
+              const orderLookups = projDocs
+                .filter(
+                  (project) =>
+                    typeof project.orderId === 'string' && project.orderId.trim().length > 0
+                )
+                .map(async (project) => {
+                  try {
+                    const orderSnap = await getDoc(doc(db, 'orders', project.orderId));
+                    if (!orderSnap.exists()) return;
+                    const orderData = orderSnap.data() as any;
+                    const summary = summariseKitItems(orderData?.kitItems ?? []);
+                    if (summary) {
+                      kitSummaryMap[project.id] = summary;
+                    }
+                  } catch (err) {
+                    console.warn('Failed to resolve kit summary', project.id, err);
+                  }
+                });
+              if (orderLookups.length > 0) {
+                await Promise.all(orderLookups);
+              }
+              setProjectKitSummaries(kitSummaryMap);
               // Load customer-facing tasks for these projects
               const allTasks: any[] = [];
               for (const p of projDocs) {
@@ -191,6 +217,25 @@ export default function DashboardPage() {
       }
     })();
   }, []);
+
+  const flightPlanAssets = useMemo(
+    () =>
+      assets.filter(
+        (asset) =>
+          typeof asset?.assetType === 'string' &&
+          asset.assetType.toLowerCase() === 'flight_plan'
+      ),
+    [assets]
+  );
+
+  const deliverableAssets = useMemo(
+    () =>
+      assets.filter(
+        (asset) =>
+          !(typeof asset?.assetType === 'string' && asset.assetType.toLowerCase() === 'flight_plan')
+      ),
+    [assets]
+  );
 
   const completeTask = async (task: any) => {
     try {
@@ -448,13 +493,13 @@ export default function DashboardPage() {
                   Open asset library
                 </Link>
               </div>
-              {assets.length === 0 ? (
+              {deliverableAssets.length === 0 ? (
                 <p className="mt-6 rounded-2xl border border-dashed border-gray-200 p-6 text-sm text-gray-600">
                   Assets that are ready for review or download will appear here once production uploads them.
                 </p>
               ) : (
                 <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                  {assets.map((a) => {
+                  {deliverableAssets.map((a) => {
                     const releaseMeta = getAssetReleaseMeta(a);
                     return (
                       <Link
@@ -474,6 +519,57 @@ export default function DashboardPage() {
                             ) : null}
                           </div>
                         ) : null}
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            <section aria-labelledby="flight-plan-heading" className="card rounded-3xl border border-gray-200 p-6">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 id="flight-plan-heading" className="text-lg font-semibold text-gray-900">
+                    Flight plans &amp; airspace approvals
+                  </h2>
+                  <p className="text-sm text-gray-600">
+                    Track drone paperwork and approvals before assigning aerial crew.
+                  </p>
+                </div>
+                <Link href="/projects" className="btn-sm">
+                  Manage projects
+                </Link>
+              </div>
+              {flightPlanAssets.length === 0 ? (
+                <p className="mt-6 rounded-2xl border border-dashed border-gray-200 p-6 text-sm text-gray-600">
+                  Stage flight plans from Drive or upload licence paperwork to keep airspace reviews on schedule.
+                </p>
+              ) : (
+                <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                  {flightPlanAssets.map((asset) => {
+                    const releaseMeta = getAssetReleaseMeta(asset);
+                    return (
+                      <Link
+                        key={asset.id}
+                        href={`/projects/${asset.projectId}/assets/${asset.id}`}
+                        className="flex flex-col gap-3 rounded-2xl border border-gray-200 p-4 transition hover:border-gray-400 hover:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                      >
+                        <div className="space-y-1">
+                          <p className="text-sm font-semibold text-gray-900">{asset.name || 'Flight plan'}</p>
+                          <p className="text-xs text-gray-500">Status: {asset.status || 'draft'}</p>
+                        </div>
+                        {releaseMeta ? (
+                          <div className="space-y-1">
+                            <AssetReleaseBadge asset={asset} />
+                            {releaseMeta.description ? (
+                              <p className="text-xs text-gray-500">{releaseMeta.description}</p>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-gray-500">
+                            Review and approve the plan so the crew can launch on time.
+                          </p>
+                        )}
                       </Link>
                     );
                   })}
@@ -508,6 +604,19 @@ export default function DashboardPage() {
                       </p>
                       <p className="text-xs text-gray-500">{b.status}</p>
                       {b.location && <p className="text-xs text-gray-500">Location: {b.location}</p>}
+                      {typeof b.projectId === 'string' && projectKitSummaries[b.projectId] ? (
+                        <div className="mt-1 space-y-1 text-xs text-gray-500">
+                          <p>
+                            Equipment: {projectKitSummaries[b.projectId].label}
+                            {projectKitSummaries[b.projectId].hasDrone
+                              ? ' · Drone kit assigned'
+                              : ''}
+                          </p>
+                          {projectKitSummaries[b.projectId].window ? (
+                            <p>Kit window: {projectKitSummaries[b.projectId].window}</p>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </li>
                   ))}
                 </ul>

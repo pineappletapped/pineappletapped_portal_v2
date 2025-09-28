@@ -54,6 +54,48 @@ export const getAssetReleaseMeta = (asset: any): AssetReleaseMeta | null => {
   const status = typeof asset.status === "string" ? asset.status.toLowerCase() : "";
   const releaseHoldNote =
     typeof asset.releaseHoldNote === "string" ? asset.releaseHoldNote : null;
+  const assetType =
+    typeof asset.assetType === "string" ? asset.assetType.toLowerCase() : "";
+
+  if (assetType === "flight_plan") {
+    if (deliverablesReleased) {
+      return {
+        tone: "success",
+        label: "Flight plan released",
+        description:
+          releaseHoldNote ||
+          "Download the approved plan and brief the pilot before departure.",
+      };
+    }
+
+    if (releaseHoldReason === "payment_pending") {
+      return {
+        tone: "warning",
+        label: "Awaiting payment clearance",
+        description:
+          releaseHoldNote ||
+          "Finance will unlock the flight plan once the outstanding balance is paid.",
+      };
+    }
+
+    if (status === "approved" || status === "final" || status === "final_approved") {
+      return {
+        tone: "success",
+        label: "Flight plan approved",
+        description:
+          releaseHoldNote ||
+          "Crew can proceed once pre-flight safety checks are complete.",
+      };
+    }
+
+    return {
+      tone: "warning",
+      label: "Airspace approval pending",
+      description:
+        releaseHoldNote ||
+        "Operations must review the plan before drone work can be scheduled.",
+    };
+  }
 
   if (deliverablesReleased) {
     const releasedAt = parseTimestamp(asset.releaseReadyAt || asset.updatedAt);

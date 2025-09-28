@@ -6,7 +6,8 @@ import { adminListUsers } from '@/lib/admin';
 import { ensureFirebase } from '@/lib/firebase';
 import { useRoleGate } from '@/hooks/useRoleGate';
 import { extractUserRoles, type UserRoles } from '@/lib/roles';
-import { collection, doc, getDocs, Timestamp, updateDoc } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, Timestamp, updateDoc } from 'firebase/firestore';
+import { summariseKitItems, type KitSummary } from '@/lib/kit-summary';
 
 interface StaffOption {
   uid: string;
@@ -106,6 +107,7 @@ function formatDateDisplay(value: any): string {
 export default function AdminProjectsPage() {
   const { allowed, loading: guardLoading } = useRoleGate(['admin', 'projects']);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [kitSummaries, setKitSummaries] = useState<Record<string, KitSummary>>({});
   const [staff, setStaff] = useState<StaffOption[]>([]);
   const [franchises, setFranchises] = useState<FranchiseOption[]>([]);
   const [view, setView] = useState<'kanban' | 'list'>('kanban');
@@ -135,6 +137,16 @@ export default function AdminProjectsPage() {
           };
         });
         setProjects(items);
+        setKitSummaries((prev) => {
+          const next: Record<string, KitSummary> = {};
+          for (const project of items) {
+            const summary = project.id ? prev[project.id] : undefined;
+            if (summary) {
+              next[project.id] = summary;
+            }
+          }
+          return next;
+        });
       } catch (err) {
         console.error('Failed to load projects', err);
       }
@@ -144,6 +156,62 @@ export default function AdminProjectsPage() {
       active = false;
     };
   }, [allowed, guardLoading]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      if (guardLoading || !allowed) return;
+      if (projects.length === 0) {
+        if (!cancelled) {
+          setKitSummaries({});
+        }
+        return;
+      }
+
+      try {
+        const { db } = await ensureFirebase();
+        if (!db) {
+          throw new Error('Firestore is unavailable');
+        }
+
+        const results: Record<string, KitSummary> = {};
+        await Promise.all(
+          projects
+            .filter((project) => typeof project.orderId === 'string' && project.orderId.trim().length > 0)
+            .map(async (project) => {
+              const orderId = (project.orderId as string).trim();
+              try {
+                const orderSnap = await getDoc(doc(db, 'orders', orderId));
+                if (!orderSnap.exists()) {
+                  return;
+                }
+                const orderData = orderSnap.data() as any;
+                const summary = summariseKitItems(orderData?.kitItems ?? []);
+                if (summary) {
+                  results[project.id] = summary;
+                }
+              } catch (error) {
+                console.warn('Failed to resolve project kit summary', { projectId: project.id, orderId }, error);
+              }
+            })
+        );
+
+        if (!cancelled) {
+          setKitSummaries(results);
+        }
+      } catch (error) {
+        console.warn('Failed to load kit assignments for projects', error);
+        if (!cancelled) {
+          setKitSummaries({});
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [allowed, guardLoading, projects]);
 
   useEffect(() => {
     let active = true;
@@ -530,6 +598,7 @@ export default function AdminProjectsPage() {
                 <th className="p-2">Due</th>
                 <th className="p-2">Priority</th>
                 <th className="p-2">Status</th>
+                <th className="p-2">Kit assignments</th>
                 <th className="p-2">Created</th>
                 <th className="p-2">Actions</th>
               </tr>
@@ -613,6 +682,27 @@ export default function AdminProjectsPage() {
                         </option>
                       ))}
                     </select>
+                  </td>
+                  <td className="p-2 align-top">
+                    {(() => {
+                      const summary = kitSummaries[p.id];
+                      if (!summary) {
+                        return <span className="text-xs text-gray-500">—</span>;
+                      }
+                      return (
+                        <div className="grid gap-1">
+                          <span className="font-medium text-xs text-gray-700">{summary.label}</span>
+                          {summary.window ? (
+                            <span className="text-xs text-gray-500">Window: {summary.window}</span>
+                          ) : null}
+                          {summary.hasDrone ? (
+                            <span className="inline-flex w-max items-center rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-800">
+                              Drone kit
+                            </span>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
                   </td>
                   <td className="p-2 align-top whitespace-nowrap">
                     {formatDateDisplay(p.createdAt)}
@@ -699,6 +789,19 @@ export default function AdminProjectsPage() {
                           </span>
                         )}
                       </div>
+                      {kitSummaries[project.id] ? (
+                        <div className="grid gap-1 text-xs text-gray-600">
+                          <span className="font-medium text-gray-700">{kitSummaries[project.id].label}</span>
+                          {kitSummaries[project.id].window ? (
+                            <span>Window: {kitSummaries[project.id].window}</span>
+                          ) : null}
+                          {kitSummaries[project.id].hasDrone ? (
+                            <span className="inline-flex w-max items-center rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-800">
+                              Drone kit
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : null}
                       <div className="grid gap-1 text-xs">
                         <select
                           value={project.ownerUid || ''}

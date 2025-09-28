@@ -114,7 +114,10 @@ export default function DriveAssetStager({ className }: DriveAssetStagerProps) {
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveError, setDriveError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [ingestingId, setIngestingId] = useState<string | null>(null);
+  const [ingesting, setIngesting] = useState<{
+    id: string;
+    assetType: "deliverable" | "flight_plan";
+  } | null>(null);
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -321,21 +324,37 @@ export default function DriveAssetStager({ className }: DriveAssetStagerProps) {
   );
 
   const stageFile = useCallback(
-    async (item: DriveItem) => {
+    async (
+      item: DriveItem,
+      options: { assetType?: "flight_plan" | "deliverable" } = {}
+    ) => {
       if (!selectedProject || !services?.functions) return;
       setNotice(null);
       setDriveError(null);
-      setIngestingId(item.id);
+      const targetType =
+        options.assetType === "flight_plan" ? "flight_plan" : "deliverable";
+      setIngesting({ id: item.id, assetType: targetType });
       try {
         const callable = httpsCallable(services.functions, "drive_stageAssetFromFile");
-        await callable({ projectId: selectedProject.id, fileId: item.id });
-        setNotice(`${item.name} staged into the asset library.`);
+        const payload: Record<string, unknown> = {
+          projectId: selectedProject.id,
+          fileId: item.id,
+        };
+        if (targetType === "flight_plan") {
+          payload.assetType = "flight_plan";
+        }
+        await callable(payload);
+        setNotice(
+          targetType === "flight_plan"
+            ? `${item.name} staged as a flight plan.`
+            : `${item.name} staged into the asset library.`
+        );
       } catch (error: any) {
         console.error("DriveAssetStager staging failed", error);
         const message = error?.message || error?.code || "Failed to ingest the Drive file.";
         setDriveError(typeof message === "string" ? message : "Failed to ingest the Drive file.");
       } finally {
-        setIngestingId(null);
+        setIngesting(null);
       }
     },
     [selectedProject, services?.functions]
@@ -492,14 +511,28 @@ export default function DriveAssetStager({ className }: DriveAssetStagerProps) {
                           Open folder
                         </button>
                       ) : (
-                        <button
-                          type="button"
-                          className="btn btn-xs"
-                          onClick={() => void stageFile(item)}
-                          disabled={driveLoading || ingestingId === item.id}
-                        >
-                          {ingestingId === item.id ? "Staging…" : "Stage asset"}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="btn btn-xs"
+                            onClick={() => void stageFile(item)}
+                            disabled={driveLoading || ingesting?.id === item.id}
+                          >
+                            {ingesting?.id === item.id && ingesting?.assetType === "deliverable"
+                              ? "Staging…"
+                              : "Stage asset"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-xs btn-outline"
+                            onClick={() => void stageFile(item, { assetType: "flight_plan" })}
+                            disabled={driveLoading || ingesting?.id === item.id}
+                          >
+                            {ingesting?.id === item.id && ingesting?.assetType === "flight_plan"
+                              ? "Staging…"
+                              : "Stage as flight plan"}
+                          </button>
+                        </div>
                       )}
                     </div>
                   </li>

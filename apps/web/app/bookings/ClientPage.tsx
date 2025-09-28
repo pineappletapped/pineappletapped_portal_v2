@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { collection, query, where, getDocs, addDoc, orderBy } from 'firebase/firestore';
+import { collection, query, where, getDocs, addDoc, orderBy, doc, getDoc } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, auth } from '@/lib/firebase';
 import { useRouter } from 'next/navigation';
 import PortalContainer from '@/components/PortalContainer';
+import { KitSummary, summariseKitItems } from '@/lib/kit-summary';
 
 /**
  * Bookings page.
@@ -22,6 +23,7 @@ export default function BookingsPage() {
   const [customEnd, setCustomEnd] = useState('');
   const [customNotes, setCustomNotes] = useState('');
   const [myBookings, setMyBookings] = useState<any[]>([]);
+  const [kitSummaries, setKitSummaries] = useState<Record<string, KitSummaryMeta>>({});
   const [loadingSlots, setLoadingSlots] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const router = useRouter();
@@ -45,7 +47,49 @@ export default function BookingsPage() {
       if (!user) return;
       const bq = query(collection(db, 'bookings'), where('uid', '==', user.uid));
       const bsnap = await getDocs(bq);
-      setMyBookings(bsnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      const bookingsList = bsnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setMyBookings(bookingsList);
+
+      const projectIds = Array.from(
+        new Set(
+          bookingsList
+            .map((booking) =>
+              typeof booking.projectId === 'string' && booking.projectId.trim().length > 0
+                ? booking.projectId.trim()
+                : null
+            )
+            .filter((value): value is string => Boolean(value))
+        )
+      );
+      if (projectIds.length > 0) {
+        const summaryMap: Record<string, KitSummaryMeta> = {};
+        await Promise.all(
+          projectIds.map(async (projectId) => {
+            try {
+              const projectSnap = await getDoc(doc(db, 'projects', projectId));
+              if (!projectSnap.exists()) return;
+              const projectData = projectSnap.data() as any;
+              const orderId =
+                typeof projectData?.orderId === 'string' && projectData.orderId.trim().length > 0
+                  ? projectData.orderId.trim()
+                  : null;
+              if (!orderId) return;
+              const orderSnap = await getDoc(doc(db, 'orders', orderId));
+              if (!orderSnap.exists()) return;
+              const orderData = orderSnap.data() as any;
+              const summary = summariseKitItems(orderData?.kitItems ?? []);
+              if (summary) {
+                summaryMap[projectId] = summary;
+              }
+            } catch (err) {
+              console.warn('Failed to resolve booking kit summary', { projectId }, err);
+            }
+          })
+        );
+        setKitSummaries(summaryMap);
+      } else {
+        setKitSummaries({});
+      }
     })();
   }, []);
 
@@ -147,6 +191,17 @@ export default function BookingsPage() {
                 <div>
                   <p className="font-medium">{b.slot?.date} {b.slot?.start}-{b.slot?.end}</p>
                   <p className="text-sm text-gray-600">Status: {b.status}</p>
+                  {typeof b.projectId === 'string' && kitSummaries[b.projectId] ? (
+                    <div className="mt-1 space-y-1 text-xs text-gray-500">
+                      <p>
+                        Equipment: {kitSummaries[b.projectId].label}
+                        {kitSummaries[b.projectId].hasDrone ? ' · Drone kit assigned' : ''}
+                      </p>
+                      {kitSummaries[b.projectId].window ? (
+                        <p>Equipment window: {kitSummaries[b.projectId].window}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ))}

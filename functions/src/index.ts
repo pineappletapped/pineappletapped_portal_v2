@@ -1711,6 +1711,9 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
   const projectId = typeof data?.projectId === 'string' ? data.projectId.trim() : '';
   const driveFileId = typeof data?.fileId === 'string' ? data.fileId.trim() : '';
   const overrideName = typeof data?.name === 'string' ? data.name.trim() : '';
+  const assetTypeInput =
+    typeof data?.assetType === 'string' ? data.assetType.trim().toLowerCase() : '';
+  const assetType = assetTypeInput === 'flight_plan' ? 'flight_plan' : 'deliverable';
   if (!projectId || !driveFileId) {
     throw new functions.https.HttpsError('invalid-argument', 'projectId and fileId are required');
   }
@@ -1746,11 +1749,12 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
 
   const orderId = typeof projectData.orderId === 'string' ? projectData.orderId : null;
   let orderStatus: string | null = null;
+  let orderData: FirebaseFirestore.DocumentData | null = null;
   if (orderId) {
     try {
       const orderSnap = await db.collection('orders').doc(orderId).get();
       if (orderSnap.exists) {
-        const orderData = orderSnap.data() as Record<string, any>;
+        orderData = orderSnap.data() as FirebaseFirestore.DocumentData;
         if (typeof orderData.status === 'string') {
           orderStatus = orderData.status;
         }
@@ -1868,6 +1872,7 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
     driveIngestedAt: admin.firestore.FieldValue.serverTimestamp(),
     orderId: orderId || null,
     orderStatus: orderStatus || null,
+    assetType,
   };
 
   const assetRef = await db.collection('assets').add(assetDoc);
@@ -1883,10 +1888,33 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
         driveFileId,
         driveFileName: sourceName,
         orderId,
+        assetType,
       },
     });
   } catch (auditError) {
     console.warn('drive_stageAssetFromFile audit log failed', { projectId, driveFileId }, auditError);
+  }
+
+  try {
+    await syncAssetReviewTask({
+      projectId,
+      assetId: assetRef.id,
+      assetName,
+      assetStatus: 'ready',
+      deliverablesReleased: false,
+      releaseHoldReason: null,
+      orderId,
+      orderStatus,
+      projectData,
+      orderData,
+      assetType,
+    });
+  } catch (taskError) {
+    console.warn('drive_stageAssetFromFile failed to seed review task', {
+      projectId,
+      assetId: assetRef.id,
+      assetType,
+    }, taskError);
   }
 
   return { assetId: assetRef.id, version };
@@ -2922,7 +2950,21 @@ export const reserveKit = functions.https.onCall(async (data) => {
         }
       });
     }
-    kitItems.push({ id, start: start.toISOString(), end: end.toISOString() });
+    const equipmentName =
+      typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : null;
+    const equipmentCategory =
+      typeof eq.category === 'string' && eq.category.trim().length > 0
+        ? eq.category.trim()
+        : typeof eq.type === 'string' && eq.type.trim().length > 0
+          ? eq.type.trim()
+          : null;
+    kitItems.push({
+      id,
+      name: equipmentName,
+      category: equipmentCategory,
+      start: start.toISOString(),
+      end: end.toISOString(),
+    });
     rentalTotal += eq.rentalPrice || 0;
   }
   if (conflicts.length > 0) {
@@ -4310,6 +4352,7 @@ interface AssetTaskSyncOptions {
   orderStatus?: string | null;
   projectData?: FirebaseFirestore.DocumentData | null;
   orderData?: FirebaseFirestore.DocumentData | null;
+  assetType?: string | null;
 }
 
 async function syncAssetReviewTask(options: AssetTaskSyncOptions): Promise<void> {
@@ -4354,13 +4397,29 @@ async function syncAssetReviewTask(options: AssetTaskSyncOptions): Promise<void>
   const deliverablesReleased = options.deliverablesReleased === true;
   const releaseHoldReason = options.releaseHoldReason ?? null;
   const assetStatus = normaliseAssetStatus(options.assetStatus);
-  const derivedStatus = deriveAssetTaskStatus(assetStatus, deliverablesReleased, releaseHoldReason);
+  const assetTypeValue =
+    typeof options.assetType === 'string' ? options.assetType.trim().toLowerCase() : '';
+  const isFlightPlan = assetTypeValue === 'flight_plan';
+  let derivedStatus = deriveAssetTaskStatus(
+    assetStatus,
+    deliverablesReleased,
+    releaseHoldReason
+  );
+  if (isFlightPlan) {
+    if (isAssetApprovalStatus(assetStatus)) {
+      derivedStatus = 'done';
+    } else if (!assetStatus || assetStatus === 'ready' || assetStatus === 'draft') {
+      derivedStatus = 'todo';
+    } else {
+      derivedStatus = 'in_progress';
+    }
+  }
 
   const tasksRef = db.collection('projects').doc(projectId).collection('tasks');
   let existingTask: FirebaseFirestore.QueryDocumentSnapshot<FirebaseFirestore.DocumentData> | null = null;
   try {
     const existingSnap = await tasksRef
-      .where('type', '==', 'asset_review')
+      .where('type', '==', isFlightPlan ? 'flight_plan_review' : 'asset_review')
       .where('assetId', '==', assetId)
       .limit(1)
       .get();
@@ -4372,10 +4431,17 @@ async function syncAssetReviewTask(options: AssetTaskSyncOptions): Promise<void>
 
   const timestamp = admin.firestore.FieldValue.serverTimestamp();
   const payload: Record<string, any> = {
-    title: options.assetName ? `Review ${options.assetName}` : 'Review deliverable',
-    description:
-      'Track review approvals and unlock the download once finance confirms payment.',
-    type: 'asset_review',
+    title: options.assetName
+      ? isFlightPlan
+        ? `Approve flight plan: ${options.assetName}`
+        : `Review ${options.assetName}`
+      : isFlightPlan
+        ? 'Approve flight plan'
+        : 'Review deliverable',
+    description: isFlightPlan
+      ? 'Verify airspace, weather, and compliance before signing off this flight plan.'
+      : 'Track review approvals and unlock the download once finance confirms payment.',
+    type: isFlightPlan ? 'flight_plan_review' : 'asset_review',
     assetId,
     assetName: options.assetName ?? null,
     status: derivedStatus,
@@ -4385,19 +4451,22 @@ async function syncAssetReviewTask(options: AssetTaskSyncOptions): Promise<void>
     orderId: orderId ?? null,
     orderStatus: orderStatus ?? null,
     updatedAt: timestamp,
-    stage: 'review',
+    stage: isFlightPlan ? 'planning' : 'review',
     forCustomer: false,
+    assetType: isFlightPlan ? 'flight_plan' : assetTypeValue || null,
   };
 
   if (releaseHoldReason === 'payment_pending') {
     payload.releaseHoldNote = 'Awaiting balance payment before downloads unlock.';
   } else if (releaseHoldReason) {
     payload.releaseHoldNote = releaseHoldReason;
+  } else if (isFlightPlan) {
+    payload.releaseHoldNote = 'Flight operations must approve the plan before launch.';
   } else {
     payload.releaseHoldNote = null;
   }
 
-  if (deliverablesReleased) {
+  if (deliverablesReleased || (isFlightPlan && derivedStatus === 'done')) {
     payload.completedAt = timestamp;
   } else {
     payload.completedAt = null;
@@ -4432,6 +4501,9 @@ export const onAssetUpdate = functions.firestore
     if (!projectId) {
       return null;
     }
+
+    const assetType =
+      typeof after.assetType === 'string' ? after.assetType.trim().toLowerCase() : '';
 
     const beforeStatus = normaliseAssetStatus(before?.status);
     const afterStatus = normaliseAssetStatus(after.status);
@@ -4539,6 +4611,7 @@ export const onAssetUpdate = functions.firestore
         orderStatus,
         projectData,
         orderData,
+        assetType,
       });
     } catch (taskError) {
       console.error('onAssetUpdate failed to sync review task', { assetId, projectId }, taskError);
@@ -4658,6 +4731,7 @@ export const onAssetCreated = functions.firestore
           assetStatus: typeof asset.status === 'string' ? asset.status : null,
           deliverablesReleased: false,
           releaseHoldReason: null,
+          assetType: typeof asset.assetType === 'string' ? asset.assetType : null,
         });
       } catch (taskError) {
         console.error('onAssetCreated failed to seed review task', context.params.assetId, taskError);
@@ -4736,6 +4810,7 @@ export const onOrderStatusUpdated = functions.firestore
                   orderStatus: after.status ?? nextStatus,
                   projectData,
                   orderData: after,
+                  assetType: typeof assetData.assetType === 'string' ? assetData.assetType : null,
                 });
               } catch (taskError) {
                 console.error('onOrderStatusUpdated failed to sync review task', {
@@ -5311,13 +5386,40 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     postalCode,
     projectName,
     voucher,
-    kitItems = [],
+    kitItems: kitItemsInput = [],
     rentalSubtotal = 0,
     leadSource: leadSourceInput,
   } = data;
   if (!items || !Array.isArray(items) || items.length === 0) {
     throw new functions.https.HttpsError('invalid-argument', 'items are required');
   }
+
+  const normaliseKitItem = (raw: any) => {
+    if (!raw || typeof raw !== 'object') {
+      return null;
+    }
+    const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+    if (!id) {
+      return null;
+    }
+    const name =
+      typeof raw.name === 'string' && raw.name.trim().length > 0 ? raw.name.trim() : null;
+    const category =
+      typeof raw.category === 'string' && raw.category.trim().length > 0
+        ? raw.category.trim()
+        : null;
+    const start = typeof raw.start === 'string' ? raw.start : null;
+    const end = typeof raw.end === 'string' ? raw.end : null;
+    return { id, name, category, start, end };
+  };
+
+  const kitItems = Array.isArray(kitItemsInput)
+    ? kitItemsInput
+        .map(normaliseKitItem)
+        .filter((item): item is { id: string; name: string | null; category: string | null; start: string | null; end: string | null } =>
+          !!item
+        )
+    : [];
 
   const productRefs = items.map((i: any) => db.collection('products').doc(i.id));
   const leadSourceRaw =

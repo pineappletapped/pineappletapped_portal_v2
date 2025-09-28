@@ -9,7 +9,44 @@ import StatusBadge from '@/components/StatusBadge';
 import PortalContainer from '@/components/PortalContainer';
 import VenueMap from '@/components/VenueMap';
 import AssetReleaseBadge, { getAssetReleaseMeta } from '@/components/AssetReleaseBadge';
+import { summariseKitItems } from '@/lib/kit-summary';
 import type { Venue } from '@/lib/venues';
+
+const kitDateFormatter = new Intl.DateTimeFormat('en-GB', {
+  day: 'numeric',
+  month: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
+const parseKitDate = (value: string | null | undefined): Date | null => {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const formatKitWindow = (start: string | null, end: string | null): string | null => {
+  const startDate = parseKitDate(start);
+  const endDate = parseKitDate(end);
+  if (startDate && endDate) {
+    return `${kitDateFormatter.format(startDate)} – ${kitDateFormatter.format(endDate)}`;
+  }
+  if (startDate) {
+    return `From ${kitDateFormatter.format(startDate)}`;
+  }
+  if (endDate) {
+    return `Until ${kitDateFormatter.format(endDate)}`;
+  }
+  return null;
+};
+
+const isDroneAssignment = (name: string | null, category: string | null): boolean => {
+  const nameMatch = name?.toLowerCase().includes('drone') ?? false;
+  const categoryMatch = category?.toLowerCase().includes('drone') ?? false;
+  return nameMatch || categoryMatch;
+};
 
 export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [project, setProject] = useState<any>(null);
@@ -26,6 +63,23 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [venueSelection, setVenueSelection] = useState('');
   const [savingVenue, setSavingVenue] = useState(false);
   const [order, setOrder] = useState<any | null>(null);
+  const kitSummary = useMemo(() => summariseKitItems(order?.kitItems ?? []), [order?.kitItems]);
+  const deliverableAssets = useMemo(
+    () =>
+      assets.filter(
+        (asset) =>
+          !(typeof asset?.assetType === 'string' && asset.assetType.toLowerCase() === 'flight_plan')
+      ),
+    [assets]
+  );
+  const flightPlanAssets = useMemo(
+    () =>
+      assets.filter(
+        (asset) =>
+          typeof asset?.assetType === 'string' && asset.assetType.toLowerCase() === 'flight_plan'
+      ),
+    [assets]
+  );
 
   // Signature request
   const [pendingSignature, setPendingSignature] = useState<any | null>(null);
@@ -457,12 +511,58 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
         </div>
       ) : null}
       <div className="card">
+        <h2 className="mb-2 text-base font-semibold text-gray-900">Equipment assignments</h2>
+        {kitSummary ? (
+          <div className="space-y-3 text-sm text-gray-700">
+            <p className="text-sm text-gray-600">
+              Crew will collect the reserved kit shown below. Update the order if the inventory needs to change.
+            </p>
+            <ul className="grid gap-3">
+              {kitSummary.items.map((item) => {
+                const window = formatKitWindow(item.start, item.end);
+                const drone = isDroneAssignment(item.name, item.category);
+                return (
+                  <li key={item.id} className="rounded border border-gray-200 p-3">
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="space-y-1">
+                        <p className="font-medium text-gray-900">
+                          {item.name || 'Equipment'}
+                          {item.category ? (
+                            <span className="text-gray-500"> · {item.category}</span>
+                          ) : null}
+                          {drone ? (
+                            <span className="ml-2 inline-flex items-center rounded-full bg-sky-100 px-2 py-0.5 text-xs font-semibold text-sky-800">
+                              Drone kit
+                            </span>
+                          ) : null}
+                        </p>
+                        <p className="text-xs text-gray-500">ID: {item.id}</p>
+                      </div>
+                      {window ? <p className="text-xs text-gray-500">Window: {window}</p> : null}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            {kitSummary.window ? (
+              <p className="text-xs text-gray-500">
+                Overall kit window: {kitSummary.window}
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <p className="text-sm text-gray-600">
+            No equipment reservations are linked to this project yet.
+          </p>
+        )}
+      </div>
+      <div className="card">
         <h2 className="mb-2 text-base font-semibold text-gray-900">Assets</h2>
-        {assets.length === 0 ? (
+        {deliverableAssets.length === 0 ? (
           <p className="text-sm text-gray-600">No assets have been uploaded yet.</p>
         ) : (
           <ul className="grid gap-3">
-            {assets.map((a) => {
+            {deliverableAssets.map((a) => {
               const releaseMeta = getAssetReleaseMeta(a);
               return (
                 <li key={a.id} className="rounded border border-gray-200 p-4">
@@ -496,10 +596,51 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
           </ul>
         )}
         {/* Compare Versions */}
-        {assets.length > 1 && (
+        {deliverableAssets.length > 1 && (
           <div className="mt-2">
             <Link href={`/projects/${project.id}/compare`} className="text-sm text-blue-600 underline">Compare Versions</Link>
           </div>
+        )}
+      </div>
+      <div className="card">
+        <h2 className="mb-2 text-base font-semibold text-gray-900">Flight plans &amp; approvals</h2>
+        {flightPlanAssets.length === 0 ? (
+          <p className="text-sm text-gray-600">
+            Upload or stage flight plans to kick off the drone compliance review for this project.
+          </p>
+        ) : (
+          <ul className="grid gap-3">
+            {flightPlanAssets.map((asset) => {
+              const releaseMeta = getAssetReleaseMeta(asset);
+              return (
+                <li key={asset.id} className="rounded border border-gray-200 p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-1">
+                      <Link
+                        href={`/projects/${project.id}/assets/${asset.id}`}
+                        className="text-sm font-semibold text-blue-600 hover:underline"
+                      >
+                        {asset.name || asset.storageKey || 'Flight plan'}
+                      </Link>
+                      <p className="text-xs text-gray-500">Status: {asset.status || 'draft'}</p>
+                    </div>
+                    <div className="flex flex-col gap-1 sm:items-end">
+                      <AssetReleaseBadge asset={asset} />
+                      {releaseMeta?.description ? (
+                        <p className="text-xs text-gray-500 max-w-xs sm:text-right">
+                          {releaseMeta.description}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-gray-500 max-w-xs sm:text-right">
+                          Review and approve the plan so aerial work can proceed.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         )}
       </div>
       {/* Brand pack selector */}
