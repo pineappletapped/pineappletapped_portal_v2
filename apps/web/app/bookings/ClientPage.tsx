@@ -8,6 +8,17 @@ import { useRouter } from 'next/navigation';
 import PortalContainer from '@/components/PortalContainer';
 import { KitSummary, summariseKitItems } from '@/lib/kit-summary';
 
+type BookingRecord = {
+  id: string;
+  projectId: string | null;
+  slot: {
+    date: string | null;
+    start: string | null;
+    end: string | null;
+  } | null;
+  status: string | null;
+};
+
 /**
  * Bookings page.
  *
@@ -22,8 +33,8 @@ export default function BookingsPage() {
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
   const [customNotes, setCustomNotes] = useState('');
-  const [myBookings, setMyBookings] = useState<any[]>([]);
-  const [kitSummaries, setKitSummaries] = useState<Record<string, KitSummaryMeta>>({});
+  const [myBookings, setMyBookings] = useState<BookingRecord[]>([]);
+  const [kitSummaries, setKitSummaries] = useState<Record<string, KitSummary>>({});
   const [loadingSlots, setLoadingSlots] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const router = useRouter();
@@ -47,7 +58,25 @@ export default function BookingsPage() {
       if (!user) return;
       const bq = query(collection(db, 'bookings'), where('uid', '==', user.uid));
       const bsnap = await getDocs(bq);
-      const bookingsList = bsnap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const bookingsList: BookingRecord[] = bsnap.docs.map((d) => {
+        const data = d.data() as Record<string, unknown>;
+        const slot =
+          data && typeof data.slot === 'object' && data.slot !== null
+            ? (data.slot as Record<string, unknown>)
+            : null;
+        return {
+          id: d.id,
+          projectId: typeof data.projectId === 'string' ? data.projectId : null,
+          slot: slot
+            ? {
+                date: typeof slot.date === 'string' ? slot.date : null,
+                start: typeof slot.start === 'string' ? slot.start : null,
+                end: typeof slot.end === 'string' ? slot.end : null,
+              }
+            : null,
+          status: typeof data.status === 'string' ? data.status : null,
+        };
+      });
       setMyBookings(bookingsList);
 
       const projectIds = Array.from(
@@ -62,7 +91,7 @@ export default function BookingsPage() {
         )
       );
       if (projectIds.length > 0) {
-        const summaryMap: Record<string, KitSummaryMeta> = {};
+        const summaryMap: Record<string, KitSummary> = {};
         await Promise.all(
           projectIds.map(async (projectId) => {
             try {
