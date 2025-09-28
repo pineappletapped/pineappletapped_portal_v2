@@ -220,7 +220,9 @@ export function normaliseTrainingModule(id: string, data: any): TrainingModuleRe
     : typeof data?.keywords === 'string'
       ? data.keywords.split(',')
       : [];
-  const keywords = rawKeywords.map((keyword) => keyword.trim()).filter(Boolean);
+  const keywords = rawKeywords
+    .map((keyword: string) => keyword.trim())
+    .filter((keyword: string): keyword is string => Boolean(keyword));
 
   const rawAudiences = isAudienceArray(data?.audiences)
     ? (data.audiences as TrainingAudience[])
@@ -229,7 +231,8 @@ export function normaliseTrainingModule(id: string, data: any): TrainingModuleRe
           TRAINING_AUDIENCE_OPTIONS.some((option) => option.key === item)
         ) as TrainingAudience[])
       : [];
-  const audiences = rawAudiences.length > 0 ? rawAudiences : ['clients'];
+  const audiences: TrainingAudience[] =
+    rawAudiences.length > 0 ? rawAudiences : (['clients'] as TrainingAudience[]);
 
   const content: TrainingContentBlock[] = Array.isArray(data?.content)
     ? data.content
@@ -243,7 +246,7 @@ export function normaliseTrainingModule(id: string, data: any): TrainingModuleRe
           }
           return result;
         })
-        .filter((block): block is TrainingContentBlock => Boolean(block))
+        .filter((block: TrainingContentBlock | null): block is TrainingContentBlock => Boolean(block))
     : [];
 
   const resources: TrainingResource[] = Array.isArray(data?.resources)
@@ -265,7 +268,9 @@ export function normaliseTrainingModule(id: string, data: any): TrainingModuleRe
               : createRandomId(`resource-${index}`);
           return { id: resourceId, title, url, description };
         })
-        .filter((resource): resource is TrainingResource => Boolean(resource))
+        .filter(
+          (resource: TrainingResource | null): resource is TrainingResource => Boolean(resource)
+        )
     : [];
 
   return {

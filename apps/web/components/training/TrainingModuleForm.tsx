@@ -117,7 +117,29 @@ export default function TrainingModuleForm({
   const updateBlock = useCallback(
     (blockId: string, updates: Partial<TrainingContentBlockInput>) => {
       setContentBlocks((prev) =>
-        prev.map((block) => (block.id === blockId ? { ...block, ...updates } : block))
+        prev.map((block) => {
+          if (block.id !== blockId) {
+            return block;
+          }
+
+          if (updates.type && updates.type !== block.type) {
+            // Prevent accidental type switching when applying updates.
+            return block;
+          }
+
+          switch (block.type) {
+            case 'text':
+              return { ...block, ...(updates as Partial<Extract<TrainingContentBlockInput, { type: 'text' }>>) };
+            case 'video':
+              return { ...block, ...(updates as Partial<Extract<TrainingContentBlockInput, { type: 'video' }>>) };
+            case 'image':
+              return { ...block, ...(updates as Partial<Extract<TrainingContentBlockInput, { type: 'image' }>>) };
+            case 'link':
+              return { ...block, ...(updates as Partial<Extract<TrainingContentBlockInput, { type: 'link' }>>) };
+            default:
+              return block;
+          }
+        })
       );
     },
     []

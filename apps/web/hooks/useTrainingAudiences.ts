@@ -77,8 +77,8 @@ export function useTrainingAudiences(): TrainingAudienceState {
 
           try {
             const userSnap = await getDoc(doc(db, 'users', user.uid));
-            const raw = userSnap.data() ?? {};
-            const userData = {
+            const raw = (userSnap.data() ?? {}) as Record<string, any>;
+            const userData: Record<string, any> = {
               ...raw,
               id: userSnap.id,
               uid: user.uid,
