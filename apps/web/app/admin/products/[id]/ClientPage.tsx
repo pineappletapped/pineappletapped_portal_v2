@@ -69,6 +69,8 @@ interface ModifierOption {
   priceTiers?: PriceTiers | null;
   budgetAdjustments?: ProductBudgetOverride | null;
   crewAdjustments?: ModifierCrewAdjustment[] | null;
+  deliverableType?: DeliverableType | null;
+  deliverableLabel?: string | null;
 }
 
 interface ModifierGroup {
