@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { db, storage, functions } from "@/lib/firebase";
@@ -484,6 +484,147 @@ type ModifierSelectionFormState = {
   missingTemplates: string[];
 };
 
+const generateRandomId = (): string =>
+  typeof globalThis !== "undefined" &&
+  globalThis.crypto &&
+  typeof globalThis.crypto.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+
+const buildVariationFormState = (
+  variation: ProductVariation | undefined,
+  crewRoleState: CrewRoleFormState[]
+): VariationFormState => {
+  const features = Array.isArray(variation?.features)
+    ? (variation?.features as string[])
+    : [];
+  const tier2 = variation?.priceTiers?.tier2;
+  const tier3 = variation?.priceTiers?.tier3;
+  return {
+    id:
+      typeof variation?.id === "string" && variation.id.length > 0
+        ? variation.id
+        : generateRandomId(),
+    name: variation?.name || "",
+    price:
+      variation && typeof variation.price === "number"
+        ? String(variation.price)
+        : "0",
+    tier2Price:
+      typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : "",
+    tier3Price:
+      typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
+    featuresText: features.join("\n"),
+    budgetOverrides: createBudgetForm(variation?.budgetOverrides ?? null),
+    crewOverrides: createCrewOverrideMap(
+      crewRoleState,
+      variation?.crewOverrides ?? null
+    ),
+  };
+};
+
+const buildModifierSelectionFromExisting = (
+  selection: ProductModifierSelection,
+  option: ModifierOption | undefined,
+  crewRoleState: CrewRoleFormState[]
+): ModifierSelectionFormState => {
+  const rawAdjustments = Array.isArray(option?.crewAdjustments)
+    ? (option?.crewAdjustments as ModifierCrewAdjustment[])
+    : [];
+  const templateAdjustments = rawAdjustments.filter(
+    (adj): adj is ModifierCrewAdjustment =>
+      !!adj && typeof adj.templateId === "string"
+  );
+  const crewOverrideMap = createCrewOverrideMap(
+    crewRoleState,
+    selection.crewOverrides ?? null
+  );
+  applyTemplateAdjustmentsToOverrides(
+    crewOverrideMap,
+    crewRoleState,
+    templateAdjustments
+  );
+  const budgetSource = selection.budgetOverrides
+    ? selection.budgetOverrides
+    : option?.budgetAdjustments ?? null;
+  const priceString =
+    typeof selection.price === "number"
+      ? String(selection.price)
+      : option
+      ? String(option.price ?? 0)
+      : "";
+  const tier2Value =
+    typeof selection.priceTiers?.tier2 === "number"
+      ? selection.priceTiers.tier2
+      : option && typeof option.priceTiers?.tier2 === "number"
+      ? option.priceTiers.tier2
+      : null;
+  const tier3Value =
+    typeof selection.priceTiers?.tier3 === "number"
+      ? selection.priceTiers.tier3
+      : option && typeof option.priceTiers?.tier3 === "number"
+      ? option.priceTiers.tier3
+      : null;
+  return {
+    groupId: selection.groupId,
+    optionId: selection.optionId,
+    price: priceString,
+    tier2Price:
+      typeof tier2Value === "number" && Number.isFinite(tier2Value)
+        ? String(tier2Value)
+        : "",
+    tier3Price:
+      typeof tier3Value === "number" && Number.isFinite(tier3Value)
+        ? String(tier3Value)
+        : "",
+    budgetOverrides: createBudgetForm(budgetSource),
+    crewOverrides: crewOverrideMap,
+    templateAdjustments,
+    missingTemplates: computeMissingTemplates(
+      crewRoleState,
+      templateAdjustments
+    ),
+  };
+};
+
+const buildModifierSelectionFromOption = (
+  groupId: string,
+  option: ModifierOption,
+  crewRoleState: CrewRoleFormState[]
+): ModifierSelectionFormState => {
+  const rawAdjustments = Array.isArray(option.crewAdjustments)
+    ? (option.crewAdjustments as ModifierCrewAdjustment[])
+    : [];
+  const templateAdjustments = rawAdjustments.filter(
+    (adj): adj is ModifierCrewAdjustment =>
+      !!adj && typeof adj.templateId === "string"
+  );
+  const crewOverrideMap = createCrewOverrideMap(crewRoleState, []);
+  applyTemplateAdjustmentsToOverrides(
+    crewOverrideMap,
+    crewRoleState,
+    templateAdjustments
+  );
+  const tier2 = option.priceTiers?.tier2;
+  const tier3 = option.priceTiers?.tier3;
+  return {
+    groupId,
+    optionId: option.id,
+    price: String(option.price ?? 0),
+    tier2Price:
+      typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : "",
+    tier3Price:
+      typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
+    budgetOverrides: createBudgetForm(option.budgetAdjustments ?? null),
+    crewOverrides: crewOverrideMap,
+    templateAdjustments,
+    missingTemplates: computeMissingTemplates(
+      crewRoleState,
+      templateAdjustments
+    ),
+  };
+};
+
 export default function EditProductPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -615,149 +756,6 @@ export default function EditProductPage() {
   const selectedVenue = useMemo(
     () => venues.find((v) => v.id === venueId) || null,
     [venues, venueId]
-  );
-  const generateFormId = () =>
-    typeof crypto !== "undefined" &&
-    typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
-
-  const buildVariationForm = useCallback(
-    (
-      variation?: ProductVariation,
-      crewRoleState: CrewRoleFormState[] = crewRoles
-    ): VariationFormState => {
-      const features = Array.isArray(variation?.features)
-        ? variation!.features!
-        : [];
-      const tier2 = variation?.priceTiers?.tier2;
-      const tier3 = variation?.priceTiers?.tier3;
-      return {
-        id: variation?.id || generateFormId(),
-        name: variation?.name || "",
-        price:
-          variation && typeof variation.price === "number"
-            ? String(variation.price)
-            : "0",
-        tier2Price:
-          typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : "",
-        tier3Price:
-          typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
-        featuresText: features.join("\n"),
-        budgetOverrides: createBudgetForm(variation?.budgetOverrides ?? null),
-        crewOverrides: createCrewOverrideMap(
-          crewRoleState,
-          variation?.crewOverrides ?? null
-        ),
-      };
-    },
-    [crewRoles]
-  );
-
-  const buildModifierFormFromSelection = useCallback(
-    (
-      selection: ProductModifierSelection,
-      option: ModifierOption | undefined,
-      crewRoleState: CrewRoleFormState[] = crewRoles
-    ): ModifierSelectionFormState => {
-      const templateAdjustments = Array.isArray(option?.crewAdjustments)
-        ? option!.crewAdjustments!.filter(
-            (adj): adj is ModifierCrewAdjustment =>
-              !!adj && typeof adj.templateId === "string"
-          )
-        : [];
-      const crewOverrideMap = createCrewOverrideMap(
-        crewRoleState,
-        selection.crewOverrides ?? null
-      );
-      applyTemplateAdjustmentsToOverrides(
-        crewOverrideMap,
-        crewRoleState,
-        templateAdjustments
-      );
-      const budgetSource = selection.budgetOverrides
-        ? selection.budgetOverrides
-        : option?.budgetAdjustments ?? null;
-      const priceString =
-        typeof selection.price === "number"
-          ? String(selection.price)
-          : option
-          ? String(option.price ?? 0)
-          : "";
-      const tier2Value =
-        typeof selection.priceTiers?.tier2 === "number"
-          ? selection.priceTiers.tier2
-          : option && typeof option.priceTiers?.tier2 === "number"
-          ? option.priceTiers.tier2
-          : null;
-      const tier3Value =
-        typeof selection.priceTiers?.tier3 === "number"
-          ? selection.priceTiers.tier3
-          : option && typeof option.priceTiers?.tier3 === "number"
-          ? option.priceTiers.tier3
-          : null;
-      return {
-        groupId: selection.groupId,
-        optionId: selection.optionId,
-        price: priceString,
-        tier2Price:
-          typeof tier2Value === "number" && Number.isFinite(tier2Value)
-            ? String(tier2Value)
-            : "",
-        tier3Price:
-          typeof tier3Value === "number" && Number.isFinite(tier3Value)
-            ? String(tier3Value)
-            : "",
-        budgetOverrides: createBudgetForm(budgetSource),
-        crewOverrides: crewOverrideMap,
-        templateAdjustments,
-        missingTemplates: computeMissingTemplates(
-          crewRoleState,
-          templateAdjustments
-        ),
-      };
-    },
-    [crewRoles]
-  );
-
-  const buildModifierFormFromOption = useCallback(
-    (
-      groupId: string,
-      option: ModifierOption,
-      crewRoleState: CrewRoleFormState[] = crewRoles
-    ): ModifierSelectionFormState => {
-      const templateAdjustments = Array.isArray(option.crewAdjustments)
-        ? option.crewAdjustments.filter(
-            (adj): adj is ModifierCrewAdjustment =>
-              !!adj && typeof adj.templateId === "string"
-          )
-        : [];
-      const crewOverrideMap = createCrewOverrideMap(crewRoleState, []);
-      applyTemplateAdjustmentsToOverrides(
-        crewOverrideMap,
-        crewRoleState,
-        templateAdjustments
-      );
-      const tier2 = option.priceTiers?.tier2;
-      const tier3 = option.priceTiers?.tier3;
-      return {
-        groupId,
-        optionId: option.id,
-        price: String(option.price ?? 0),
-        tier2Price:
-          typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : "",
-        tier3Price:
-          typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
-        budgetOverrides: createBudgetForm(option.budgetAdjustments ?? null),
-        crewOverrides: crewOverrideMap,
-        templateAdjustments,
-        missingTemplates: computeMissingTemplates(
-          crewRoleState,
-          templateAdjustments
-        ),
-      };
-    },
-    [crewRoles]
   );
 
   const parseMoney = (value: string, fallback = 0) => {
@@ -1298,7 +1296,7 @@ export default function EditProductPage() {
           setVariations(
             variationEntries.length
               ? variationEntries.map((variation) =>
-                  buildVariationForm(variation, crewRoleInputs)
+                  buildVariationFormState(variation, crewRoleInputs)
                 )
               : []
           );
@@ -1331,7 +1329,7 @@ export default function EditProductPage() {
         setModifiers(
           initialModifierSelections.length
             ? initialModifierSelections.map((selection) =>
-                buildModifierFormFromSelection(
+                buildModifierSelectionFromExisting(
                   selection,
                   modifierGroups
                     .find((group) => group.id === selection.groupId)
@@ -1411,7 +1409,7 @@ export default function EditProductPage() {
         setLoading(false);
       }
     })();
-  }, [allowed, guardLoading, id, buildModifierFormFromSelection, buildVariationForm]);
+  }, [allowed, guardLoading, id]);
 
   useEffect(() => {
     if (selectedVenue) {
@@ -1807,7 +1805,10 @@ export default function EditProductPage() {
   };
 
   const addVariation = () => {
-    setVariations((prev) => [...prev, buildVariationForm(undefined, crewRoles)]);
+    setVariations((prev) => [
+      ...prev,
+      buildVariationFormState(undefined, crewRoles),
+    ]);
   };
 
   const updateVariation = (index: number, data: Partial<VariationFormState>) => {
@@ -1941,7 +1942,11 @@ export default function EditProductPage() {
         const group = allModifiers.find((g) => g.id === groupId);
         const option = group?.options.find((opt) => opt.id === optionId);
         if (!option) return prev;
-        const nextEntry = buildModifierFormFromOption(groupId, option, crewRoles);
+        const nextEntry = buildModifierSelectionFromOption(
+          groupId,
+          option,
+          crewRoles
+        );
         if (group && !group.multiple) {
           return [
             ...prev.filter((selection) => selection.groupId !== groupId),
