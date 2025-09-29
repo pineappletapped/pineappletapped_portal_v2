@@ -7,6 +7,7 @@ import { db } from "@/lib/firebase";
 import { collection, getDocs, addDoc } from "firebase/firestore";
 import { useRoleGate } from "@/hooks/useRoleGate";
 
+type FirestoreRecord = Record<string, unknown>;
 type ProjectRecord = { id: string; name?: string | null; code?: string | null };
 
 const inputClassName =
@@ -37,10 +38,12 @@ export default function NewExpensePage() {
     (async () => {
       try {
         const projSnap = await getDocs(collection(db, "projects"));
-        const records: ProjectRecord[] = projSnap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as ProjectRecord),
-        }));
+        const records: ProjectRecord[] = projSnap.docs.map((d) => {
+          const data = d.data() as FirestoreRecord;
+          const nameValue = typeof data.name === "string" ? data.name : null;
+          const codeValue = typeof data.code === "string" ? data.code : null;
+          return { id: d.id, name: nameValue, code: codeValue };
+        });
         setProjects(records);
       } catch (error) {
         console.error("Failed to load projects", error);

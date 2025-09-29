@@ -117,23 +117,6 @@ export default function AdminFinancePage() {
     }
   };
 
-  if (guardLoading || loading) {
-    return (
-      <PortalContainer>
-        <p className="py-16 text-center text-sm text-gray-600">Loading finance data…</p>
-      </PortalContainer>
-    );
-  }
-  if (!allowed) {
-    return (
-      <PortalContainer>
-        <p className="py-16 text-center text-sm text-gray-600">
-          You do not have access to this page.
-        </p>
-      </PortalContainer>
-    );
-  }
-
   const moneyIn = clientInvoices.reduce(
     (sum, inv) => sum + (inv.total || inv.amount || 0),
     0
@@ -150,7 +133,8 @@ export default function AdminFinancePage() {
     return { ...p, revenue, cost, profit: revenue - cost };
   });
 
-  const outstandingClientInvoices = useMemo(() => {
+  type InvoiceWithDue = FirestoreRecord & { _dueDate: Date | null };
+  const outstandingClientInvoices = useMemo<InvoiceWithDue[]>(() => {
     return clientInvoices
       .filter((invoice: FirestoreRecord) => {
         const status = `${invoice?.status || ""}`.toLowerCase();
@@ -158,7 +142,7 @@ export default function AdminFinancePage() {
       })
       .map((invoice: FirestoreRecord) => {
         const due = coerceDate(invoice?.dueDate || invoice?.createdAt);
-        return { ...invoice, _dueDate: due };
+        return { ...(invoice as FirestoreRecord), _dueDate: due };
       })
       .sort((a, b) => {
         const left = a?._dueDate?.getTime() ?? 0;
@@ -173,11 +157,12 @@ export default function AdminFinancePage() {
     return Number.isFinite(value) ? sum + value : sum;
   }, 0);
 
-  const recentExpenses = useMemo(() => {
+  type ExpenseWithDate = FirestoreRecord & { _date: Date | null };
+  const recentExpenses = useMemo<ExpenseWithDate[]>(() => {
     return expenses
       .map((expense: FirestoreRecord) => {
         const when = coerceDate(expense?.date || expense?.createdAt);
-        return { ...expense, _date: when };
+        return { ...(expense as FirestoreRecord), _date: when };
       })
       .sort((a, b) => {
         const left = a?._date?.getTime() ?? 0;
@@ -186,6 +171,23 @@ export default function AdminFinancePage() {
       })
       .slice(0, 8);
   }, [expenses]);
+
+  if (guardLoading || loading) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">Loading finance data…</p>
+      </PortalContainer>
+    );
+  }
+  if (!allowed) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">
+          You do not have access to this page.
+        </p>
+      </PortalContainer>
+    );
+  }
 
   return (
     <PortalContainer>
