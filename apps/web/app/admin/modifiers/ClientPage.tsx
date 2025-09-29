@@ -394,7 +394,7 @@ function OptionForm({
     deliverableType: "" | DeliverableType,
     deliverableLabel: string,
     reset: () => void
-  ) => void;
+  ) => Promise<void> | void;
 }) {
   const [name, setName] = useState("");
   const [price, setPrice] = useState("0");
@@ -981,8 +981,10 @@ function ModifierGroupCard({
     price: string,
     tier2Price: string,
     tier3Price: string,
+    deliverableType: "" | DeliverableType,
+    deliverableLabel: string,
     reset: () => void
-  ) => void;
+  ) => Promise<void> | void;
   onUpdateGroup: (groupId: string, name: string, multiple: boolean) => void;
   onDeleteGroup: (groupId: string) => void;
   onUpdateOption: (groupId: string, option: ModifierOption) => void;
