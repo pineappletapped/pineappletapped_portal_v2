@@ -46,8 +46,16 @@ export default function QuoteRequestDetail({ params }: { params: { id: string } 
               return { ...it, name: prodSnap.data()?.name || '' };
             })
           );
+          const contactName = data.contactName || data.name || '';
+          const contactEmail = data.contactEmail || data.email || '';
           if (!cancelled) {
-            setRequest({ id: snap.id, ...data, items: itemsWithNames });
+            setRequest({
+              id: snap.id,
+              ...data,
+              contactName,
+              contactEmail,
+              items: itemsWithNames,
+            });
             setStatus(data.status || '');
             setNotes(data.internalNotes || '');
           }
@@ -162,10 +170,21 @@ export default function QuoteRequestDetail({ params }: { params: { id: string } 
         </p>
       )}
       <div className="grid gap-2 bg-white p-4 rounded">
-        <div><span className="font-medium">Name:</span> {request.name || '—'}</div>
-        <div><span className="font-medium">Email:</span> {request.email || '—'}</div>
+        <div><span className="font-medium">Name:</span> {request.contactName || '—'}</div>
+        <div><span className="font-medium">Email:</span> {request.contactEmail || '—'}</div>
         {request.productionPeriod && (
           <div><span className="font-medium">Production:</span> {request.productionPeriod}</div>
+        )}
+        {request.eventDate && (
+          <div><span className="font-medium">Event date:</span> {request.eventDate}</div>
+        )}
+        {(request.venueName || request.venueLocation) && (
+          <div>
+            <span className="font-medium">Venue:</span>{' '}
+            {[request.venueName, request.venueLocation]
+              .filter(Boolean)
+              .join(' – ') || '—'}
+          </div>
         )}
         {request.items?.length > 0 && (
           <div className="grid gap-1 mt-2">
@@ -174,10 +193,19 @@ export default function QuoteRequestDetail({ params }: { params: { id: string } 
               {request.items.map((it: any, idx: number) => (
                 <li key={idx}>
                   {it.name || it.productId}
+                  {it.variationName && (
+                    <span className="text-gray-600"> – {it.variationName}</span>
+                  )}
                   {it.note && <span className="text-gray-600"> – {it.note}</span>}
                 </li>
               ))}
             </ul>
+          </div>
+        )}
+        {request.requirements && (
+          <div className="mt-2">
+            <div className="font-medium">Requirements</div>
+            <p className="text-sm whitespace-pre-line">{request.requirements}</p>
           </div>
         )}
         {request.customRequest && (

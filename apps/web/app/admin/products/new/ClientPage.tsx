@@ -530,6 +530,7 @@ export default function NewProductPage() {
   const [seo, setSeo] = useState<ProductSEO>({});
   const [seoImageFile, setSeoImageFile] = useState<File | null>(null);
   const [category, setCategory] = useState("");
+  const [salesMode, setSalesMode] = useState<"ecommerce" | "quote">("ecommerce");
   const [workflowId, setWorkflowId] = useState("");
   const [eventDate, setEventDate] = useState("");
   const [venueId, setVenueId] = useState("");
@@ -1304,6 +1305,7 @@ export default function NewProductPage() {
       name,
       description,
       tagline: tagline || null,
+      salesMode,
       price: baseProductPrice,
       priceTiers: productPriceTiers,
       labourCost: labourValue,
@@ -1622,6 +1624,41 @@ export default function NewProductPage() {
 
       {tab === "info" && (
         <div className="grid gap-2">
+          <div className="rounded border bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">Sales workflow</p>
+                <p className="text-xs text-gray-600">
+                  Choose whether this product can be purchased instantly or should capture a bespoke quote enquiry.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={salesMode === "quote"}
+                onClick={() =>
+                  setSalesMode((current) =>
+                    current === "quote" ? "ecommerce" : "quote"
+                  )
+                }
+                className={`relative inline-flex h-6 w-12 items-center rounded-full transition ${
+                  salesMode === "quote" ? "bg-orange-500" : "bg-gray-300"
+                }`}
+              >
+                <span className="sr-only">Toggle sales workflow</span>
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+                    salesMode === "quote" ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+            <p className="mt-3 text-xs text-gray-600">
+              {salesMode === "quote"
+                ? "Clients will submit their requirements, venue details and timeline for a tailored estimate."
+                : "Clients can add the product to their cart and complete checkout online."}
+            </p>
+          </div>
           <label className="text-sm font-medium">Name</label>
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} required />
           <label className="text-sm font-medium">Tagline</label>

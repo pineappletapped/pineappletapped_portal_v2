@@ -4138,54 +4138,143 @@ export const quote_request_public = functions.https.onCall(async (data) => {
   const leadSourceRaw =
     typeof data.leadSource === 'string' ? (data.leadSource as string).trim() : '';
   const leadSourceTag = leadSourceRaw || 'hq';
+
+  const normaliseOptionalString = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  };
+
+  const normaliseRequiredString = (value: unknown): string =>
+    normaliseOptionalString(value) ?? '';
+
+  const contactName = normaliseRequiredString(data.name);
+  const contactEmail = normaliseRequiredString(data.email);
+  const contactCompany = normaliseOptionalString(data.company);
+  const projectName = normaliseOptionalString(data.projectName);
+  const productionPeriod = normaliseOptionalString(data.productionPeriod);
+  const customRequest = normaliseOptionalString(data.customRequest);
+  const requirements = normaliseOptionalString((data as any).requirements);
+  const venueName = normaliseOptionalString((data as any).venueName);
+  const venueLocation = normaliseOptionalString((data as any).venueLocation);
+  const eventDate = normaliseOptionalString((data as any).eventDate);
+
+  const itemsRaw = Array.isArray(data.items) ? data.items : [];
+  const items = itemsRaw
+    .map((item: any) => {
+      const productId = normaliseOptionalString(item?.productId);
+      if (!productId) return null;
+      const entry: Record<string, any> = { productId };
+      const note = normaliseOptionalString(item?.note);
+      if (note) entry.note = note;
+      const variationId = normaliseOptionalString(item?.variationId);
+      if (variationId) entry.variationId = variationId;
+      const variationName = normaliseOptionalString(item?.variationName);
+      if (variationName) entry.variationName = variationName;
+      return entry;
+    })
+    .filter((entry): entry is Record<string, any> => entry !== null);
+
+  const originProductId =
+    normaliseOptionalString((data as any).originProductId) ||
+    (items[0]?.productId ?? null);
+
+  const quoteMode =
+    normaliseOptionalString((data as any).quoteMode) ||
+    normaliseOptionalString((data as any).salesMode) ||
+    'manual';
+
   const record = {
     userId: null,
-    contactName: data.name,
-    contactEmail: data.email,
-    contactCompany: data.company || null,
-    projectName: data.projectName || null,
-    items: data.items || [],
-    customRequest: data.customRequest || null,
-    productionPeriod: data.productionPeriod || null,
+    contactName,
+    contactEmail,
+    contactCompany,
+    projectName,
+    items,
+    customRequest,
+    productionPeriod,
     createdAt: timestamp,
     status: 'pending',
     leadSource: leadSourceTag,
     leadSourceCapturedAt: timestamp,
+    originProductId,
+    quoteMode,
+    requirements,
+    venueName,
+    venueLocation,
+    eventDate,
   };
+
   const ref = await db.collection('quoteRequests').add(record);
+
+  const emailLines: string[] = [];
+  if (projectName) emailLines.push(`Project: ${projectName}`);
+  if (productionPeriod) emailLines.push(`Production: ${productionPeriod}`);
+  if (eventDate) emailLines.push(`Event date: ${eventDate}`);
+  if (venueName || venueLocation) {
+    emailLines.push(
+      `Venue: ${[venueName, venueLocation].filter(Boolean).join(' – ')}`
+    );
+  }
+  if (items.length > 0) {
+    items.forEach((item) => {
+      const parts = [item.productId as string];
+      if (item.variationName) parts.push(`(${item.variationName})`);
+      emailLines.push(`Item: ${parts.join(' ')}`);
+      if (item.note) {
+        emailLines.push(`  Note: ${item.note}`);
+      }
+    });
+  }
+  emailLines.push(`Email: ${contactEmail}`);
+  if (requirements) {
+    emailLines.push('', 'Requirements:', requirements);
+  }
+  if (customRequest) {
+    emailLines.push('', 'Additional notes:', customRequest);
+  }
+
   await sendEmail(
     'info@pineapple.local',
-    `Quote request from ${data.name}`,
-    `${data.projectName ? `Project: ${data.projectName}\n` : ''}${data.productionPeriod ? `Production: ${data.productionPeriod}\n` : ''}Email: ${data.email}\n\n${data.customRequest || ''}`
+    `Quote request from ${contactName || 'Unknown'}`,
+    emailLines.join('\n')
   );
-  try {
-    const existing = await db.collection('leads').where('email', '==', data.email).limit(1).get();
-    if (existing.empty) {
-      await db.collection('leads').add({
-        orgId: null,
-        name: data.name || null,
-        email: data.email,
-        company: data.company || null,
-        status: 'new',
-        source: 'quote',
-        createdAt: timestamp,
-        leadSource: leadSourceTag,
-        leadSourceCapturedAt: timestamp,
-      });
-    } else {
-      const leadUpdate: Record<string, any> = {
-        name: data.name || null,
-        company: data.company || null,
-      };
-      if (leadSourceRaw) {
-        leadUpdate.leadSource = leadSourceTag;
-        leadUpdate.leadSourceCapturedAt = timestamp;
+
+  if (contactEmail) {
+    try {
+      const existing = await db
+        .collection('leads')
+        .where('email', '==', contactEmail)
+        .limit(1)
+        .get();
+      if (existing.empty) {
+        await db.collection('leads').add({
+          orgId: null,
+          name: contactName || null,
+          email: contactEmail,
+          company: contactCompany || null,
+          status: 'new',
+          source: 'quote',
+          createdAt: timestamp,
+          leadSource: leadSourceTag,
+          leadSourceCapturedAt: timestamp,
+        });
+      } else {
+        const leadUpdate: Record<string, any> = {
+          name: contactName || null,
+          company: contactCompany || null,
+        };
+        if (leadSourceRaw) {
+          leadUpdate.leadSource = leadSourceTag;
+          leadUpdate.leadSourceCapturedAt = timestamp;
+        }
+        await existing.docs[0].ref.set(leadUpdate, { merge: true });
       }
-      await existing.docs[0].ref.set(leadUpdate, { merge: true });
+    } catch (err) {
+      console.error('Failed to log quote lead', err);
     }
-  } catch (err) {
-    console.error('Failed to log quote lead', err);
   }
+
   return { id: ref.id };
 });
 

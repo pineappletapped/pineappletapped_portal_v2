@@ -170,6 +170,7 @@ function VideoPlayer({
 }
 import AddToCartWizard from "./AddToCartWizard";
 import ProductModifierSummary from "./ProductModifierSummary";
+import ProductQuoteRequestDialog from "./ProductQuoteRequestDialog";
 import VenueMap from "./VenueMap";
 
 export default function ProductDetail({
@@ -179,9 +180,11 @@ export default function ProductDetail({
   product: Product;
   venue?: Venue | null;
 }) {
+  const isQuoteOnly = (product.salesMode ?? "ecommerce") === "quote";
   const [basePrice, setBasePrice] = useState(product.price);
   const [variation, setVariation] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [quoteOpen, setQuoteOpen] = useState(false);
   const listingPriceLabel = useMemo(
     () => getListingPriceLabel(product),
     [product]
@@ -301,6 +304,10 @@ export default function ProductDetail({
   const handleAdd = () => {
     const variationRequired = product.variations && product.variations.length > 0;
     if (variationRequired && !variation) return;
+    if (isQuoteOnly) {
+      setQuoteOpen(true);
+      return;
+    }
     setWizardOpen(true);
   };
 
@@ -317,6 +324,12 @@ export default function ProductDetail({
       ])
     );
   }, [product.variations]);
+
+  const selectedVariationSummary = useMemo(() => {
+    if (!variation) return null;
+    const label = variationNameById.get(variation) || "";
+    return { id: variation, label };
+  }, [variation, variationNameById]);
 
   const deliverableDisplay = useMemo(() => {
     const entries = Array.isArray(product.deliverables)
@@ -494,7 +507,9 @@ export default function ProductDetail({
             <p className="text-gray-600">{product.tagline}</p>
           )}
           <div className="flex flex-col gap-1">
-            <p className="text-2xl font-bold">£{price.toFixed(2)}</p>
+            <p className="text-2xl font-bold">
+              {isQuoteOnly ? "Bespoke quote required" : `£${price.toFixed(2)}`}
+            </p>
             {listingPriceLabel && (
               <p className="text-sm font-medium text-gray-700">
                 {listingPriceLabel}
@@ -544,14 +559,22 @@ export default function ProductDetail({
             }
             onClick={handleAdd}
           >
-            Add to Cart
+            {isQuoteOnly ? "Request bespoke quote" : "Add to Cart"}
           </button>
-          {wizardOpen && (
+          {wizardOpen && !isQuoteOnly && (
             <AddToCartWizard
               product={product}
               variationId={variation || undefined}
               basePrice={basePrice}
               onClose={() => setWizardOpen(false)}
+            />
+          )}
+          {quoteOpen && (
+            <ProductQuoteRequestDialog
+              product={product}
+              open={quoteOpen}
+              onClose={() => setQuoteOpen(false)}
+              variation={selectedVariationSummary}
             />
           )}
         </div>

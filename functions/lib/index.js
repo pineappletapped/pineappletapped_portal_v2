@@ -3469,51 +3469,133 @@ export const quote_request_public = functions.https.onCall(async (data) => {
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
     const leadSourceRaw = typeof data.leadSource === 'string' ? data.leadSource.trim() : '';
     const leadSourceTag = leadSourceRaw || 'hq';
+    const normaliseOptionalString = (value) => {
+        if (typeof value !== 'string')
+            return null;
+        const trimmed = value.trim();
+        return trimmed.length > 0 ? trimmed : null;
+    };
+    const normaliseRequiredString = (value) => {
+        const normalised = normaliseOptionalString(value);
+        return normalised === null ? '' : normalised;
+    };
+    const contactName = normaliseRequiredString(data.name);
+    const contactEmail = normaliseRequiredString(data.email);
+    const contactCompany = normaliseOptionalString(data.company);
+    const projectName = normaliseOptionalString(data.projectName);
+    const productionPeriod = normaliseOptionalString(data.productionPeriod);
+    const customRequest = normaliseOptionalString(data.customRequest);
+    const requirements = normaliseOptionalString(data?.requirements);
+    const venueName = normaliseOptionalString(data?.venueName);
+    const venueLocation = normaliseOptionalString(data?.venueLocation);
+    const eventDate = normaliseOptionalString(data?.eventDate);
+    const itemsRaw = Array.isArray(data.items) ? data.items : [];
+    const items = [];
+    for (const raw of itemsRaw) {
+        if (!raw || typeof raw !== 'object')
+            continue;
+        const productId = normaliseOptionalString(raw.productId);
+        if (!productId)
+            continue;
+        const entry = { productId };
+        const note = normaliseOptionalString(raw.note);
+        if (note)
+            entry.note = note;
+        const variationId = normaliseOptionalString(raw.variationId);
+        if (variationId)
+            entry.variationId = variationId;
+        const variationName = normaliseOptionalString(raw.variationName);
+        if (variationName)
+            entry.variationName = variationName;
+        items.push(entry);
+    }
+    const originProductId = normaliseOptionalString(data.originProductId) || (items[0] && items[0].productId) || null;
+    const quoteMode = normaliseOptionalString(data.quoteMode) || normaliseOptionalString(data.salesMode) || 'manual';
     const record = {
         userId: null,
-        contactName: data.name,
-        contactEmail: data.email,
-        contactCompany: data.company || null,
-        projectName: data.projectName || null,
-        items: data.items || [],
-        customRequest: data.customRequest || null,
-        productionPeriod: data.productionPeriod || null,
+        contactName,
+        contactEmail,
+        contactCompany,
+        projectName,
+        items,
+        customRequest,
+        productionPeriod,
         createdAt: timestamp,
         status: 'pending',
         leadSource: leadSourceTag,
         leadSourceCapturedAt: timestamp,
+        originProductId,
+        quoteMode,
+        requirements,
+        venueName,
+        venueLocation,
+        eventDate,
     };
     const ref = await db.collection('quoteRequests').add(record);
-    await sendEmail('info@pineapple.local', `Quote request from ${data.name}`, `${data.projectName ? `Project: ${data.projectName}\n` : ''}${data.productionPeriod ? `Production: ${data.productionPeriod}\n` : ''}Email: ${data.email}\n\n${data.customRequest || ''}`);
-    try {
-        const existing = await db.collection('leads').where('email', '==', data.email).limit(1).get();
-        if (existing.empty) {
-            await db.collection('leads').add({
-                orgId: null,
-                name: data.name || null,
-                email: data.email,
-                company: data.company || null,
-                status: 'new',
-                source: 'quote',
-                createdAt: timestamp,
-                leadSource: leadSourceTag,
-                leadSourceCapturedAt: timestamp,
-            });
-        }
-        else {
-            const leadUpdate = {
-                name: data.name || null,
-                company: data.company || null,
-            };
-            if (leadSourceRaw) {
-                leadUpdate.leadSource = leadSourceTag;
-                leadUpdate.leadSourceCapturedAt = timestamp;
-            }
-            await existing.docs[0].ref.set(leadUpdate, { merge: true });
-        }
+    const emailLines = [];
+    if (projectName)
+        emailLines.push(`Project: ${projectName}`);
+    if (productionPeriod)
+        emailLines.push(`Production: ${productionPeriod}`);
+    if (eventDate)
+        emailLines.push(`Event date: ${eventDate}`);
+    if (venueName || venueLocation) {
+        emailLines.push(`Venue: ${[venueName, venueLocation].filter(Boolean).join(' – ')}`);
     }
-    catch (err) {
-        console.error('Failed to log quote lead', err);
+    if (items.length > 0) {
+        items.forEach((item) => {
+            const parts = [item.productId];
+            if (item.variationName)
+                parts.push(`(${item.variationName})`);
+            emailLines.push(`Item: ${parts.join(' ')}`);
+            if (item.note) {
+                emailLines.push(`  Note: ${item.note}`);
+            }
+        });
+    }
+    emailLines.push(`Email: ${contactEmail}`);
+    if (requirements) {
+        emailLines.push('', 'Requirements:', requirements);
+    }
+    if (customRequest) {
+        emailLines.push('', 'Additional notes:', customRequest);
+    }
+    await sendEmail('info@pineapple.local', `Quote request from ${contactName || 'Unknown'}`, emailLines.join('\n'));
+    if (contactEmail) {
+        try {
+            const existing = await db
+                .collection('leads')
+                .where('email', '==', contactEmail)
+                .limit(1)
+                .get();
+            if (existing.empty) {
+                await db.collection('leads').add({
+                    orgId: null,
+                    name: contactName || null,
+                    email: contactEmail,
+                    company: contactCompany || null,
+                    status: 'new',
+                    source: 'quote',
+                    createdAt: timestamp,
+                    leadSource: leadSourceTag,
+                    leadSourceCapturedAt: timestamp,
+                });
+            }
+            else {
+                const leadUpdate = {
+                    name: contactName || null,
+                    company: contactCompany || null,
+                };
+                if (leadSourceRaw) {
+                    leadUpdate.leadSource = leadSourceTag;
+                    leadUpdate.leadSourceCapturedAt = timestamp;
+                }
+                await existing.docs[0].ref.set(leadUpdate, { merge: true });
+            }
+        }
+        catch (err) {
+            console.error('Failed to log quote lead', err);
+        }
     }
     return { id: ref.id };
 });

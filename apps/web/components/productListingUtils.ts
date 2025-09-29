@@ -45,6 +45,9 @@ export function getProductPriceExtents(product: Product):
 }
 
 export function getListingPriceLabel(product: Product): string | null {
+  if ((product.salesMode ?? "ecommerce") === "quote") {
+    return "Pricing available on request";
+  }
   const range = getProductPriceExtents(product);
   if (!range) return null;
   const baseLabel = `From £${range.min.toFixed(2)} (login for accurate instant quote)`;
