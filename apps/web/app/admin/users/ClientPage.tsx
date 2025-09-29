@@ -5,14 +5,6 @@ import Link from 'next/link';
 import { functions, ensureFirebase } from '@/lib/firebase';
 import { httpsCallable } from 'firebase/functions';
 import { adminListUsers, adminUpdateUser } from '@/lib/admin';
-import {
-  ROLE_DEFINITIONS,
-  ROLE_KEYS,
-  ROLE_LABELS,
-  extractUserRoles,
-  RoleKey,
-  UserRoles,
-} from '@/lib/roles';
 import { useRoleGate } from '@/hooks/useRoleGate';
 import CRMRecordForm from '@/components/CRMRecordForm';
 import ComplianceBadge from '@/components/ComplianceBadge';
@@ -40,7 +32,6 @@ interface AdminUser {
   fullName?: string;
   crmStatus?: string;
   discount?: number;
-  roles?: UserRoles;
   suggestedProductId?: string | null;
   [key: string]: any;
 }
@@ -50,7 +41,7 @@ interface AdminComplianceRecord extends ComplianceRecord {
 }
 
 export default function AdminUsersPage() {
-  const { allowed, roles, loading: guardLoading } = useRoleGate(['admin', 'sales']);
+  const { allowed, loading: guardLoading } = useRoleGate(['admin', 'sales']);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [crmStage, setCrmStage] = useState<'client' | 'prospect' | 'outreach'>('client');
@@ -62,7 +53,6 @@ export default function AdminUsersPage() {
   const [complianceRecords, setComplianceRecords] = useState<AdminComplianceRecord[]>([]);
   const [complianceLoading, setComplianceLoading] = useState(true);
   const [complianceError, setComplianceError] = useState<string | null>(null);
-  const canEditRoles = useMemo(() => !!roles?.admin, [roles]);
 
   useEffect(() => {
     (async () => {
@@ -73,11 +63,7 @@ export default function AdminUsersPage() {
       }
       try {
         const result: any = await adminListUsers();
-        const hydrated = (result.users || []).map((user: AdminUser) => ({
-          ...user,
-          roles: extractUserRoles(user),
-        }));
-        setUsers(hydrated);
+        setUsers(result.users || []);
       } catch (err: any) {
         console.error(err);
         setError(err.message || 'Error loading users');
@@ -180,24 +166,6 @@ export default function AdminUsersPage() {
     }
   };
 
-  const updateRole = async (user: AdminUser, role: RoleKey, enabled: boolean) => {
-    if (!canEditRoles) return;
-    try {
-      const currentRoles = extractUserRoles(user);
-      const updatedRoles = { ...currentRoles } as UserRoles;
-      if (enabled) {
-        updatedRoles[role] = true;
-      } else {
-        delete updatedRoles[role];
-      }
-      await adminUpdateUser({ userId: user.id, updates: { roles: updatedRoles } });
-      setUsers(users.map(u => u.id === user.id ? { ...u, roles: updatedRoles } : u));
-    } catch (err: any) {
-      console.error(err);
-      alert(err.message || 'Error updating user');
-    }
-  };
-
   const updateDiscount = async (user: any, discount: number) => {
     try {
       await adminUpdateUser({ userId: user.id, updates: { discount } });
@@ -216,19 +184,6 @@ export default function AdminUsersPage() {
     } catch (err: any) {
       console.error(err);
       alert(err.message || 'Error updating suggested product');
-    }
-  };
-
-  const sendReset = async (user: any) => {
-    const ok = confirm(`Send password reset email to ${user.email}?`);
-    if (!ok) return;
-    try {
-      const callable = httpsCallable(functions, 'admin_sendPasswordReset');
-      await callable({ email: user.email });
-      alert('Reset link sent');
-    } catch (err: any) {
-      console.error(err);
-      alert(err.message || 'Error sending reset email');
     }
   };
 
@@ -315,52 +270,6 @@ export default function AdminUsersPage() {
     }
   };
 
-  const renderRoleBadges = (user: AdminUser) => {
-    const activeRoles = ROLE_KEYS.filter((role) => user.roles?.[role]);
-    if (activeRoles.length === 0) {
-      return <span>-</span>;
-    }
-    return (
-      <div className="flex flex-wrap gap-1">
-        {activeRoles.map((role) => (
-          <span key={role} className="badge badge-outline text-xs">
-            {ROLE_LABELS[role]}
-          </span>
-        ))}
-      </div>
-    );
-  };
-
-  const renderRoleEditor = (user: AdminUser) => {
-    if (!canEditRoles) {
-      return renderRoleBadges(user);
-    }
-
-    return (
-      <div className="grid gap-2">
-        {renderRoleBadges(user)}
-        <details className="text-xs">
-          <summary className="cursor-pointer text-blue-600">Manage roles</summary>
-          <div className="mt-2 grid gap-1">
-            {ROLE_DEFINITIONS.map((role) => (
-              <label key={role.key} className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={!!user.roles?.[role.key]}
-                  onChange={(e) => updateRole(user, role.key, e.target.checked)}
-                />
-                <span>
-                  <span className="font-medium">{role.label}</span>
-                  <span className="block text-[0.7rem] text-gray-500">{role.description}</span>
-                </span>
-              </label>
-            ))}
-          </div>
-        </details>
-      </div>
-    );
-  };
-
   const renderTable = (list: AdminUser[], status: 'client' | 'prospect' | 'outreach') => (
     list.length === 0 ? (
       <p>No records.</p>
@@ -371,7 +280,6 @@ export default function AdminUsersPage() {
             <th className="p-2">Email</th>
             <th className="p-2">Name</th>
             <th className="p-2">Stage</th>
-            <th className="p-2">Roles</th>
             <th className="p-2">Drone compliance</th>
             <th className="p-2">Discount%</th>
             <th className="p-2">Suggested Product</th>
@@ -393,9 +301,6 @@ export default function AdminUsersPage() {
                   <option value="prospect">Prospect</option>
                   <option value="outreach">Outreach</option>
                 </select>
-              </td>
-              <td className="p-2">
-                {canEditRoles ? renderRoleEditor(user) : renderRoleBadges(user)}
               </td>
               <td className="p-2">
                 {(() => {
@@ -452,9 +357,6 @@ export default function AdminUsersPage() {
               </td>
               <td className="p-2 flex gap-2">
                 <Link className="btn-sm" href={`/admin/users/${user.id}`}>View</Link>
-                {user.email && (
-                  <button className="btn-sm" onClick={() => sendReset(user)}>Reset</button>
-                )}
                 <button className="btn-sm" onClick={() => mergeUser(user)}>Merge</button>
               </td>
             </tr>
