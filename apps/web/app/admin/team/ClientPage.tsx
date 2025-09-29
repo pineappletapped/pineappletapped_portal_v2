@@ -1,12 +1,18 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { db, functions } from '@/lib/firebase';
 import { httpsCallable } from 'firebase/functions';
-import { doc, getDoc, collection, getDocs, updateDoc } from 'firebase/firestore';
+import { doc, collection, getDocs, updateDoc } from 'firebase/firestore';
 import { adminListUsers, adminUpdateUser } from '@/lib/admin';
 import { useRoleGate } from '@/hooks/useRoleGate';
-import { extractUserRoles, type UserRoles } from '@/lib/roles';
+import {
+  ROLE_DEFINITIONS,
+  extractUserRoles,
+  isGodAdmin,
+  type RoleKey,
+  type UserRoles,
+} from '@/lib/roles';
 
 interface User {
   id: string;
@@ -27,6 +33,16 @@ export default function AdminTeamPage() {
   const [activeTab, setActiveTab] = useState<'staff' | 'contractor' | 'applications'>('staff');
   const [showCreate, setShowCreate] = useState(false);
   const [newUser, setNewUser] = useState({ email: '', password: '', fullName: '', isStaff: false, contractor: false });
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [isEditingPanel, setIsEditingPanel] = useState(false);
+  const [savingPanel, setSavingPanel] = useState(false);
+  const [panelAction, setPanelAction] = useState<string | null>(null);
+  const [panelForm, setPanelForm] = useState({
+    fullName: '',
+    displayName: '',
+    contractor: false,
+    roles: {} as UserRoles,
+  });
 
   useEffect(() => {
     (async () => {
@@ -55,42 +71,78 @@ export default function AdminTeamPage() {
     })();
   }, [allowed, guardLoading]);
 
-  if (guardLoading) return <p>Loading…</p>;
-  if (!allowed) return <p>You do not have permission to view this page.</p>;
-
   const sendReset = async (user: User) => {
     const fn = httpsCallable(functions, 'admin_sendPasswordReset');
     await fn({ email: user.email });
     alert('Reset link sent');
   };
 
-  const toggleDisable = async (user: User) => {
-    await adminUpdateUser({ userId: user.id, updates: { disabled: !user.disabled } });
-    setUsers(users.map(u => u.id === user.id ? { ...u, disabled: !u.disabled } : u));
-  };
+  const selectedUser = useMemo(() => users.find((user) => user.id === selectedUserId) || null, [users, selectedUserId]);
 
-  const toggleStaff = async (user: User) => {
-    const next = !(user.roles?.admin);
-    const updatedRoles: UserRoles = { ...(user.roles || {}) };
-    if (next) {
-      updatedRoles.admin = true;
-    } else {
-      delete updatedRoles.admin;
+  useEffect(() => {
+    if (!selectedUser) {
+      setIsEditingPanel(false);
+      setPanelForm({ fullName: '', displayName: '', contractor: false, roles: {} });
+      return;
     }
-    await adminUpdateUser({ userId: user.id, updates: { roles: updatedRoles } });
-    setUsers(users.map(u => u.id === user.id ? { ...u, roles: updatedRoles, isStaff: next } : u));
+    setPanelForm({
+      fullName: selectedUser.fullName ?? '',
+      displayName: selectedUser.displayName ?? '',
+      contractor: Boolean(selectedUser.contractor),
+      roles: { ...(selectedUser.roles || {}) },
+    });
+    setIsEditingPanel(false);
+  }, [selectedUser]);
+
+  if (guardLoading) return <p>Loading…</p>;
+  if (!allowed) return <p>You do not have permission to view this page.</p>;
+
+  const closePanel = () => {
+    if (savingPanel || panelAction) return;
+    setSelectedUserId(null);
   };
 
-  const toggleContractor = async (user: User) => {
-    await adminUpdateUser({ userId: user.id, updates: { contractor: !user.contractor } });
-    setUsers(users.map(u => u.id === user.id ? { ...u, contractor: !u.contractor } : u));
+  const handlePanelFieldChange = (key: 'fullName' | 'displayName', value: string) => {
+    setPanelForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handlePanelContractorToggle = (checked: boolean) => {
+    setPanelForm((prev) => ({ ...prev, contractor: checked }));
+  };
+
+  const handlePanelRoleToggle = (roleKey: RoleKey, checked: boolean) => {
+    setPanelForm((prev) => {
+      const nextRoles: UserRoles = { ...(prev.roles || {}) };
+      if (checked) {
+        nextRoles[roleKey] = true;
+      } else {
+        delete nextRoles[roleKey];
+      }
+      return { ...prev, roles: nextRoles };
+    });
+  };
+
+  const toggleDisable = async (user: User) => {
+    setPanelAction('disable');
+    try {
+      await adminUpdateUser({ userId: user.id, updates: { disabled: !user.disabled } });
+      setUsers(users.map(u => u.id === user.id ? { ...u, disabled: !u.disabled } : u));
+    } finally {
+      setPanelAction(null);
+    }
   };
 
   const deleteUser = async (user: User) => {
     if (!confirm(`Delete ${user.email}?`)) return;
-    const fn = httpsCallable(functions, 'admin_deleteUser');
-    await fn({ userId: user.id });
-    setUsers(users.filter(u => u.id !== user.id));
+    setPanelAction('delete');
+    try {
+      const fn = httpsCallable(functions, 'admin_deleteUser');
+      await fn({ userId: user.id });
+      setUsers(users.filter(u => u.id !== user.id));
+      setSelectedUserId((current) => (current === user.id ? null : current));
+    } finally {
+      setPanelAction(null);
+    }
   };
 
   const createUser = async () => {
@@ -148,7 +200,7 @@ export default function AdminTeamPage() {
     return user.email;
   };
 
-  const renderList = (list: User[], showStaff: boolean, showContractor: boolean) => (
+  const renderList = (list: User[]) => (
     list.length === 0 ? (
       <p>No records.</p>
     ) : (
@@ -158,7 +210,7 @@ export default function AdminTeamPage() {
             <th className="p-2">Email</th>
             <th className="p-2">Name</th>
             <th className="p-2">Disabled</th>
-            <th className="p-2">Actions</th>
+            <th className="p-2 text-right">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -167,12 +219,8 @@ export default function AdminTeamPage() {
               <td className="p-2">{user.email}</td>
               <td className="p-2">{resolveName(user) || '-'}</td>
               <td className="p-2">{user.disabled ? 'Yes' : 'No'}</td>
-              <td className="p-2 flex gap-2 flex-wrap">
-                <button onClick={() => sendReset(user)} className="btn btn-sm">Reset</button>
-                <button onClick={() => toggleDisable(user)} className="btn btn-sm">{user.disabled ? 'Enable' : 'Disable'}</button>
-                {showStaff && <button onClick={() => toggleStaff(user)} className="btn btn-sm">{user.isStaff ? 'Unstaff' : 'Staff'}</button>}
-                {showContractor && <button onClick={() => toggleContractor(user)} className="btn btn-sm">{user.contractor ? 'Unflag' : 'Contractor'}</button>}
-                <button onClick={() => deleteUser(user)} className="btn btn-sm btn-outline">Delete</button>
+              <td className="p-2 text-right">
+                <button onClick={() => setSelectedUserId(user.id)} className="btn btn-sm">Manage</button>
               </td>
             </tr>
           ))}
@@ -200,8 +248,8 @@ export default function AdminTeamPage() {
           <button className="btn btn-sm" onClick={createUser}>Save</button>
         </div>
       )}
-      {activeTab === 'staff' && renderList(staffUsers, true, true)}
-      {activeTab === 'contractor' && renderList(contractorUsers, false, true)}
+      {activeTab === 'staff' && renderList(staffUsers)}
+      {activeTab === 'contractor' && renderList(contractorUsers)}
       {activeTab === 'applications' && (
         apps.length === 0 ? (
           <p>No applications.</p>
@@ -228,6 +276,212 @@ export default function AdminTeamPage() {
             </tbody>
           </table>
         )
+      )}
+      {selectedUser && (
+        <div className="fixed inset-0 z-40 flex">
+          <div className="absolute inset-0 bg-black/40" onClick={closePanel} aria-hidden="true" />
+          <aside
+            className="relative z-50 ml-auto flex h-full w-full max-w-xl flex-col bg-white shadow-xl"
+            role="dialog"
+            aria-modal="true"
+          >
+            <header className="flex items-start justify-between gap-2 border-b px-6 py-4">
+              <div className="grid gap-1">
+                <h2 className="text-lg font-semibold">{resolveName(selectedUser)}</h2>
+                <p className="text-sm text-gray-500">{selectedUser.email}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                {isEditingPanel ? (
+                  <>
+                    <button
+                      className="btn btn-sm btn-outline"
+                      onClick={() => {
+                        if (savingPanel) return;
+                        setIsEditingPanel(false);
+                        setPanelForm({
+                          fullName: selectedUser.fullName ?? '',
+                          displayName: selectedUser.displayName ?? '',
+                          contractor: Boolean(selectedUser.contractor),
+                          roles: { ...(selectedUser.roles || {}) },
+                        });
+                      }}
+                      disabled={savingPanel}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="btn btn-sm"
+                      onClick={async () => {
+                        if (!selectedUser) return;
+                        setSavingPanel(true);
+                        try {
+                          const godLocked = isGodAdmin(selectedUser);
+                          const nextRoles = godLocked
+                            ? { ...(selectedUser.roles || {}), admin: true }
+                            : { ...(panelForm.roles || {}) };
+                          if (godLocked) {
+                            nextRoles.admin = true;
+                          }
+                          const updates: Partial<User> & { roles: UserRoles } = {
+                            fullName: panelForm.fullName,
+                            displayName: panelForm.displayName,
+                            contractor: panelForm.contractor,
+                            roles: nextRoles,
+                          };
+                          await adminUpdateUser({ userId: selectedUser.id, updates });
+                          setUsers((prev) =>
+                            prev.map((u) =>
+                              u.id === selectedUser.id
+                                ? {
+                                    ...u,
+                                    ...updates,
+                                    roles: updates.roles,
+                                    contractor: updates.contractor,
+                                    fullName: updates.fullName,
+                                    displayName: updates.displayName,
+                                    isStaff: updates.roles.admin === true,
+                                  }
+                                : u
+                            )
+                          );
+                          setIsEditingPanel(false);
+                        } catch (err) {
+                          console.error(err);
+                          alert('Failed to update user.');
+                        } finally {
+                          setSavingPanel(false);
+                        }
+                      }}
+                      disabled={savingPanel}
+                    >
+                      Save
+                    </button>
+                  </>
+                ) : (
+                  <button className="btn btn-sm" onClick={() => setIsEditingPanel(true)}>
+                    Edit
+                  </button>
+                )}
+                <button className="btn btn-sm btn-outline" onClick={closePanel} disabled={savingPanel || Boolean(panelAction)}>
+                  Close
+                </button>
+              </div>
+            </header>
+            <div className="grid flex-1 gap-6 overflow-y-auto px-6 py-4">
+              <section className="grid gap-3">
+                <h3 className="text-xs font-semibold uppercase text-gray-500">Profile</h3>
+                <label className="grid gap-1 text-sm">
+                  <span className="text-gray-600">Full name</span>
+                  {isEditingPanel ? (
+                    <input
+                      className="input"
+                      value={panelForm.fullName}
+                      onChange={(e) => handlePanelFieldChange('fullName', e.target.value)}
+                    />
+                  ) : (
+                    <p className="rounded border bg-gray-50 px-3 py-2 text-sm">{selectedUser.fullName || '—'}</p>
+                  )}
+                </label>
+                <label className="grid gap-1 text-sm">
+                  <span className="text-gray-600">Display name</span>
+                  {isEditingPanel ? (
+                    <input
+                      className="input"
+                      value={panelForm.displayName}
+                      onChange={(e) => handlePanelFieldChange('displayName', e.target.value)}
+                    />
+                  ) : (
+                    <p className="rounded border bg-gray-50 px-3 py-2 text-sm">{selectedUser.displayName || '—'}</p>
+                  )}
+                </label>
+              </section>
+              <section className="grid gap-3">
+                <h3 className="text-xs font-semibold uppercase text-gray-500">Account management</h3>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
+                    {selectedUser.disabled ? 'Disabled' : 'Active'}
+                  </span>
+                  {selectedUser.contractor && (
+                    <span className="rounded-full bg-purple-100 px-3 py-1 text-xs font-medium text-purple-700">Contractor</span>
+                  )}
+                  {selectedUser.roles?.admin && (
+                    <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-medium text-blue-700">Admin</span>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => toggleDisable(selectedUser)}
+                    disabled={panelAction === 'disable'}
+                  >
+                    {selectedUser.disabled ? 'Enable account' : 'Disable account'}
+                  </button>
+                  <button
+                    className="btn btn-sm btn-outline"
+                    onClick={async () => {
+                      setPanelAction('reset');
+                      try {
+                        await sendReset(selectedUser);
+                      } finally {
+                        setPanelAction(null);
+                      }
+                    }}
+                    disabled={panelAction === 'reset'}
+                  >
+                    Send password reset
+                  </button>
+                  <button
+                    className="btn btn-sm btn-outline"
+                    onClick={() => deleteUser(selectedUser)}
+                    disabled={panelAction === 'delete' || isGodAdmin(selectedUser)}
+                  >
+                    Delete user
+                  </button>
+                </div>
+              </section>
+              <section className="grid gap-3">
+                <h3 className="text-xs font-semibold uppercase text-gray-500">Permissions</h3>
+                {isGodAdmin(selectedUser) && (
+                  <p className="rounded border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-700">
+                    This account is protected and must always retain admin access.
+                  </p>
+                )}
+                <div className="grid gap-2">
+                  {ROLE_DEFINITIONS.map((role) => {
+                    const checked = isEditingPanel
+                      ? Boolean(panelForm.roles?.[role.key])
+                      : Boolean(selectedUser.roles?.[role.key]);
+                    return (
+                      <label key={role.key} className="flex items-start gap-3 rounded border px-3 py-2 text-sm">
+                        <input
+                          type="checkbox"
+                          className="mt-1"
+                          checked={checked}
+                          disabled={!isEditingPanel || isGodAdmin(selectedUser)}
+                          onChange={(event) => handlePanelRoleToggle(role.key, event.target.checked)}
+                        />
+                        <span>
+                          <span className="font-medium">{role.label}</span>
+                          <span className="block text-xs text-gray-500">{role.description}</span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                {isEditingPanel && (
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={panelForm.contractor}
+                      onChange={(event) => handlePanelContractorToggle(event.target.checked)}
+                    />
+                    Contractor access
+                  </label>
+                )}
+              </section>
+            </div>
+          </aside>
+        </div>
       )}
     </div>
   );
