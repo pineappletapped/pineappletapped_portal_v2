@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ensureFirebase } from '@/lib/firebase';
 import { httpsCallable } from 'firebase/functions';
 import { collection, getDocs } from 'firebase/firestore';
 import { useRoleGate } from '@/hooks/useRoleGate';
+import PortalContainer from '@/components/PortalContainer';
 
 /**
  * Admin Workflows Management
@@ -287,6 +288,7 @@ export default function AdminWorkflowsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
+  const [expandedWorkflowId, setExpandedWorkflowId] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -451,6 +453,7 @@ export default function AdminWorkflowsPage() {
     setEditingId(wf.id);
     setEditName(wf.name);
     setEditDescription(wf.description || '');
+    setExpandedWorkflowId(wf.id);
   };
 
   const saveEdit = async () => {
@@ -473,23 +476,139 @@ export default function AdminWorkflowsPage() {
       const { functions } = await ensureFirebase();
       const callable = httpsCallable(functions, 'admin_deleteWorkflow');
       await callable({ workflowId: id });
-      setWorkflows(workflows.filter((w) => w.id !== id));
+      setWorkflows((prev) => prev.filter((w) => w.id !== id));
+      setExpandedWorkflowId((prev) => (prev === id ? null : prev));
+      setEditingId((prev) => (prev === id ? null : prev));
     } catch (err: any) {
       console.error(err);
       alert(err.message || 'Error deleting workflow');
     }
   };
 
-  if (guardLoading || loading) return <p>Loading…</p>;
-  if (!allowed) return <p>You do not have permission to manage workflows.</p>;
+  const workflowStats = useMemo(() => {
+    const workflowCount = workflows.length;
+    let taskCount = 0;
+    let customerTaskCount = 0;
+    workflows.forEach((wf) => {
+      const wfTasks: any[] = Array.isArray(wf?.tasks) ? wf.tasks : [];
+      taskCount += wfTasks.length;
+      customerTaskCount += wfTasks.filter((task) => Boolean(task?.forCustomer)).length;
+    });
+    return {
+      workflowCount,
+      taskCount,
+      customerTaskCount,
+      averageTaskCount: workflowCount > 0 ? Math.round(taskCount / workflowCount) : 0,
+    };
+  }, [workflows]);
+
+  const toggleWorkflowExpansion = (workflowId: string) => {
+    setExpandedWorkflowId((prev) => (prev === workflowId ? null : workflowId));
+  };
+
+  if (guardLoading || loading) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">Loading workflows…</p>
+      </PortalContainer>
+    );
+  }
+
+  if (!allowed) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">
+          You do not have permission to manage workflows.
+        </p>
+      </PortalContainer>
+    );
+  }
+
+  const hasWorkflows = workflowStats.workflowCount > 0;
+
   return (
-    <div className="grid gap-6">
-      <h1 className="text-xl font-semibold">Manage Workflows</h1>
+    <PortalContainer>
+      <div className="grid gap-6">
+        <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="space-y-1">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Automation</p>
+            <h1 className="text-2xl font-semibold text-gray-900">Manage workflows</h1>
+            <p className="text-sm text-gray-600">
+              Standardise project onboarding and delivery tasks so every team member follows the same playbook.
+            </p>
+          </div>
+          <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3 lg:text-right">
+            <div className="rounded-lg border border-base-200 bg-base-100 p-3 shadow-sm">
+              <dt className="text-xs font-semibold uppercase tracking-wide text-gray-500">Workflows</dt>
+              <dd className="text-xl font-semibold text-gray-900">{workflowStats.workflowCount}</dd>
+            </div>
+            <div className="rounded-lg border border-base-200 bg-base-100 p-3 shadow-sm">
+              <dt className="text-xs font-semibold uppercase tracking-wide text-gray-500">Average steps</dt>
+              <dd className="text-xl font-semibold text-gray-900">{workflowStats.averageTaskCount}</dd>
+            </div>
+            <div className="rounded-lg border border-base-200 bg-base-100 p-3 shadow-sm">
+              <dt className="text-xs font-semibold uppercase tracking-wide text-gray-500">Client touchpoints</dt>
+              <dd className="text-xl font-semibold text-gray-900">{workflowStats.customerTaskCount}</dd>
+            </div>
+          </dl>
+        </header>
+
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="space-y-6">
+            <section className="rounded-xl border border-base-200 bg-base-100 p-6 shadow-sm">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="space-y-1">
+                  <h2 className="text-lg font-semibold text-gray-900">Create workflow</h2>
+                  <p className="text-sm text-gray-600">
+                    Break down your delivery process into reusable steps and capture the right client information first time.
+                  </p>
+                </div>
+                <button type="button" className="btn btn-sm" onClick={addTask}>
+                  Add task
+                </button>
+              </div>
+
+              <div className="mt-6 grid gap-3">
       {/* Create workflow form */}
-      <div className="card p-4 grid gap-3 max-w-xl">
-        <h2 className="font-semibold">Create Workflow</h2>
-        <input type="text" className="input" placeholder="Workflow name" value={name} onChange={(e) => setName(e.target.value)} />
-        <textarea className="input" placeholder="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className="form-control">
+            <span className="label-text text-sm font-medium text-gray-700">Workflow name</span>
+            <input
+              type="text"
+              className="input input-bordered"
+              placeholder="Product onboarding"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </label>
+          <label className="form-control">
+            <span className="label-text text-sm font-medium text-gray-700">Summary</span>
+            <input
+              type="text"
+              className="input input-bordered"
+              placeholder="Introduces the team and requests brand assets"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </label>
+        </div>
+
+        <div className="rounded-lg border border-dashed border-base-300 bg-white/80 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-base font-semibold text-gray-900">Workflow tasks</h3>
+              <p className="text-sm text-gray-600">Outline each step for the team and flag items that surface in the client portal.</p>
+            </div>
+            {tasks.length > 0 ? (
+              <span className="hidden rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700 sm:inline-flex">
+                {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'}
+              </span>
+            ) : null}
+          </div>
+
+          <div className="mt-4 grid gap-3">
+            {/* Existing task editors remain below */}
+            <div className="grid gap-2">
         <div className="grid gap-2">
           <h3 className="font-semibold">Tasks</h3>
           {tasks.length === 0 ? (
@@ -732,15 +851,43 @@ export default function AdminWorkflowsPage() {
               );
             })
           )}
-          <button className="btn-sm w-fit" onClick={addTask}>Add Task</button>
+          <div className="flex flex-wrap justify-end gap-2 pt-2">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={addTask}>
+              Add another task
+            </button>
+          </div>
         </div>
-        <button className="btn w-fit" onClick={createWorkflow}>Create Workflow</button>
+
+        <div className="flex flex-wrap justify-end gap-2">
+          <button type="button" className="btn btn-ghost" onClick={() => setTasks([])}>
+            Clear
+          </button>
+          <button type="button" className="btn btn-primary" onClick={createWorkflow}>
+            Save workflow
+          </button>
+        </div>
       </div>
-      {/* Workflows list */}
-      <div>
-        <h2 className="font-semibold mb-2">Existing Workflows</h2>
-        {workflows.length === 0 ? <p>No workflows.</p> : (
-          <div className="grid gap-3">
+    </section>
+    <section className="rounded-xl border border-base-200 bg-base-100 p-6 shadow-sm">
+      <div className="flex items-center justify-between gap-3">
+        <div className="space-y-1">
+          <h2 className="text-lg font-semibold text-gray-900">Existing workflows</h2>
+          <p className="text-sm text-gray-600">
+            Keep templates tidy so every new order spins up the right set of tasks.
+          </p>
+        </div>
+        {hasWorkflows ? (
+          <span className="hidden rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700 sm:inline-flex">
+            {workflowStats.taskCount} total tasks
+          </span>
+        ) : null}
+      </div>
+
+      <div className="mt-6">
+        {!hasWorkflows ? (
+          <p className="text-sm text-gray-500">No workflows yet. Create your first template to get started.</p>
+        ) : (
+          <div className="grid gap-4">
             {workflows.map((wf) => {
               const tasksList: any[] = Array.isArray(wf.tasks) ? wf.tasks : [];
               const taskKey = (task: any, idx: number) =>
@@ -756,24 +903,60 @@ export default function AdminWorkflowsPage() {
                     : 'Untitled task';
                 dependencyLabels.set(key, `${taskIndex + 1}. ${labelTitle}`);
               });
+              const isExpanded = expandedWorkflowId === wf.id;
               return (
-                <div key={wf.id} className="card p-4 grid gap-2">
+                <div key={wf.id} className="rounded-lg border border-base-200 bg-white p-4 shadow-sm">
                   {editingId === wf.id ? (
-                    <div className="grid gap-2">
-                      <input className="input" value={editName} onChange={(e) => setEditName(e.target.value)} />
-                      <textarea className="input" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
-                      <div className="flex gap-2">
-                        <button className="btn-sm" onClick={saveEdit}>Save</button>
-                        <button className="btn-sm" onClick={() => setEditingId(null)}>Cancel</button>
+                    <div className="grid gap-3">
+                      <label className="form-control">
+                        <span className="label-text text-sm font-medium text-gray-700">Workflow name</span>
+                        <input
+                          className="input input-bordered"
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                        />
+                      </label>
+                      <label className="form-control">
+                        <span className="label-text text-sm font-medium text-gray-700">Summary</span>
+                        <textarea
+                          className="textarea textarea-bordered"
+                          value={editDescription}
+                          onChange={(e) => setEditDescription(e.target.value)}
+                          rows={3}
+                        />
+                      </label>
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditingId(null)}>
+                          Cancel
+                        </button>
+                        <button type="button" className="btn btn-primary btn-sm" onClick={saveEdit}>
+                          Save changes
+                        </button>
                       </div>
                     </div>
                   ) : (
-                    <>
-                      <h3 className="font-medium text-lg">{wf.name}</h3>
-                      <p className="text-sm text-gray-700">{wf.description}</p>
-                      <p className="text-sm">Tasks: {tasksList.length}</p>
-                      {tasksList.length > 0 && (
-                        <div className="ml-3 border-l pl-3 space-y-2">
+                    <div className="space-y-4">
+                      <button
+                        type="button"
+                        className="flex w-full items-start justify-between text-left"
+                        onClick={() => toggleWorkflowExpansion(wf.id)}
+                      >
+                        <div className="space-y-1">
+                          <p className="text-base font-semibold text-gray-900">{wf.name}</p>
+                          <p className="text-sm text-gray-600">{wf.description || 'No description yet.'}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700">
+                            {tasksList.length} {tasksList.length === 1 ? 'task' : 'tasks'}
+                          </span>
+                          <span className="text-xs font-medium text-gray-500">
+                            {isExpanded ? 'Hide details' : 'View details'}
+                          </span>
+                        </div>
+                      </button>
+
+                      {isExpanded && tasksList.length > 0 ? (
+                        <div className="space-y-3 rounded-lg border border-base-200 bg-base-100 p-3">
                           {tasksList.map((t: any, idx: number) => {
                             const key = taskKey(t, idx);
                             const title =
@@ -795,8 +978,8 @@ export default function AdminWorkflowsPage() {
                                   : null;
                             const typeLabel = rawType && rawType !== 'none'
                               ? rawType === 'team-member'
-                                ? `Assignment (${(t?.assignmentScope || 'team') as string})`
-                                : `Field: ${rawType}`
+                                ? `Assignment ${(t?.assignmentScope || 'team') as string}`
+                                : `Field ${rawType}`
                               : null;
                             const fieldLabel =
                               typeof t?.fieldLabel === 'string' && t.fieldLabel.trim().length > 0
@@ -812,30 +995,42 @@ export default function AdminWorkflowsPage() {
                               .filter(Boolean)
                               .join(', ');
                             return (
-                              <div key={key} className="text-sm text-gray-600 space-y-1">
-                                <p>
+                              <div
+                                key={key}
+                                className="rounded-lg border border-dashed border-base-300 bg-white p-3 text-sm text-gray-600"
+                              >
+                                <p className="font-medium text-gray-900">
                                   {idx + 1}. {title}
-                                  {dueDays ? ` (due +${dueDays}d)` : ''} – {audience}
+                                  {dueDays ? ` · due +${dueDays}d` : ''} · {audience}
                                 </p>
-                                {typeLabel && (
+                                {typeLabel ? (
                                   <p className="text-xs text-gray-500">
                                     {typeLabel}
                                     {fieldLabel ? ` · ${fieldLabel}` : ''}
                                   </p>
-                                )}
-                                {dependencyText && (
+                                ) : null}
+                                {dependencyText ? (
                                   <p className="text-xs text-gray-500">Depends on: {dependencyText}</p>
-                                )}
+                                ) : null}
                               </div>
                             );
                           })}
                         </div>
-                      )}
-                      <div className="flex gap-2 pt-2">
-                        <button className="btn-sm" onClick={() => startEdit(wf)}>Edit</button>
-                        <button className="btn-sm text-red-600" onClick={() => deleteWorkflow(wf.id)}>Delete</button>
+                      ) : null}
+
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <button type="button" className="btn btn-ghost btn-sm" onClick={() => startEdit(wf)}>
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm text-rose-600"
+                          onClick={() => deleteWorkflow(wf.id)}
+                        >
+                          Delete
+                        </button>
                       </div>
-                    </>
+                    </div>
                   )}
                 </div>
               );
@@ -843,6 +1038,35 @@ export default function AdminWorkflowsPage() {
           </div>
         )}
       </div>
-    </div>
+    </section>
+          </div>
+          <aside className="space-y-4">
+            <div className="rounded-xl border border-base-200 bg-base-100 p-5 shadow-sm">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Workflow tips</h2>
+              <ul className="mt-3 space-y-3 text-sm text-gray-600">
+                <li>Group client-facing tasks near the start so portal users know what to expect after ordering.</li>
+                <li>Use dependencies to drip feed tasks to your internal team once prerequisites are complete.</li>
+                <li>Keep radio/checkbox fields aligned with forms your contractors already use.</li>
+              </ul>
+            </div>
+            <div className="rounded-xl border border-base-200 bg-base-100 p-5 shadow-sm">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Recently updated</h2>
+              {hasWorkflows ? (
+                <ul className="mt-3 space-y-2 text-sm text-gray-600">
+                  {workflows.slice(0, 4).map((wf) => (
+                    <li key={`summary-${wf.id}`} className="flex items-center justify-between gap-3">
+                      <span className="truncate font-medium text-gray-900">{wf.name}</span>
+                      <span className="text-xs text-gray-500">{Array.isArray(wf.tasks) ? wf.tasks.length : 0} steps</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-3 text-sm text-gray-500">Workflows you update will appear here for quick reference.</p>
+              )}
+            </div>
+          </aside>
+        </div>
+      </div>
+    </PortalContainer>
   );
 }

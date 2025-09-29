@@ -10,6 +10,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   addDoc,
   collection,
@@ -163,6 +164,7 @@ export default function ExpoLeadCaptureManager({
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [portalTarget, setPortalTarget] = useState<Element | null>(null);
   const [origin, setOrigin] = useState("https://pineappletapped.com");
   const dbRef = useRef<Firestore | null>(null);
 
@@ -412,6 +414,10 @@ export default function ExpoLeadCaptureManager({
   }, []);
 
   useEffect(() => {
+    setPortalTarget(typeof document !== "undefined" ? document.body : null);
+  }, []);
+
+  useEffect(() => {
     if (!panelOpen) {
       return;
     }
@@ -421,8 +427,16 @@ export default function ExpoLeadCaptureManager({
       }
     };
     window.addEventListener("keydown", handleKeyDown);
+    let originalOverflow: string | undefined;
+    if (typeof document !== "undefined") {
+      originalOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    }
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
+      if (typeof document !== "undefined") {
+        document.body.style.overflow = originalOverflow ?? "";
+      }
     };
   }, [closePanel, panelOpen]);
 
@@ -436,92 +450,26 @@ export default function ExpoLeadCaptureManager({
 
   const HeadingTag = resolveHeadingTag(headingLevel);
 
-  return (
-    <div className="grid gap-6">
-      {HeadingTag ? <HeadingTag className="text-xl font-semibold">{heading}</HeadingTag> : null}
-      {description}
-
-      <section className="rounded border p-4 shadow-sm">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold">Landing pages</h2>
-            <p className="text-sm text-gray-600">
-              Configure the experience prospects see at the stand and route entries into the CRM with event tags.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button type="button" className="btn btn-primary btn-sm" onClick={openCreatePanel}>
-              Create landing page
-            </button>
-          </div>
-        </div>
-
-        {error && !panelOpen && <p className="mt-4 text-sm text-red-600">{error}</p>}
-
-        {loading ? (
-          <p className="mt-4 text-sm text-gray-500">Loading landing pages…</p>
-        ) : pages.length === 0 ? (
-          <p className="mt-4 text-sm text-gray-500">No exhibition landing pages yet.</p>
-        ) : (
-          <div className="mt-4 overflow-x-auto">
-            <table className="table table-zebra">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Event</th>
-                  <th>Status</th>
-                  <th>Updated</th>
-                  <th className="text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pages.map((page) => (
-                  <tr key={page.id}>
-                    <td className="font-medium">{page.name}</td>
-                    <td>{page.eventName || "—"}</td>
-                    <td>
-                      <span className={`badge ${page.isActive ? "badge-success" : "badge-ghost"}`}>
-                        {page.isActive ? "Active" : "Inactive"}
-                      </span>
-                    </td>
-                    <td>{formatDateTime(page.updatedAt ?? page.createdAt)}</td>
-                    <td className="text-right">
-                      <div className="flex justify-end gap-2">
-                        {page.slug ? (
-                          <Link
-                            href={`/expo/${page.slug}`}
-                            className="btn btn-ghost btn-xs"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            View
-                          </Link>
-                        ) : null}
-                        <button type="button" className="btn btn-outline btn-xs" onClick={() => openEditPanel(page.id)}>
-                          Manage
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {panelOpen ? (
-        <div className="fixed inset-0 z-50 flex">
+  const panel = !panelOpen
+    ? null
+    : (
+        <div className="fixed inset-0 z-[60] flex items-stretch justify-end">
           <button
             type="button"
             aria-label="Close landing page manager"
             className="absolute inset-0 bg-black/40"
             onClick={closePanel}
           />
-          <aside role="dialog" aria-modal="true" className="ml-auto flex h-full w-full max-w-3xl flex-col bg-base-100 shadow-xl">
+          <aside
+            role="dialog"
+            aria-modal="true"
+            className="ml-auto flex h-full w-full max-w-3xl flex-col bg-base-100 shadow-xl"
+          >
             <header className="flex items-start justify-between border-b px-6 py-4">
               <div>
-                <h2 className="text-lg font-semibold">{selectedId ? "Edit landing page" : "Create landing page"}</h2>
+                <h2 className="text-lg font-semibold">
+                  {selectedId ? "Edit landing page" : "Create landing page"}
+                </h2>
                 <p className="text-sm text-gray-600">
                   Publish and manage exhibition microsites without leaving the orders workflow.
                 </p>
@@ -618,47 +566,11 @@ export default function ExpoLeadCaptureManager({
                     onChange={(event) => updateForm("onePagerUrl", event.target.value)}
                     placeholder="https://example.com/pineapple-tapped-one-pager.pdf"
                   />
-                  <span className="label-text-alt text-gray-500">
-                    Sent automatically after someone completes the form to keep us top of mind.
-                  </span>
                 </label>
 
-                <fieldset className="grid gap-4 rounded border p-4">
-                  <legend className="px-2 text-sm font-medium text-gray-600">Form content</legend>
+                <div className="grid gap-4 md:grid-cols-2">
                   <label className="form-control">
-                    <span className="label-text">Consent text</span>
-                    <textarea
-                      className="textarea textarea-bordered"
-                      value={form.consentText}
-                      onChange={(event) => updateForm("consentText", event.target.value)}
-                      placeholder="I agree to be contacted…"
-                      rows={2}
-                    />
-                  </label>
-                  <label className="form-control">
-                    <span className="label-text">Success headline</span>
-                    <input
-                      type="text"
-                      className="input input-bordered"
-                      value={form.successHeadline}
-                      onChange={(event) => updateForm("successHeadline", event.target.value)}
-                    />
-                  </label>
-                  <label className="form-control">
-                    <span className="label-text">Success message</span>
-                    <textarea
-                      className="textarea textarea-bordered"
-                      value={form.successMessage}
-                      onChange={(event) => updateForm("successMessage", event.target.value)}
-                      rows={3}
-                    />
-                  </label>
-                </fieldset>
-
-                <fieldset className="grid gap-4 rounded border p-4">
-                  <legend className="px-2 text-sm font-medium text-gray-600">Automated follow-up email</legend>
-                  <label className="form-control">
-                    <span className="label-text">Subject line</span>
+                    <span className="label-text">Auto-email subject</span>
                     <input
                       type="text"
                       className="input input-bordered"
@@ -667,59 +579,175 @@ export default function ExpoLeadCaptureManager({
                     />
                   </label>
                   <label className="form-control">
-                    <span className="label-text">Message body</span>
-                    <textarea
-                      className="textarea textarea-bordered font-mono text-xs"
-                      value={form.emailBody}
-                      onChange={(event) => updateForm("emailBody", event.target.value)}
-                      rows={8}
-                    />
-                    <span className="label-text-alt text-gray-500">
-                      Use {'{{name}}'} to personalise the greeting. The one-pager URL is appended automatically.
-                    </span>
-                  </label>
-                  <label className="form-control">
                     <span className="label-text">Notification emails</span>
                     <input
                       type="text"
                       className="input input-bordered"
                       value={form.notificationEmails}
                       onChange={(event) => updateForm("notificationEmails", event.target.value)}
-                      placeholder="exhibitions@pineappletapped.com, sales@pineappletapped.com"
+                      placeholder="expo@pineappletapped.com, events@pineappletapped.com"
                     />
-                    <span className="label-text-alt text-gray-500">Comma-separated list of team members to alert.</span>
+                    <span className="label-text-alt text-gray-500">Separate addresses with commas.</span>
                   </label>
-                  <label className="label cursor-pointer justify-start gap-3">
+                </div>
+
+                <label className="form-control">
+                  <span className="label-text">Auto-email body</span>
+                  <textarea
+                    className="textarea textarea-bordered"
+                    value={form.emailBody}
+                    onChange={(event) => updateForm("emailBody", event.target.value)}
+                    rows={6}
+                  />
+                </label>
+
+                <label className="form-control">
+                  <span className="label-text">Success headline</span>
+                  <input
+                    type="text"
+                    className="input input-bordered"
+                    value={form.successHeadline}
+                    onChange={(event) => updateForm("successHeadline", event.target.value)}
+                    placeholder="Thanks for entering!"
+                  />
+                </label>
+                <label className="form-control">
+                  <span className="label-text">Success message</span>
+                  <textarea
+                    className="textarea textarea-bordered"
+                    value={form.successMessage}
+                    onChange={(event) => updateForm("successMessage", event.target.value)}
+                    rows={4}
+                  />
+                </label>
+
+                <label className="form-control">
+                  <span className="label-text">Consent checkbox copy</span>
+                  <input
+                    type="text"
+                    className="input input-bordered"
+                    value={form.consentText}
+                    onChange={(event) => updateForm("consentText", event.target.value)}
+                    placeholder="I agree to be contacted by Pineapple Tapped about video and photo services."
+                  />
+                </label>
+
+                <div className="flex items-center justify-between gap-3">
+                  <label className="flex items-center gap-2 text-sm">
                     <input
                       type="checkbox"
-                      className="checkbox"
                       checked={form.isActive}
                       onChange={(event) => updateForm("isActive", event.target.checked)}
                     />
-                    <span className="label-text">Landing page is active</span>
+                    Active on the expo listings page
                   </label>
-                </fieldset>
-
-                <div className="flex flex-wrap items-center gap-3">
-                  <button type="submit" className="btn btn-primary" disabled={saving}>
-                    {saving ? "Saving…" : selectedId ? "Save changes" : "Create page"}
-                  </button>
-                  {selectedId && (
-                    <button type="button" className="btn btn-outline" onClick={handleDelete} disabled={deleting}>
-                      {deleting ? "Deleting…" : "Delete"}
+                  <div className="flex flex-wrap gap-2">
+                    {selectedPage && selectedPage.slug ? (
+                      <Link
+                        href={`/expo/${selectedPage.slug}`}
+                        className="btn btn-ghost btn-sm"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Open public page
+                      </Link>
+                    ) : null}
+                    {selectedId ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm text-rose-600"
+                        onClick={handleDelete}
+                        disabled={deleting}
+                      >
+                        {deleting ? "Deleting…" : "Delete"}
+                      </button>
+                    ) : null}
+                    <button type="submit" className="btn btn-primary btn-sm" disabled={saving}>
+                      {saving ? "Saving…" : selectedId ? "Save changes" : "Create landing page"}
                     </button>
-                  )}
-                  {selectedPage && selectedPage.slug && (
-                    <Link href={`/expo/${selectedPage.slug}`} className="btn btn-ghost" target="_blank" rel="noopener noreferrer">
-                      Open public page
-                    </Link>
-                  )}
+                  </div>
                 </div>
               </form>
             </div>
           </aside>
         </div>
-      ) : null}
+      );
+
+  return (
+    <div className="grid gap-6">
+      {HeadingTag ? <HeadingTag className="text-xl font-semibold">{heading}</HeadingTag> : null}
+      {description}
+
+      <section className="rounded border p-4 shadow-sm">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">Landing pages</h2>
+            <p className="text-sm text-gray-600">
+              Configure the experience prospects see at the stand and route entries into the CRM with event tags.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="btn btn-primary btn-sm" onClick={openCreatePanel}>
+              Create landing page
+            </button>
+          </div>
+        </div>
+
+        {error && !panelOpen && <p className="mt-4 text-sm text-red-600">{error}</p>}
+
+        {loading ? (
+          <p className="mt-4 text-sm text-gray-500">Loading landing pages…</p>
+        ) : pages.length === 0 ? (
+          <p className="mt-4 text-sm text-gray-500">No exhibition landing pages yet.</p>
+        ) : (
+          <div className="mt-4 overflow-x-auto">
+            <table className="table table-zebra">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Event</th>
+                  <th>Status</th>
+                  <th>Updated</th>
+                  <th className="text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pages.map((page) => (
+                  <tr key={page.id}>
+                    <td className="font-medium">{page.name}</td>
+                    <td>{page.eventName || "—"}</td>
+                    <td>
+                      <span className={`badge ${page.isActive ? "badge-success" : "badge-ghost"}`}>
+                        {page.isActive ? "Active" : "Inactive"}
+                      </span>
+                    </td>
+                    <td>{formatDateTime(page.updatedAt ?? page.createdAt)}</td>
+                    <td className="text-right">
+                      <div className="flex justify-end gap-2">
+                        {page.slug ? (
+                          <Link
+                            href={`/expo/${page.slug}`}
+                            className="btn btn-ghost btn-xs"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            View
+                          </Link>
+                        ) : null}
+                        <button type="button" className="btn btn-outline btn-xs" onClick={() => openEditPanel(page.id)}>
+                          Manage
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {portalTarget ? createPortal(panel, portalTarget) : panel}
     </div>
   );
 }
