@@ -11,7 +11,11 @@ import {
   deleteDoc,
 } from "firebase/firestore";
 import { useRoleGate } from "@/hooks/useRoleGate";
-import type { CrewRoleTemplate, ProductBudgetOverride } from "@/lib/products";
+import type {
+  CrewRoleTemplate,
+  DeliverableType,
+  ProductBudgetOverride,
+} from "@/lib/products";
 import type { PriceTiers } from "@/lib/pricing";
 
 interface ModifierCrewAdjustment {
@@ -28,6 +32,8 @@ interface ModifierOption {
   priceTiers?: PriceTiers | null;
   budgetAdjustments?: ProductBudgetOverride | null;
   crewAdjustments?: ModifierCrewAdjustment[] | null;
+  deliverableType?: DeliverableType | null;
+  deliverableLabel?: string | null;
 }
 
 interface ModifierGroup {
@@ -37,9 +43,17 @@ interface ModifierGroup {
   options: ModifierOption[];
 }
 
+const DELIVERABLE_TYPES: { value: DeliverableType; label: string }[] = [
+  { value: "long-form-video", label: "Long Form Video" },
+  { value: "short-form-vertical", label: "Short Form (Vertical)" },
+  { value: "photo", label: "Photo" },
+  { value: "photo-set", label: "Photo Set" },
+  { value: "thumbnail", label: "Thumbnail" },
+  { value: "audio-licence", label: "Audio Licence" },
+  { value: "document", label: "Document" },
+];
+
 type BudgetFormState = {
-  labourFilming: string;
-  labourEditing: string;
   kitManual: string;
   kit: string;
   kitMode: "" | "manual" | "guided";
@@ -50,8 +64,6 @@ type BudgetFormState = {
 };
 
 const emptyBudgetForm: BudgetFormState = {
-  labourFilming: "",
-  labourEditing: "",
   kitManual: "",
   kit: "",
   kitMode: "",
@@ -69,14 +81,6 @@ const createRowId = () =>
 const toBudgetForm = (
   budget?: ProductBudgetOverride | null
 ): BudgetFormState => ({
-  labourFilming:
-    typeof budget?.labourFilming === "number" && Number.isFinite(budget.labourFilming)
-      ? String(budget.labourFilming)
-      : "",
-  labourEditing:
-    typeof budget?.labourEditing === "number" && Number.isFinite(budget.labourEditing)
-      ? String(budget.labourEditing)
-      : "",
   kitManual:
     typeof budget?.kitManual === "number" && Number.isFinite(budget.kitManual)
       ? String(budget.kitManual)
@@ -117,10 +121,6 @@ const toBudgetOverride = (
   form: BudgetFormState
 ): ProductBudgetOverride | undefined => {
   const payload: ProductBudgetOverride = {};
-  const labourFilming = parseNumberInput(form.labourFilming);
-  if (labourFilming !== undefined) payload.labourFilming = labourFilming;
-  const labourEditing = parseNumberInput(form.labourEditing);
-  if (labourEditing !== undefined) payload.labourEditing = labourEditing;
   const kitManual = parseNumberInput(form.kitManual);
   if (kitManual !== undefined) payload.kitManual = kitManual;
   const kit = parseNumberInput(form.kit);
@@ -251,6 +251,8 @@ export default function ModifiersPage() {
     price: string,
     tier2Price: string,
     tier3Price: string,
+    deliverableType: "" | DeliverableType,
+    deliverableLabel: string,
     reset: () => void
   ) => {
     const trimmed = name.trim();
@@ -263,6 +265,9 @@ export default function ModifiersPage() {
       name: trimmed,
       price: basePrice,
     };
+    if (deliverableType) option.deliverableType = deliverableType;
+    const deliverableLabelTrimmed = deliverableLabel.trim();
+    if (deliverableLabelTrimmed) option.deliverableLabel = deliverableLabelTrimmed;
     option.priceTiers = {
       tier1: basePrice,
       ...(tier2 !== undefined ? { tier2 } : {}),
@@ -386,6 +391,8 @@ function OptionForm({
     price: string,
     tier2Price: string,
     tier3Price: string,
+    deliverableType: "" | DeliverableType,
+    deliverableLabel: string,
     reset: () => void
   ) => void;
 }) {
@@ -393,16 +400,31 @@ function OptionForm({
   const [price, setPrice] = useState("0");
   const [tier2Price, setTier2Price] = useState("");
   const [tier3Price, setTier3Price] = useState("");
+  const [deliverableType, setDeliverableType] = useState<"" | DeliverableType>(
+    ""
+  );
+  const [deliverableLabel, setDeliverableLabel] = useState("");
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        onAdd(groupId, name, price, tier2Price, tier3Price, () => {
-          setName("");
-          setPrice("0");
-          setTier2Price("");
-          setTier3Price("");
-        });
+        onAdd(
+          groupId,
+          name,
+          price,
+          tier2Price,
+          tier3Price,
+          deliverableType,
+          deliverableLabel,
+          () => {
+            setName("");
+            setPrice("0");
+            setTier2Price("");
+            setTier3Price("");
+            setDeliverableType("");
+            setDeliverableLabel("");
+          }
+        );
       }}
       className="grid gap-2 rounded border border-dashed p-3"
     >
@@ -437,6 +459,38 @@ function OptionForm({
           onChange={(e) => setTier3Price(e.target.value)}
         />
       </div>
+      <div className="grid gap-2 md:grid-cols-2">
+        <label className="grid gap-1 text-xs">
+          <span className="font-medium text-gray-600">
+            Deliverable type (optional)
+          </span>
+          <select
+            className="input"
+            value={deliverableType}
+            onChange={(e) =>
+              setDeliverableType(
+                e.target.value ? (e.target.value as DeliverableType) : ""
+              )
+            }
+          >
+            <option value="">No additional deliverable</option>
+            {DELIVERABLE_TYPES.map((entry) => (
+              <option key={entry.value} value={entry.value}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1 text-xs">
+          <span className="font-medium text-gray-600">Deliverable label</span>
+          <input
+            className="input"
+            value={deliverableLabel}
+            onChange={(e) => setDeliverableLabel(e.target.value)}
+            placeholder="e.g. Bonus thumbnail"
+          />
+        </label>
+      </div>
       <button type="submit" className="btn btn-sm w-fit">
         Add Option
       </button>
@@ -469,6 +523,12 @@ function EditableOptionRow({
       ? String(option.priceTiers.tier3)
       : ""
   );
+  const [deliverableType, setDeliverableType] = useState<"" | DeliverableType>(
+    option.deliverableType ?? ""
+  );
+  const [deliverableLabel, setDeliverableLabel] = useState(
+    option.deliverableLabel ?? ""
+  );
   const [budgetForm, setBudgetForm] = useState<BudgetFormState>(() =>
     toBudgetForm(option.budgetAdjustments)
   );
@@ -489,6 +549,8 @@ function EditableOptionRow({
         ? String(option.priceTiers.tier3)
         : ""
     );
+    setDeliverableType(option.deliverableType ?? "");
+    setDeliverableLabel(option.deliverableLabel ?? "");
     setBudgetForm(toBudgetForm(option.budgetAdjustments));
     setCrewRows(toCrewAdjustmentRows(option.crewAdjustments));
   }, [option]);
@@ -559,6 +621,11 @@ function EditableOptionRow({
         ...(tier3 !== undefined ? { tier3 } : {}),
       },
     };
+    if (deliverableType) payload.deliverableType = deliverableType;
+    else delete (payload as any).deliverableType;
+    const deliverableLabelTrimmed = deliverableLabel.trim();
+    if (deliverableLabelTrimmed) payload.deliverableLabel = deliverableLabelTrimmed;
+    else delete (payload as any).deliverableLabel;
     const budgetOverrides = toBudgetOverride(budgetForm);
     if (budgetOverrides) payload.budgetAdjustments = budgetOverrides;
     else delete (payload as any).budgetAdjustments;
@@ -617,6 +684,41 @@ function EditableOptionRow({
         </div>
       </div>
 
+      <div className="grid gap-2 md:grid-cols-2">
+        <label className="grid gap-1">
+          <span className="text-xs font-medium text-gray-600">
+            Deliverable type (optional)
+          </span>
+          <select
+            className="input"
+            value={deliverableType}
+            onChange={(e) =>
+              setDeliverableType(
+                e.target.value ? (e.target.value as DeliverableType) : ""
+              )
+            }
+          >
+            <option value="">No additional deliverable</option>
+            {DELIVERABLE_TYPES.map((entry) => (
+              <option key={entry.value} value={entry.value}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1">
+          <span className="text-xs font-medium text-gray-600">
+            Deliverable label
+          </span>
+          <input
+            className="input"
+            value={deliverableLabel}
+            onChange={(e) => setDeliverableLabel(e.target.value)}
+            placeholder="e.g. Social media thumbnail"
+          />
+        </label>
+      </div>
+
       <details
         className="rounded border border-dashed p-3"
         open={budgetHasValues}
@@ -625,34 +727,6 @@ function EditableOptionRow({
           Budget adjustments
         </summary>
         <div className="mt-3 grid gap-2 md:grid-cols-2">
-          <label className="grid gap-1">
-            <span className="text-xs font-medium text-gray-600">
-              Labour (filming)
-            </span>
-            <input
-              type="number"
-              className="input"
-              value={budgetForm.labourFilming}
-              onChange={(e) =>
-                handleBudgetChange("labourFilming", e.target.value)
-              }
-              placeholder="Inherit"
-            />
-          </label>
-          <label className="grid gap-1">
-            <span className="text-xs font-medium text-gray-600">
-              Labour (editing)
-            </span>
-            <input
-              type="number"
-              className="input"
-              value={budgetForm.labourEditing}
-              onChange={(e) =>
-                handleBudgetChange("labourEditing", e.target.value)
-              }
-              placeholder="Inherit"
-            />
-          </label>
           <label className="grid gap-1">
             <span className="text-xs font-medium text-gray-600">Kit total</span>
             <input

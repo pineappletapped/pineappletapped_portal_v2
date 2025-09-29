@@ -98,6 +98,11 @@ export interface ProductDeliverable {
   variationIds?: string[];
 }
 
+export interface ProductModifierDeliverable {
+  type?: DeliverableType | null;
+  label?: string | null;
+}
+
 export interface ProductBudgetOverride {
   labourFilming?: number | null;
   labourEditing?: number | null;
@@ -127,6 +132,7 @@ export interface ProductModifierSelection {
   priceTiers?: PriceTiers | null;
   budgetOverrides?: ProductBudgetOverride;
   crewOverrides?: ProductCrewRoleOverride[];
+  deliverable?: ProductModifierDeliverable;
 }
 
 export interface ProductVariation {
