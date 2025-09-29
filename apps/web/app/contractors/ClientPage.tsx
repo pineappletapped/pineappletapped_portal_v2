@@ -616,16 +616,72 @@ export default function ContractorPortal() {
     },
   ];
 
+  type HeroConfig = {
+    title: string;
+    description: string;
+    metrics?: typeof heroMetrics;
+    quickActions?: typeof heroActions;
+  };
+
+  const hero: HeroConfig = (() => {
+    switch (activeTab) {
+      case "notices":
+        return {
+          title: "Notice board",
+          description: "Catch up on announcements from HQ and franchise leads in one place.",
+        } as const;
+      case "availability":
+        return {
+          title: "Update your availability",
+          description: "Keep your calendar current so HQ knows when to line up the next shoot.",
+        } as const;
+      case "projects":
+        return {
+          title: "Project pipeline",
+          description: "Review briefs, tasks, and delivery status for every booking you&apos;re involved in.",
+        } as const;
+      case "compliance":
+        return {
+          title: "Compliance centre",
+          description: "Upload and maintain your drone licence and insurance so you&apos;re cleared for upcoming work.",
+        } as const;
+      case "kit":
+        return {
+          title: "Kit locker",
+          description: "Track the equipment issued to you and request updates when something changes.",
+        } as const;
+      case "workwear":
+        return {
+          title: "Order workwear",
+          description: "Grab the latest branded apparel so you look the part on every shoot.",
+        } as const;
+      case "profile":
+        return {
+          title: "Your profile",
+          description: "Update your contact details and preferences so HQ can stay in touch.",
+        } as const;
+      case "dashboard":
+      default:
+        return {
+          title: "Your crew HQ",
+          description:
+            "Track bookings, stay ahead on tasks, and keep your kit details current so every shoot runs smoothly.",
+          metrics: heroMetrics,
+          quickActions: heroActions,
+        } as const;
+    }
+  })();
+
   return (
     <PortalContainer>
       <div className="space-y-10">
         <PortalHero
           eyebrow="Team portal"
-          title="Your crew HQ"
-          description="Track bookings, stay ahead on tasks, and keep your kit details current so every shoot runs smoothly."
+          title={hero.title}
+          description={hero.description}
           backgroundClass="bg-emerald-900"
-          metrics={heroMetrics}
-          quickActions={heroActions}
+          metrics={hero.metrics}
+          quickActions={hero.quickActions}
         />
 
         <nav
@@ -657,8 +713,7 @@ export default function ContractorPortal() {
           id={panelId("dashboard")}
           role="tabpanel"
           aria-labelledby={tabId("dashboard")}
-          hidden={activeTab !== "dashboard"}
-          className="flex flex-col gap-6"
+          className={`flex flex-col gap-6 ${activeTab === "dashboard" ? "" : "hidden"}`}
         >
           <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -761,8 +816,7 @@ export default function ContractorPortal() {
           id={panelId("notices")}
           role="tabpanel"
           aria-labelledby={tabId("notices")}
-          hidden={activeTab !== "notices"}
-          className="flex flex-col gap-6"
+          className={`flex flex-col gap-6 ${activeTab === "notices" ? "" : "hidden"}`}
         >
           <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-4 flex items-start justify-between gap-4">
@@ -830,8 +884,7 @@ export default function ContractorPortal() {
           id={panelId("availability")}
           role="tabpanel"
           aria-labelledby={tabId("availability")}
-          hidden={activeTab !== "availability"}
-          className="flex flex-col gap-6"
+          className={`flex flex-col gap-6 ${activeTab === "availability" ? "" : "hidden"}`}
         >
           <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-6">
@@ -874,8 +927,7 @@ export default function ContractorPortal() {
           id={panelId("projects")}
           role="tabpanel"
           aria-labelledby={tabId("projects")}
-          hidden={activeTab !== "projects"}
-          className="flex flex-col gap-6"
+          className={`flex flex-col gap-6 ${activeTab === "projects" ? "" : "hidden"}`}
         >
           <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -1001,7 +1053,7 @@ export default function ContractorPortal() {
           id={panelId("compliance")}
           role="tabpanel"
           aria-labelledby={tabId("compliance")}
-          hidden={activeTab !== "compliance"}
+          className={activeTab === "compliance" ? "flex flex-col gap-6" : "hidden"}
         >
           <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -1135,7 +1187,7 @@ export default function ContractorPortal() {
           id={panelId("kit")}
           role="tabpanel"
           aria-labelledby={tabId("kit")}
-          hidden={activeTab !== "kit"}
+          className={activeTab === "kit" ? "flex flex-col gap-6" : "hidden"}
         >
           <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-base font-semibold text-slate-900">My kit register</h2>
@@ -1150,7 +1202,7 @@ export default function ContractorPortal() {
           id={panelId("workwear")}
           role="tabpanel"
           aria-labelledby={tabId("workwear")}
-          hidden={activeTab !== "workwear"}
+          className={activeTab === "workwear" ? "flex flex-col gap-6" : "hidden"}
         >
           <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-base font-semibold text-slate-900">Order workwear</h2>
@@ -1165,7 +1217,7 @@ export default function ContractorPortal() {
           id={panelId("profile")}
           role="tabpanel"
           aria-labelledby={tabId("profile")}
-          hidden={activeTab !== "profile"}
+          className={activeTab === "profile" ? "flex flex-col gap-6" : "hidden"}
         >
           <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-base font-semibold text-slate-900">My profile</h2>
