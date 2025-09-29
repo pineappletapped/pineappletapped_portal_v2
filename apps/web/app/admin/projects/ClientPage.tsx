@@ -118,6 +118,15 @@ export default function AdminProjectsPage() {
   const [dueFilter, setDueFilter] = useState<'all' | 'overdue' | 'week' | 'month' | 'none'>('all');
   const [franchiseFilter, setFranchiseFilter] = useState<'all' | '__unassigned' | string>('all');
   const [groupBy, setGroupBy] = useState<'status' | 'owner' | 'due'>('status');
+  const [expandedProjects, setExpandedProjects] = useState<string[]>([]);
+
+  const toggleProjectExpanded = useCallback((projectId: string) => {
+    setExpandedProjects((prev) =>
+      prev.includes(projectId)
+        ? prev.filter((id) => id !== projectId)
+        : [...prev, projectId]
+    );
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -767,10 +776,15 @@ export default function AdminProjectsPage() {
                 <p className="text-sm text-gray-500">No projects</p>
               ) : (
                 <div className="flex flex-col gap-2">
-                  {column.projects.map((project) => (
-                    <div
-                      key={project.id}
-                      className="card p-2 grid gap-2"
+                  {column.projects.map((project) => {
+                    const expanded = expandedProjects.includes(project.id);
+                    const { franchiseLabel, territoryLabel, operator, hqIntake } =
+                      resolveFranchiseContext(project);
+
+                    return (
+                      <div
+                        key={project.id}
+                        className="card flex flex-col gap-2 overflow-hidden p-3"
                       draggable={column.droppable}
                       onDragStart={(e) => {
                         if (!column.droppable) return;
@@ -778,22 +792,28 @@ export default function AdminProjectsPage() {
                       }}
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <div>
+                        <button
+                          type="button"
+                          onClick={() => toggleProjectExpanded(project.id)}
+                          className="flex-1 text-left"
+                          aria-expanded={expanded}
+                        >
                           <p className="font-medium text-sm">{project.title || 'Untitled'}</p>
                           <p className="text-xs text-gray-600">{project.userEmail || ''}</p>
+                        </button>
+                        <div className="flex flex-col items-end gap-1 text-xs text-gray-500">
+                          <span className={franchiseLabel ? 'font-medium text-gray-700' : 'text-gray-400'}>
+                            Franchise: {franchiseLabel || 'Unassigned'}
+                          </span>
+                          <span>Shoot date: {formatDateDisplay(project.dueDate) || 'TBC'}</span>
+                          <Link href={`/projects/${project.id}`} className="btn-sm">
+                            Open
+                          </Link>
                         </div>
-                        <span className="text-xs text-gray-500 whitespace-nowrap">
-                          {formatDateDisplay(project.dueDate)}
-                        </span>
                       </div>
-                      {(() => {
-                        const { franchiseLabel, territoryLabel, operator, hqIntake } =
-                          resolveFranchiseContext(project);
-                        return (
-                          <div className="grid gap-1 text-xs text-gray-600">
-                            <span className={franchiseLabel ? 'font-medium text-gray-700' : 'text-gray-400'}>
-                              Franchise: {franchiseLabel || 'Unassigned'}
-                            </span>
+                      {expanded ? (
+                        <div className="space-y-2 text-xs">
+                          <div className="grid gap-1 text-gray-600">
                             {territoryLabel && <span>Territory: {territoryLabel}</span>}
                             {operator && <span>Operator: {operator}</span>}
                             {hqIntake && (
@@ -802,94 +822,94 @@ export default function AdminProjectsPage() {
                               </span>
                             )}
                           </div>
-                        );
-                      })()}
-                      <div className="flex flex-wrap gap-2 text-xs text-gray-600">
-                        {project.ownerUid && staffMap.get(project.ownerUid)?.label && (
-                          <span className="rounded-full bg-gray-100 px-2 py-1">
-                            {staffMap.get(project.ownerUid)?.label}
-                          </span>
-                        )}
-                        {project.priority && (
-                          <span className="rounded-full bg-amber-100 px-2 py-1 capitalize">
-                            {project.priority}
-                          </span>
-                        )}
-                      </div>
-                      {kitSummaries[project.id] ? (
-                        <div className="grid gap-1 text-xs text-gray-600">
-                          <span className="font-medium text-gray-700">{kitSummaries[project.id].label}</span>
-                          {kitSummaries[project.id].window ? (
-                            <span>Window: {kitSummaries[project.id].window}</span>
+                          <div className="flex flex-wrap gap-2 text-gray-600">
+                            {project.ownerUid && staffMap.get(project.ownerUid)?.label && (
+                              <span className="rounded-full bg-gray-100 px-2 py-1">
+                                {staffMap.get(project.ownerUid)?.label}
+                              </span>
+                            )}
+                            {project.priority && (
+                              <span className="rounded-full bg-amber-100 px-2 py-1 capitalize">
+                                {project.priority}
+                              </span>
+                            )}
+                          </div>
+                          {kitSummaries[project.id] ? (
+                            <div className="grid gap-1 text-gray-600">
+                              <span className="font-medium text-gray-700">
+                                {kitSummaries[project.id].label}
+                              </span>
+                              {kitSummaries[project.id].window ? (
+                                <span>Window: {kitSummaries[project.id].window}</span>
+                              ) : null}
+                              {kitSummaries[project.id].hasDrone ? (
+                                <span className="inline-flex w-max items-center rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-800">
+                                  Drone kit
+                                </span>
+                              ) : null}
+                            </div>
                           ) : null}
-                          {kitSummaries[project.id].hasDrone ? (
-                            <span className="inline-flex w-max items-center rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-800">
-                              Drone kit
-                            </span>
-                          ) : null}
+                          <div className="grid gap-2 text-xs">
+                            <select
+                              value={project.ownerUid || ''}
+                              onChange={(e) => updateOwner(project.id, e.target.value || null)}
+                              className="input w-full text-xs"
+                            >
+                              <option value="">Unassigned</option>
+                              {staff.map((member) => (
+                                <option key={member.uid} value={member.uid}>
+                                  {member.label}
+                                </option>
+                              ))}
+                            </select>
+                            <div className="flex gap-2">
+                              <label className="flex-1">
+                                <span className="sr-only">Due date</span>
+                                <input
+                                  type="date"
+                                  value={toDateInputValue(project.dueDate)}
+                                  onChange={(e) => updateDateField(project.id, 'dueDate', e.target.value)}
+                                  className="input w-full text-xs"
+                                />
+                              </label>
+                              <label className="flex-1">
+                                <span className="sr-only">Kickoff date</span>
+                                <input
+                                  type="date"
+                                  value={toDateInputValue(project.kickoffDate)}
+                                  onChange={(e) => updateDateField(project.id, 'kickoffDate', e.target.value)}
+                                  className="input w-full text-xs"
+                                />
+                              </label>
+                            </div>
+                            <select
+                              value={(project.priority as ProjectPriority) || ''}
+                              onChange={(e) => updatePriority(project.id, e.target.value as ProjectPriority)}
+                              className="input w-full text-xs"
+                            >
+                              {PRIORITY_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              value={project.status || statuses[0]}
+                              onChange={(e) => updateStatus(project.id, e.target.value)}
+                              className="input w-full text-xs"
+                            >
+                              {statuses.map((s) => (
+                                <option key={s} value={s}>
+                                  {s.replace('_', ' ')}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
                         </div>
                       ) : null}
-                      <div className="grid gap-1 text-xs">
-                        <select
-                          value={project.ownerUid || ''}
-                          onChange={(e) => updateOwner(project.id, e.target.value || null)}
-                          className="input text-xs"
-                        >
-                          <option value="">Unassigned</option>
-                          {staff.map((member) => (
-                            <option key={member.uid} value={member.uid}>
-                              {member.label}
-                            </option>
-                          ))}
-                        </select>
-                        <div className="flex gap-1">
-                          <label className="flex-1">
-                            <span className="sr-only">Due date</span>
-                            <input
-                              type="date"
-                              value={toDateInputValue(project.dueDate)}
-                              onChange={(e) => updateDateField(project.id, 'dueDate', e.target.value)}
-                              className="input text-xs"
-                            />
-                          </label>
-                          <label className="flex-1">
-                            <span className="sr-only">Kickoff date</span>
-                            <input
-                              type="date"
-                              value={toDateInputValue(project.kickoffDate)}
-                              onChange={(e) => updateDateField(project.id, 'kickoffDate', e.target.value)}
-                              className="input text-xs"
-                            />
-                          </label>
-                        </div>
-                        <select
-                          value={(project.priority as ProjectPriority) || ''}
-                          onChange={(e) => updatePriority(project.id, e.target.value as ProjectPriority)}
-                          className="input text-xs"
-                        >
-                          {PRIORITY_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                        <select
-                          value={project.status || statuses[0]}
-                          onChange={(e) => updateStatus(project.id, e.target.value)}
-                          className="input text-xs"
-                        >
-                          {statuses.map((s) => (
-                            <option key={s} value={s}>
-                              {s.replace('_', ' ')}
-                            </option>
-                          ))}
-                        </select>
-                        <Link href={`/projects/${project.id}`} className="btn-sm w-fit">
-                          Open
-                        </Link>
-                      </div>
                     </div>
-                  ))}
+                  );
+                  })}
                 </div>
               )}
             </div>
