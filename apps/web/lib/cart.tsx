@@ -27,6 +27,8 @@ export interface CartItem {
     end: string;
   }[];
   rentalTotal?: number;
+  kitStatus?: "confirmed" | "pending";
+  kitWarnings?: string[];
 }
 
 interface ProductInput {
@@ -44,6 +46,8 @@ interface ProductInput {
     end: string;
   }[];
   rentalTotal?: number;
+  kitStatus?: "confirmed" | "pending";
+  kitWarnings?: string[];
 }
 
 interface CartContextProps {
@@ -134,7 +138,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
           i.date === product.date &&
           i.variation === product.variation &&
           JSON.stringify(i.modifiers || []) ===
-            JSON.stringify(product.modifiers || [])
+            JSON.stringify(product.modifiers || []) &&
+          (i.kitStatus || "confirmed") === (product.kitStatus || "confirmed") &&
+          JSON.stringify(i.kitWarnings || []) ===
+            JSON.stringify(product.kitWarnings || [])
       );
       if (existing) {
         return prev.map((i) =>

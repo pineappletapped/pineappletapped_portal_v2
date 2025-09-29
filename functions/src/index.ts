@@ -2541,11 +2541,17 @@ export const onOrderCreated = functions.firestore
     const filmingDueAt = admin.firestore.Timestamp.fromDate(filmingDueDate);
     const editingDueAt = admin.firestore.Timestamp.fromDate(editingDueDate);
 
+    const kitReservationStatus =
+      order.kitReservationStatus === 'pending' ? 'pending' : 'confirmed';
     const projectUpdates: Record<string, any> = {
       kickoffDate: admin.firestore.FieldValue.serverTimestamp(),
       dueDate: editingDueAt,
       filmingDueDate: filmingDueAt,
+      kitReservationStatus,
     };
+    if (Array.isArray(order.kitReservationWarnings) && order.kitReservationWarnings.length > 0) {
+      projectUpdates.kitReservationWarnings = order.kitReservationWarnings;
+    }
     if (order.budgetTotals) projectUpdates.budgetTotals = order.budgetTotals;
     const budgetItems = (order.items || []).map((item: any) => ({
       id: item.id,
@@ -2771,7 +2777,7 @@ export const onOrderCreated = functions.firestore
 
     // Record equipment bookings and usage logs
     const kitItems: any[] = order.kitItems || [];
-    if (Array.isArray(kitItems) && kitItems.length) {
+    if (kitReservationStatus === 'confirmed' && Array.isArray(kitItems) && kitItems.length) {
       const batch = db.batch();
       for (const item of kitItems) {
         if (!item.id || !item.start || !item.end) continue;
@@ -2975,7 +2981,9 @@ export const reserveKit = functions.https.onCall(async (data) => {
   const eqIds: string[] = required.flatMap((g: any) => g.items || []);
   const conflicts: any[] = [];
   const kitItems: any[] = [];
+  const missingStandards: string[] = [];
   let rentalTotal = 0;
+  let reservationStatus: 'confirmed' | 'pending' = 'confirmed';
   for (const id of eqIds) {
     const eqRef = db.collection('equipment').doc(id);
     const eqSnap = await eqRef.get();
@@ -2988,6 +2996,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
       .get();
     if (!bookings.empty) {
       conflicts.push({ id, name: eq.name || id });
+      reservationStatus = 'pending';
       continue;
     }
     if (standardsToEnforce.size > 0) {
@@ -3022,30 +3031,48 @@ export const reserveKit = functions.https.onCall(async (data) => {
     rentalTotal += eq.rentalPrice || 0;
   }
   if (conflicts.length > 0) {
-    return { conflicts };
+    return {
+      conflicts,
+      kitItems,
+      rentalTotal,
+      status: 'pending',
+      missingStandards,
+    };
   }
   if (standardsToEnforce.size > 0) {
-    const missingStandards = requiredStandards.filter((standard) => {
+    const missingStandardsList = requiredStandards.filter((standard) => {
       const matches = standardMatches.get(standard);
       return !matches || matches.size === 0;
     });
-    if (missingStandards.length > 0) {
-      throw new functions.https.HttpsError('failed-precondition', 'missing-required-standards', {
-        missingStandards,
+    if (missingStandardsList.length > 0) {
+      missingStandardsList.forEach((standard) => {
+        if (!standard) return;
+        if (!missingStandards.includes(standard)) {
+          missingStandards.push(standard);
+        }
       });
+      reservationStatus = 'pending';
     }
   }
-  const batch = db.batch();
-  for (const item of kitItems) {
-    const eqRef = db.collection('equipment').doc(item.id);
-    batch.set(eqRef.collection('bookings').doc(), {
-      start: admin.firestore.Timestamp.fromDate(start),
-      end: admin.firestore.Timestamp.fromDate(end),
-      projectId: null,
-    });
+  if (reservationStatus === 'confirmed') {
+    const batch = db.batch();
+    for (const item of kitItems) {
+      const eqRef = db.collection('equipment').doc(item.id);
+      batch.set(eqRef.collection('bookings').doc(), {
+        start: admin.firestore.Timestamp.fromDate(start),
+        end: admin.firestore.Timestamp.fromDate(end),
+        projectId: null,
+      });
+    }
+    await batch.commit();
   }
-  await batch.commit();
-  return { conflicts: [], kitItems, rentalTotal };
+  return {
+    conflicts: [],
+    kitItems,
+    rentalTotal,
+    status: reservationStatus,
+    missingStandards,
+  };
 });
 
 type NormalisedRoles = Record<string, boolean>;
@@ -5532,6 +5559,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     kitItems: kitItemsInput = [],
     rentalSubtotal = 0,
     leadSource: leadSourceInput,
+    kitReservationStatus: kitReservationStatusInput,
+    kitReservationWarnings: kitReservationWarningsInput = [],
   } = data;
   if (!items || !Array.isArray(items) || items.length === 0) {
     throw new functions.https.HttpsError('invalid-argument', 'items are required');
@@ -5562,6 +5591,16 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         .filter((item): item is { id: string; name: string | null; category: string | null; start: string | null; end: string | null } =>
           !!item
         )
+    : [];
+
+  const kitReservationStatusInitial =
+    typeof kitReservationStatusInput === 'string' && kitReservationStatusInput === 'pending'
+      ? 'pending'
+      : 'confirmed';
+  const kitReservationWarningsInitial = Array.isArray(kitReservationWarningsInput)
+    ? (kitReservationWarningsInput as unknown[])
+        .map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .filter((value): value is string => value.length > 0)
     : [];
 
   const postalCodeValue = typeof postalCode === 'string' ? postalCode : null;
@@ -5611,6 +5650,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   }
   const productSnaps = await db.getAll(...productRefs);
   const orderItems: any[] = [];
+  let aggregatedKitReservationStatus: 'confirmed' | 'pending' = kitReservationStatusInitial;
+  const aggregatedKitWarnings = new Set<string>(kitReservationWarningsInitial);
   const driveProducts: DriveOrderProductContext[] = [];
   let productSubtotal = 0;
   let labourSubtotal = 0;
@@ -5693,6 +5734,25 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       resolvedModifiers.push(payload);
     });
     const price = unitPrice + modifiersTotal;
+    const rawItemKitStatus =
+      items[idx] && typeof items[idx].kitStatus === 'string'
+        ? (items[idx].kitStatus as string)
+        : null;
+    const itemKitStatus: 'confirmed' | 'pending' =
+      rawItemKitStatus === 'pending' ? 'pending' : 'confirmed';
+    const itemKitWarnings = Array.isArray(items[idx]?.kitWarnings)
+      ? (items[idx].kitWarnings as unknown[])
+          .map((warning) => (typeof warning === 'string' ? warning.trim() : ''))
+          .filter((warning): warning is string => warning.length > 0)
+      : [];
+    if (itemKitStatus === 'pending') {
+      aggregatedKitReservationStatus = 'pending';
+    }
+    itemKitWarnings.forEach((warning) => {
+      if (warning.length > 0) {
+        aggregatedKitWarnings.add(warning);
+      }
+    });
     const budget = (prod as any).budget || {};
     const labourFilming = parseOptional(budget.labourFilming);
     const labourEditing = parseOptional(budget.labourEditing);
@@ -5730,6 +5790,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       category,
       rentalTotal: rental,
       modifiers: resolvedModifiers,
+      kitReservationStatus: itemKitStatus,
+      kitWarnings: itemKitWarnings,
       budget: {
         perUnit: {
           labour,
@@ -5916,6 +5978,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     budgetSubtotal,
     budgetTotals,
     kitItems,
+    kitReservationStatus: aggregatedKitReservationStatus,
+    kitReservationWarnings: Array.from(aggregatedKitWarnings),
     voucherDiscount,
     discountPct,
     discountAmount,

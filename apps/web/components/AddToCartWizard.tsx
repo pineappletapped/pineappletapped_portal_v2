@@ -214,8 +214,15 @@ export default function AddToCartWizard({
     try {
       const reserve = httpsCallable(functions, "reserveKit");
       const res: any = await reserve({ productId: product.id, date });
-      const { conflicts = [], kitItems = [], rentalTotal = 0 } = res.data || {};
-      if (conflicts.length > 0) {
+      const {
+        conflicts = [],
+        kitItems = [],
+        rentalTotal = 0,
+        status,
+        missingStandards = [],
+      } = res.data || {};
+      const reservationStatus = status === "pending" ? "pending" : "confirmed";
+      if (reservationStatus === "confirmed" && conflicts.length > 0) {
         const conflictNames = conflicts
           .map((c: any) => (c && (c.name || c.id)) || "Unavailable item")
           .filter(Boolean);
@@ -224,6 +231,31 @@ export default function AddToCartWizard({
         setLiveMessage("Equipment conflicts found for the selected date");
         setSubmitting(false);
         return;
+      }
+      setConflicts([]);
+      const warnings: string[] = [];
+      if (reservationStatus === "pending") {
+        const conflictNames = conflicts
+          .map((c: any) => (c && (c.name || c.id)) || "Unavailable item")
+          .filter(Boolean);
+        if (conflictNames.length > 0) {
+          warnings.push(`Equipment already booked: ${conflictNames.join(", ")}`);
+        }
+        if (missingStandards.length > 0) {
+          warnings.push(
+            `Missing required equipment standards: ${missingStandards.join(", ")}`
+          );
+        }
+        if (warnings.length === 0) {
+          warnings.push("Kit availability will be confirmed manually by the operations team.");
+        }
+        if (typeof window !== "undefined") {
+          const message = [
+            "We've added this to your cart, but kit availability still needs manual confirmation.",
+            ...warnings,
+          ].join("\n\n");
+          window.alert(message);
+        }
       }
       add({
         id: product.id,
@@ -234,8 +266,14 @@ export default function AddToCartWizard({
         modifiers: selections,
         kitItems,
         rentalTotal,
+        kitStatus: reservationStatus,
+        kitWarnings: warnings,
       });
-      setLiveMessage("Added to cart");
+      setLiveMessage(
+        reservationStatus === "pending"
+          ? "Added to cart – kit confirmation pending"
+          : "Added to cart"
+      );
       setSubmitting(false);
       onClose();
     } catch (err) {

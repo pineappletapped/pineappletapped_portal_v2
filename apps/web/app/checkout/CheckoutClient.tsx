@@ -77,17 +77,42 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const loginErrorRef = useRef<HTMLDivElement | null>(null);
   const authEmail = currentUser?.email || "";
   const orderInput = useMemo(() => {
-    const itemPayload = items.map((item) => ({
-      id: item.id,
-      quantity: item.quantity,
-      rentalTotal: item.rentalTotal ?? 0,
-      modifiers: (item.modifiers ?? []).map((mod) => ({ ...mod })),
-    }));
+    const itemPayload = items.map((item) => {
+      const warnings = Array.isArray(item.kitWarnings)
+        ? item.kitWarnings
+            .map((warning) => (typeof warning === "string" ? warning.trim() : ""))
+            .filter((warning) => warning.length > 0)
+        : [];
+      return {
+        id: item.id,
+        quantity: item.quantity,
+        rentalTotal: item.rentalTotal ?? 0,
+        modifiers: (item.modifiers ?? []).map((mod) => ({ ...mod })),
+        kitStatus: item.kitStatus === "pending" ? "pending" : "confirmed",
+        kitWarnings: warnings,
+      };
+    });
     const kitItemsPayload = items.flatMap((item) => item.kitItems || []);
+    const kitReservationStatus = items.some((item) => item.kitStatus === "pending")
+      ? "pending"
+      : "confirmed";
+    const kitReservationWarnings = Array.from(
+      new Set(
+        items.flatMap((item) =>
+          Array.isArray(item.kitWarnings)
+            ? item.kitWarnings
+                .map((warning) => (typeof warning === "string" ? warning.trim() : ""))
+                .filter((warning) => warning.length > 0)
+            : []
+        )
+      )
+    );
     return {
       items: itemPayload,
       kitItems: kitItemsPayload,
       rentalSubtotal: rentalTotal,
+      kitReservationStatus,
+      kitReservationWarnings,
       userEmail: authEmail || email,
       customerName: name,
       companyName: company || null,
@@ -123,6 +148,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             optionId: mod.optionId,
             price: mod.price ?? null,
           })),
+          kitStatus: item.kitStatus,
+          kitWarnings: item.kitWarnings,
         })),
         kitItems: orderInput.kitItems.map((kit) => ({
           id: kit.id,
@@ -131,6 +158,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           start: kit.start,
           end: kit.end,
         })),
+        kitReservationStatus: orderInput.kitReservationStatus,
+        kitReservationWarnings: orderInput.kitReservationWarnings,
       }),
     [orderInput]
   );

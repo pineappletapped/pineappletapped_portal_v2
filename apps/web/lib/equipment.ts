@@ -25,6 +25,8 @@ export interface Equipment {
   description?: string;
   weightKg?: number;
   length?: string;
+  focalLengthMin?: number | null;
+  focalLengthMax?: number | null;
   photo?: string;
   documents?: string[];
   meetsStandards?: string[];

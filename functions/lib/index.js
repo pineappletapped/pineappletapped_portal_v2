@@ -2095,11 +2095,16 @@ export const onOrderCreated = functions.firestore
     const editingDueDate = new Date(Date.now() + DEFAULT_EDITING_SLA_DAYS * DAY_IN_MS);
     const filmingDueAt = admin.firestore.Timestamp.fromDate(filmingDueDate);
     const editingDueAt = admin.firestore.Timestamp.fromDate(editingDueDate);
+    const kitReservationStatus = order.kitReservationStatus === 'pending' ? 'pending' : 'confirmed';
     const projectUpdates = {
         kickoffDate: admin.firestore.FieldValue.serverTimestamp(),
         dueDate: editingDueAt,
         filmingDueDate: filmingDueAt,
+        kitReservationStatus,
     };
+    if (Array.isArray(order.kitReservationWarnings) && order.kitReservationWarnings.length > 0) {
+        projectUpdates.kitReservationWarnings = order.kitReservationWarnings;
+    }
     if (order.budgetTotals)
         projectUpdates.budgetTotals = order.budgetTotals;
     const budgetItems = (order.items || []).map((item) => ({
@@ -2301,7 +2306,7 @@ export const onOrderCreated = functions.firestore
     }
     // Record equipment bookings and usage logs
     const kitItems = order.kitItems || [];
-    if (Array.isArray(kitItems) && kitItems.length) {
+    if (kitReservationStatus === 'confirmed' && Array.isArray(kitItems) && kitItems.length) {
         const batch = db.batch();
         for (const item of kitItems) {
             if (!item.id || !item.start || !item.end)
@@ -2495,7 +2500,9 @@ export const reserveKit = functions.https.onCall(async (data) => {
     const eqIds = required.flatMap((g) => g.items || []);
     const conflicts = [];
     const kitItems = [];
+    const missingStandards = [];
     let rentalTotal = 0;
+    let reservationStatus = 'confirmed';
     for (const id of eqIds) {
         const eqRef = db.collection('equipment').doc(id);
         const eqSnap = await eqRef.get();
@@ -2509,6 +2516,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
             .get();
         if (!bookings.empty) {
             conflicts.push({ id, name: eq.name || id });
+            reservationStatus = 'pending';
             continue;
         }
         if (standardsToEnforce.size > 0) {
@@ -2542,30 +2550,49 @@ export const reserveKit = functions.https.onCall(async (data) => {
         rentalTotal += eq.rentalPrice || 0;
     }
     if (conflicts.length > 0) {
-        return { conflicts };
+        return {
+            conflicts,
+            kitItems,
+            rentalTotal,
+            status: 'pending',
+            missingStandards,
+        };
     }
     if (standardsToEnforce.size > 0) {
-        const missingStandards = requiredStandards.filter((standard) => {
+        const missingStandardsList = requiredStandards.filter((standard) => {
             const matches = standardMatches.get(standard);
             return !matches || matches.size === 0;
         });
-        if (missingStandards.length > 0) {
-            throw new functions.https.HttpsError('failed-precondition', 'missing-required-standards', {
-                missingStandards,
+        if (missingStandardsList.length > 0) {
+            missingStandardsList.forEach((standard) => {
+                if (!standard)
+                    return;
+                if (!missingStandards.includes(standard)) {
+                    missingStandards.push(standard);
+                }
             });
+            reservationStatus = 'pending';
         }
     }
-    const batch = db.batch();
-    for (const item of kitItems) {
-        const eqRef = db.collection('equipment').doc(item.id);
-        batch.set(eqRef.collection('bookings').doc(), {
-            start: admin.firestore.Timestamp.fromDate(start),
-            end: admin.firestore.Timestamp.fromDate(end),
-            projectId: null,
-        });
+    if (reservationStatus === 'confirmed') {
+        const batch = db.batch();
+        for (const item of kitItems) {
+            const eqRef = db.collection('equipment').doc(item.id);
+            batch.set(eqRef.collection('bookings').doc(), {
+                start: admin.firestore.Timestamp.fromDate(start),
+                end: admin.firestore.Timestamp.fromDate(end),
+                projectId: null,
+            });
+        }
+        await batch.commit();
     }
-    await batch.commit();
-    return { conflicts: [], kitItems, rentalTotal };
+    return {
+        conflicts: [],
+        kitItems,
+        rentalTotal,
+        status: reservationStatus,
+        missingStandards,
+    };
 });
 function normaliseRoles(raw) {
     if (!raw || typeof raw !== 'object') {
@@ -3475,42 +3502,41 @@ export const quote_request_public = functions.https.onCall(async (data) => {
         const trimmed = value.trim();
         return trimmed.length > 0 ? trimmed : null;
     };
-    const normaliseRequiredString = (value) => {
-        const normalised = normaliseOptionalString(value);
-        return normalised === null ? '' : normalised;
-    };
+    const normaliseRequiredString = (value) => normaliseOptionalString(value) ?? '';
     const contactName = normaliseRequiredString(data.name);
     const contactEmail = normaliseRequiredString(data.email);
     const contactCompany = normaliseOptionalString(data.company);
     const projectName = normaliseOptionalString(data.projectName);
     const productionPeriod = normaliseOptionalString(data.productionPeriod);
     const customRequest = normaliseOptionalString(data.customRequest);
-    const requirements = normaliseOptionalString(data?.requirements);
-    const venueName = normaliseOptionalString(data?.venueName);
-    const venueLocation = normaliseOptionalString(data?.venueLocation);
-    const eventDate = normaliseOptionalString(data?.eventDate);
+    const requirements = normaliseOptionalString(data.requirements);
+    const venueName = normaliseOptionalString(data.venueName);
+    const venueLocation = normaliseOptionalString(data.venueLocation);
+    const eventDate = normaliseOptionalString(data.eventDate);
     const itemsRaw = Array.isArray(data.items) ? data.items : [];
-    const items = [];
-    for (const raw of itemsRaw) {
-        if (!raw || typeof raw !== 'object')
-            continue;
-        const productId = normaliseOptionalString(raw.productId);
+    const items = itemsRaw
+        .map((item) => {
+        const productId = normaliseOptionalString(item?.productId);
         if (!productId)
-            continue;
+            return null;
         const entry = { productId };
-        const note = normaliseOptionalString(raw.note);
+        const note = normaliseOptionalString(item?.note);
         if (note)
             entry.note = note;
-        const variationId = normaliseOptionalString(raw.variationId);
+        const variationId = normaliseOptionalString(item?.variationId);
         if (variationId)
             entry.variationId = variationId;
-        const variationName = normaliseOptionalString(raw.variationName);
+        const variationName = normaliseOptionalString(item?.variationName);
         if (variationName)
             entry.variationName = variationName;
-        items.push(entry);
-    }
-    const originProductId = normaliseOptionalString(data.originProductId) || (items[0] && items[0].productId) || null;
-    const quoteMode = normaliseOptionalString(data.quoteMode) || normaliseOptionalString(data.salesMode) || 'manual';
+        return entry;
+    })
+        .filter((entry) => entry !== null);
+    const originProductId = normaliseOptionalString(data.originProductId) ||
+        (items[0]?.productId ?? null);
+    const quoteMode = normaliseOptionalString(data.quoteMode) ||
+        normaliseOptionalString(data.salesMode) ||
+        'manual';
     const record = {
         userId: null,
         contactName,
@@ -4801,7 +4827,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     const parseOptional = (value) => value === undefined || value === null ? undefined : toNumber(value);
     const DEFAULT_TRAVEL_MILES = 100;
     const DEFAULT_TRAVEL_RATE = 0.3;
-    const { items, userEmail, customerName, companyName, location, postalCode, projectName, voucher, kitItems: kitItemsInput = [], rentalSubtotal = 0, leadSource: leadSourceInput, } = data;
+    const { items, userEmail, customerName, companyName, location, postalCode, projectName, voucher, kitItems: kitItemsInput = [], rentalSubtotal = 0, leadSource: leadSourceInput, kitReservationStatus: kitReservationStatusInput, kitReservationWarnings: kitReservationWarningsInput = [], } = data;
     if (!items || !Array.isArray(items) || items.length === 0) {
         throw new functions.https.HttpsError('invalid-argument', 'items are required');
     }
@@ -4825,6 +4851,14 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         ? kitItemsInput
             .map(normaliseKitItem)
             .filter((item) => !!item)
+        : [];
+    const kitReservationStatusInitial = typeof kitReservationStatusInput === 'string' && kitReservationStatusInput === 'pending'
+        ? 'pending'
+        : 'confirmed';
+    const kitReservationWarningsInitial = Array.isArray(kitReservationWarningsInput)
+        ? kitReservationWarningsInput
+            .map((value) => (typeof value === 'string' ? value.trim() : ''))
+            .filter((value) => value.length > 0)
         : [];
     const postalCodeValue = typeof postalCode === 'string' ? postalCode : null;
     const normalisedPostalCode = normalisePostalCode(postalCodeValue);
@@ -4866,6 +4900,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     }
     const productSnaps = await db.getAll(...productRefs);
     const orderItems = [];
+    let aggregatedKitReservationStatus = kitReservationStatusInitial;
+    const aggregatedKitWarnings = new Set(kitReservationWarningsInitial);
     const driveProducts = [];
     let productSubtotal = 0;
     let labourSubtotal = 0;
@@ -4934,6 +4970,23 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             resolvedModifiers.push(payload);
         });
         const price = unitPrice + modifiersTotal;
+        const rawItemKitStatus = items[idx] && typeof items[idx].kitStatus === 'string'
+            ? items[idx].kitStatus
+            : null;
+        const itemKitStatus = rawItemKitStatus === 'pending' ? 'pending' : 'confirmed';
+        const itemKitWarnings = Array.isArray(items[idx]?.kitWarnings)
+            ? items[idx].kitWarnings
+                .map((warning) => (typeof warning === 'string' ? warning.trim() : ''))
+                .filter((warning) => warning.length > 0)
+            : [];
+        if (itemKitStatus === 'pending') {
+            aggregatedKitReservationStatus = 'pending';
+        }
+        itemKitWarnings.forEach((warning) => {
+            if (warning.length > 0) {
+                aggregatedKitWarnings.add(warning);
+            }
+        });
         const budget = prod.budget || {};
         const labourFilming = parseOptional(budget.labourFilming);
         const labourEditing = parseOptional(budget.labourEditing);
@@ -4966,6 +5019,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             category,
             rentalTotal: rental,
             modifiers: resolvedModifiers,
+            kitReservationStatus: itemKitStatus,
+            kitWarnings: itemKitWarnings,
             budget: {
                 perUnit: {
                     labour,
@@ -5142,6 +5197,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         budgetSubtotal,
         budgetTotals,
         kitItems,
+        kitReservationStatus: aggregatedKitReservationStatus,
+        kitReservationWarnings: Array.from(aggregatedKitWarnings),
         voucherDiscount,
         discountPct,
         discountAmount,
