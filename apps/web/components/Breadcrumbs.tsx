@@ -34,6 +34,8 @@ const LABELS: Record<string, string> = {
   engagements: 'Engagement Log',
 };
 
+const HIDDEN_ROOT_SEGMENTS = new Set(['admin', 'dashboard', 'franchise', 'contractors', 'team']);
+
 function formatSegment(seg: string): string {
   return LABELS[seg] ?? seg.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -45,35 +47,36 @@ export default function Breadcrumbs({
 }) {
   const pathname = usePathname();
   const segments = pathname.split('/').filter(Boolean);
+  const shouldAutoHide = !items && segments.length === 1 && HIDDEN_ROOT_SEGMENTS.has(segments[0]);
   const trail =
     items ??
     segments.map((seg, idx) => ({
       href: '/' + segments.slice(0, idx + 1).join('/'),
       label: formatSegment(seg),
     }));
-  if (trail.length === 0) return null;
+  if (trail.length === 0 || shouldAutoHide) return null;
 
   return (
-    <nav aria-label="Breadcrumb" className="text-sm breadcrumbs mb-4">
-      <ul>
+    <nav aria-label="Breadcrumb" className="mb-4">
+      <ol className="flex flex-wrap items-center gap-2 text-xs font-medium text-gray-500 sm:text-sm">
         {trail.map((item, idx) => {
           const isLast = idx === trail.length - 1;
           return (
-            <li key={item.href}>
+            <li key={item.href} className="flex items-center gap-2">
               {isLast ? (
-                <span className="font-semibold">{item.label}</span>
+                <span className="text-gray-900" aria-current="page">
+                  {item.label}
+                </span>
               ) : (
-                <Link
-                  href={item.href}
-                  className="text-blue-600 hover:underline"
-                >
+                <Link href={item.href} className="hover:text-gray-900">
                   {item.label}
                 </Link>
               )}
+              {!isLast ? <span className="text-gray-300">/</span> : null}
             </li>
           );
         })}
-      </ul>
+      </ol>
     </nav>
   );
 }

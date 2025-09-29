@@ -49,6 +49,9 @@ export default function AddToCartWizard({
   basePrice,
   onClose,
 }: Props) {
+  if ((product.salesMode ?? "ecommerce") === "quote") {
+    throw new Error("Quote-only products cannot be added to the cart.");
+  }
   const { add } = useCart();
   const [groups, setGroups] = useState<ModifierGroup[]>([]);
   const [selected, setSelected] = useState<Record<string, string[]>>({});

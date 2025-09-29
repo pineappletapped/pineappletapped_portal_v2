@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import TerritoryMap from "@/components/TerritoryMap";
+import WorkflowStepsEditor from "@/components/admin/WorkflowStepsEditor";
 import {
   addDoc,
   collection,
@@ -11,6 +12,7 @@ import {
   getDocs,
   serverTimestamp,
   updateDoc,
+  type Timestamp,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useRoleGate } from "@/hooks/useRoleGate";
@@ -29,6 +31,7 @@ import {
   defaultFranchiseQuickBooksConfig,
   parseFranchise,
   parseMember,
+  HQ_UNASSIGNED_TERRITORY_LABEL,
   parseTerritory,
   territorySummary,
 } from "@/lib/franchises";
@@ -66,6 +69,34 @@ const TERRITORY_TYPES = [
   { value: "postal" as const, label: "Postcode collection" },
   { value: "radius" as const, label: "Radius from coordinate" },
 ];
+
+const APPLICATION_STATUS_OPTIONS: {
+  value: FranchiseApplicationStatus;
+  label: string;
+  description: string;
+}[] = [
+  { value: "pending", label: "New", description: "Application has been received and awaits review." },
+  { value: "reviewing", label: "Reviewing", description: "HQ is reviewing the submission details." },
+  { value: "interview", label: "Interview", description: "Candidate is in the interview or discovery call stage." },
+  { value: "approved", label: "Approved", description: "Candidate has been approved to move forward." },
+  { value: "declined", label: "Declined", description: "Application has been closed and will not proceed." },
+];
+
+const APPLICATION_STAGE_OPTIONS: {
+  value: FranchiseApplicationStage;
+  label: string;
+  description: string;
+}[] = [
+  { value: "discovery", label: "Discovery", description: "Initial enquiry and information gathering." },
+  { value: "qualification", label: "Qualification", description: "Reviewing financials and fit for the network." },
+  {
+    value: "due_diligence",
+    label: "Due diligence",
+    description: "Background checks, legal review, and territory confirmation.",
+  },
+  { value: "launch", label: "Launch", description: "Preparing contracts, onboarding, and go-live." },
+];
+
 
 const ONBOARDING_STATUS_OPTIONS: {
   value: FranchiseOnboardingStatus;
@@ -228,6 +259,24 @@ type QuickBooksState = {
   realmId: string;
 };
 
+type FranchiseApplicationStatus = 'pending' | 'reviewing' | 'interview' | 'approved' | 'declined';
+
+type FranchiseApplicationStage = 'discovery' | 'qualification' | 'due_diligence' | 'launch';
+
+interface FranchiseApplicationRecord {
+  id: string;
+  status: FranchiseApplicationStatus;
+  onboardingStage: FranchiseApplicationStage;
+  createdAt: Timestamp | null;
+  updatedAt: Timestamp | null;
+  preferredTerritoryIds: string[];
+  preferredTerritoryLabels: string[];
+  preferredCategoryIds: string[];
+  preferredCategoryLabels: string[];
+  answers: Record<string, unknown>;
+  reviewNotes: string;
+}
+
 const ordinal = (value: number) => {
   const remainder = value % 10;
   const isTeen = value % 100 >= 11 && value % 100 <= 13;
@@ -343,12 +392,13 @@ const removeRoyaltyTier = (state: RoyaltyState, index: number): RoyaltyState => 
   return { ...state, hqTiers: tiers };
 };
 
-type AdminFranchiseTab = "franchises" | "territories" | "members";
+type AdminFranchiseTab = "franchises" | "territories" | "members" | "applications";
 
 const FRANCHISE_TABS: { id: AdminFranchiseTab; label: string }[] = [
   { id: "franchises", label: "Franchises" },
   { id: "territories", label: "Territories" },
   { id: "members", label: "Members & Assignments" },
+  { id: "applications", label: "Applications" },
 ];
 
 const describeRoyaltyTier = (tier: { minOrder: number; maxOrder?: number | null; percentage: number }) => {
@@ -370,6 +420,9 @@ export default function AdminFranchisesPage() {
   const [members, setMembers] = useState<FranchiseMember[]>([]);
   const [users, setUsers] = useState<UserSummary[]>([]);
   const [categoryOptions, setCategoryOptions] = useState<CategoryOption[]>([]);
+  const [applications, setApplications] = useState<FranchiseApplicationRecord[]>([]);
+  const [applicationNotes, setApplicationNotes] = useState<Record<string, string>>({});
+  const [savingApplications, setSavingApplications] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AdminFranchiseTab>("franchises");
 
@@ -409,6 +462,7 @@ export default function AdminFranchisesPage() {
     type: "postal" as "postal" | "radius",
     postalCodes: "",
     exclusive: true,
+    acceptingApplications: false,
     radiusKm: "",
     centerLat: "",
     centerLng: "",
@@ -424,6 +478,7 @@ export default function AdminFranchisesPage() {
     type: "postal" as "postal" | "radius",
     postalCodes: "",
     exclusive: true,
+    acceptingApplications: false,
     radiusKm: "",
     centerLat: "",
     centerLng: "",
@@ -512,12 +567,20 @@ export default function AdminFranchisesPage() {
   );
 
   const loadAll = useCallback(async (cancelRef?: { current: boolean }) => {
-    const [franchiseSnap, territorySnap, memberSnap, usersSnap, categorySnap] = await Promise.all([
+    const [
+      franchiseSnap,
+      territorySnap,
+      memberSnap,
+      usersSnap,
+      categorySnap,
+      applicationSnap,
+    ] = await Promise.all([
       getDocs(collection(db, "franchises")),
       getDocs(collection(db, "franchiseTerritories")),
       getDocs(collection(db, "franchiseMembers")),
       getDocs(collection(db, "users")),
       getDocs(collection(db, "categories")),
+      getDocs(collection(db, "franchiseApplications")),
     ]);
 
     if (cancelRef?.current) return;
@@ -559,11 +622,78 @@ export default function AdminFranchisesPage() {
       })
       .sort((a, b) => a.name.localeCompare(b.name));
 
+    const applicationList = applicationSnap.docs.map((doc) => {
+      const data = doc.data() as Record<string, unknown>;
+      const statusValue =
+        typeof data.status === "string" && APPLICATION_STATUS_OPTIONS.some((option) => option.value === data.status)
+          ? (data.status as FranchiseApplicationStatus)
+          : "pending";
+      const stageValue =
+        typeof data.onboardingStage === "string" &&
+        APPLICATION_STAGE_OPTIONS.some((option) => option.value === data.onboardingStage)
+          ? (data.onboardingStage as FranchiseApplicationStage)
+          : "discovery";
+      const preferredTerritoryIds = Array.isArray(data.preferredTerritoryIds)
+        ? (data.preferredTerritoryIds as unknown[])
+            .map((value) => (typeof value === "string" ? value : String(value ?? "")))
+            .filter((value) => value.length > 0)
+        : [];
+      const preferredTerritoryLabels = Array.isArray(data.preferredTerritoryLabels)
+        ? (data.preferredTerritoryLabels as unknown[])
+            .map((value) => (typeof value === "string" ? value : String(value ?? "")))
+            .filter((value) => value.length > 0)
+        : [];
+      const preferredCategoryIds = Array.isArray(data.preferredCategoryIds)
+        ? (data.preferredCategoryIds as unknown[])
+            .map((value) => (typeof value === "string" ? value : String(value ?? "")))
+            .filter((value) => value.length > 0)
+        : [];
+      const preferredCategoryLabels = Array.isArray(data.preferredCategoryLabels)
+        ? (data.preferredCategoryLabels as unknown[])
+            .map((value) => (typeof value === "string" ? value : String(value ?? "")))
+            .filter((value) => value.length > 0)
+        : [];
+      const reviewNotes = typeof data.reviewNotes === "string" ? data.reviewNotes : "";
+      const excludedKeys = new Set([
+        "status",
+        "stepIds",
+        "createdAt",
+        "updatedAt",
+        "onboardingStage",
+        "preferredTerritoryIds",
+        "preferredTerritoryLabels",
+        "preferredCategoryIds",
+        "preferredCategoryLabels",
+        "reviewNotes",
+      ]);
+      const answers: Record<string, unknown> = {};
+      Object.entries(data).forEach(([key, value]) => {
+        if (excludedKeys.has(key)) {
+          return;
+        }
+        answers[key] = value;
+      });
+      return {
+        id: doc.id,
+        status: statusValue,
+        onboardingStage: stageValue,
+        createdAt: (data.createdAt as Timestamp) ?? null,
+        updatedAt: (data.updatedAt as Timestamp) ?? null,
+        preferredTerritoryIds,
+        preferredTerritoryLabels,
+        preferredCategoryIds,
+        preferredCategoryLabels,
+        answers,
+        reviewNotes,
+      } satisfies FranchiseApplicationRecord;
+    });
+
     setFranchises(franchiseList);
     setTerritories(territoryList);
     setMembers(memberList);
     setUsers(userList.sort((a, b) => a.displayName.localeCompare(b.displayName)));
     setCategoryOptions(categories);
+    setApplications(applicationList);
   }, []);
 
   useEffect(() => {
@@ -602,6 +732,16 @@ export default function AdminFranchisesPage() {
     setStripeActionLoading(false);
   }, [editingFranchiseId]);
 
+  useEffect(() => {
+    setApplicationNotes((prev) => {
+      const next: Record<string, string> = {};
+      applications.forEach((application) => {
+        next[application.id] = prev[application.id] ?? application.reviewNotes ?? "";
+      });
+      return next;
+    });
+  }, [applications]);
+
   const franchiseMap = useMemo(() => {
     const map = new Map<string, Franchise>();
     franchises.forEach((franchise) => map.set(franchise.id, franchise));
@@ -620,6 +760,15 @@ export default function AdminFranchisesPage() {
     return map;
   }, [categoryOptions]);
 
+  const dateTimeFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat("en-GB", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }),
+    []
+  );
+
   const gbpFormatter = useMemo(
     () =>
       new Intl.NumberFormat("en-GB", {
@@ -634,12 +783,32 @@ export default function AdminFranchisesPage() {
   const territoryByFranchise = useMemo(() => {
     const map = new Map<string, FranchiseTerritory[]>();
     territories.forEach((territory) => {
+      if (!territory.franchiseId) {
+        return;
+      }
       const list = map.get(territory.franchiseId) || [];
       list.push(territory);
       map.set(territory.franchiseId, list);
     });
     return map;
   }, [territories]);
+
+  const territoryMap = useMemo(() => {
+    const map = new Map<string, FranchiseTerritory>();
+    territories.forEach((territory) => map.set(territory.id, territory));
+    return map;
+  }, [territories]);
+
+  const unassignedTerritories = useMemo(
+    () => territories.filter((territory) => !territory.franchiseId),
+    [territories]
+  );
+  const unassignedCount = unassignedTerritories.length;
+
+  const openApplicationTerritories = useMemo(
+    () => territories.filter((territory) => territory.acceptingApplications && !territory.franchiseId),
+    [territories]
+  );
 
   const membersByFranchise = useMemo(() => {
     const map = new Map<string, FranchiseMember[]>();
@@ -658,6 +827,93 @@ export default function AdminFranchisesPage() {
   if (!allowed) {
     return <p>You do not have permission to manage franchise records.</p>;
   }
+
+  const formatAnswerValue = (value: unknown): string => {
+    if (value == null) {
+      return "";
+    }
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => formatAnswerValue(item))
+        .filter((item) => item.length > 0)
+        .join(", ");
+    }
+    if (value instanceof Date) {
+      return dateTimeFormatter.format(value);
+    }
+    if (typeof value === "object") {
+      const maybeTimestamp = value as Timestamp | { toDate?: () => Date };
+      if (maybeTimestamp && typeof maybeTimestamp.toDate === "function") {
+        try {
+          return dateTimeFormatter.format(maybeTimestamp.toDate());
+        } catch {
+          return String(value);
+        }
+      }
+      return JSON.stringify(value);
+    }
+    if (typeof value === "boolean") {
+      return value ? "Yes" : "No";
+    }
+    return String(value);
+  };
+
+  const deriveApplicantName = (answers: Record<string, unknown>): string => {
+    const directKeys = ["fullName", "name", "applicantName", "companyName"];
+    for (const key of directKeys) {
+      const value = answers[key];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
+      }
+    }
+    const first = typeof answers.firstName === "string" ? answers.firstName.trim() : "";
+    const last = typeof answers.lastName === "string" ? answers.lastName.trim() : "";
+    const combined = [first, last].filter(Boolean).join(" ");
+    if (combined) {
+      return combined;
+    }
+    return "";
+  };
+
+  const deriveApplicantEmail = (answers: Record<string, unknown>): string => {
+    const keys = ["email", "contactEmail", "workEmail", "primaryEmail"];
+    for (const key of keys) {
+      const value = answers[key];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
+      }
+    }
+    return "";
+  };
+
+  const deriveApplicantPhone = (answers: Record<string, unknown>): string => {
+    const keys = ["phone", "contactPhone", "mobile", "telephone"];
+    for (const key of keys) {
+      const value = answers[key];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
+      }
+    }
+    return "";
+  };
+
+  const timestampToDate = (value: Timestamp | Date | null | undefined): Date | null => {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    if (typeof value.toDate === "function") {
+      try {
+        return value.toDate();
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+
+  const timestampToMs = (value: Timestamp | Date | null | undefined): number => {
+    const date = timestampToDate(value);
+    return date ? date.getTime() : 0;
+  };
 
   const resetFranchiseForm = () => {
     setNewFranchise({
@@ -823,6 +1079,7 @@ export default function AdminFranchisesPage() {
       type: "postal",
       postalCodes: "",
       exclusive: true,
+      acceptingApplications: false,
       radiusKm: "",
       centerLat: "",
       centerLng: "",
@@ -845,12 +1102,14 @@ export default function AdminFranchisesPage() {
       const parsedLng = Number.parseFloat(newTerritory.centerLng);
       const parsedLicense = Number.parseFloat(newTerritory.licenseFee);
       const priceTier = normalisePriceTierLevel(newTerritory.priceTier);
+      const trimmedFranchiseId = newTerritory.franchiseId.trim();
       const payload = {
-        franchiseId: newTerritory.franchiseId,
+        franchiseId: trimmedFranchiseId.length > 0 ? trimmedFranchiseId : null,
         label: newTerritory.label.trim() || "Unnamed Territory",
         type: newTerritory.type,
         postalCodes,
         exclusive: newTerritory.exclusive,
+        acceptingApplications: newTerritory.acceptingApplications,
         radiusKm:
           newTerritory.type === "radius" && newTerritory.radiusKm.trim() && Number.isFinite(parsedRadius)
             ? parsedRadius
@@ -888,8 +1147,14 @@ export default function AdminFranchisesPage() {
       if (conflicts.length > 0) {
         const message = conflicts
           .map((territory) => {
-            const franchise = franchiseMap.get(territory.franchiseId);
-            const franchiseLabel = franchise?.name?.trim() ? franchise.name : territory.franchiseId;
+            const franchise = territory.franchiseId
+              ? franchiseMap.get(territory.franchiseId)
+              : undefined;
+            const franchiseLabel = franchise?.name?.trim()
+              ? franchise.name
+              : territory.franchiseId
+                ? territory.franchiseId
+                : HQ_UNASSIGNED_TERRITORY_LABEL;
             return `${territory.label} (${franchiseLabel})`;
           })
           .join("\n");
@@ -911,11 +1176,12 @@ export default function AdminFranchisesPage() {
   const startEditTerritory = (territory: FranchiseTerritory) => {
     setEditingTerritoryId(territory.id);
     setEditingTerritory({
-      franchiseId: territory.franchiseId,
+      franchiseId: territory.franchiseId ?? "",
       label: territory.label,
       type: territory.type,
       postalCodes: territory.postalCodes.join("\n"),
       exclusive: territory.exclusive,
+      acceptingApplications: territory.acceptingApplications,
       radiusKm: territory.radiusKm ? String(territory.radiusKm) : "",
       centerLat: territory.centerLat ? String(territory.centerLat) : "",
       centerLng: territory.centerLng ? String(territory.centerLng) : "",
@@ -934,6 +1200,7 @@ export default function AdminFranchisesPage() {
       type: "postal",
       postalCodes: "",
       exclusive: true,
+      acceptingApplications: false,
       radiusKm: "",
       centerLat: "",
       centerLng: "",
@@ -957,12 +1224,14 @@ export default function AdminFranchisesPage() {
       const parsedLng = Number.parseFloat(editingTerritory.centerLng);
       const parsedLicense = Number.parseFloat(editingTerritory.licenseFee);
       const priceTier = normalisePriceTierLevel(editingTerritory.priceTier);
+      const trimmedFranchiseId = editingTerritory.franchiseId.trim();
       const payload = {
-        franchiseId: editingTerritory.franchiseId,
+        franchiseId: trimmedFranchiseId.length > 0 ? trimmedFranchiseId : null,
         label: editingTerritory.label.trim() || "Unnamed Territory",
         type: editingTerritory.type,
         postalCodes,
         exclusive: editingTerritory.exclusive,
+        acceptingApplications: editingTerritory.acceptingApplications,
         radiusKm:
           editingTerritory.type === "radius" && editingTerritory.radiusKm.trim() && Number.isFinite(parsedRadius)
             ? parsedRadius
@@ -999,8 +1268,14 @@ export default function AdminFranchisesPage() {
       if (conflicts.length > 0) {
         const message = conflicts
           .map((territory) => {
-            const franchise = franchiseMap.get(territory.franchiseId);
-            const franchiseLabel = franchise?.name?.trim() ? franchise.name : territory.franchiseId;
+            const franchise = territory.franchiseId
+              ? franchiseMap.get(territory.franchiseId)
+              : undefined;
+            const franchiseLabel = franchise?.name?.trim()
+              ? franchise.name
+              : territory.franchiseId
+                ? territory.franchiseId
+                : HQ_UNASSIGNED_TERRITORY_LABEL;
             return `${territory.label} (${franchiseLabel})`;
           })
           .join("\n");
@@ -1083,6 +1358,39 @@ export default function AdminFranchisesPage() {
     } catch (err) {
       console.error("Failed to remove membership", err);
       alert("Unable to remove membership. Please try again.");
+    }
+  };
+
+  const handleUpdateApplication = async (
+    applicationId: string,
+    updates: Partial<Pick<FranchiseApplicationRecord, "status" | "onboardingStage">>
+  ) => {
+    try {
+      await updateDoc(doc(db, "franchiseApplications", applicationId), {
+        ...updates,
+        updatedAt: serverTimestamp(),
+      });
+      await refreshData();
+    } catch (err) {
+      console.error("Failed to update franchise application", err);
+      alert("Unable to update the application. Please try again.");
+    }
+  };
+
+  const handleSaveApplicationNotes = async (applicationId: string) => {
+    const notes = (applicationNotes[applicationId] ?? "").trim();
+    try {
+      setSavingApplications((prev) => ({ ...prev, [applicationId]: true }));
+      await updateDoc(doc(db, "franchiseApplications", applicationId), {
+        reviewNotes: notes.length > 0 ? notes : null,
+        updatedAt: serverTimestamp(),
+      });
+      await refreshData();
+    } catch (err) {
+      console.error("Failed to save application notes", err);
+      alert("Unable to save notes. Please try again.");
+    } finally {
+      setSavingApplications((prev) => ({ ...prev, [applicationId]: false }));
     }
   };
 
@@ -2277,15 +2585,18 @@ export default function AdminFranchisesPage() {
                     className="input"
                     value={newTerritory.franchiseId}
                     onChange={(event) => setNewTerritory({ ...newTerritory, franchiseId: event.target.value })}
-                    required
                   >
-                    <option value="">Select franchise…</option>
+                    <option value="">Unassigned – HQ intake</option>
                     {franchises.map((franchise) => (
                       <option key={franchise.id} value={franchise.id}>
                         {franchise.name}
                       </option>
                     ))}
                   </select>
+                  <span className="text-xs text-gray-500">
+                    Leave unassigned to let HQ capture leads until a franchise is appointed. Routing an order to another
+                    franchise will apply the 25% out-of-territory rate.
+                  </span>
                 </label>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <label className="grid gap-1 text-sm">
@@ -2369,6 +2680,16 @@ export default function AdminFranchisesPage() {
                     onChange={(event) => setNewTerritory({ ...newTerritory, exclusive: event.target.checked })}
                   />
                   Exclusive lock for this territory
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={newTerritory.acceptingApplications}
+                    onChange={(event) =>
+                      setNewTerritory({ ...newTerritory, acceptingApplications: event.target.checked })
+                    }
+                  />
+                  Open for franchise applications
                 </label>
                 <label className="grid gap-1 text-sm">
                   <span className="font-medium">Price tier</span>
@@ -2458,6 +2779,13 @@ export default function AdminFranchisesPage() {
                 </div>
               </form>
             )}
+            {unassignedCount > 0 && (
+              <div className="rounded border border-orange-200 bg-orange-50 p-3 text-sm text-orange-800">
+                {unassignedCount === 1
+                  ? "1 territory is currently unassigned. HQ will nurture leads until it is sold. Reassigning work to a franchisee later applies the 25% out-of-territory rate."
+                  : `${unassignedCount} territories are currently unassigned. HQ will nurture leads until they are sold. Reassigning work to a franchisee later applies the 25% out-of-territory rate.`}
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full min-w-[700px] text-sm border">
             <thead>
@@ -2465,6 +2793,7 @@ export default function AdminFranchisesPage() {
                 <th className="p-2">Territory</th>
                 <th className="p-2">Franchise</th>
                 <th className="p-2">Exclusive</th>
+                <th className="p-2">Applications</th>
                 <th className="p-2">Price tier</th>
                 <th className="p-2">Summary</th>
                 <th className="p-2">Actions</th>
@@ -2473,13 +2802,20 @@ export default function AdminFranchisesPage() {
             <tbody>
               {territories.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="p-4 text-center text-gray-500">
+                  <td colSpan={7} className="p-4 text-center text-gray-500">
                     No territories configured.
                   </td>
                 </tr>
               ) : (
                 territories.map((territory) => {
-                  const franchise = franchiseMap.get(territory.franchiseId);
+                  const franchise = territory.franchiseId
+                    ? franchiseMap.get(territory.franchiseId)
+                    : undefined;
+                  const franchiseLabel = franchise?.name?.trim()
+                    ? franchise.name
+                    : territory.franchiseId
+                      ? territory.franchiseId
+                      : HQ_UNASSIGNED_TERRITORY_LABEL;
                   const editing = editingTerritoryId === territory.id;
                   const territoryCategories = territory.categories.map((categoryId) => ({
                     id: categoryId,
@@ -2493,9 +2829,30 @@ export default function AdminFranchisesPage() {
                   return (
                     <tr key={territory.id} className="border-t align-top">
                       <td className="p-2 font-medium">{territory.label}</td>
-                      <td className="p-2">{franchise ? franchise.name : territory.franchiseId}</td>
-                      <td className="p-2">{territory.exclusive ? "Yes" : "No"}</td>
-                      <td className="p-2">Tier {territory.priceTier}</td>
+                      <td className="p-2">
+                        <div className="grid gap-1">
+                          <span>{franchiseLabel}</span>
+                          {!territory.franchiseId && (
+                            <span className="text-[11px] uppercase text-orange-500">
+                              HQ holding territory
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                  <td className="p-2">{territory.exclusive ? "Yes" : "No"}</td>
+                  <td className="p-2">
+                    <span
+                      className={clsx(
+                        "inline-flex items-center rounded px-2 py-0.5 text-xs font-medium",
+                        territory.acceptingApplications
+                          ? "bg-emerald-100 text-emerald-700"
+                          : "bg-gray-100 text-gray-600"
+                      )}
+                    >
+                      {territory.acceptingApplications ? "Open" : "Closed"}
+                    </span>
+                  </td>
+                  <td className="p-2">Tier {territory.priceTier}</td>
                       <td className="p-2 text-xs text-gray-600">
                         <div className="grid gap-2">
                           <div>{territorySummary(territory)}</div>
@@ -2566,12 +2923,17 @@ export default function AdminFranchisesPage() {
                                   setEditingTerritory({ ...editingTerritory, franchiseId: event.target.value })
                                 }
                               >
+                                <option value="">Unassigned – HQ intake</option>
                                 {franchises.map((franchiseOption) => (
                                   <option key={franchiseOption.id} value={franchiseOption.id}>
                                     {franchiseOption.name}
                                   </option>
                                 ))}
                               </select>
+                              <span className="text-[11px] text-gray-500">
+                                Keep unassigned while HQ manages the leads. Reassigning later will trigger the 25% out-of-territory
+                                rate.
+                              </span>
                             </label>
                             <label className="grid gap-1 text-xs">
                               <span className="font-medium">Type</span>
@@ -2669,6 +3031,19 @@ export default function AdminFranchisesPage() {
                                 }
                               />
                               Exclusive lock
+                            </label>
+                            <label className="flex items-center gap-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={editingTerritory.acceptingApplications}
+                                onChange={(event) =>
+                                  setEditingTerritory({
+                                    ...editingTerritory,
+                                    acceptingApplications: event.target.checked,
+                                  })
+                                }
+                              />
+                              Applications open
                             </label>
                             <label className="grid gap-1 text-xs">
                               <span className="font-medium">Price tier</span>
@@ -2906,6 +3281,203 @@ export default function AdminFranchisesPage() {
                 </tbody>
               </table>
             </div>
+          </div>
+        </section>
+      )}
+
+      {activeTab === "applications" && (
+        <section className="grid gap-6">
+          <div className="grid gap-4">
+            <div>
+              <h2 className="text-lg font-semibold">Franchise application workflow</h2>
+              <p className="mt-1 text-sm text-gray-600">
+                Configure the steps that appear on the Apply for Franchise form. Changes take effect immediately.
+              </p>
+            </div>
+            <WorkflowStepsEditor
+              collectionPath="franchiseOnboardingSteps"
+              emptyHelp="No franchise onboarding steps configured yet. Use the button above to add your first step."
+            />
+          </div>
+
+          <div className="grid gap-4">
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold">Applications</h2>
+                <p className="mt-1 text-sm text-gray-600">
+                  Track franchise enquiries, update their stage, and capture notes for HQ follow-up.
+                </p>
+              </div>
+              <div className="text-sm text-gray-600">
+                {openApplicationTerritories.length > 0
+                  ? `${openApplicationTerritories.length} open territor${openApplicationTerritories.length === 1 ? 'y' : 'ies'} accepting applications`
+                  : 'No territories are currently marked as open for franchise applications.'}
+              </div>
+            </div>
+
+            {applications.length === 0 ? (
+              <div className="rounded border border-dashed p-6 text-center text-sm text-gray-500">
+                No franchise applications submitted yet.
+              </div>
+            ) : (
+              <div className="grid gap-4">
+                {applications
+                  .slice()
+                  .sort((a, b) => timestampToMs(b.createdAt) - timestampToMs(a.createdAt))
+                  .map((application) => {
+                    const fallbackCompany = formatAnswerValue(application.answers["company"]);
+                    const applicantName =
+                      deriveApplicantName(application.answers) ||
+                      fallbackCompany ||
+                      application.preferredTerritoryLabels[0] ||
+                      `Application ${application.id}`;
+                    const applicantEmail = deriveApplicantEmail(application.answers);
+                    const applicantPhone = deriveApplicantPhone(application.answers);
+                    const submittedAtDate = timestampToDate(application.createdAt);
+                    const submittedLabel = submittedAtDate
+                      ? dateTimeFormatter.format(submittedAtDate)
+                      : "Submission pending";
+                    const territoryNames = application.preferredTerritoryIds.map((id, index) => {
+                      const territory = territoryMap.get(id);
+                      return territory?.label || application.preferredTerritoryLabels[index] || id;
+                    });
+                    const categoryNames = application.preferredCategoryIds.map((id, index) => {
+                      const category = categoryMap.get(id);
+                      return category?.name || application.preferredCategoryLabels[index] || id;
+                    });
+                    const answers = Object.entries(application.answers)
+                      .map(([key, value]) => ({ key, value: formatAnswerValue(value) }))
+                      .filter((entry) => entry.value.length > 0);
+                    const notesValue = applicationNotes[application.id] ?? application.reviewNotes ?? "";
+                    const saving = savingApplications[application.id] === true;
+
+                    return (
+                      <div key={application.id} className="grid gap-4 rounded border p-4">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                          <div>
+                            <h3 className="text-base font-semibold">{applicantName}</h3>
+                            <div className="text-xs text-gray-500">Submitted {submittedLabel}</div>
+                            {applicantEmail && (
+                              <div className="text-sm text-gray-600">
+                                <a className="link" href={`mailto:${applicantEmail}`}>
+                                  {applicantEmail}
+                                </a>
+                              </div>
+                            )}
+                            {applicantPhone && <div className="text-sm text-gray-600">{applicantPhone}</div>}
+                          </div>
+                          <div className="grid gap-3 sm:w-72">
+                            <label className="grid gap-1 text-xs">
+                              <span className="font-semibold uppercase text-gray-500">Status</span>
+                              <select
+                                className="input"
+                                value={application.status}
+                                onChange={(event) =>
+                                  handleUpdateApplication(application.id, {
+                                    status: event.target.value as FranchiseApplicationStatus,
+                                  })
+                                }
+                              >
+                                {APPLICATION_STATUS_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="grid gap-1 text-xs">
+                              <span className="font-semibold uppercase text-gray-500">Stage</span>
+                              <select
+                                className="input"
+                                value={application.onboardingStage}
+                                onChange={(event) =>
+                                  handleUpdateApplication(application.id, {
+                                    onboardingStage: event.target.value as FranchiseApplicationStage,
+                                  })
+                                }
+                              >
+                                {APPLICATION_STAGE_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-2 text-sm">
+                          {territoryNames.length > 0 && (
+                            <div>
+                              <span className="text-xs font-semibold uppercase text-gray-500">Preferred territories</span>
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {territoryNames.map((name) => (
+                                  <span key={`${application.id}-territory-${name}`} className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-700">
+                                    {name}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {categoryNames.length > 0 && (
+                            <div>
+                              <span className="text-xs font-semibold uppercase text-gray-500">Service categories</span>
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {categoryNames.map((name) => (
+                                  <span key={`${application.id}-category-${name}`} className="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
+                                    {name}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {answers.length > 0 && (
+                            <div className="grid gap-1">
+                              <span className="text-xs font-semibold uppercase text-gray-500">Responses</span>
+                              <div className="grid gap-1">
+                                {answers.map((entry) => (
+                                  <div key={`${application.id}-${entry.key}`} className="grid gap-0.5 rounded border border-dashed p-2">
+                                    <span className="text-[11px] font-semibold uppercase text-gray-500">{entry.key}</span>
+                                    <span className="text-sm text-gray-700">{entry.value}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="grid gap-2">
+                          <label className="grid gap-1 text-sm">
+                            <span className="font-medium">Review notes</span>
+                            <textarea
+                              className="input"
+                              rows={3}
+                              value={notesValue}
+                              onChange={(event) =>
+                                setApplicationNotes((prev) => ({
+                                  ...prev,
+                                  [application.id]: event.target.value,
+                                }))
+                              }
+                              placeholder="Call outcome, franchise fit, next actions…"
+                            />
+                          </label>
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => handleSaveApplicationNotes(application.id)}
+                              disabled={saving}
+                            >
+                              {saving ? "Saving…" : "Save notes"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
           </div>
         </section>
       )}

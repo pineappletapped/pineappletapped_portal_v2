@@ -29,6 +29,18 @@ interface Step {
   agreementText?: string;
 }
 
+type TerritoryOption = {
+  id: string;
+  label: string;
+  summary: string;
+  categoryIds: string[];
+};
+
+type CategoryOption = {
+  id: string;
+  name: string;
+};
+
 export default function JoinTeamPage() {
   const [activeTab, setActiveTab] = useState<'team' | 'franchise'>('team');
   const [teamSteps, setTeamSteps] = useState<Step[]>([]);
@@ -47,14 +59,21 @@ export default function JoinTeamPage() {
   const [franchiseError, setFranchiseError] = useState<string | null>(null);
   const [teamSubmitting, setTeamSubmitting] = useState(false);
   const [franchiseSubmitting, setFranchiseSubmitting] = useState(false);
+  const [territoryOptions, setTerritoryOptions] = useState<TerritoryOption[]>([]);
+  const [categoryOptions, setCategoryOptions] = useState<CategoryOption[]>([]);
+  const [selectedTerritories, setSelectedTerritories] = useState<string[]>([]);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [franchiseValidationError, setFranchiseValidationError] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
     (async () => {
       try {
-        const [teamSnap, franchiseSnap] = await Promise.all([
+        const [teamSnap, franchiseSnap, territorySnap, categorySnap] = await Promise.all([
           getDocs(query(collection(db, 'joinTeamSteps'), orderBy('order'))),
-          getDocs(query(collection(db, 'franchiseOnboardingSteps'), orderBy('order')))
+          getDocs(query(collection(db, 'franchiseOnboardingSteps'), orderBy('order'))),
+          getDocs(collection(db, 'franchiseTerritories')),
+          getDocs(collection(db, 'categories'))
         ]);
 
         if (!isMounted) return;
@@ -67,6 +86,60 @@ export default function JoinTeamPage() {
 
         setTeamSteps(mapSteps(teamSnap));
         setFranchiseSteps(mapSteps(franchiseSnap));
+
+        const mappedTerritories = territorySnap.docs
+          .map((docSnap) => {
+            const data = docSnap.data() as Record<string, unknown>;
+            const franchiseId = typeof data.franchiseId === 'string' ? data.franchiseId.trim() : '';
+            const acceptingApplications = data.acceptingApplications === true;
+            if (!acceptingApplications) {
+              return null;
+            }
+            if (franchiseId.length > 0) {
+              return null;
+            }
+            const label =
+              typeof data.label === 'string' && data.label.trim().length > 0
+                ? data.label.trim()
+                : 'Available territory';
+            const type = typeof data.type === 'string' ? data.type : 'postal';
+            let summary = '';
+            if (type === 'radius') {
+              const radius = typeof data.radiusKm === 'number' ? data.radiusKm : null;
+              const lat = typeof data.centerLat === 'number' ? data.centerLat : null;
+              const lng = typeof data.centerLng === 'number' ? data.centerLng : null;
+              const radiusLabel = radius ? `${radius}km radius` : 'Radius pending';
+              const centerLabel = lat != null && lng != null ? `${lat.toFixed(3)}, ${lng.toFixed(3)}` : 'centre TBC';
+              summary = `${radiusLabel} from ${centerLabel}`;
+            } else {
+              const postalCodes = Array.isArray(data.postalCodes) ? data.postalCodes : [];
+              summary = `${postalCodes.length} postal code${postalCodes.length === 1 ? '' : 's'}`;
+            }
+            const categoryIds = Array.isArray(data.categories)
+              ? (data.categories as unknown[])
+                  .map((value) => (typeof value === 'string' ? value.trim() : String(value ?? '')).trim())
+                  .filter((value) => value.length > 0)
+              : [];
+            return {
+              id: docSnap.id,
+              label,
+              summary,
+              categoryIds,
+            } satisfies TerritoryOption;
+          })
+          .filter((option): option is TerritoryOption => option !== null)
+          .sort((a, b) => a.label.localeCompare(b.label));
+
+        const mappedCategories = categorySnap.docs
+          .map((docSnap) => {
+            const data = docSnap.data() as Record<string, unknown>;
+            const name = typeof data.name === 'string' && data.name.trim().length > 0 ? data.name.trim() : docSnap.id;
+            return { id: docSnap.id, name } satisfies CategoryOption;
+          })
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        setTerritoryOptions(mappedTerritories);
+        setCategoryOptions(mappedCategories);
       } catch (error) {
         console.error('Failed to load application steps', error);
         if (!isMounted) return;
@@ -84,6 +157,14 @@ export default function JoinTeamPage() {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    setSelectedTerritories((prev) => prev.filter((id) => territoryOptions.some((option) => option.id === id)));
+  }, [territoryOptions]);
+
+  useEffect(() => {
+    setSelectedCategories((prev) => prev.filter((id) => categoryOptions.some((option) => option.id === id)));
+  }, [categoryOptions]);
 
   const teamStep = teamSteps[teamCurrent];
   const teamIsLast = teamCurrent === teamSteps.length - 1;
@@ -106,11 +187,24 @@ export default function JoinTeamPage() {
     []
   );
 
+  const territoryMap = useMemo(() => {
+    const map = new Map<string, TerritoryOption>();
+    territoryOptions.forEach((option) => map.set(option.id, option));
+    return map;
+  }, [territoryOptions]);
+
+  const categoryMap = useMemo(() => {
+    const map = new Map<string, CategoryOption>();
+    categoryOptions.forEach((option) => map.set(option.id, option));
+    return map;
+  }, [categoryOptions]);
+
   const resetAgreementForTab = (tab: 'team' | 'franchise') => {
     if (tab === 'team') {
       setTeamAgree(false);
     } else {
       setFranchiseAgree(false);
+      setFranchiseValidationError(null);
     }
   };
 
@@ -171,16 +265,35 @@ export default function JoinTeamPage() {
 
   const handleFranchiseSubmit = async () => {
     if (franchiseSubmitting) return;
+    const territorySelectionRequired = territoryOptions.length > 0;
+    if (territorySelectionRequired && selectedTerritories.length === 0) {
+      setFranchiseValidationError('Please choose at least one territory you would like to service.');
+      return;
+    }
     setFranchiseSubmitting(true);
+    setFranchiseValidationError(null);
     try {
+      const selectedTerritoryLabels = selectedTerritories.map(
+        (id) => territoryMap.get(id)?.label ?? id
+      );
+      const selectedCategoryLabels = selectedCategories.map(
+        (id) => categoryMap.get(id)?.name ?? id
+      );
       await addDoc(collection(db, 'franchiseApplications'), {
         ...franchiseForm,
         stepIds: franchiseSteps.map((item) => item.id),
         status: 'pending',
         onboardingStage: 'discovery',
+        preferredTerritoryIds: selectedTerritories,
+        preferredTerritoryLabels: selectedTerritoryLabels,
+        preferredCategoryIds: selectedCategories,
+        preferredCategoryLabels: selectedCategoryLabels,
         createdAt: serverTimestamp()
       });
       setFranchiseSent(true);
+      setSelectedTerritories([]);
+      setSelectedCategories([]);
+      setFranchiseValidationError(null);
     } catch (error) {
       console.error('Failed to submit franchise application', error);
       setFranchiseError('We were unable to submit your franchise application. Please try again.');
@@ -200,7 +313,8 @@ export default function JoinTeamPage() {
     onBack: () => void,
     onSubmit: () => Promise<void> | void,
     submitting: boolean,
-    canGoBack: boolean
+    canGoBack: boolean,
+    submitEnabled = true
   ) => {
     if (!step) return null;
 
@@ -246,7 +360,11 @@ export default function JoinTeamPage() {
             {isLast && (
               <button
                 className="btn"
-                disabled={submitting || (step.agreementText ? !agree : false)}
+                disabled={
+                  submitting ||
+                  !submitEnabled ||
+                  (step.agreementText ? !agree : false)
+                }
                 onClick={async () => {
                   await onSubmit();
                 }}
@@ -258,6 +376,25 @@ export default function JoinTeamPage() {
         </div>
       </div>
     );
+  };
+
+  const toggleTerritory = (id: string) => {
+    setSelectedTerritories((prev) => {
+      if (prev.includes(id)) {
+        return prev.filter((value) => value !== id);
+      }
+      return [...prev, id];
+    });
+    setFranchiseValidationError(null);
+  };
+
+  const toggleCategory = (id: string) => {
+    setSelectedCategories((prev) => {
+      if (prev.includes(id)) {
+        return prev.filter((value) => value !== id);
+      }
+      return [...prev, id];
+    });
   };
 
   const renderContent = () => {
@@ -325,24 +462,122 @@ export default function JoinTeamPage() {
       );
     }
 
-    return renderStep(
-      franchiseStep,
-      franchiseIsLast,
-      franchiseForm,
-      (key, value) => setFranchiseForm((prev) => ({ ...prev, [key]: value })),
-      franchiseAgree,
-      (value) => setFranchiseAgree(value),
-      () => {
-        setFranchiseCurrent((index) => Math.min(franchiseSteps.length - 1, index + 1));
-        resetAgreementForTab('franchise');
-      },
-      () => {
-        setFranchiseCurrent((index) => Math.max(0, index - 1));
-        resetAgreementForTab('franchise');
-      },
-      handleFranchiseSubmit,
-      franchiseSubmitting,
-      franchiseCurrent > 0
+    const territorySelectionRequired = territoryOptions.length > 0;
+    const submitEnabled = !territorySelectionRequired || selectedTerritories.length > 0;
+
+    const territoryCard = (
+      <section className="card grid gap-3 p-4">
+        <div className="grid gap-1">
+          <h2 className="text-lg font-semibold">Tell us where you&apos;d like to operate</h2>
+          <p className="text-sm text-gray-600">
+            Choose the franchise territories you&apos;re interested in so we can prioritise them during review.
+          </p>
+        </div>
+        {territoryOptions.length === 0 ? (
+          <p className="text-sm text-gray-500">
+            We don&apos;t have any open territories right now. Submit your application and we&apos;ll reach out as new regions
+            launch.
+          </p>
+        ) : (
+          <div className="grid gap-2">
+            {territoryOptions.map((option) => {
+              const selected = selectedTerritories.includes(option.id);
+              const territoryCategories = option.categoryIds
+                .map((categoryId) => categoryMap.get(categoryId)?.name ?? categoryId)
+                .filter((name) => name.length > 0);
+              const baseClasses = 'flex items-start gap-3 rounded border p-3 transition';
+              const stateClasses = selected
+                ? ' border-blue-500 bg-blue-50'
+                : ' border-neutral-200 hover:border-blue-300';
+              return (
+                <label key={option.id} className={`${baseClasses}${stateClasses}`}>
+                  <input
+                    type="checkbox"
+                    className="mt-1 h-4 w-4"
+                    checked={selected}
+                    onChange={() => toggleTerritory(option.id)}
+                  />
+                  <div className="grid gap-1">
+                    <span className="font-medium">{option.label}</span>
+                    <span className="text-xs text-gray-600">{option.summary}</span>
+                    {territoryCategories.length > 0 && (
+                      <span className="text-[11px] uppercase tracking-wide text-gray-500">
+                        Services: {territoryCategories.join(', ')}
+                      </span>
+                    )}
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    );
+
+    const categoryCard = (
+      <section className="card grid gap-3 p-4">
+        <div className="grid gap-1">
+          <h2 className="text-lg font-semibold">Services you&apos;d like to lead</h2>
+          <p className="text-sm text-gray-600">
+            Highlight the service areas you want to champion so we can tailor resources and mentoring.
+          </p>
+        </div>
+        {categoryOptions.length === 0 ? (
+          <p className="text-sm text-gray-500">
+            We&apos;ll cover services during your discovery call so you can tailor the offering to your market.
+          </p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {categoryOptions.map((option) => {
+              const selected = selectedCategories.includes(option.id);
+              const baseClasses = 'rounded-full px-3 py-1 text-sm transition';
+              const stateClasses = selected
+                ? ' bg-blue-600 text-white'
+                : ' bg-gray-100 text-gray-700 hover:bg-gray-200';
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`${baseClasses}${stateClasses}`}
+                  onClick={() => toggleCategory(option.id)}
+                >
+                  {option.name}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    );
+
+    return (
+      <div className="grid gap-4">
+        {territoryCard}
+        {categoryCard}
+        {territorySelectionRequired && franchiseValidationError && (
+          <p className="text-sm text-red-600">{franchiseValidationError}</p>
+        )}
+        {renderStep(
+          franchiseStep,
+          franchiseIsLast,
+          franchiseForm,
+          (key, value) => setFranchiseForm((prev) => ({ ...prev, [key]: value })),
+          franchiseAgree,
+          (value) => setFranchiseAgree(value),
+          () => {
+            setFranchiseCurrent((index) => Math.min(franchiseSteps.length - 1, index + 1));
+            resetAgreementForTab('franchise');
+          },
+          () => {
+            setFranchiseCurrent((index) => Math.max(0, index - 1));
+            resetAgreementForTab('franchise');
+          },
+          handleFranchiseSubmit,
+          franchiseSubmitting,
+          franchiseCurrent > 0,
+          submitEnabled
+        )}
+      </div>
     );
   };
 

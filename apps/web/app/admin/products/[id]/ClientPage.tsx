@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { db, storage, functions } from "@/lib/firebase";
@@ -34,6 +34,7 @@ import type {
 import type { PriceTiers } from "@/lib/pricing";
 import type { Venue } from "@/lib/venues";
 import type { KitBag, EquipmentStandard } from "@/lib/equipment";
+import { defaultFranchiseRoyaltyConfig } from "@/lib/franchises";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -98,6 +99,10 @@ const DELIVERABLE_TYPES: { value: DeliverableType; label: string }[] = [
   { value: "audio-licence", label: "Audio Licence" },
   { value: "document", label: "Document" },
 ];
+const DELIVERABLE_TYPE_LABELS: Record<DeliverableType, string> = DELIVERABLE_TYPES.reduce(
+  (acc, entry) => ({ ...acc, [entry.value]: entry.label }),
+  {} as Record<DeliverableType, string>
+);
 
 const deliverableIcons: Record<DeliverableType, IconType> = {
   "long-form-video": FiFilm,
@@ -215,8 +220,6 @@ const parseRoleQuantity = (value: string): number => {
 };
 
 type BudgetOverrideFormState = {
-  labourFilming: string;
-  labourEditing: string;
   kitManual: string;
   kit: string;
   kitMode: "" | "manual" | "guided";
@@ -227,8 +230,6 @@ type BudgetOverrideFormState = {
 };
 
 const emptyBudgetForm: BudgetOverrideFormState = {
-  labourFilming: "",
-  labourEditing: "",
   kitManual: "",
   kit: "",
   kitMode: "",
@@ -247,16 +248,6 @@ const parseNumberInput = (value: string): number | undefined => {
 const createBudgetForm = (
   source?: ProductBudgetOverride | null
 ): BudgetOverrideFormState => ({
-  labourFilming:
-    typeof source?.labourFilming === "number" &&
-    Number.isFinite(source.labourFilming)
-      ? String(source.labourFilming)
-      : "",
-  labourEditing:
-    typeof source?.labourEditing === "number" &&
-    Number.isFinite(source.labourEditing)
-      ? String(source.labourEditing)
-      : "",
   kitManual:
     typeof source?.kitManual === "number" && Number.isFinite(source.kitManual)
       ? String(source.kitManual)
@@ -292,10 +283,6 @@ const parseBudgetFormToOverride = (
   form: BudgetOverrideFormState
 ): ProductBudgetOverride | undefined => {
   const payload: ProductBudgetOverride = {};
-  const labourFilming = parseNumberInput(form.labourFilming);
-  if (labourFilming !== undefined) payload.labourFilming = labourFilming;
-  const labourEditing = parseNumberInput(form.labourEditing);
-  if (labourEditing !== undefined) payload.labourEditing = labourEditing;
   const kitManual = parseNumberInput(form.kitManual);
   if (kitManual !== undefined) payload.kitManual = kitManual;
   const kit = parseNumberInput(form.kit);
@@ -484,6 +471,147 @@ type ModifierSelectionFormState = {
   missingTemplates: string[];
 };
 
+const generateRandomId = (): string =>
+  typeof globalThis !== "undefined" &&
+  globalThis.crypto &&
+  typeof globalThis.crypto.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+
+const buildVariationFormState = (
+  variation: ProductVariation | undefined,
+  crewRoleState: CrewRoleFormState[]
+): VariationFormState => {
+  const features = Array.isArray(variation?.features)
+    ? (variation?.features as string[])
+    : [];
+  const tier2 = variation?.priceTiers?.tier2;
+  const tier3 = variation?.priceTiers?.tier3;
+  return {
+    id:
+      typeof variation?.id === "string" && variation.id.length > 0
+        ? variation.id
+        : generateRandomId(),
+    name: variation?.name || "",
+    price:
+      variation && typeof variation.price === "number"
+        ? String(variation.price)
+        : "0",
+    tier2Price:
+      typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : "",
+    tier3Price:
+      typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
+    featuresText: features.join("\n"),
+    budgetOverrides: createBudgetForm(variation?.budgetOverrides ?? null),
+    crewOverrides: createCrewOverrideMap(
+      crewRoleState,
+      variation?.crewOverrides ?? null
+    ),
+  };
+};
+
+const buildModifierSelectionFromExisting = (
+  selection: ProductModifierSelection,
+  option: ModifierOption | undefined,
+  crewRoleState: CrewRoleFormState[]
+): ModifierSelectionFormState => {
+  const rawAdjustments = Array.isArray(option?.crewAdjustments)
+    ? (option?.crewAdjustments as ModifierCrewAdjustment[])
+    : [];
+  const templateAdjustments = rawAdjustments.filter(
+    (adj): adj is ModifierCrewAdjustment =>
+      !!adj && typeof adj.templateId === "string"
+  );
+  const crewOverrideMap = createCrewOverrideMap(
+    crewRoleState,
+    selection.crewOverrides ?? null
+  );
+  applyTemplateAdjustmentsToOverrides(
+    crewOverrideMap,
+    crewRoleState,
+    templateAdjustments
+  );
+  const budgetSource = selection.budgetOverrides
+    ? selection.budgetOverrides
+    : option?.budgetAdjustments ?? null;
+  const priceString =
+    typeof selection.price === "number"
+      ? String(selection.price)
+      : option
+      ? String(option.price ?? 0)
+      : "";
+  const tier2Value =
+    typeof selection.priceTiers?.tier2 === "number"
+      ? selection.priceTiers.tier2
+      : option && typeof option.priceTiers?.tier2 === "number"
+      ? option.priceTiers.tier2
+      : null;
+  const tier3Value =
+    typeof selection.priceTiers?.tier3 === "number"
+      ? selection.priceTiers.tier3
+      : option && typeof option.priceTiers?.tier3 === "number"
+      ? option.priceTiers.tier3
+      : null;
+  return {
+    groupId: selection.groupId,
+    optionId: selection.optionId,
+    price: priceString,
+    tier2Price:
+      typeof tier2Value === "number" && Number.isFinite(tier2Value)
+        ? String(tier2Value)
+        : "",
+    tier3Price:
+      typeof tier3Value === "number" && Number.isFinite(tier3Value)
+        ? String(tier3Value)
+        : "",
+    budgetOverrides: createBudgetForm(budgetSource),
+    crewOverrides: crewOverrideMap,
+    templateAdjustments,
+    missingTemplates: computeMissingTemplates(
+      crewRoleState,
+      templateAdjustments
+    ),
+  };
+};
+
+const buildModifierSelectionFromOption = (
+  groupId: string,
+  option: ModifierOption,
+  crewRoleState: CrewRoleFormState[]
+): ModifierSelectionFormState => {
+  const rawAdjustments = Array.isArray(option.crewAdjustments)
+    ? (option.crewAdjustments as ModifierCrewAdjustment[])
+    : [];
+  const templateAdjustments = rawAdjustments.filter(
+    (adj): adj is ModifierCrewAdjustment =>
+      !!adj && typeof adj.templateId === "string"
+  );
+  const crewOverrideMap = createCrewOverrideMap(crewRoleState, []);
+  applyTemplateAdjustmentsToOverrides(
+    crewOverrideMap,
+    crewRoleState,
+    templateAdjustments
+  );
+  const tier2 = option.priceTiers?.tier2;
+  const tier3 = option.priceTiers?.tier3;
+  return {
+    groupId,
+    optionId: option.id,
+    price: String(option.price ?? 0),
+    tier2Price:
+      typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : "",
+    tier3Price:
+      typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
+    budgetOverrides: createBudgetForm(option.budgetAdjustments ?? null),
+    crewOverrides: crewOverrideMap,
+    templateAdjustments,
+    missingTemplates: computeMissingTemplates(
+      crewRoleState,
+      templateAdjustments
+    ),
+  };
+};
+
 export default function EditProductPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -553,6 +681,7 @@ export default function EditProductPage() {
   const [seo, setSeo] = useState<ProductSEO>({});
   const [seoImageFile, setSeoImageFile] = useState<File | null>(null);
   const [category, setCategory] = useState("");
+  const [salesMode, setSalesMode] = useState<"ecommerce" | "quote">("ecommerce");
   const [workflowId, setWorkflowId] = useState("");
   const [eventDate, setEventDate] = useState("");
   const [venueId, setVenueId] = useState("");
@@ -600,8 +729,6 @@ export default function EditProductPage() {
   const [roleLibraryMessage, setRoleLibraryMessage] = useState<
     { tone: "success" | "error"; text: string } | null
   >(null);
-  const [labourFilmingRate, setLabourFilmingRate] = useState("0");
-  const [labourEditingRate, setLabourEditingRate] = useState("0");
   const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
   const [manualKitCost, setManualKitCost] = useState("0");
   const [equipmentSearch, setEquipmentSearch] = useState("");
@@ -614,149 +741,6 @@ export default function EditProductPage() {
   const selectedVenue = useMemo(
     () => venues.find((v) => v.id === venueId) || null,
     [venues, venueId]
-  );
-  const generateFormId = () =>
-    typeof crypto !== "undefined" &&
-    typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
-
-  const buildVariationForm = useCallback(
-    (
-      variation?: ProductVariation,
-      crewRoleState: CrewRoleFormState[] = crewRoles
-    ): VariationFormState => {
-      const features = Array.isArray(variation?.features)
-        ? variation!.features!
-        : [];
-      const tier2 = variation?.priceTiers?.tier2;
-      const tier3 = variation?.priceTiers?.tier3;
-      return {
-        id: variation?.id || generateFormId(),
-        name: variation?.name || "",
-        price:
-          variation && typeof variation.price === "number"
-            ? String(variation.price)
-            : "0",
-        tier2Price:
-          typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : "",
-        tier3Price:
-          typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
-        featuresText: features.join("\n"),
-        budgetOverrides: createBudgetForm(variation?.budgetOverrides ?? null),
-        crewOverrides: createCrewOverrideMap(
-          crewRoleState,
-          variation?.crewOverrides ?? null
-        ),
-      };
-    },
-    [crewRoles]
-  );
-
-  const buildModifierFormFromSelection = useCallback(
-    (
-      selection: ProductModifierSelection,
-      option: ModifierOption | undefined,
-      crewRoleState: CrewRoleFormState[] = crewRoles
-    ): ModifierSelectionFormState => {
-      const templateAdjustments = Array.isArray(option?.crewAdjustments)
-        ? option!.crewAdjustments!.filter(
-            (adj): adj is ModifierCrewAdjustment =>
-              !!adj && typeof adj.templateId === "string"
-          )
-        : [];
-      const crewOverrideMap = createCrewOverrideMap(
-        crewRoleState,
-        selection.crewOverrides ?? null
-      );
-      applyTemplateAdjustmentsToOverrides(
-        crewOverrideMap,
-        crewRoleState,
-        templateAdjustments
-      );
-      const budgetSource = selection.budgetOverrides
-        ? selection.budgetOverrides
-        : option?.budgetAdjustments ?? null;
-      const priceString =
-        typeof selection.price === "number"
-          ? String(selection.price)
-          : option
-          ? String(option.price ?? 0)
-          : "";
-      const tier2Value =
-        typeof selection.priceTiers?.tier2 === "number"
-          ? selection.priceTiers.tier2
-          : option && typeof option.priceTiers?.tier2 === "number"
-          ? option.priceTiers.tier2
-          : null;
-      const tier3Value =
-        typeof selection.priceTiers?.tier3 === "number"
-          ? selection.priceTiers.tier3
-          : option && typeof option.priceTiers?.tier3 === "number"
-          ? option.priceTiers.tier3
-          : null;
-      return {
-        groupId: selection.groupId,
-        optionId: selection.optionId,
-        price: priceString,
-        tier2Price:
-          typeof tier2Value === "number" && Number.isFinite(tier2Value)
-            ? String(tier2Value)
-            : "",
-        tier3Price:
-          typeof tier3Value === "number" && Number.isFinite(tier3Value)
-            ? String(tier3Value)
-            : "",
-        budgetOverrides: createBudgetForm(budgetSource),
-        crewOverrides: crewOverrideMap,
-        templateAdjustments,
-        missingTemplates: computeMissingTemplates(
-          crewRoleState,
-          templateAdjustments
-        ),
-      };
-    },
-    [crewRoles]
-  );
-
-  const buildModifierFormFromOption = useCallback(
-    (
-      groupId: string,
-      option: ModifierOption,
-      crewRoleState: CrewRoleFormState[] = crewRoles
-    ): ModifierSelectionFormState => {
-      const templateAdjustments = Array.isArray(option.crewAdjustments)
-        ? option.crewAdjustments.filter(
-            (adj): adj is ModifierCrewAdjustment =>
-              !!adj && typeof adj.templateId === "string"
-          )
-        : [];
-      const crewOverrideMap = createCrewOverrideMap(crewRoleState, []);
-      applyTemplateAdjustmentsToOverrides(
-        crewOverrideMap,
-        crewRoleState,
-        templateAdjustments
-      );
-      const tier2 = option.priceTiers?.tier2;
-      const tier3 = option.priceTiers?.tier3;
-      return {
-        groupId,
-        optionId: option.id,
-        price: String(option.price ?? 0),
-        tier2Price:
-          typeof tier2 === "number" && Number.isFinite(tier2) ? String(tier2) : "",
-        tier3Price:
-          typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
-        budgetOverrides: createBudgetForm(option.budgetAdjustments ?? null),
-        crewOverrides: crewOverrideMap,
-        templateAdjustments,
-        missingTemplates: computeMissingTemplates(
-          crewRoleState,
-          templateAdjustments
-        ),
-      };
-    },
-    [crewRoles]
   );
 
   const parseMoney = (value: string, fallback = 0) => {
@@ -1097,17 +1081,12 @@ export default function EditProductPage() {
             typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : ""
           );
           const budget = (p as any).budget || {};
-          const labourFilming =
-            budget.labourFilming ?? budget.labour ?? (p as any).labourCost ?? 0;
-          const labourEditing = budget.labourEditing ?? 0;
           const initialKitMode =
             budget.kitMode === "guided" || budget.kitMode === "manual"
               ? budget.kitMode
               : "manual";
           const manualKit =
             budget.kitManual ?? budget.kit ?? (p as any).defaultKitCost ?? 0;
-          setLabourFilmingRate(String(labourFilming));
-          setLabourEditingRate(String(labourEditing));
           setManualKitCost(String(manualKit));
           setKitCostMode(initialKitMode);
           setTravelMiles(String(budget.travelMiles ?? 100));
@@ -1147,6 +1126,7 @@ export default function EditProductPage() {
           setEnabledModifierGroups(initialGroups);
           setSeo(p.seo || {});
           setCategory(p.category || "");
+          setSalesMode((p as any).salesMode === "quote" ? "quote" : "ecommerce");
           setEventDate(p.eventDate || "");
           initialVenueId = (p as any).venueId || "";
           initialVenueName = p.venue || "";
@@ -1296,7 +1276,7 @@ export default function EditProductPage() {
           setVariations(
             variationEntries.length
               ? variationEntries.map((variation) =>
-                  buildVariationForm(variation, crewRoleInputs)
+                  buildVariationFormState(variation, crewRoleInputs)
                 )
               : []
           );
@@ -1329,7 +1309,7 @@ export default function EditProductPage() {
         setModifiers(
           initialModifierSelections.length
             ? initialModifierSelections.map((selection) =>
-                buildModifierFormFromSelection(
+                buildModifierSelectionFromExisting(
                   selection,
                   modifierGroups
                     .find((group) => group.id === selection.groupId)
@@ -1409,7 +1389,7 @@ export default function EditProductPage() {
         setLoading(false);
       }
     })();
-  }, [allowed, guardLoading, id, buildModifierFormFromSelection, buildVariationForm]);
+  }, [allowed, guardLoading, id]);
 
   useEffect(() => {
     if (selectedVenue) {
@@ -1559,15 +1539,13 @@ export default function EditProductPage() {
       );
 
     const venueLabel = venue || selectedVenue?.name || null;
-    const labourFilmingValue = parseMoney(labourFilmingRate);
-    const labourEditingValue = parseMoney(labourEditingRate);
     const crewRolesTotal = crewRoleData.reduce((total, role) => {
       if (role.includeInBudget === false) return total;
       const qty = Number(role.quantity) || 0;
       const rate = Number(role.unitRate) || 0;
       return total + qty * rate;
     }, 0);
-    const labourValue = labourFilmingValue + labourEditingValue + crewRolesTotal;
+    const labourValue = crewRolesTotal;
     const manualKitValue = parseMoney(manualKitCost);
     const kitValue = kitCostMode === "guided" ? kitGuidanceValue : manualKitValue;
     const travelMilesValue = parseMoney(travelMiles, 100);
@@ -1578,6 +1556,12 @@ export default function EditProductPage() {
     const parkingValue = parseMoney(parkingCost);
     const enabledGroups = enabledModifierGroups.filter((id) => typeof id === "string");
     const enabledSet = new Set(enabledGroups);
+    const modifierOptionLookup = new Map<string, ModifierOption>();
+    allModifiers.forEach((group) => {
+      group.options.forEach((option) => {
+        modifierOptionLookup.set(`${group.id}::${option.id}`, option);
+      });
+    });
     const modifierData: ProductModifierSelection[] = modifiers
       .filter((m) => enabledSet.has(m.groupId))
       .map((selection) => {
@@ -1608,6 +1592,19 @@ export default function EditProductPage() {
         if (budgetOverrides) entry.budgetOverrides = budgetOverrides;
         const crewOverrides = parseCrewOverrideMap(selection.crewOverrides);
         if (crewOverrides.length) entry.crewOverrides = crewOverrides;
+        const optionDetails = modifierOptionLookup.get(
+          `${selection.groupId}::${selection.optionId}`
+        );
+        if (
+          optionDetails &&
+          (optionDetails.deliverableType || optionDetails.deliverableLabel)
+        ) {
+          entry.deliverable = {
+            type: optionDetails.deliverableType ?? undefined,
+            label:
+              optionDetails.deliverableLabel?.trim() || optionDetails.name || undefined,
+          };
+        }
         return entry;
       });
     const requiredStandards = Array.isArray(productStandards)
@@ -1640,13 +1637,12 @@ export default function EditProductPage() {
       name,
       description,
       tagline: tagline || null,
+      salesMode,
       price: baseProductPrice,
       priceTiers: productPriceTiers,
       labourCost: labourValue,
       defaultKitCost: kitValue,
       budget: {
-        labourFilming: labourFilmingValue,
-        labourEditing: labourEditingValue,
         labourCrew: crewRolesTotal,
         labour: labourValue,
         kitMode: kitCostMode,
@@ -1804,7 +1800,10 @@ export default function EditProductPage() {
   };
 
   const addVariation = () => {
-    setVariations((prev) => [...prev, buildVariationForm(undefined, crewRoles)]);
+    setVariations((prev) => [
+      ...prev,
+      buildVariationFormState(undefined, crewRoles),
+    ]);
   };
 
   const updateVariation = (index: number, data: Partial<VariationFormState>) => {
@@ -1938,7 +1937,11 @@ export default function EditProductPage() {
         const group = allModifiers.find((g) => g.id === groupId);
         const option = group?.options.find((opt) => opt.id === optionId);
         if (!option) return prev;
-        const nextEntry = buildModifierFormFromOption(groupId, option, crewRoles);
+        const nextEntry = buildModifierSelectionFromOption(
+          groupId,
+          option,
+          crewRoles
+        );
         if (group && !group.multiple) {
           return [
             ...prev.filter((selection) => selection.groupId !== groupId),
@@ -2183,9 +2186,7 @@ export default function EditProductPage() {
     () => crewRoleBreakdown.filter((role) => role.included && role.total > 0),
     [crewRoleBreakdown]
   );
-  const labourFilmingValue = parseMoney(labourFilmingRate);
-  const labourEditingValue = parseMoney(labourEditingRate);
-  const labourValue = labourFilmingValue + labourEditingValue + crewCostValue;
+  const labourValue = crewCostValue;
   const manualKitValue = parseMoney(manualKitCost);
   const kitValue = kitCostMode === "guided" ? kitGuidanceValue : manualKitValue;
   const travelMilesValue = parseMoney(travelMiles, 100);
@@ -2195,6 +2196,54 @@ export default function EditProductPage() {
     : 0;
   const parkingValue = parseMoney(parkingCost);
   const priceValue = parseMoney(price);
+  const tierPriceValues = useMemo(
+    () => {
+      const tier1 = priceValue;
+      const tier2 = priceTier2.trim().length
+        ? parseMoney(priceTier2, tier1)
+        : tier1;
+      const tier3 = priceTier3.trim().length
+        ? parseMoney(priceTier3, tier1)
+        : tier1;
+      return [
+        { label: "Tier 1", value: tier1 },
+        { label: "Tier 2", value: tier2 },
+        { label: "Tier 3", value: tier3 },
+      ];
+    },
+    [priceValue, priceTier2, priceTier3]
+  );
+  const franchiseRoyaltyConfig = useMemo(
+    () => defaultFranchiseRoyaltyConfig(),
+    []
+  );
+  const franchiseRateOptions = useMemo(() => {
+    const rates = new Set<number>();
+    franchiseRoyaltyConfig.hqTiers?.forEach((tier) => {
+      if (typeof tier?.percentage === "number" && Number.isFinite(tier.percentage)) {
+        rates.add(tier.percentage);
+      }
+    });
+    const sourced = franchiseRoyaltyConfig.franchiseSourcedPercentage;
+    if (typeof sourced === "number" && Number.isFinite(sourced)) {
+      rates.add(sourced);
+    }
+    return Array.from(rates).sort((a, b) => b - a);
+  }, [franchiseRoyaltyConfig]);
+  const franchiseEarnings = useMemo(
+    () =>
+      franchiseRateOptions.map((percentage) => {
+        const fraction = percentage / 100;
+        return {
+          percentage,
+          values: tierPriceValues.map((tier) => ({
+            label: tier.label,
+            amount: tier.value * fraction,
+          })),
+        };
+      }),
+    [franchiseRateOptions, tierPriceValues]
+  );
   const budgetTotal = labourValue + kitValue + travelCostValue + parkingValue;
   const profitValue = priceValue - budgetTotal;
   const filteredEquipment = useMemo(() => {
@@ -2212,7 +2261,7 @@ export default function EditProductPage() {
   if (!allowed) return <p>You do not have permission to edit products.</p>;
 
   return (
-    <form onSubmit={save} className="grid gap-6 max-w-2xl">
+    <form onSubmit={save} className="grid w-full gap-6">
       <h1 className="text-xl font-semibold">Edit Product</h1>
       <nav className="flex gap-4 border-b">
         {[ 
@@ -2284,6 +2333,41 @@ export default function EditProductPage() {
 
       {tab === "info" && (
         <div className="grid gap-2">
+          <div className="rounded border bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">Sales workflow</p>
+                <p className="text-xs text-gray-600">
+                  Decide whether this product uses instant checkout or a bespoke quote intake.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={salesMode === "quote"}
+                onClick={() =>
+                  setSalesMode((current) =>
+                    current === "quote" ? "ecommerce" : "quote"
+                  )
+                }
+                className={`relative inline-flex h-6 w-12 items-center rounded-full transition ${
+                  salesMode === "quote" ? "bg-orange-500" : "bg-gray-300"
+                }`}
+              >
+                <span className="sr-only">Toggle sales workflow</span>
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+                    salesMode === "quote" ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+            <p className="mt-3 text-xs text-gray-600">
+              {salesMode === "quote"
+                ? "Clients will request a tailored estimate with venue and project details."
+                : "Clients can add the product to their cart and pay online."}
+            </p>
+          </div>
           <label className="text-sm font-medium">Name</label>
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} required />
           <label className="text-sm font-medium">Tagline</label>
@@ -2802,29 +2886,8 @@ export default function EditProductPage() {
               Territories use Tier 1 by default unless a territory override is applied.
             </span>
           </div>
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
             <div className="grid gap-6">
-              <div className="grid gap-2">
-                <h3 className="font-medium">Labour rates</h3>
-                <label className="text-sm font-medium">Filming labour rate</label>
-                <input
-                  type="number"
-                  className="input"
-                  value={labourFilmingRate}
-                  onChange={(e) => setLabourFilmingRate(e.target.value)}
-                />
-                <label className="text-sm font-medium">Editing labour rate</label>
-                <input
-                  type="number"
-                  className="input"
-                  value={labourEditingRate}
-                  onChange={(e) => setLabourEditingRate(e.target.value)}
-                />
-                <p className="text-xs text-gray-500">
-                  These rates are stored separately so you can see the split between
-                  filming and post-production costs.
-                </p>
-              </div>
               <div className="grid gap-2">
                 <h3 className="font-medium">Kit costs</h3>
                 <div className="flex flex-col gap-1 text-sm">
@@ -2937,14 +3000,6 @@ export default function EditProductPage() {
                 <span>{formatCurrency(priceValue)}</span>
               </div>
               <div className="flex justify-between">
-                <span>Labour (filming)</span>
-                <span>{formatCurrency(labourFilmingValue)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Labour (editing)</span>
-                <span>{formatCurrency(labourEditingValue)}</span>
-              </div>
-              <div className="flex justify-between">
                 <span>Labour (crew roles)</span>
                 <span>{formatCurrency(crewCostValue)}</span>
               </div>
@@ -2995,6 +3050,44 @@ export default function EditProductPage() {
                 <span>Estimated profit</span>
                 <span>{formatCurrency(profitValue)}</span>
               </div>
+            </div>
+            <div className="border rounded p-3 text-sm space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="font-medium">Franchise earnings preview</span>
+                <span className="text-xs text-gray-500">per tier</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="mt-1 w-full min-w-[240px] table-fixed text-xs">
+                  <thead>
+                    <tr className="text-left text-gray-500">
+                      <th className="py-1 pr-2 font-medium">Rate</th>
+                      {tierPriceValues.map((tier) => (
+                        <th key={tier.label} className="py-1 text-right font-medium">
+                          {tier.label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {franchiseEarnings.map((row) => (
+                      <tr key={row.percentage} className="border-t">
+                        <td className="py-1 pr-2 font-medium text-gray-700">
+                          {row.percentage}%
+                        </td>
+                        {row.values.map((value) => (
+                          <td key={value.label} className="py-1 text-right">
+                            {formatCurrency(value.amount)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-[11px] text-gray-500">
+                Uses the default HQ royalty tiers. Territory or workflow overrides may
+                change the actual split.
+              </p>
             </div>
           </div>
         </div>
@@ -3101,42 +3194,6 @@ export default function EditProductPage() {
                       Budget overrides
                     </summary>
                     <div className="mt-3 grid gap-2 md:grid-cols-2">
-                      <label className="grid gap-1">
-                        <span className="text-xs font-medium text-gray-600">
-                          Labour (filming)
-                        </span>
-                        <input
-                          type="number"
-                          className="input"
-                          value={budget.labourFilming}
-                          onChange={(e) =>
-                            updateVariationBudget(
-                              index,
-                              "labourFilming",
-                              e.target.value
-                            )
-                          }
-                          placeholder="Inherit"
-                        />
-                      </label>
-                      <label className="grid gap-1">
-                        <span className="text-xs font-medium text-gray-600">
-                          Labour (editing)
-                        </span>
-                        <input
-                          type="number"
-                          className="input"
-                          value={budget.labourEditing}
-                          onChange={(e) =>
-                            updateVariationBudget(
-                              index,
-                              "labourEditing",
-                              e.target.value
-                            )
-                          }
-                          placeholder="Inherit"
-                        />
-                      </label>
                       <label className="grid gap-1">
                         <span className="text-xs font-medium text-gray-600">
                           Kit total
@@ -4043,6 +4100,19 @@ export default function EditProductPage() {
                             <p className="text-[11px] text-gray-500">
                               Remove values to inherit the base modifier pricing for each tier.
                             </p>
+                            {(option.deliverableType || option.deliverableLabel) && (
+                              <div className="rounded border border-dashed bg-white p-3 text-xs text-gray-600">
+                                <p className="font-semibold text-gray-700">
+                                  Additional deliverable
+                                </p>
+                                <p>
+                                  {option.deliverableLabel?.trim() || "Uses modifier name"}
+                                  {option.deliverableType
+                                    ? ` (${DELIVERABLE_TYPE_LABELS[option.deliverableType] || option.deliverableType})`
+                                    : ""}
+                                </p>
+                              </div>
+                            )}
                             <details
                               className="rounded border border-dashed p-3"
                               open={budgetHasValues}
@@ -4051,46 +4121,6 @@ export default function EditProductPage() {
                                 Budget overrides
                               </summary>
                               <div className="mt-3 grid gap-2 md:grid-cols-2">
-                                <label className="grid gap-1">
-                                  <span className="text-xs font-medium text-gray-600">
-                                    Labour (filming)
-                                  </span>
-                                  <input
-                                    type="number"
-                                    className="input"
-                                    value={budget.labourFilming}
-                                    disabled={!enabled}
-                                    onChange={(e) =>
-                                      updateModifierBudget(
-                                        group.id,
-                                        option.id,
-                                        "labourFilming",
-                                        e.target.value
-                                      )
-                                    }
-                                    placeholder="Inherit"
-                                  />
-                                </label>
-                                <label className="grid gap-1">
-                                  <span className="text-xs font-medium text-gray-600">
-                                    Labour (editing)
-                                  </span>
-                                  <input
-                                    type="number"
-                                    className="input"
-                                    value={budget.labourEditing}
-                                    disabled={!enabled}
-                                    onChange={(e) =>
-                                      updateModifierBudget(
-                                        group.id,
-                                        option.id,
-                                        "labourEditing",
-                                        e.target.value
-                                      )
-                                    }
-                                    placeholder="Inherit"
-                                  />
-                                </label>
                                 <label className="grid gap-1">
                                   <span className="text-xs font-medium text-gray-600">
                                     Kit total

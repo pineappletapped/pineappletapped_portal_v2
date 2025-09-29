@@ -214,8 +214,15 @@ export default function AdminProductsPage() {
                 <div>
                   <p className="font-medium">{p.name}</p>
                   <p className="text-sm text-gray-700">
-                    £{p.price?.toFixed(2)}
+                    {p.salesMode === "quote"
+                      ? "Quote-only workflow"
+                      : `£${(p.price ?? 0).toFixed(2)}`}
                   </p>
+                  {p.salesMode === "quote" && (
+                    <p className="text-xs text-orange-600">
+                      Requests route to bespoke quote intake.
+                    </p>
+                  )}
                   {p.venue && (
                     <p className="text-xs text-gray-600">{p.venue}</p>
                   )}

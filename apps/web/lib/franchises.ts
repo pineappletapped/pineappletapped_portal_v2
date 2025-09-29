@@ -65,13 +65,16 @@ export interface Franchise {
 
 export type TerritoryType = 'postal' | 'radius';
 
+export const HQ_UNASSIGNED_TERRITORY_LABEL = 'HQ intake (unassigned territory)';
+
 export interface FranchiseTerritory {
   id: string;
-  franchiseId: string;
+  franchiseId: string | null;
   label: string;
   type: TerritoryType;
   postalCodes: string[];
   exclusive: boolean;
+  acceptingApplications: boolean;
   radiusKm?: number | null;
   centerLat?: number | null;
   centerLng?: number | null;
@@ -312,11 +315,15 @@ export function parseTerritory(doc: SnapshotWithId): FranchiseTerritory {
       : [];
   return {
     id: doc.id,
-    franchiseId: (data.franchiseId as string) || '',
+    franchiseId:
+      typeof data.franchiseId === 'string' && data.franchiseId.trim().length > 0
+        ? data.franchiseId.trim()
+        : null,
     label: (data.label as string) || 'Unnamed Territory',
     type: ((data.type as TerritoryType) ?? 'postal') as TerritoryType,
     postalCodes: postalCodesRaw,
     exclusive: data.exclusive !== false,
+    acceptingApplications: data.acceptingApplications === true,
     radiusKm: typeof data.radiusKm === 'number' ? (data.radiusKm as number) : null,
     centerLat: typeof data.centerLat === 'number' ? (data.centerLat as number) : null,
     centerLng: typeof data.centerLng === 'number' ? (data.centerLng as number) : null,

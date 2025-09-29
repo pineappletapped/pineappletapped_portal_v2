@@ -16,22 +16,27 @@ import {
   getListingPriceLabel,
 } from "./productListingUtils";
 import AddToCartWizard from "./AddToCartWizard";
+import ProductQuoteRequestDialog from "./ProductQuoteRequestDialog";
 import ListingPriceNote from "./ListingPriceNote";
 
 export default function ProductCard({ product }: { product: Product }) {
   const [selectedVariation, setSelectedVariation] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [quoteOpen, setQuoteOpen] = useState(false);
   const variations = product.variations ?? [];
   const requiresVariation = variations.length > 0;
+  const isQuoteOnly = (product.salesMode ?? "ecommerce") === "quote";
   const activeVariation = requiresVariation
     ? variations.find((variation) => variation.id === selectedVariation)
     : null;
   const basePrice = activeVariation?.price ?? product.price;
   const priceRangeLabel =
     getListingPriceLabel(product) ?? "Pricing on request";
-  const priceLabel = selectedVariation
-    ? `£${basePrice.toFixed(2)}`
-    : priceRangeLabel;
+  const priceLabel = isQuoteOnly
+    ? "Pricing available on request"
+    : selectedVariation
+      ? `£${basePrice.toFixed(2)}`
+      : priceRangeLabel;
   const img =
     product.imageUrl || "https://placehold.co/600x400?text=No+Image";
   const { visibleDeliverables, remainingDeliverableCount } =
@@ -41,8 +46,22 @@ export default function ProductCard({ product }: { product: Product }) {
 
   const handleQuickAdd = () => {
     if (requiresVariation && !selectedVariation) return;
+    if (isQuoteOnly) {
+      setQuoteOpen(true);
+      return;
+    }
     setWizardOpen(true);
   };
+
+  const variationSummary = selectedVariation
+    ? {
+        id: selectedVariation,
+        label:
+          activeVariation?.name?.trim() ||
+          variations.find((v) => v.id === selectedVariation)?.name ||
+          "Selected package",
+      }
+    : null;
 
   return (
     <>
@@ -124,7 +143,8 @@ export default function ProductCard({ product }: { product: Product }) {
                 <option value="">Select a package</option>
                 {variations.map((variation) => (
                   <option key={variation.id} value={variation.id}>
-                    {variation.name} – £{variation.price.toFixed(2)}
+                    {variation.name}
+                    {!isQuoteOnly && ` – £${variation.price.toFixed(2)}`}
                   </option>
                 ))}
               </select>
@@ -138,11 +158,13 @@ export default function ProductCard({ product }: { product: Product }) {
               disabled={requiresVariation && !selectedVariation}
               title={
                 requiresVariation && !selectedVariation
-                  ? "Select a package to add to cart"
+                  ? isQuoteOnly
+                    ? "Select a package to request a quote"
+                    : "Select a package to add to cart"
                   : undefined
               }
             >
-              Add to Cart
+              {isQuoteOnly ? "Request Quote" : "Add to Cart"}
             </button>
             <Link
               href={`/products/${product.id}`}
@@ -153,12 +175,20 @@ export default function ProductCard({ product }: { product: Product }) {
           </div>
         </div>
       </div>
-      {wizardOpen && (
+      {wizardOpen && !isQuoteOnly && (
         <AddToCartWizard
           product={product}
           variationId={selectedVariation || undefined}
           basePrice={basePrice}
           onClose={() => setWizardOpen(false)}
+        />
+      )}
+      {quoteOpen && (
+        <ProductQuoteRequestDialog
+          product={product}
+          open={quoteOpen}
+          onClose={() => setQuoteOpen(false)}
+          variation={variationSummary}
         />
       )}
     </>

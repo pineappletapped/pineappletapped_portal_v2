@@ -10,6 +10,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   addDoc,
   collection,
@@ -162,7 +163,16 @@ export default function ExpoLeadCaptureManager({
   const [slugTouched, setSlugTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [portalTarget, setPortalTarget] = useState<Element | null>(null);
+  const [origin, setOrigin] = useState("https://pineappletapped.com");
   const dbRef = useRef<Firestore | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setOrigin(window.location.origin);
+    }
+  }, []);
 
   const loadPages = useCallback(async (database?: Firestore | null) => {
     const firestore = database ?? dbRef.current;
@@ -247,6 +257,11 @@ export default function ExpoLeadCaptureManager({
   }, [loadPages]);
 
   useEffect(() => {
+    if (!panelOpen) {
+      setForm(emptyForm);
+      setSlugTouched(false);
+      return;
+    }
     if (!selectedId) {
       setForm(emptyForm);
       setSlugTouched(false);
@@ -275,14 +290,14 @@ export default function ExpoLeadCaptureManager({
       isActive: page.isActive,
     });
     setSlugTouched(page.slug.trim().length > 0);
-  }, [pages, selectedId]);
+  }, [pages, panelOpen, selectedId]);
 
-  const selectedPage = useMemo(() => pages.find((item) => item.id === selectedId) ?? null, [pages, selectedId]);
+  const selectedPage = useMemo(
+    () => (panelOpen && selectedId ? pages.find((item) => item.id === selectedId) ?? null : null),
+    [pages, panelOpen, selectedId]
+  );
 
-  const handleSelect = useCallback((event: ChangeEvent<HTMLSelectElement>) => {
-    const value = event.target.value;
-    setSelectedId(value === "__new" ? null : value);
-  }, []);
+  const slugBase = useMemo(() => `${origin.replace(/\/$/, "")}/expo/`, [origin]);
 
   const updateForm = useCallback(<Key extends keyof ExpoLeadPageForm>(key: Key, value: ExpoLeadPageForm[Key]) => {
     setForm((prev) => ({
@@ -370,6 +385,7 @@ export default function ExpoLeadCaptureManager({
       await deleteDoc(doc(dbRef.current, "expoLeadPages", selectedId));
       setSelectedId(null);
       await loadPages();
+      setPanelOpen(false);
     } catch (err) {
       console.error("Failed to delete expo lead page", err);
       setError("Unable to delete the landing page. Please try again.");
@@ -377,6 +393,52 @@ export default function ExpoLeadCaptureManager({
       setDeleting(false);
     }
   }, [loadPages, selectedId]);
+
+  const openCreatePanel = useCallback(() => {
+    setSelectedId(null);
+    setForm(emptyForm);
+    setSlugTouched(false);
+    setPanelOpen(true);
+  }, []);
+
+  const openEditPanel = useCallback((pageId: string) => {
+    setSelectedId(pageId);
+    setPanelOpen(true);
+  }, []);
+
+  const closePanel = useCallback(() => {
+    setPanelOpen(false);
+    setSelectedId(null);
+    setForm(emptyForm);
+    setSlugTouched(false);
+  }, []);
+
+  useEffect(() => {
+    setPortalTarget(typeof document !== "undefined" ? document.body : null);
+  }, []);
+
+  useEffect(() => {
+    if (!panelOpen) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closePanel();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    let originalOverflow: string | undefined;
+    if (typeof document !== "undefined") {
+      originalOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    }
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      if (typeof document !== "undefined") {
+        document.body.style.overflow = originalOverflow ?? "";
+      }
+    };
+  }, [closePanel, panelOpen]);
 
   if (guardLoading) {
     return <p>Checking access…</p>;
@@ -387,6 +449,229 @@ export default function ExpoLeadCaptureManager({
   }
 
   const HeadingTag = resolveHeadingTag(headingLevel);
+
+  const panel = !panelOpen
+    ? null
+    : (
+        <div className="fixed inset-0 z-[60] flex items-stretch justify-end">
+          <button
+            type="button"
+            aria-label="Close landing page manager"
+            className="absolute inset-0 bg-black/40"
+            onClick={closePanel}
+          />
+          <aside
+            role="dialog"
+            aria-modal="true"
+            className="ml-auto flex h-full w-full max-w-3xl flex-col bg-base-100 shadow-xl"
+          >
+            <header className="flex items-start justify-between border-b px-6 py-4">
+              <div>
+                <h2 className="text-lg font-semibold">
+                  {selectedId ? "Edit landing page" : "Create landing page"}
+                </h2>
+                <p className="text-sm text-gray-600">
+                  Publish and manage exhibition microsites without leaving the orders workflow.
+                </p>
+              </div>
+              <button type="button" className="btn btn-sm" onClick={closePanel}>
+                Close
+              </button>
+            </header>
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
+              <form className="grid gap-4" onSubmit={handleSubmit}>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="form-control">
+                    <span className="label-text">Internal name</span>
+                    <input
+                      type="text"
+                      className="input input-bordered"
+                      value={form.name}
+                      onChange={handleNameChange}
+                      placeholder="March Expo 2025"
+                    />
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text">Event name</span>
+                    <input
+                      type="text"
+                      className="input input-bordered"
+                      value={form.eventName}
+                      onChange={(event) => updateForm("eventName", event.target.value)}
+                      placeholder="Global Franchise Show"
+                    />
+                  </label>
+                </div>
+
+                <label className="form-control">
+                  <span className="label-text">Slug / kiosk URL</span>
+                  <div className="join">
+                    <span className="join-item input input-bordered pointer-events-none select-none whitespace-nowrap">
+                      {slugBase}
+                    </span>
+                    <input
+                      type="text"
+                      className="join-item input input-bordered"
+                      value={form.slug}
+                      onChange={handleSlugChange}
+                      placeholder="franchise-show-2025"
+                    />
+                  </div>
+                  <span className="label-text-alt text-gray-500">
+                    We&apos;ll generate a QR code for this link so the stand team can surface it instantly.
+                  </span>
+                </label>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="form-control">
+                    <span className="label-text">Headline</span>
+                    <input
+                      type="text"
+                      className="input input-bordered"
+                      value={form.headline}
+                      onChange={(event) => updateForm("headline", event.target.value)}
+                      placeholder="Win £500 of content creation"
+                    />
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text">Subheading</span>
+                    <input
+                      type="text"
+                      className="input input-bordered"
+                      value={form.subheading}
+                      onChange={(event) => updateForm("subheading", event.target.value)}
+                      placeholder="Tell us about your marketing goals for 2025"
+                    />
+                  </label>
+                </div>
+
+                <label className="form-control">
+                  <span className="label-text">Prize or incentive</span>
+                  <textarea
+                    className="textarea textarea-bordered"
+                    value={form.prizeDescription}
+                    onChange={(event) => updateForm("prizeDescription", event.target.value)}
+                    placeholder="Free brand film, headshots or social content package"
+                    rows={3}
+                  />
+                </label>
+
+                <label className="form-control">
+                  <span className="label-text">One-pager URL</span>
+                  <input
+                    type="url"
+                    className="input input-bordered"
+                    value={form.onePagerUrl}
+                    onChange={(event) => updateForm("onePagerUrl", event.target.value)}
+                    placeholder="https://example.com/pineapple-tapped-one-pager.pdf"
+                  />
+                </label>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="form-control">
+                    <span className="label-text">Auto-email subject</span>
+                    <input
+                      type="text"
+                      className="input input-bordered"
+                      value={form.emailSubject}
+                      onChange={(event) => updateForm("emailSubject", event.target.value)}
+                    />
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text">Notification emails</span>
+                    <input
+                      type="text"
+                      className="input input-bordered"
+                      value={form.notificationEmails}
+                      onChange={(event) => updateForm("notificationEmails", event.target.value)}
+                      placeholder="expo@pineappletapped.com, events@pineappletapped.com"
+                    />
+                    <span className="label-text-alt text-gray-500">Separate addresses with commas.</span>
+                  </label>
+                </div>
+
+                <label className="form-control">
+                  <span className="label-text">Auto-email body</span>
+                  <textarea
+                    className="textarea textarea-bordered"
+                    value={form.emailBody}
+                    onChange={(event) => updateForm("emailBody", event.target.value)}
+                    rows={6}
+                  />
+                </label>
+
+                <label className="form-control">
+                  <span className="label-text">Success headline</span>
+                  <input
+                    type="text"
+                    className="input input-bordered"
+                    value={form.successHeadline}
+                    onChange={(event) => updateForm("successHeadline", event.target.value)}
+                    placeholder="Thanks for entering!"
+                  />
+                </label>
+                <label className="form-control">
+                  <span className="label-text">Success message</span>
+                  <textarea
+                    className="textarea textarea-bordered"
+                    value={form.successMessage}
+                    onChange={(event) => updateForm("successMessage", event.target.value)}
+                    rows={4}
+                  />
+                </label>
+
+                <label className="form-control">
+                  <span className="label-text">Consent checkbox copy</span>
+                  <input
+                    type="text"
+                    className="input input-bordered"
+                    value={form.consentText}
+                    onChange={(event) => updateForm("consentText", event.target.value)}
+                    placeholder="I agree to be contacted by Pineapple Tapped about video and photo services."
+                  />
+                </label>
+
+                <div className="flex items-center justify-between gap-3">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={form.isActive}
+                      onChange={(event) => updateForm("isActive", event.target.checked)}
+                    />
+                    Active on the expo listings page
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {selectedPage && selectedPage.slug ? (
+                      <Link
+                        href={`/expo/${selectedPage.slug}`}
+                        className="btn btn-ghost btn-sm"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Open public page
+                      </Link>
+                    ) : null}
+                    {selectedId ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm text-rose-600"
+                        onClick={handleDelete}
+                        disabled={deleting}
+                      >
+                        {deleting ? "Deleting…" : "Delete"}
+                      </button>
+                    ) : null}
+                    <button type="submit" className="btn btn-primary btn-sm" disabled={saving}>
+                      {saving ? "Saving…" : selectedId ? "Save changes" : "Create landing page"}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </aside>
+        </div>
+      );
 
   return (
     <div className="grid gap-6">
@@ -401,223 +686,21 @@ export default function ExpoLeadCaptureManager({
               Configure the experience prospects see at the stand and route entries into the CRM with event tags.
             </p>
           </div>
-          <label className="form-control w-full md:w-64">
-            <span className="label">
-              <span className="label-text">Select a page</span>
-            </span>
-            <select className="select select-bordered" value={selectedId ?? "__new"} onChange={handleSelect}>
-              <option value="__new">Create new page…</option>
-              {pages.map((page) => (
-                <option key={page.id} value={page.id}>
-                  {page.name} – {page.eventName || "Untitled Event"}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="btn btn-primary btn-sm" onClick={openCreatePanel}>
+              Create landing page
+            </button>
+          </div>
         </div>
 
-        {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
+        {error && !panelOpen && <p className="mt-4 text-sm text-red-600">{error}</p>}
+
         {loading ? (
           <p className="mt-4 text-sm text-gray-500">Loading landing pages…</p>
+        ) : pages.length === 0 ? (
+          <p className="mt-4 text-sm text-gray-500">No exhibition landing pages yet.</p>
         ) : (
-          <form className="mt-6 grid gap-4" onSubmit={handleSubmit}>
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="form-control">
-                <span className="label-text">Internal name</span>
-                <input
-                  type="text"
-                  className="input input-bordered"
-                  value={form.name}
-                  onChange={handleNameChange}
-                  placeholder="March Expo 2025"
-                />
-              </label>
-              <label className="form-control">
-                <span className="label-text">Event name</span>
-                <input
-                  type="text"
-                  className="input input-bordered"
-                  value={form.eventName}
-                  onChange={(event) => updateForm("eventName", event.target.value)}
-                  placeholder="Global Franchise Show"
-                />
-              </label>
-            </div>
-
-            <label className="form-control">
-              <span className="label-text">Slug / kiosk URL</span>
-              <div className="join">
-                <span className="join-item input input-bordered pointer-events-none select-none whitespace-nowrap">
-                  expo.pineappletapped.com/
-                </span>
-                <input
-                  type="text"
-                  className="join-item input input-bordered"
-                  value={form.slug}
-                  onChange={handleSlugChange}
-                  placeholder="franchise-show-2025"
-                />
-              </div>
-              <span className="label-text-alt text-gray-500">
-                We&apos;ll generate a QR code for this link so the stand team can surface it instantly.
-              </span>
-            </label>
-
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="form-control">
-                <span className="label-text">Headline</span>
-                <input
-                  type="text"
-                  className="input input-bordered"
-                  value={form.headline}
-                  onChange={(event) => updateForm("headline", event.target.value)}
-                  placeholder="Win £500 of content creation"
-                />
-              </label>
-              <label className="form-control">
-                <span className="label-text">Subheading</span>
-                <input
-                  type="text"
-                  className="input input-bordered"
-                  value={form.subheading}
-                  onChange={(event) => updateForm("subheading", event.target.value)}
-                  placeholder="Tell us about your marketing goals for 2025"
-                />
-              </label>
-            </div>
-
-            <label className="form-control">
-              <span className="label-text">Prize or incentive</span>
-              <textarea
-                className="textarea textarea-bordered"
-                value={form.prizeDescription}
-                onChange={(event) => updateForm("prizeDescription", event.target.value)}
-                placeholder="Free brand film, headshots or social content package"
-                rows={3}
-              />
-            </label>
-
-            <label className="form-control">
-              <span className="label-text">One-pager URL</span>
-              <input
-                type="url"
-                className="input input-bordered"
-                value={form.onePagerUrl}
-                onChange={(event) => updateForm("onePagerUrl", event.target.value)}
-                placeholder="https://example.com/pineapple-tapped-one-pager.pdf"
-              />
-              <span className="label-text-alt text-gray-500">
-                Sent automatically after someone completes the form to keep us top of mind.
-              </span>
-            </label>
-
-            <fieldset className="grid gap-4 rounded border p-4">
-              <legend className="px-2 text-sm font-medium text-gray-600">Form content</legend>
-              <label className="form-control">
-                <span className="label-text">Consent text</span>
-                <textarea
-                  className="textarea textarea-bordered"
-                  value={form.consentText}
-                  onChange={(event) => updateForm("consentText", event.target.value)}
-                  placeholder="I agree to be contacted…"
-                  rows={2}
-                />
-              </label>
-              <label className="form-control">
-                <span className="label-text">Success headline</span>
-                <input
-                  type="text"
-                  className="input input-bordered"
-                  value={form.successHeadline}
-                  onChange={(event) => updateForm("successHeadline", event.target.value)}
-                />
-              </label>
-              <label className="form-control">
-                <span className="label-text">Success message</span>
-                <textarea
-                  className="textarea textarea-bordered"
-                  value={form.successMessage}
-                  onChange={(event) => updateForm("successMessage", event.target.value)}
-                  rows={3}
-                />
-              </label>
-            </fieldset>
-
-            <fieldset className="grid gap-4 rounded border p-4">
-              <legend className="px-2 text-sm font-medium text-gray-600">Automated follow-up email</legend>
-              <label className="form-control">
-                <span className="label-text">Subject line</span>
-                <input
-                  type="text"
-                  className="input input-bordered"
-                  value={form.emailSubject}
-                  onChange={(event) => updateForm("emailSubject", event.target.value)}
-                />
-              </label>
-              <label className="form-control">
-                <span className="label-text">Message body</span>
-                <textarea
-                  className="textarea textarea-bordered font-mono text-xs"
-                  value={form.emailBody}
-                  onChange={(event) => updateForm("emailBody", event.target.value)}
-                  rows={8}
-                />
-                <span className="label-text-alt text-gray-500">
-                  Use {'{{name}}'} to personalise the greeting. The one-pager URL is appended automatically.
-                </span>
-              </label>
-              <label className="form-control">
-                <span className="label-text">Notification emails</span>
-                <input
-                  type="text"
-                  className="input input-bordered"
-                  value={form.notificationEmails}
-                  onChange={(event) => updateForm("notificationEmails", event.target.value)}
-                  placeholder="exhibitions@pineappletapped.com, sales@pineappletapped.com"
-                />
-                <span className="label-text-alt text-gray-500">Comma-separated list of team members to alert.</span>
-              </label>
-              <label className="label cursor-pointer justify-start gap-3">
-                <input
-                  type="checkbox"
-                  className="checkbox"
-                  checked={form.isActive}
-                  onChange={(event) => updateForm("isActive", event.target.checked)}
-                />
-                <span className="label-text">Landing page is active</span>
-              </label>
-            </fieldset>
-
-            <div className="flex flex-wrap items-center gap-3">
-              <button type="submit" className="btn btn-primary" disabled={saving}>
-                {saving ? "Saving…" : selectedId ? "Save changes" : "Create page"}
-              </button>
-              {selectedId && (
-                <button type="button" className="btn btn-outline" onClick={handleDelete} disabled={deleting}>
-                  {deleting ? "Deleting…" : "Delete"}
-                </button>
-              )}
-              {selectedPage && selectedPage.slug && (
-                <Link
-                  href={`https://expo.pineappletapped.com/${selectedPage.slug}`}
-                  className="btn btn-ghost"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  Open public page
-                </Link>
-              )}
-            </div>
-          </form>
-        )}
-      </section>
-
-      <section className="rounded border p-4 shadow-sm">
-        <h2 className="text-lg font-semibold">Recent capture pages</h2>
-        {pages.length === 0 ? (
-          <p className="mt-2 text-sm text-gray-500">No exhibition landing pages yet.</p>
-        ) : (
-          <div className="mt-3 overflow-x-auto">
+          <div className="mt-4 overflow-x-auto">
             <table className="table table-zebra">
               <thead>
                 <tr>
@@ -625,6 +708,7 @@ export default function ExpoLeadCaptureManager({
                   <th>Event</th>
                   <th>Status</th>
                   <th>Updated</th>
+                  <th className="text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -638,6 +722,23 @@ export default function ExpoLeadCaptureManager({
                       </span>
                     </td>
                     <td>{formatDateTime(page.updatedAt ?? page.createdAt)}</td>
+                    <td className="text-right">
+                      <div className="flex justify-end gap-2">
+                        {page.slug ? (
+                          <Link
+                            href={`/expo/${page.slug}`}
+                            className="btn btn-ghost btn-xs"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            View
+                          </Link>
+                        ) : null}
+                        <button type="button" className="btn btn-outline btn-xs" onClick={() => openEditPanel(page.id)}>
+                          Manage
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -645,6 +746,8 @@ export default function ExpoLeadCaptureManager({
           </div>
         )}
       </section>
+
+      {portalTarget ? createPortal(panel, portalTarget) : panel}
     </div>
   );
 }

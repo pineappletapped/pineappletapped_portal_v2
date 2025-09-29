@@ -98,6 +98,11 @@ export interface ProductDeliverable {
   variationIds?: string[];
 }
 
+export interface ProductModifierDeliverable {
+  type?: DeliverableType | null;
+  label?: string | null;
+}
+
 export interface ProductBudgetOverride {
   labourFilming?: number | null;
   labourEditing?: number | null;
@@ -127,6 +132,7 @@ export interface ProductModifierSelection {
   priceTiers?: PriceTiers | null;
   budgetOverrides?: ProductBudgetOverride;
   crewOverrides?: ProductCrewRoleOverride[];
+  deliverable?: ProductModifierDeliverable;
 }
 
 export interface ProductVariation {
@@ -201,6 +207,12 @@ export interface Product {
   name: string;
   description: string;
   tagline?: string;
+  /**
+   * Controls how customers engage with the product.
+   * "ecommerce" keeps the instant checkout flow, while "quote"
+   * routes enquiries through the bespoke quote workflow.
+   */
+  salesMode?: "ecommerce" | "quote";
   price: number;
   priceTiers?: PriceTiers | null;
   imageUrl?: string;
@@ -245,6 +257,7 @@ const sampleProducts: Product[] = [
   {
     id: "TLQUINBJIT2RC56SP6CEEPFG",
     name: "BID Video Packages",
+    salesMode: "ecommerce",
     description:
       "Help your town shine with high-impact, ready-to-share video content. Includes 3x business videos and 1x community spotlight.",
     tagline: "Showcase your BID in style",
@@ -297,6 +310,7 @@ const sampleProducts: Product[] = [
   {
     id: "LIVE_STREAM_BASIC",
     name: "Live Stream Package",
+    salesMode: "ecommerce",
     description: "Stream your event live with our complete crew and equipment.",
     tagline: "Broadcast your event worldwide",
     price: 500,

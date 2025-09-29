@@ -16,6 +16,7 @@ import {
 } from "firebase/firestore";
 import { useRoleGate } from "@/hooks/useRoleGate";
 import { describeLeadSource } from "@/lib/lead-source";
+import { HQ_UNASSIGNED_TERRITORY_LABEL } from "@/lib/franchises";
 
 export default function AdminOrdersPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
@@ -238,6 +239,7 @@ export default function AdminOrdersPage() {
               <th className="p-2">Franchise Routing</th>
               <th className="p-2">Created</th>
               <th className="p-2">Project</th>
+              <th className="p-2">Items</th>
               <th className="p-2">Actions</th>
             </tr>
           </thead>
@@ -253,14 +255,19 @@ export default function AdminOrdersPage() {
                 | {
                     status?: string;
                     matchType?: string;
-                    franchiseId?: string;
+                    franchiseId?: string | null;
+                    territoryId?: string | null;
                     territoryLabel?: string;
                     territoryPostalCode?: string;
                     normalizedPostalCode?: string;
                     inputPostalCode?: string;
+                    hqFallback?: boolean;
                   }
                 | null;
-              const assignmentStatus = assignment?.status || null;
+              const assignmentStatus =
+                typeof assignment?.status === "string" ? (assignment.status as string) : null;
+              const assignmentStatusLabel =
+                assignmentStatus !== null ? assignmentStatus.replace(/_/g, " ") : null;
               const assignmentMatchType = assignment?.matchType || null;
               const franchiseId =
                 (o.franchiseId as string | undefined) ||
@@ -276,6 +283,13 @@ export default function AdminOrdersPage() {
                 null;
               const territoryLabel =
                 assignment?.territoryLabel || assignment?.territoryPostalCode || null;
+              const hasTerritoryMatch = Boolean(
+                assignment?.territoryId || assignment?.territoryPostalCode || assignment?.territoryLabel
+              );
+              const isHqIntake =
+                !franchiseId &&
+                (assignmentStatus === "hq_unassigned" || assignment?.hqFallback === true ||
+                  (assignmentStatus === "matched" && hasTerritoryMatch));
               const assignedOperator =
                 (o.franchiseAssignedUser?.displayName as string | undefined) ||
                 (o.franchiseAssignedUser?.email as string | undefined) ||
@@ -310,6 +324,15 @@ export default function AdminOrdersPage() {
               const royaltyTier = royalty?.tier as
                 | { minOrder?: number | null; maxOrder?: number | null }
                 | undefined;
+              const orderItems = Array.isArray(o.items)
+                ? (o.items as Array<Record<string, any>>)
+                : Array.isArray(o.budgetItems)
+                  ? (o.budgetItems as Array<Record<string, any>>)
+                  : [];
+              const projectId =
+                typeof o.projectId === "string" && o.projectId.trim().length > 0
+                  ? o.projectId
+                  : null;
               return (
                 <tr key={o.id} className="border-t">
                   <td className="p-2">{o.id}</td>
@@ -356,6 +379,20 @@ export default function AdminOrdersPage() {
                           </div>
                         )}
                       </div>
+                    ) : isHqIntake ? (
+                      <div className="grid gap-1">
+                        <div className="font-medium text-sm">
+                          {HQ_UNASSIGNED_TERRITORY_LABEL}
+                        </div>
+                        {territoryLabel && (
+                          <div className="text-xs text-gray-500">
+                            Territory: {territoryLabel}
+                          </div>
+                        )}
+                        <div className="text-xs text-gray-500">
+                          HQ can fulfil internally or assign to a franchisee with the 25% out-of-territory rate.
+                        </div>
+                      </div>
                     ) : (
                       <div className="text-xs text-gray-500">
                         {assignmentStatus === "unmatched"
@@ -368,9 +405,9 @@ export default function AdminOrdersPage() {
                         Postcode: {inputPostalCode}
                       </div>
                     )}
-                    {assignmentStatus && (
+                    {assignmentStatusLabel && (
                       <div className="text-[10px] uppercase text-gray-400">
-                        {assignmentStatus}
+                        {assignmentStatusLabel}
                         {assignmentMatchType ? ` · ${assignmentMatchType}` : ""}
                       </div>
                     )}
@@ -395,15 +432,87 @@ export default function AdminOrdersPage() {
                       : "-"}
                   </td>
                   <td className="p-2">
-                    {o.projectId ? (
+                    {projectId ? (
                       <Link
-                        href={`/projects/${o.projectId}`}
+                        href={`/projects/${projectId}`}
                         className="text-orange underline"
                       >
                         View
                       </Link>
                     ) : (
                       "-"
+                    )}
+                  </td>
+                  <td className="p-2 align-top">
+                    {orderItems.length === 0 ? (
+                      <span className="text-xs text-gray-500">No items</span>
+                    ) : (
+                      <ul className="grid gap-2">
+                        {orderItems.map((item, index) => {
+                          const itemId =
+                            typeof item?.id === "string" && item.id.trim().length > 0
+                              ? item.id
+                              : null;
+                          const quantity =
+                            typeof item?.quantity === "number" && Number.isFinite(item.quantity)
+                              ? item.quantity
+                              : null;
+                          const price =
+                            typeof item?.price === "number" && Number.isFinite(item.price)
+                              ? item.price
+                              : null;
+                          const rentalTotal =
+                            typeof item?.rentalTotal === "number" && Number.isFinite(item.rentalTotal)
+                              ? item.rentalTotal
+                              : null;
+                          const description =
+                            typeof item?.description === "string" ? item.description : null;
+                          const deliveryLink = projectId
+                            ? `/admin/deliveries/new?projectId=${encodeURIComponent(projectId)}${
+                                itemId ? `&itemId=${encodeURIComponent(itemId)}` : ""
+                              }${item?.name ? `&itemName=${encodeURIComponent(item.name)}` : ""}&orderId=${encodeURIComponent(o.id)}`
+                            : null;
+                          return (
+                            <li key={itemId || `${o.id}-item-${index}`} className="space-y-1">
+                              <div className="font-medium text-sm text-gray-900">
+                                {item?.name || "Line item"}
+                                {quantity ? (
+                                  <span className="text-xs text-gray-500"> · ×{quantity}</span>
+                                ) : null}
+                              </div>
+                              {description ? (
+                                <div className="text-xs text-gray-500 whitespace-pre-line">
+                                  {description}
+                                </div>
+                              ) : null}
+                              {(price || rentalTotal) && (
+                                <div className="text-xs text-gray-500">
+                                  {price ? `£${price.toFixed(2)}` : null}
+                                  {price && rentalTotal ? " · " : null}
+                                  {rentalTotal ? `Rental £${rentalTotal.toFixed(2)}` : null}
+                                </div>
+                              )}
+                              <div className="flex flex-wrap gap-2 text-xs">
+                                {projectId ? (
+                                  <Link
+                                    href={`/projects/${projectId}`}
+                                    className="text-orange underline"
+                                  >
+                                    Open project
+                                  </Link>
+                                ) : (
+                                  <span className="text-gray-400">Project pending</span>
+                                )}
+                                {deliveryLink ? (
+                                  <Link href={deliveryLink} className="btn btn-xs">
+                                    Delivery form
+                                  </Link>
+                                ) : null}
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
                     )}
                   </td>
                   <td className="p-2">
