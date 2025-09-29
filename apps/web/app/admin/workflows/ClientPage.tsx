@@ -568,306 +568,302 @@ export default function AdminWorkflowsPage() {
                 </button>
               </div>
 
-              <div className="mt-6 grid gap-3">
-      {/* Create workflow form */}
-        <div className="grid gap-3 md:grid-cols-2">
-          <label className="form-control">
-            <span className="label-text text-sm font-medium text-gray-700">Workflow name</span>
-            <input
-              type="text"
-              className="input input-bordered"
-              placeholder="Product onboarding"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </label>
-          <label className="form-control">
-            <span className="label-text text-sm font-medium text-gray-700">Summary</span>
-            <input
-              type="text"
-              className="input input-bordered"
-              placeholder="Introduces the team and requests brand assets"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-            />
-          </label>
-        </div>
-
-        <div className="rounded-lg border border-dashed border-base-300 bg-white/80 p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h3 className="text-base font-semibold text-gray-900">Workflow tasks</h3>
-              <p className="text-sm text-gray-600">Outline each step for the team and flag items that surface in the client portal.</p>
-            </div>
-            {tasks.length > 0 ? (
-              <span className="hidden rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700 sm:inline-flex">
-                {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'}
-              </span>
-            ) : null}
-          </div>
-
-          <div className="mt-4 grid gap-3">
-            {/* Existing task editors remain below */}
-            <div className="grid gap-2">
-        <div className="grid gap-2">
-          <h3 className="font-semibold">Tasks</h3>
-          {tasks.length === 0 ? (
-            <p className="text-sm text-gray-600">
-              Add workflow tasks to guide the client and internal team through delivery.
-            </p>
-          ) : (
-            tasks.map((task, index) => {
-              const dependencyCandidates = tasks.filter((candidate) => candidate.id !== task.id);
-              return (
-                <div key={task.id} className="border p-3 rounded-md grid gap-3 bg-gray-50">
-                  <div className="flex justify-between items-center">
-                    <p className="font-medium">Task {index + 1}</p>
-                    <button className="text-red-600 text-sm" onClick={() => removeTask(task.id)}>
-                      Remove
-                    </button>
-                  </div>
-                  <input
-                    type="text"
-                    className="input"
-                    placeholder="Title"
-                    value={task.title}
-                    onChange={(e) => updateTask(task.id, { title: e.target.value })}
-                  />
-                  <textarea
-                    className="input"
-                    placeholder="Description"
-                    value={task.description}
-                    onChange={(e) => updateTask(task.id, { description: e.target.value })}
-                  />
-                  <div className="grid gap-2 md:grid-cols-2">
+              <div className="mt-6 grid gap-4">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="form-control">
+                    <span className="label-text text-sm font-medium text-gray-700">Workflow name</span>
                     <input
-                      type="number"
-                      className="input"
-                      placeholder="Due days (offset)"
-                      value={task.dueDays}
-                      onChange={(e) => updateTask(task.id, { dueDays: e.target.value })}
+                      type="text"
+                      className="input input-bordered"
+                      placeholder="Product onboarding"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
                     />
-                    <label className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={task.forCustomer}
-                        onChange={(e) => {
-                          const checked = e.target.checked;
-                          updateTask(task.id, {
-                            forCustomer: checked,
-                            fieldType:
-                              checked && task.fieldType === 'none'
-                                ? 'text'
-                                : task.fieldType,
-                          });
-                        }}
-                      />
-                      Client task
-                    </label>
+                  </label>
+                  <label className="form-control">
+                    <span className="label-text text-sm font-medium text-gray-700">Summary</span>
+                    <input
+                      type="text"
+                      className="input input-bordered"
+                      placeholder="Introduces the team and requests brand assets"
+                      value={description}
+                      onChange={(e) => setDescription(e.target.value)}
+                    />
+                  </label>
+                </div>
+
+                <div className="rounded-lg border border-dashed border-base-300 bg-white/80 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-semibold text-gray-900">Workflow tasks</h3>
+                      <p className="text-sm text-gray-600">
+                        Outline each step for the team and flag items that surface in the client portal.
+                      </p>
+                    </div>
+                    {tasks.length > 0 ? (
+                      <span className="hidden rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-700 sm:inline-flex">
+                        {tasks.length} {tasks.length === 1 ? 'task' : 'tasks'}
+                      </span>
+                    ) : null}
                   </div>
-                  <div className="grid gap-2 md:grid-cols-2">
-                    <div className="grid gap-1">
-                      <label className="text-sm font-medium">Field template</label>
-                      <select
-                        className="input"
-                        value={task.templateKey ?? ''}
-                        onChange={(e) => applyTemplate(task.id, e.target.value)}
-                      >
-                        <option value="">Choose a preset…</option>
-                        {FIELD_TEMPLATES.map((template) => (
-                          <option key={template.key} value={template.key}>
-                            {template.label}
-                          </option>
-                        ))}
-                        <option value="custom">Custom field</option>
-                        <option value="none">No preset</option>
-                      </select>
-                    </div>
-                    <div className="grid gap-1">
-                      <label className="text-sm font-medium">Response type</label>
-                      <select
-                        className="input"
-                        value={task.fieldType}
-                        onChange={(e) => {
-                          const nextType = e.target.value as TaskFieldType;
-                          const nextOptions =
-                            nextType === 'select'
-                              ? task.fieldOptions.length > 0
-                                ? task.fieldOptions
-                                : [createSelectOption('Option 1'), createSelectOption('Option 2')]
-                              : [];
-                          updateTask(task.id, {
-                            fieldType: nextType,
-                            fieldOptions: nextOptions,
-                            templateKey:
-                              task.templateKey && task.templateKey !== 'custom'
-                                ? 'custom'
-                                : task.templateKey,
-                          });
-                        }}
-                      >
-                        {FIELD_TYPE_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  {task.fieldType !== 'none' && (
-                    <div className="grid gap-2">
-                      <div className="grid gap-1">
-                        <label className="text-sm font-medium">Field label</label>
-                        <input
-                          className="input"
-                          placeholder="Label shown in the portal"
-                          value={task.fieldLabel}
-                          onChange={(e) => updateTask(task.id, { fieldLabel: e.target.value })}
-                        />
-                      </div>
-                      <label className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={task.fieldRequired}
-                          onChange={(e) => updateTask(task.id, { fieldRequired: e.target.checked })}
-                        />
-                        Required to complete
-                      </label>
-                      <input
-                        className="input"
-                        placeholder="Placeholder (optional)"
-                        value={task.fieldPlaceholder}
-                        onChange={(e) => updateTask(task.id, { fieldPlaceholder: e.target.value })}
-                      />
-                      <textarea
-                        className="input"
-                        placeholder="Helper text or instructions"
-                        value={task.fieldHelpText}
-                        onChange={(e) => updateTask(task.id, { fieldHelpText: e.target.value })}
-                      />
-                      {task.fieldType === 'file' && (
-                        <input
-                          className="input"
-                          placeholder="Accepted file types e.g. .pdf,image/*"
-                          value={task.fieldAccept}
-                          onChange={(e) => updateTask(task.id, { fieldAccept: e.target.value })}
-                        />
-                      )}
-                    </div>
-                  )}
-                  {task.fieldType === 'select' && (
-                    <div className="grid gap-2">
-                      <p className="text-sm font-medium">Options</p>
-                      {task.fieldOptions.map((option) => (
-                        <div key={option.id} className="flex flex-col gap-2 sm:flex-row">
-                          <input
-                            className="input flex-1"
-                            placeholder="Option label"
-                            value={option.label}
-                            onChange={(e) => updateTaskOption(task.id, option.id, { label: e.target.value })}
-                          />
-                          <input
-                            className="input flex-1"
-                            placeholder="Option value (optional)"
-                            value={option.value}
-                            onChange={(e) => updateTaskOption(task.id, option.id, { value: e.target.value })}
-                          />
-                          <button
-                            type="button"
-                            className="btn btn-sm sm:w-auto"
-                            onClick={() => removeTaskOption(task.id, option.id)}
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      ))}
-                      <button type="button" className="btn btn-sm w-fit" onClick={() => addTaskOption(task.id)}>
-                        Add option
-                      </button>
-                    </div>
-                  )}
-                  {task.fieldType === 'team-member' && (
-                    <div className="grid gap-2">
-                      <p className="text-sm font-medium">Who are we assigning?</p>
-                      <div className="flex flex-wrap gap-3 text-sm">
-                        <label className="flex items-center gap-2">
-                          <input
-                            type="radio"
-                            name={`assignment-${task.id}`}
-                            value="team"
-                            checked={task.assignmentScope === 'team'}
-                            onChange={() => updateTask(task.id, { assignmentScope: 'team' })}
-                          />
-                          Team member
-                        </label>
-                        <label className="flex items-center gap-2">
-                          <input
-                            type="radio"
-                            name={`assignment-${task.id}`}
-                            value="contractor"
-                            checked={task.assignmentScope === 'contractor'}
-                            onChange={() => updateTask(task.id, { assignmentScope: 'contractor' })}
-                          />
-                          Contractor
-                        </label>
-                      </div>
-                      <label className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={task.shareAssigneeContact}
-                          onChange={(e) => updateTask(task.id, { shareAssigneeContact: e.target.checked })}
-                        />
-                        Share the selected person’s email & phone with coordinators
-                      </label>
-                    </div>
-                  )}
-                  {dependencyCandidates.length > 0 && (
-                    <div className="grid gap-1">
-                      <p className="text-sm font-medium">Depends on</p>
-                      <div className="flex flex-wrap gap-3">
-                        {dependencyCandidates.map((candidate) => {
-                          const candidateIndex = tasks.findIndex((t) => t.id === candidate.id);
-                          const label = candidate.title
-                            ? `${candidateIndex + 1}. ${candidate.title}`
-                            : `Task ${candidateIndex + 1}`;
+
+                  <div className="mt-4 space-y-3">
+                    <h3 className="text-sm font-semibold text-gray-900">Tasks</h3>
+                    {tasks.length === 0 ? (
+                      <p className="text-sm text-gray-600">
+                        Add workflow tasks to guide the client and internal team through delivery.
+                      </p>
+                    ) : (
+                      <div className="grid gap-3">
+                        {tasks.map((task, index) => {
+                          const dependencyCandidates = tasks.filter((candidate) => candidate.id !== task.id);
                           return (
-                            <label
-                              key={candidate.id}
-                              className="flex items-center gap-2 text-xs sm:text-sm"
-                            >
+                            <div key={task.id} className="grid gap-3 rounded-md border border-base-200 bg-gray-50 p-3">
+                              <div className="flex items-center justify-between">
+                                <p className="font-medium text-gray-900">Task {index + 1}</p>
+                                <button type="button" className="text-sm text-rose-600" onClick={() => removeTask(task.id)}>
+                                  Remove
+                                </button>
+                              </div>
                               <input
-                                type="checkbox"
-                                checked={task.dependsOn.includes(candidate.id)}
-                                onChange={(e) => toggleDependency(task.id, candidate.id, e.target.checked)}
+                                type="text"
+                                className="input"
+                                placeholder="Title"
+                                value={task.title}
+                                onChange={(e) => updateTask(task.id, { title: e.target.value })}
                               />
-                              {label}
-                            </label>
+                              <textarea
+                                className="input"
+                                placeholder="Description"
+                                value={task.description}
+                                onChange={(e) => updateTask(task.id, { description: e.target.value })}
+                              />
+                              <div className="grid gap-2 md:grid-cols-2">
+                                <input
+                                  type="number"
+                                  className="input"
+                                  placeholder="Due days (offset)"
+                                  value={task.dueDays}
+                                  onChange={(e) => updateTask(task.id, { dueDays: e.target.value })}
+                                />
+                                <label className="flex items-center gap-2 text-sm">
+                                  <input
+                                    type="checkbox"
+                                    checked={task.forCustomer}
+                                    onChange={(e) => {
+                                      const checked = e.target.checked;
+                                      updateTask(task.id, {
+                                        forCustomer: checked,
+                                        fieldType:
+                                          checked && task.fieldType === 'none' ? 'text' : task.fieldType,
+                                      });
+                                    }}
+                                  />
+                                  Client task
+                                </label>
+                              </div>
+                              <div className="grid gap-2 md:grid-cols-2">
+                                <div className="grid gap-1">
+                                  <label className="text-sm font-medium">Field template</label>
+                                  <select
+                                    className="input"
+                                    value={task.templateKey ?? ''}
+                                    onChange={(e) => applyTemplate(task.id, e.target.value)}
+                                  >
+                                    <option value="">Choose a preset…</option>
+                                    {FIELD_TEMPLATES.map((template) => (
+                                      <option key={template.key} value={template.key}>
+                                        {template.label}
+                                      </option>
+                                    ))}
+                                    <option value="custom">Custom field</option>
+                                    <option value="none">No preset</option>
+                                  </select>
+                                </div>
+                                <div className="grid gap-1">
+                                  <label className="text-sm font-medium">Response type</label>
+                                  <select
+                                    className="input"
+                                    value={task.fieldType}
+                                    onChange={(e) => {
+                                      const nextType = e.target.value as TaskFieldType;
+                                      const nextOptions =
+                                        nextType === 'select'
+                                          ? task.fieldOptions.length > 0
+                                            ? task.fieldOptions
+                                            : [createSelectOption('Option 1'), createSelectOption('Option 2')]
+                                          : [];
+                                      updateTask(task.id, {
+                                        fieldType: nextType,
+                                        fieldOptions: nextOptions,
+                                        templateKey:
+                                          task.templateKey && task.templateKey !== 'custom'
+                                            ? 'custom'
+                                            : task.templateKey,
+                                      });
+                                    }}
+                                  >
+                                    {FIELD_TYPE_OPTIONS.map((option) => (
+                                      <option key={option.value} value={option.value}>
+                                        {option.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+                              {task.fieldType !== 'none' ? (
+                                <div className="grid gap-2">
+                                  <div className="grid gap-1">
+                                    <label className="text-sm font-medium">Field label</label>
+                                    <input
+                                      className="input"
+                                      placeholder="Label shown in the portal"
+                                      value={task.fieldLabel}
+                                      onChange={(e) => updateTask(task.id, { fieldLabel: e.target.value })}
+                                    />
+                                  </div>
+                                  <label className="flex items-center gap-2 text-sm">
+                                    <input
+                                      type="checkbox"
+                                      checked={task.fieldRequired}
+                                      onChange={(e) => updateTask(task.id, { fieldRequired: e.target.checked })}
+                                    />
+                                    Required to complete
+                                  </label>
+                                  <input
+                                    className="input"
+                                    placeholder="Placeholder (optional)"
+                                    value={task.fieldPlaceholder}
+                                    onChange={(e) => updateTask(task.id, { fieldPlaceholder: e.target.value })}
+                                  />
+                                  <textarea
+                                    className="input"
+                                    placeholder="Helper text or instructions"
+                                    value={task.fieldHelpText}
+                                    onChange={(e) => updateTask(task.id, { fieldHelpText: e.target.value })}
+                                  />
+                                  {task.fieldType === 'file' ? (
+                                    <input
+                                      className="input"
+                                      placeholder="Accepted file types e.g. .pdf,image/*"
+                                      value={task.fieldAccept}
+                                      onChange={(e) => updateTask(task.id, { fieldAccept: e.target.value })}
+                                    />
+                                  ) : null}
+                                </div>
+                              ) : null}
+                              {task.fieldType === 'select' ? (
+                                <div className="grid gap-2">
+                                  <p className="text-sm font-medium">Options</p>
+                                  {task.fieldOptions.map((option) => (
+                                    <div key={option.id} className="flex flex-col gap-2 sm:flex-row">
+                                      <input
+                                        className="input flex-1"
+                                        placeholder="Option label"
+                                        value={option.label}
+                                        onChange={(e) => updateTaskOption(task.id, option.id, { label: e.target.value })}
+                                      />
+                                      <input
+                                        className="input flex-1"
+                                        placeholder="Option value (optional)"
+                                        value={option.value}
+                                        onChange={(e) => updateTaskOption(task.id, option.id, { value: e.target.value })}
+                                      />
+                                      <button
+                                        type="button"
+                                        className="btn btn-sm sm:w-auto"
+                                        onClick={() => removeTaskOption(task.id, option.id)}
+                                      >
+                                        Remove
+                                      </button>
+                                    </div>
+                                  ))}
+                                  <button type="button" className="btn btn-sm w-fit" onClick={() => addTaskOption(task.id)}>
+                                    Add option
+                                  </button>
+                                </div>
+                              ) : null}
+                              {task.fieldType === 'team-member' ? (
+                                <div className="grid gap-2">
+                                  <p className="text-sm font-medium">Who are we assigning?</p>
+                                  <div className="flex flex-wrap gap-3 text-sm">
+                                    <label className="flex items-center gap-2">
+                                      <input
+                                        type="radio"
+                                        name={`assignment-${task.id}`}
+                                        value="team"
+                                        checked={task.assignmentScope === 'team'}
+                                        onChange={() => updateTask(task.id, { assignmentScope: 'team' })}
+                                      />
+                                      Team member
+                                    </label>
+                                    <label className="flex items-center gap-2">
+                                      <input
+                                        type="radio"
+                                        name={`assignment-${task.id}`}
+                                        value="contractor"
+                                        checked={task.assignmentScope === 'contractor'}
+                                        onChange={() => updateTask(task.id, { assignmentScope: 'contractor' })}
+                                      />
+                                      Contractor
+                                    </label>
+                                  </div>
+                                  <label className="flex items-center gap-2 text-sm">
+                                    <input
+                                      type="checkbox"
+                                      checked={task.shareAssigneeContact}
+                                      onChange={(e) => updateTask(task.id, { shareAssigneeContact: e.target.checked })}
+                                    />
+                                    Share the selected person’s email & phone with coordinators
+                                  </label>
+                                </div>
+                              ) : null}
+                              {dependencyCandidates.length > 0 ? (
+                                <div className="grid gap-1">
+                                  <p className="text-sm font-medium">Depends on</p>
+                                  <div className="flex flex-wrap gap-3">
+                                    {dependencyCandidates.map((candidate) => {
+                                      const candidateIndex = tasks.findIndex((t) => t.id === candidate.id);
+                                      const label = candidate.title
+                                        ? `${candidateIndex + 1}. ${candidate.title}`
+                                        : `Task ${candidateIndex + 1}`;
+                                      return (
+                                        <label key={candidate.id} className="flex items-center gap-2 text-xs sm:text-sm">
+                                          <input
+                                            type="checkbox"
+                                            checked={task.dependsOn.includes(candidate.id)}
+                                            onChange={(e) => toggleDependency(task.id, candidate.id, e.target.checked)}
+                                          />
+                                          {label}
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
                           );
                         })}
                       </div>
+                    )}
+                    <div className="flex flex-wrap justify-end gap-2 pt-2">
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={addTask}>
+                        Add another task
+                      </button>
                     </div>
-                  )}
+                  </div>
                 </div>
-              );
-            })
-          )}
-          <div className="flex flex-wrap justify-end gap-2 pt-2">
-            <button type="button" className="btn btn-ghost btn-sm" onClick={addTask}>
-              Add another task
-            </button>
-          </div>
-        </div>
 
-        <div className="flex flex-wrap justify-end gap-2">
-          <button type="button" className="btn btn-ghost" onClick={() => setTasks([])}>
-            Clear
-          </button>
-          <button type="button" className="btn btn-primary" onClick={createWorkflow}>
-            Save workflow
-          </button>
-        </div>
-      </div>
-    </section>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button type="button" className="btn btn-ghost" onClick={() => setTasks([])}>
+                    Clear
+                  </button>
+                  <button type="button" className="btn btn-primary" onClick={createWorkflow}>
+                    Save workflow
+                  </button>
+                </div>
+              </div>
+            </section>
     <section className="rounded-xl border border-base-200 bg-base-100 p-6 shadow-sm">
       <div className="flex items-center justify-between gap-3">
         <div className="space-y-1">
