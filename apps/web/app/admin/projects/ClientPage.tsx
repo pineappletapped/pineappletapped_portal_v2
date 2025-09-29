@@ -8,6 +8,7 @@ import { useRoleGate } from '@/hooks/useRoleGate';
 import { extractUserRoles, type UserRoles } from '@/lib/roles';
 import { collection, doc, getDoc, getDocs, Timestamp, updateDoc } from 'firebase/firestore';
 import { summariseKitItems, type KitSummary } from '@/lib/kit-summary';
+import { HQ_UNASSIGNED_TERRITORY_LABEL } from '@/lib/franchises';
 
 interface StaffOption {
   uid: string;
@@ -370,7 +371,10 @@ export default function AdminProjectsPage() {
 
   const resolveFranchiseContext = useCallback(
     (project: ProjectRecord) => {
-      const franchise = project.franchiseId ? franchiseMap.get(project.franchiseId) : undefined;
+      const franchiseId = project.franchiseId && project.franchiseId.trim().length > 0
+        ? project.franchiseId
+        : null;
+      const franchise = franchiseId ? franchiseMap.get(franchiseId) : undefined;
       const assignment = project.franchiseAssignment || null;
       const territoryLabel =
         assignment && typeof assignment === 'object'
@@ -384,8 +388,19 @@ export default function AdminProjectsPage() {
             (project.franchiseAssignedUser.email as string | undefined)
           : null) ||
         (typeof project.franchiseAssignedUserId === 'string' ? project.franchiseAssignedUserId : null);
-      const franchiseLabel = franchise?.name || (project.franchiseId ? String(project.franchiseId) : null);
-      return { franchise, franchiseLabel, territoryLabel, operator };
+      const assignmentStatus =
+        assignment && typeof assignment === 'object'
+          ? (assignment.status as string | undefined) || null
+          : null;
+      const hqIntake =
+        !franchiseId &&
+        (assignmentStatus === 'hq_unassigned' || assignment?.hqFallback === true ||
+          (assignmentStatus === 'matched' && !!territoryLabel));
+      const franchiseLabel =
+        franchise?.name ||
+        (franchiseId ? String(franchiseId) : null) ||
+        (hqIntake ? HQ_UNASSIGNED_TERRITORY_LABEL : null);
+      return { franchise, franchiseLabel, territoryLabel, operator, hqIntake };
     },
     [franchiseMap]
   );
@@ -610,7 +625,8 @@ export default function AdminProjectsPage() {
                   <td className="p-2 align-top">{p.userEmail || '-'}</td>
                   <td className="p-2 align-top">
                     {(() => {
-                      const { franchiseLabel, territoryLabel, operator } = resolveFranchiseContext(p);
+                      const { franchiseLabel, territoryLabel, operator, hqIntake } =
+                        resolveFranchiseContext(p);
                       if (!franchiseLabel) {
                         return <span className="text-xs text-gray-500">Unassigned</span>;
                       }
@@ -622,6 +638,11 @@ export default function AdminProjectsPage() {
                           )}
                           {operator && (
                             <span className="text-xs text-gray-500">Operator: {operator}</span>
+                          )}
+                          {hqIntake && (
+                            <span className="text-[11px] text-gray-500">
+                              HQ will fulfil or reassign with the 25% out-of-territory rate.
+                            </span>
                           )}
                         </div>
                       );
@@ -766,7 +787,8 @@ export default function AdminProjectsPage() {
                         </span>
                       </div>
                       {(() => {
-                        const { franchiseLabel, territoryLabel, operator } = resolveFranchiseContext(project);
+                        const { franchiseLabel, territoryLabel, operator, hqIntake } =
+                          resolveFranchiseContext(project);
                         return (
                           <div className="grid gap-1 text-xs text-gray-600">
                             <span className={franchiseLabel ? 'font-medium text-gray-700' : 'text-gray-400'}>
@@ -774,6 +796,11 @@ export default function AdminProjectsPage() {
                             </span>
                             {territoryLabel && <span>Territory: {territoryLabel}</span>}
                             {operator && <span>Operator: {operator}</span>}
+                            {hqIntake && (
+                              <span className="text-[11px] text-gray-500">
+                                HQ will fulfil or reassign with the 25% out-of-territory rate.
+                              </span>
+                            )}
                           </div>
                         );
                       })()}

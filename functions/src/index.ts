@@ -1964,13 +1964,14 @@ function resolveTierPrice(
 }
 
 interface FranchiseAssignmentResult {
-  franchiseId: string;
+  franchiseId: string | null;
   territoryId: string;
   territoryLabel: string | null;
   territoryPostalCode: string;
   matchType: FranchiseAssignmentMatchType;
   exclusive: boolean;
   priceTier: PriceTierLevel;
+  hqFallback: boolean;
   radiusMatch?: {
     distanceKm: number;
     radiusKm: number;
@@ -2114,9 +2115,10 @@ async function resolveTerritoryForPostalCode(postalCode: string): Promise<Franch
   let attemptedGeocode = false;
   for (const territoryDoc of territoriesSnap.docs) {
     const data = territoryDoc.data() as FranchiseTerritoryDoc;
-    if (!data?.franchiseId) {
-      continue;
-    }
+    const rawFranchiseId =
+      typeof data.franchiseId === 'string' ? data.franchiseId.trim() : '';
+    const hasFranchise = rawFranchiseId.length > 0;
+    const resolvedFranchiseId = hasFranchise ? rawFranchiseId : null;
     const type: FranchiseTerritoryType =
       typeof data.type === 'string' && data.type.toLowerCase() === 'radius' ? 'radius' : 'postal';
     if (type === 'postal') {
@@ -2144,17 +2146,21 @@ async function resolveTerritoryForPostalCode(postalCode: string): Promise<Franch
         if (data.exclusive !== false) {
           score += 50;
         }
+        if (!hasFranchise) {
+          score -= 25;
+        }
         if (!best || score > best.score) {
           best = {
             score,
             result: {
-              franchiseId: data.franchiseId as string,
+              franchiseId: resolvedFranchiseId,
               territoryId: territoryDoc.id,
               territoryLabel: typeof data.label === 'string' ? data.label : null,
               territoryPostalCode: code.normalised,
               matchType,
               exclusive: data.exclusive !== false,
               priceTier: normalisePriceTierLevel(data.priceTier),
+              hqFallback: !hasFranchise,
               radiusMatch: null,
             },
           };
@@ -2196,21 +2202,25 @@ async function resolveTerritoryForPostalCode(postalCode: string): Promise<Franch
     if (data.exclusive !== false) {
       score += 50;
     }
+    if (!hasFranchise) {
+      score -= 25;
+    }
     if (!best || score > best.score) {
       best = {
         score,
-            result: {
-              franchiseId: data.franchiseId as string,
-              territoryId: territoryDoc.id,
-              territoryLabel: typeof data.label === 'string' ? data.label : null,
-              territoryPostalCode: normalisedInput,
-              matchType: 'radius',
-              exclusive: data.exclusive !== false,
-              priceTier: normalisePriceTierLevel(data.priceTier),
-              radiusMatch: {
-                distanceKm,
-                radiusKm,
-                centerLat,
+        result: {
+          franchiseId: resolvedFranchiseId,
+          territoryId: territoryDoc.id,
+          territoryLabel: typeof data.label === 'string' ? data.label : null,
+          territoryPostalCode: normalisedInput,
+          matchType: 'radius',
+          exclusive: data.exclusive !== false,
+          priceTier: normalisePriceTierLevel(data.priceTier),
+          hqFallback: !hasFranchise,
+          radiusMatch: {
+            distanceKm,
+            radiusKm,
+            centerLat,
             centerLng,
           },
         },
@@ -5471,9 +5481,10 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     ? await resolveTerritoryForPostalCode(normalisedPostalCode)
     : null;
   const territoryPriceTier: PriceTierLevel = assignmentResult?.priceTier ?? 1;
-  const assignmentMember = assignmentResult
-    ? await resolvePrimaryFranchiseMember(assignmentResult.franchiseId)
-    : null;
+  const assignmentMember =
+    assignmentResult?.franchiseId
+      ? await resolvePrimaryFranchiseMember(assignmentResult.franchiseId)
+      : null;
 
   const productRefs = items.map((i: any) => db.collection('products').doc(i.id));
   const leadSourceRaw =
@@ -5740,15 +5751,19 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     profit,
   };
 
+  const assignmentStatus = assignmentResult
+    ? assignmentResult.franchiseId
+      ? 'matched'
+      : 'hq_unassigned'
+    : normalisedPostalCode
+      ? 'unmatched'
+      : 'skipped';
   const assignmentMeta: Record<string, any> = {
     strategy: 'postal_code_auto_route',
     inputPostalCode: postalCodeValue || null,
     normalizedPostalCode: normalisedPostalCode || null,
-    status: assignmentResult
-      ? 'matched'
-      : normalisedPostalCode
-        ? 'unmatched'
-        : 'skipped',
+    status: assignmentStatus,
+    hqFallback: assignmentResult?.hqFallback === true,
     resolvedAt: admin.firestore.FieldValue.serverTimestamp(),
   };
 

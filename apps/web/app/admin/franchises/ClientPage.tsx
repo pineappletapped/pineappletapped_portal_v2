@@ -29,6 +29,7 @@ import {
   defaultFranchiseQuickBooksConfig,
   parseFranchise,
   parseMember,
+  HQ_UNASSIGNED_TERRITORY_LABEL,
   parseTerritory,
   territorySummary,
 } from "@/lib/franchises";
@@ -66,6 +67,7 @@ const TERRITORY_TYPES = [
   { value: "postal" as const, label: "Postcode collection" },
   { value: "radius" as const, label: "Radius from coordinate" },
 ];
+
 
 const ONBOARDING_STATUS_OPTIONS: {
   value: FranchiseOnboardingStatus;
@@ -634,12 +636,21 @@ export default function AdminFranchisesPage() {
   const territoryByFranchise = useMemo(() => {
     const map = new Map<string, FranchiseTerritory[]>();
     territories.forEach((territory) => {
+      if (!territory.franchiseId) {
+        return;
+      }
       const list = map.get(territory.franchiseId) || [];
       list.push(territory);
       map.set(territory.franchiseId, list);
     });
     return map;
   }, [territories]);
+
+  const unassignedTerritories = useMemo(
+    () => territories.filter((territory) => !territory.franchiseId),
+    [territories]
+  );
+  const unassignedCount = unassignedTerritories.length;
 
   const membersByFranchise = useMemo(() => {
     const map = new Map<string, FranchiseMember[]>();
@@ -845,8 +856,9 @@ export default function AdminFranchisesPage() {
       const parsedLng = Number.parseFloat(newTerritory.centerLng);
       const parsedLicense = Number.parseFloat(newTerritory.licenseFee);
       const priceTier = normalisePriceTierLevel(newTerritory.priceTier);
+      const trimmedFranchiseId = newTerritory.franchiseId.trim();
       const payload = {
-        franchiseId: newTerritory.franchiseId,
+        franchiseId: trimmedFranchiseId.length > 0 ? trimmedFranchiseId : null,
         label: newTerritory.label.trim() || "Unnamed Territory",
         type: newTerritory.type,
         postalCodes,
@@ -888,8 +900,14 @@ export default function AdminFranchisesPage() {
       if (conflicts.length > 0) {
         const message = conflicts
           .map((territory) => {
-            const franchise = franchiseMap.get(territory.franchiseId);
-            const franchiseLabel = franchise?.name?.trim() ? franchise.name : territory.franchiseId;
+            const franchise = territory.franchiseId
+              ? franchiseMap.get(territory.franchiseId)
+              : undefined;
+            const franchiseLabel = franchise?.name?.trim()
+              ? franchise.name
+              : territory.franchiseId
+                ? territory.franchiseId
+                : HQ_UNASSIGNED_TERRITORY_LABEL;
             return `${territory.label} (${franchiseLabel})`;
           })
           .join("\n");
@@ -911,7 +929,7 @@ export default function AdminFranchisesPage() {
   const startEditTerritory = (territory: FranchiseTerritory) => {
     setEditingTerritoryId(territory.id);
     setEditingTerritory({
-      franchiseId: territory.franchiseId,
+      franchiseId: territory.franchiseId ?? "",
       label: territory.label,
       type: territory.type,
       postalCodes: territory.postalCodes.join("\n"),
@@ -957,8 +975,9 @@ export default function AdminFranchisesPage() {
       const parsedLng = Number.parseFloat(editingTerritory.centerLng);
       const parsedLicense = Number.parseFloat(editingTerritory.licenseFee);
       const priceTier = normalisePriceTierLevel(editingTerritory.priceTier);
+      const trimmedFranchiseId = editingTerritory.franchiseId.trim();
       const payload = {
-        franchiseId: editingTerritory.franchiseId,
+        franchiseId: trimmedFranchiseId.length > 0 ? trimmedFranchiseId : null,
         label: editingTerritory.label.trim() || "Unnamed Territory",
         type: editingTerritory.type,
         postalCodes,
@@ -999,8 +1018,14 @@ export default function AdminFranchisesPage() {
       if (conflicts.length > 0) {
         const message = conflicts
           .map((territory) => {
-            const franchise = franchiseMap.get(territory.franchiseId);
-            const franchiseLabel = franchise?.name?.trim() ? franchise.name : territory.franchiseId;
+            const franchise = territory.franchiseId
+              ? franchiseMap.get(territory.franchiseId)
+              : undefined;
+            const franchiseLabel = franchise?.name?.trim()
+              ? franchise.name
+              : territory.franchiseId
+                ? territory.franchiseId
+                : HQ_UNASSIGNED_TERRITORY_LABEL;
             return `${territory.label} (${franchiseLabel})`;
           })
           .join("\n");
@@ -2277,15 +2302,18 @@ export default function AdminFranchisesPage() {
                     className="input"
                     value={newTerritory.franchiseId}
                     onChange={(event) => setNewTerritory({ ...newTerritory, franchiseId: event.target.value })}
-                    required
                   >
-                    <option value="">Select franchise…</option>
+                    <option value="">Unassigned – HQ intake</option>
                     {franchises.map((franchise) => (
                       <option key={franchise.id} value={franchise.id}>
                         {franchise.name}
                       </option>
                     ))}
                   </select>
+                  <span className="text-xs text-gray-500">
+                    Leave unassigned to let HQ capture leads until a franchise is appointed. Routing an order to another
+                    franchise will apply the 25% out-of-territory rate.
+                  </span>
                 </label>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <label className="grid gap-1 text-sm">
@@ -2458,6 +2486,13 @@ export default function AdminFranchisesPage() {
                 </div>
               </form>
             )}
+            {unassignedCount > 0 && (
+              <div className="rounded border border-orange-200 bg-orange-50 p-3 text-sm text-orange-800">
+                {unassignedCount === 1
+                  ? "1 territory is currently unassigned. HQ will nurture leads until it is sold. Reassigning work to a franchisee later applies the 25% out-of-territory rate."
+                  : `${unassignedCount} territories are currently unassigned. HQ will nurture leads until they are sold. Reassigning work to a franchisee later applies the 25% out-of-territory rate.`}
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full min-w-[700px] text-sm border">
             <thead>
@@ -2479,7 +2514,14 @@ export default function AdminFranchisesPage() {
                 </tr>
               ) : (
                 territories.map((territory) => {
-                  const franchise = franchiseMap.get(territory.franchiseId);
+                  const franchise = territory.franchiseId
+                    ? franchiseMap.get(territory.franchiseId)
+                    : undefined;
+                  const franchiseLabel = franchise?.name?.trim()
+                    ? franchise.name
+                    : territory.franchiseId
+                      ? territory.franchiseId
+                      : HQ_UNASSIGNED_TERRITORY_LABEL;
                   const editing = editingTerritoryId === territory.id;
                   const territoryCategories = territory.categories.map((categoryId) => ({
                     id: categoryId,
@@ -2493,7 +2535,16 @@ export default function AdminFranchisesPage() {
                   return (
                     <tr key={territory.id} className="border-t align-top">
                       <td className="p-2 font-medium">{territory.label}</td>
-                      <td className="p-2">{franchise ? franchise.name : territory.franchiseId}</td>
+                      <td className="p-2">
+                        <div className="grid gap-1">
+                          <span>{franchiseLabel}</span>
+                          {!territory.franchiseId && (
+                            <span className="text-[11px] uppercase text-orange-500">
+                              HQ holding territory
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="p-2">{territory.exclusive ? "Yes" : "No"}</td>
                       <td className="p-2">Tier {territory.priceTier}</td>
                       <td className="p-2 text-xs text-gray-600">
@@ -2566,12 +2617,17 @@ export default function AdminFranchisesPage() {
                                   setEditingTerritory({ ...editingTerritory, franchiseId: event.target.value })
                                 }
                               >
+                                <option value="">Unassigned – HQ intake</option>
                                 {franchises.map((franchiseOption) => (
                                   <option key={franchiseOption.id} value={franchiseOption.id}>
                                     {franchiseOption.name}
                                   </option>
                                 ))}
                               </select>
+                              <span className="text-[11px] text-gray-500">
+                                Keep unassigned while HQ manages the leads. Reassigning later will trigger the 25% out-of-territory
+                                rate.
+                              </span>
                             </label>
                             <label className="grid gap-1 text-xs">
                               <span className="font-medium">Type</span>

@@ -1715,9 +1715,9 @@ async function resolveTerritoryForPostalCode(postalCode) {
     let attemptedGeocode = false;
     for (const territoryDoc of territoriesSnap.docs) {
         const data = territoryDoc.data();
-        if (!data?.franchiseId) {
-            continue;
-        }
+        const rawFranchiseId = typeof data.franchiseId === 'string' ? data.franchiseId.trim() : '';
+        const hasFranchise = rawFranchiseId.length > 0;
+        const resolvedFranchiseId = hasFranchise ? rawFranchiseId : null;
         const type = typeof data.type === 'string' && data.type.toLowerCase() === 'radius' ? 'radius' : 'postal';
         if (type === 'postal') {
             const codes = extractTerritoryPostalCodes(data);
@@ -1746,17 +1746,21 @@ async function resolveTerritoryForPostalCode(postalCode) {
                 if (data.exclusive !== false) {
                     score += 50;
                 }
+                if (!hasFranchise) {
+                    score -= 25;
+                }
                 if (!best || score > best.score) {
                     best = {
                         score,
                         result: {
-                            franchiseId: data.franchiseId,
+                            franchiseId: resolvedFranchiseId,
                             territoryId: territoryDoc.id,
                             territoryLabel: typeof data.label === 'string' ? data.label : null,
                             territoryPostalCode: code.normalised,
                             matchType,
                             exclusive: data.exclusive !== false,
                             priceTier: normalisePriceTierLevel(data.priceTier),
+                            hqFallback: !hasFranchise,
                             radiusMatch: null,
                         },
                     };
@@ -1792,17 +1796,21 @@ async function resolveTerritoryForPostalCode(postalCode) {
         if (data.exclusive !== false) {
             score += 50;
         }
+        if (!hasFranchise) {
+            score -= 25;
+        }
         if (!best || score > best.score) {
             best = {
                 score,
                 result: {
-                    franchiseId: data.franchiseId,
+                    franchiseId: resolvedFranchiseId,
                     territoryId: territoryDoc.id,
                     territoryLabel: typeof data.label === 'string' ? data.label : null,
                     territoryPostalCode: normalisedInput,
                     matchType: 'radius',
                     exclusive: data.exclusive !== false,
                     priceTier: normalisePriceTierLevel(data.priceTier),
+                    hqFallback: !hasFranchise,
                     radiusMatch: {
                         distanceKm,
                         radiusKm,
@@ -4742,7 +4750,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         ? await resolveTerritoryForPostalCode(normalisedPostalCode)
         : null;
     const territoryPriceTier = assignmentResult?.priceTier ?? 1;
-    const assignmentMember = assignmentResult
+    const assignmentMember = assignmentResult?.franchiseId
         ? await resolvePrimaryFranchiseMember(assignmentResult.franchiseId)
         : null;
     const productRefs = items.map((i) => db.collection('products').doc(i.id));
@@ -4977,15 +4985,19 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         grossRevenue: price,
         profit,
     };
+    const assignmentStatus = assignmentResult
+        ? assignmentResult.franchiseId
+            ? 'matched'
+            : 'hq_unassigned'
+        : normalisedPostalCode
+            ? 'unmatched'
+            : 'skipped';
     const assignmentMeta = {
         strategy: 'postal_code_auto_route',
         inputPostalCode: postalCodeValue || null,
         normalizedPostalCode: normalisedPostalCode || null,
-        status: assignmentResult
-            ? 'matched'
-            : normalisedPostalCode
-                ? 'unmatched'
-                : 'skipped',
+        status: assignmentStatus,
+        hqFallback: assignmentResult?.hqFallback === true,
         resolvedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
     let royaltyAssessment = null;

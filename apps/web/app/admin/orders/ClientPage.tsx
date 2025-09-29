@@ -16,6 +16,7 @@ import {
 } from "firebase/firestore";
 import { useRoleGate } from "@/hooks/useRoleGate";
 import { describeLeadSource } from "@/lib/lead-source";
+import { HQ_UNASSIGNED_TERRITORY_LABEL } from "@/lib/franchises";
 
 export default function AdminOrdersPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
@@ -253,14 +254,19 @@ export default function AdminOrdersPage() {
                 | {
                     status?: string;
                     matchType?: string;
-                    franchiseId?: string;
+                    franchiseId?: string | null;
+                    territoryId?: string | null;
                     territoryLabel?: string;
                     territoryPostalCode?: string;
                     normalizedPostalCode?: string;
                     inputPostalCode?: string;
+                    hqFallback?: boolean;
                   }
                 | null;
-              const assignmentStatus = assignment?.status || null;
+              const assignmentStatus =
+                typeof assignment?.status === "string" ? (assignment.status as string) : null;
+              const assignmentStatusLabel =
+                assignmentStatus !== null ? assignmentStatus.replace(/_/g, " ") : null;
               const assignmentMatchType = assignment?.matchType || null;
               const franchiseId =
                 (o.franchiseId as string | undefined) ||
@@ -276,6 +282,13 @@ export default function AdminOrdersPage() {
                 null;
               const territoryLabel =
                 assignment?.territoryLabel || assignment?.territoryPostalCode || null;
+              const hasTerritoryMatch = Boolean(
+                assignment?.territoryId || assignment?.territoryPostalCode || assignment?.territoryLabel
+              );
+              const isHqIntake =
+                !franchiseId &&
+                (assignmentStatus === "hq_unassigned" || assignment?.hqFallback === true ||
+                  (assignmentStatus === "matched" && hasTerritoryMatch));
               const assignedOperator =
                 (o.franchiseAssignedUser?.displayName as string | undefined) ||
                 (o.franchiseAssignedUser?.email as string | undefined) ||
@@ -356,6 +369,20 @@ export default function AdminOrdersPage() {
                           </div>
                         )}
                       </div>
+                    ) : isHqIntake ? (
+                      <div className="grid gap-1">
+                        <div className="font-medium text-sm">
+                          {HQ_UNASSIGNED_TERRITORY_LABEL}
+                        </div>
+                        {territoryLabel && (
+                          <div className="text-xs text-gray-500">
+                            Territory: {territoryLabel}
+                          </div>
+                        )}
+                        <div className="text-xs text-gray-500">
+                          HQ can fulfil internally or assign to a franchisee with the 25% out-of-territory rate.
+                        </div>
+                      </div>
                     ) : (
                       <div className="text-xs text-gray-500">
                         {assignmentStatus === "unmatched"
@@ -368,9 +395,9 @@ export default function AdminOrdersPage() {
                         Postcode: {inputPostalCode}
                       </div>
                     )}
-                    {assignmentStatus && (
+                    {assignmentStatusLabel && (
                       <div className="text-[10px] uppercase text-gray-400">
-                        {assignmentStatus}
+                        {assignmentStatusLabel}
                         {assignmentMatchType ? ` · ${assignmentMatchType}` : ""}
                       </div>
                     )}
