@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
-import { ensureFirebase } from '@/lib/firebase';
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import PortalContainer from "@/components/PortalContainer";
+import { ensureFirebase } from "@/lib/firebase";
 import {
   collection,
   getDocs,
@@ -11,8 +12,41 @@ import {
   query,
   orderBy,
   limit,
-} from 'firebase/firestore';
-import { useRoleGate } from '@/hooks/useRoleGate';
+} from "firebase/firestore";
+import { useRoleGate } from "@/hooks/useRoleGate";
+
+type FirestoreRecord = Record<string, any>;
+
+function coerceDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  const candidate: any = value;
+  if (candidate && typeof candidate.toDate === "function") {
+    try {
+      return candidate.toDate();
+    } catch (error) {
+      console.warn("Failed to convert Firestore timestamp", error);
+      return null;
+    }
+  }
+  const parsed = new Date(candidate);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed;
+}
+
+const formatCurrency = (value: number) =>
+  new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(
+    Number.isFinite(value) ? value : 0
+  );
+
+const statusTone: Record<string, string> = {
+  submitted: "bg-blue-100 text-blue-800",
+  approved: "bg-emerald-100 text-emerald-700",
+  paid: "bg-gray-200 text-gray-700",
+  rejected: "bg-rose-100 text-rose-700",
+};
 
 /**
  * Admin Finance Dashboard
@@ -83,14 +117,29 @@ export default function AdminFinancePage() {
     }
   };
 
-  if (guardLoading || loading) return <p>Loading…</p>;
-  if (!allowed) return <p>You do not have access to this page.</p>;
+  if (guardLoading || loading) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">Loading finance data…</p>
+      </PortalContainer>
+    );
+  }
+  if (!allowed) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">
+          You do not have access to this page.
+        </p>
+      </PortalContainer>
+    );
+  }
 
   const moneyIn = clientInvoices.reduce(
     (sum, inv) => sum + (inv.total || inv.amount || 0),
     0
   );
   const moneyOut = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+  const totalProfit = moneyIn - moneyOut;
   const projectSummary = projects.map((p) => {
     const revenue = clientInvoices
       .filter((ci) => ci.projectId === p.id)
@@ -101,111 +150,300 @@ export default function AdminFinancePage() {
     return { ...p, revenue, cost, profit: revenue - cost };
   });
 
+  const outstandingClientInvoices = useMemo(() => {
+    return clientInvoices
+      .filter((invoice: FirestoreRecord) => {
+        const status = `${invoice?.status || ""}`.toLowerCase();
+        return status !== "paid";
+      })
+      .map((invoice: FirestoreRecord) => {
+        const due = coerceDate(invoice?.dueDate || invoice?.createdAt);
+        return { ...invoice, _dueDate: due };
+      })
+      .sort((a, b) => {
+        const left = a?._dueDate?.getTime() ?? 0;
+        const right = b?._dueDate?.getTime() ?? 0;
+        return right - left;
+      })
+      .slice(0, 6);
+  }, [clientInvoices]);
+
+  const outstandingClientTotal = outstandingClientInvoices.reduce((sum, inv: any) => {
+    const value = Number(inv.total || inv.amount || 0);
+    return Number.isFinite(value) ? sum + value : sum;
+  }, 0);
+
+  const recentExpenses = useMemo(() => {
+    return expenses
+      .map((expense: FirestoreRecord) => {
+        const when = coerceDate(expense?.date || expense?.createdAt);
+        return { ...expense, _date: when };
+      })
+      .sort((a, b) => {
+        const left = a?._date?.getTime() ?? 0;
+        const right = b?._date?.getTime() ?? 0;
+        return right - left;
+      })
+      .slice(0, 8);
+  }, [expenses]);
+
   return (
-    <div className="p-4 grid gap-6">
-      <div className="flex gap-2">
-        <Link href="/admin/finance/invoices/new" className="btn">
-          Create Invoice
-        </Link>
-        <Link href="/admin/finance/expenses/new" className="btn">
-          Log Expense
-        </Link>
-        <Link href="/admin/finance/stripe-connect" className="btn btn-outline">
-          Stripe Connect Settings
-        </Link>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-3">
-        <div className="card p-4">
-          <h2 className="font-semibold">Money In</h2>
-          <p>£{moneyIn.toFixed(2)}</p>
-        </div>
-        <div className="card p-4">
-          <h2 className="font-semibold">Money Out</h2>
-          <p>£{moneyOut.toFixed(2)}</p>
-        </div>
-        <div className="card p-4">
-          <h2 className="font-semibold">Profit</h2>
-          <p>£{(moneyIn - moneyOut).toFixed(2)}</p>
-        </div>
-      </div>
-
-      <div className="card p-4">
-        <h2 className="font-semibold mb-2">Recent Projects P&L</h2>
-        {projectSummary.length === 0 ? (
-          <p>No projects.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead>
-                <tr>
-                  <th className="text-left p-2">Project</th>
-                  <th className="text-right p-2">Revenue</th>
-                  <th className="text-right p-2">Expenses</th>
-                  <th className="text-right p-2">Profit</th>
-                </tr>
-              </thead>
-              <tbody>
-                {projectSummary.map((p) => (
-                  <tr key={p.id} className="border-t">
-                    <td className="p-2">{p.name}</td>
-                    <td className="p-2 text-right">£{p.revenue.toFixed(2)}</td>
-                    <td className="p-2 text-right">£{p.cost.toFixed(2)}</td>
-                    <td className="p-2 text-right">£{p.profit.toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+    <PortalContainer>
+      <div className="grid gap-6">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div className="space-y-1">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Finance overview
+            </p>
+            <h1 className="text-2xl font-semibold text-gray-900">Revenue &amp; expenses</h1>
+            <p className="text-sm text-gray-600">
+              Monitor cash flow, reconcile contractor invoices, and keep the latest project profitability in one view.
+            </p>
           </div>
-        )}
-      </div>
+          <div className="flex flex-wrap gap-2 sm:justify-end">
+            <Link href="/admin/finance/invoices/new" className="btn btn-sm">
+              Create invoice
+            </Link>
+            <Link href="/admin/finance/expenses/new" className="btn btn-sm">
+              Log expense
+            </Link>
+            <Link href="/admin/finance/stripe-connect" className="btn btn-xs btn-outline">
+              Stripe Connect
+            </Link>
+          </div>
+        </header>
 
-      <div className="card p-4">
-        <h2 className="font-semibold mb-2">Contractor Invoices</h2>
-        {contractorInvoices.length === 0 ? (
-          <p>No invoices.</p>
-        ) : (
-          <div className="grid gap-2">
-            {contractorInvoices.map((inv) => (
-              <div key={inv.id} className="border rounded p-3 grid gap-1">
-                <p className="font-medium">Contractor: {inv.contractorId}</p>
-                <p className="text-sm">Project: {inv.projectId}</p>
-                <p className="text-sm">
-                  Amount: £{inv.amount?.toFixed ? inv.amount.toFixed(2) : inv.amount}
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+          <div className="grid gap-6">
+            <section className="grid gap-4 sm:grid-cols-3">
+              <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Money in</p>
+                <p className="mt-2 text-2xl font-semibold text-gray-900">{formatCurrency(moneyIn)}</p>
+                <p className="mt-1 text-xs text-gray-500">
+                  {clientInvoices.length > 0
+                    ? `${clientInvoices.length} client ${clientInvoices.length === 1 ? "invoice" : "invoices"}`
+                    : "No client invoices recorded"}
                 </p>
-                <p className="text-sm">Status: {inv.status}</p>
-                {inv.url && (
-                  <a
-                    className="text-blue-600 underline text-sm"
-                    href={inv.url}
-                    target="_blank"
-                  >
-                    View Document
-                  </a>
-                )}
-                <div className="flex gap-2 mt-2">
-                  {inv.status !== 'approved' && (
-                    <button
-                      className="btn-sm"
-                      onClick={() => updateInvoiceStatus(inv.id, 'approved')}
-                    >
-                      Approve
-                    </button>
-                  )}
-                  {inv.status !== 'paid' && (
-                    <button
-                      className="btn-sm"
-                      onClick={() => updateInvoiceStatus(inv.id, 'paid')}
-                    >
-                      Mark Paid
-                    </button>
-                  )}
+              </div>
+              <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Money out</p>
+                <p className="mt-2 text-2xl font-semibold text-gray-900">{formatCurrency(moneyOut)}</p>
+                <p className="mt-1 text-xs text-gray-500">
+                  {expenses.length > 0
+                    ? `${expenses.length} expense ${expenses.length === 1 ? "entry" : "entries"}`
+                    : "No expenses logged"}
+                </p>
+              </div>
+              <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Profit</p>
+                <p className="mt-2 text-2xl font-semibold text-gray-900">{formatCurrency(totalProfit)}</p>
+                <p className="mt-1 text-xs text-gray-500">
+                  Includes both invoiced revenue and logged expenses.
+                </p>
+              </div>
+            </section>
+
+            <section className="rounded-3xl border border-gray-200 bg-white shadow-sm">
+              <div className="border-b border-gray-100 px-6 py-4">
+                <h2 className="text-lg font-semibold text-gray-900">Recent project profitability</h2>
+                <p className="text-sm text-gray-600">
+                  A quick glance at the last few projects to compare revenue against associated spend.
+                </p>
+              </div>
+              {projectSummary.length === 0 ? (
+                <p className="px-6 py-8 text-sm text-gray-500">No projects to report yet.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-100 text-sm">
+                    <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+                      <tr>
+                        <th className="px-6 py-3 text-left font-medium">Project</th>
+                        <th className="px-6 py-3 text-right font-medium">Revenue</th>
+                        <th className="px-6 py-3 text-right font-medium">Expenses</th>
+                        <th className="px-6 py-3 text-right font-medium">Profit</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {projectSummary.map((p) => (
+                        <tr key={p.id} className="bg-white">
+                          <td className="px-6 py-4 text-sm font-medium text-gray-900">{p.name || p.id}</td>
+                          <td className="px-6 py-4 text-right text-sm text-gray-700">{formatCurrency(p.revenue)}</td>
+                          <td className="px-6 py-4 text-right text-sm text-gray-700">{formatCurrency(p.cost)}</td>
+                          <td className="px-6 py-4 text-right text-sm font-semibold text-gray-900">
+                            {formatCurrency(p.profit)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            <section className="rounded-3xl border border-gray-200 bg-white shadow-sm">
+              <div className="border-b border-gray-100 px-6 py-4">
+                <h2 className="text-lg font-semibold text-gray-900">Contractor invoices</h2>
+                <p className="text-sm text-gray-600">
+                  Approve or mark payouts once the deliverables have been checked and reconciled.
+                </p>
+              </div>
+              {contractorInvoices.length === 0 ? (
+                <p className="px-6 py-8 text-sm text-gray-500">No contractor invoices awaiting action.</p>
+              ) : (
+                <ul className="divide-y divide-gray-100">
+                  {contractorInvoices.map((invoice) => {
+                    const amountValue = Number(invoice?.amount || 0);
+                    const amountLabel = Number.isFinite(amountValue)
+                      ? formatCurrency(amountValue)
+                      : `${invoice?.amount ?? "—"}`;
+                    const statusKey = `${invoice?.status || ""}`.toLowerCase();
+                    const statusClass = statusTone[statusKey] || "bg-gray-100 text-gray-700";
+                    return (
+                      <li key={invoice.id} className="px-6 py-5">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-semibold text-gray-900">
+                                {invoice.contractorName || invoice.contractorId || "Contractor"}
+                              </p>
+                              <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${statusClass}`}>
+                                {statusKey ? statusKey.replace(/_/g, " ") : "Pending"}
+                              </span>
+                            </div>
+                            {invoice.projectId ? (
+                              <p className="text-xs uppercase tracking-wide text-gray-500">
+                                Project · {invoice.projectId}
+                              </p>
+                            ) : null}
+                            <p className="text-sm text-gray-600">Amount {amountLabel}</p>
+                            {invoice.notes ? (
+                              <p className="text-xs text-gray-500">{invoice.notes}</p>
+                            ) : null}
+                            {invoice.url ? (
+                              <a
+                                href={invoice.url}
+                                target="_blank"
+                                className="text-xs font-medium text-orange underline"
+                              >
+                                View supporting document
+                              </a>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-col gap-2 sm:items-end">
+                            {statusKey !== "approved" && (
+                              <button
+                                type="button"
+                                className="btn btn-xs"
+                                onClick={() => updateInvoiceStatus(invoice.id, "approved")}
+                              >
+                                Approve invoice
+                              </button>
+                            )}
+                            {statusKey !== "paid" && (
+                              <button
+                                type="button"
+                                className="btn btn-xs btn-outline"
+                                onClick={() => updateInvoiceStatus(invoice.id, "paid")}
+                              >
+                                Mark as paid
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+          </div>
+
+          <aside className="grid gap-6">
+            <section className="rounded-3xl border border-gray-200 bg-white shadow-sm">
+              <div className="border-b border-gray-100 px-6 py-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-semibold text-gray-900">Outstanding client invoices</h2>
+                    <p className="text-sm text-gray-600">Track balances waiting to clear.</p>
+                  </div>
+                  <span className="hidden rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700 sm:inline-flex">
+                    {formatCurrency(outstandingClientTotal)}
+                  </span>
                 </div>
               </div>
-            ))}
-          </div>
-        )}
+              {outstandingClientInvoices.length === 0 ? (
+                <p className="px-6 py-8 text-sm text-gray-500">All client invoices are settled.</p>
+              ) : (
+                <ul className="divide-y divide-gray-100">
+                  {outstandingClientInvoices.map((invoice) => {
+                    const amountValue = Number(invoice?.total || invoice?.amount || 0);
+                    const amountLabel = Number.isFinite(amountValue)
+                      ? formatCurrency(amountValue)
+                      : `${invoice?.total ?? invoice?.amount ?? "—"}`;
+                    const dueDate = invoice._dueDate
+                      ? invoice._dueDate.toLocaleDateString()
+                      : "No due date";
+                    return (
+                      <li key={invoice.id} className="px-6 py-4">
+                        <div className="flex flex-col gap-1">
+                          <p className="text-sm font-semibold text-gray-900">
+                            {invoice.clientName || invoice.clientId || `Invoice ${invoice.id}`}
+                          </p>
+                          <p className="text-xs uppercase tracking-wide text-gray-500">Due {dueDate}</p>
+                          <p className="text-sm text-gray-700">{amountLabel}</p>
+                          {invoice.projectId ? (
+                            <p className="text-xs text-gray-500">Project · {invoice.projectId}</p>
+                          ) : null}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+
+            <section className="rounded-3xl border border-gray-200 bg-white shadow-sm">
+              <div className="border-b border-gray-100 px-6 py-4">
+                <h2 className="text-lg font-semibold text-gray-900">Latest expenses</h2>
+                <p className="text-sm text-gray-600">Recent entries ready for reconciliation.</p>
+              </div>
+              {recentExpenses.length === 0 ? (
+                <p className="px-6 py-8 text-sm text-gray-500">No expenses have been logged yet.</p>
+              ) : (
+                <ul className="divide-y divide-gray-100">
+                  {recentExpenses.map((expense) => {
+                    const amountValue = Number(expense?.amount || 0);
+                    const amountLabel = Number.isFinite(amountValue)
+                      ? formatCurrency(amountValue)
+                      : `${expense?.amount ?? "—"}`;
+                    const dateLabel = expense?._date
+                      ? expense._date.toLocaleDateString()
+                      : "Unscheduled";
+                    return (
+                      <li key={expense.id} className="px-6 py-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-900">
+                              {expense.description || "Expense"}
+                            </p>
+                            <p className="text-xs uppercase tracking-wide text-gray-500">{dateLabel}</p>
+                            {expense.projectId ? (
+                              <p className="text-xs text-gray-500">Project · {expense.projectId}</p>
+                            ) : (
+                              <p className="text-xs text-gray-500">General business expense</p>
+                            )}
+                          </div>
+                          <span className="text-sm font-semibold text-gray-900">{amountLabel}</span>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+          </aside>
+        </div>
       </div>
-    </div>
+    </PortalContainer>
   );
 }

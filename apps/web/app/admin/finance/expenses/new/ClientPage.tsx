@@ -1,22 +1,32 @@
 "use client";
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
-import { db } from '@/lib/firebase';
-import { collection, getDocs, addDoc } from 'firebase/firestore';
-import { useRoleGate } from '@/hooks/useRoleGate';
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import PortalContainer from "@/components/PortalContainer";
+import { db } from "@/lib/firebase";
+import { collection, getDocs, addDoc } from "firebase/firestore";
+import { useRoleGate } from "@/hooks/useRoleGate";
+
+type ProjectRecord = { id: string; name?: string | null; code?: string | null };
+
+const inputClassName =
+  "w-full rounded-2xl border border-gray-200 bg-white px-3 py-2 text-sm shadow-sm transition focus:border-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900/10";
 
 export default function NewExpensePage() {
   const [loading, setLoading] = useState(true);
-  const [projects, setProjects] = useState<any[]>([]);
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [form, setForm] = useState({
-    projectId: '',
-    amount: '',
-    description: '',
-    date: '',
-    paymentMethod: '',
+    projectId: "",
+    amount: "",
+    description: "",
+    date: "",
+    paymentMethod: "",
   });
-  const { allowed, loading: guardLoading } = useRoleGate(['admin', 'finance']);
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(
+    null
+  );
+  const { allowed, loading: guardLoading } = useRoleGate(["admin", "finance"]);
 
   useEffect(() => {
     if (guardLoading) return;
@@ -25,99 +35,200 @@ export default function NewExpensePage() {
       return;
     }
     (async () => {
-      const projSnap = await getDocs(collection(db, 'projects'));
-      setProjects(projSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
-      setLoading(false);
+      try {
+        const projSnap = await getDocs(collection(db, "projects"));
+        const records: ProjectRecord[] = projSnap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as ProjectRecord),
+        }));
+        setProjects(records);
+      } catch (error) {
+        console.error("Failed to load projects", error);
+        setFeedback({ type: "error", text: "Unable to load project list." });
+      } finally {
+        setLoading(false);
+      }
     })();
   }, [allowed, guardLoading]);
 
+  const projectOptions = useMemo(() => {
+    return projects
+      .slice()
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id, undefined, { sensitivity: "base" }));
+  }, [projects]);
+
   const handleChange = (
-    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>
+    event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>
   ) => {
-    const { name, value } = e.target;
+    const { name, value } = event.target;
     setForm((prev) => ({ ...prev, [name]: value }));
   };
 
-  const saveExpense = async () => {
-    if (!form.amount) return alert('Amount required');
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFeedback(null);
+    if (!form.amount) {
+      setFeedback({ type: "error", text: "Please enter an expense amount." });
+      return;
+    }
+    const parsedAmount = parseFloat(form.amount);
+    if (!Number.isFinite(parsedAmount)) {
+      setFeedback({ type: "error", text: "Amount must be a valid number." });
+      return;
+    }
+    setSaving(true);
     try {
-      await addDoc(collection(db, 'expenses'), {
+      await addDoc(collection(db, "expenses"), {
         projectId: form.projectId || null,
-        amount: parseFloat(form.amount),
-        description: form.description || '',
+        amount: parsedAmount,
+        description: form.description?.trim() || "",
         date: form.date || new Date().toISOString(),
-        paymentMethod: form.paymentMethod || 'unknown',
+        paymentMethod: form.paymentMethod || "unknown",
         createdAt: new Date().toISOString(),
       });
-      alert('Expense logged');
-      setForm({ projectId: '', amount: '', description: '', date: '', paymentMethod: '' });
-    } catch (err: any) {
-      console.error(err);
-      alert(err.message || 'Error logging expense');
+      setFeedback({ type: "success", text: "Expense logged successfully." });
+      setForm({ projectId: "", amount: "", description: "", date: "", paymentMethod: "" });
+    } catch (error: any) {
+      console.error("Failed to save expense", error);
+      setFeedback({ type: "error", text: error?.message || "Error logging expense." });
+    } finally {
+      setSaving(false);
     }
   };
 
-  if (guardLoading || loading) return <p>Loading…</p>;
-  if (!allowed) return <p>You do not have access to this page.</p>;
+  if (guardLoading || loading) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">Loading expense form…</p>
+      </PortalContainer>
+    );
+  }
+  if (!allowed) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">
+          You do not have access to this page.
+        </p>
+      </PortalContainer>
+    );
+  }
 
   return (
-    <div className="p-4 grid gap-4 max-w-xl">
-      <h1 className="text-xl font-semibold">Log Expense</h1>
-      <select
-        name="projectId"
-        className="input"
-        value={form.projectId}
-        onChange={handleChange}
-      >
-        <option value="">General business expense</option>
-        {projects.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}
-          </option>
-        ))}
-      </select>
-      <input
-        type="number"
-        name="amount"
-        className="input"
-        placeholder="Amount"
-        value={form.amount}
-        onChange={handleChange}
-      />
-      <textarea
-        name="description"
-        className="input"
-        placeholder="Description"
-        value={form.description}
-        onChange={handleChange}
-      />
-      <input
-        type="date"
-        name="date"
-        className="input"
-        value={form.date}
-        onChange={handleChange}
-      />
-      <select
-        name="paymentMethod"
-        className="input"
-        value={form.paymentMethod}
-        onChange={handleChange}
-      >
-        <option value="">Payment method</option>
-        <option value="card">Card</option>
-        <option value="cash">Cash</option>
-        <option value="bank">Bank Transfer</option>
-        <option value="other">Other</option>
-      </select>
-      <div className="flex gap-2">
-        <button className="btn" onClick={saveExpense}>
-          Save Expense
-        </button>
-        <Link href="/admin/finance" className="btn-outline">
-          Cancel
-        </Link>
+    <PortalContainer>
+      <div className="mx-auto grid w-full max-w-3xl gap-6">
+        <header className="space-y-1">
+          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Finance</p>
+          <h1 className="text-2xl font-semibold text-gray-900">Log an expense</h1>
+          <p className="text-sm text-gray-600">
+            Record operational costs and assign them to projects so profitability stays accurate.
+          </p>
+        </header>
+
+        <form
+          onSubmit={handleSubmit}
+          className="grid gap-6 rounded-3xl border border-gray-200 bg-white p-6 shadow-sm"
+        >
+          {feedback ? (
+            <div
+              className={
+                feedback.type === "success"
+                  ? "rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+                  : "rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800"
+              }
+            >
+              {feedback.text}
+            </div>
+          ) : null}
+
+          <label className="grid gap-1 text-sm font-medium text-gray-700">
+            Cost centre
+            <select
+              name="projectId"
+              value={form.projectId}
+              onChange={handleChange}
+              className={inputClassName}
+              disabled={saving}
+            >
+              <option value="">General business expense</option>
+              {projectOptions.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name || project.id}
+                </option>
+              ))}
+            </select>
+            <span className="text-xs font-normal text-gray-500">
+              Assign the spend to a project to keep profit reports aligned.
+            </span>
+          </label>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              Amount
+              <input
+                type="number"
+                name="amount"
+                value={form.amount}
+                onChange={handleChange}
+                className={inputClassName}
+                min="0"
+                step="0.01"
+                placeholder="0.00"
+                disabled={saving}
+                required
+              />
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              Payment method
+              <select
+                name="paymentMethod"
+                value={form.paymentMethod}
+                onChange={handleChange}
+                className={inputClassName}
+                disabled={saving}
+              >
+                <option value="">Select payment method</option>
+                <option value="card">Card</option>
+                <option value="cash">Cash</option>
+                <option value="bank">Bank transfer</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+          </div>
+
+          <label className="grid gap-1 text-sm font-medium text-gray-700">
+            Expense date
+            <input
+              type="date"
+              name="date"
+              value={form.date}
+              onChange={handleChange}
+              className={inputClassName}
+              disabled={saving}
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm font-medium text-gray-700">
+            Notes
+            <textarea
+              name="description"
+              value={form.description}
+              onChange={handleChange}
+              className={`${inputClassName} min-h-[120px] resize-y`}
+              placeholder="What was purchased and why?"
+              disabled={saving}
+            />
+          </label>
+
+          <div className="flex flex-wrap gap-2">
+            <button type="submit" className="btn" disabled={saving}>
+              {saving ? "Saving…" : "Save expense"}
+            </button>
+            <Link href="/admin/finance" className="btn-outline">
+              Cancel
+            </Link>
+          </div>
+        </form>
       </div>
-    </div>
+    </PortalContainer>
   );
 }
