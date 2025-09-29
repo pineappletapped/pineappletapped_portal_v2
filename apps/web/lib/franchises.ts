@@ -74,6 +74,7 @@ export interface FranchiseTerritory {
   type: TerritoryType;
   postalCodes: string[];
   exclusive: boolean;
+  acceptingApplications: boolean;
   radiusKm?: number | null;
   centerLat?: number | null;
   centerLng?: number | null;
@@ -322,6 +323,7 @@ export function parseTerritory(doc: SnapshotWithId): FranchiseTerritory {
     type: ((data.type as TerritoryType) ?? 'postal') as TerritoryType,
     postalCodes: postalCodesRaw,
     exclusive: data.exclusive !== false,
+    acceptingApplications: data.acceptingApplications === true,
     radiusKm: typeof data.radiusKm === 'number' ? (data.radiusKm as number) : null,
     centerLat: typeof data.centerLat === 'number' ? (data.centerLat as number) : null,
     centerLng: typeof data.centerLng === 'number' ? (data.centerLng as number) : null,
