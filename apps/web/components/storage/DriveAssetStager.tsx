@@ -90,9 +90,17 @@ const formatIsoDate = (value: string | null): string => {
 
 interface DriveAssetStagerProps {
   className?: string;
+  initialProjectId?: string | null;
+  initialOrderId?: string | null;
 }
 
-export default function DriveAssetStager({ className }: DriveAssetStagerProps) {
+export default function DriveAssetStager({
+  className,
+  initialProjectId = null,
+  initialOrderId = null,
+}: DriveAssetStagerProps) {
+  const projectHint = (initialProjectId || "").trim();
+  const orderHint = (initialOrderId || "").trim();
   const [services, setServices] = useState<{ db: Firestore; functions: Functions } | null>(null);
   const [userContext, setUserContext] = useState<UserContextState>({
     loading: true,
@@ -102,7 +110,7 @@ export default function DriveAssetStager({ className }: DriveAssetStagerProps) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [projectError, setProjectError] = useState<string | null>(null);
-  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(projectHint);
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) || null,
     [projects, selectedProjectId]
@@ -197,7 +205,7 @@ export default function DriveAssetStager({ className }: DriveAssetStagerProps) {
         }
       }
 
-      const records: ProjectSummary[] = snapshot.docs.map((docSnap) => {
+      let records: ProjectSummary[] = snapshot.docs.map((docSnap) => {
         const data = docSnap.data() as Record<string, any>;
         return {
           id: docSnap.id,
@@ -208,6 +216,57 @@ export default function DriveAssetStager({ className }: DriveAssetStagerProps) {
           status: typeof data.status === "string" ? data.status : null,
         };
       });
+
+      const missingProjectHint =
+        projectHint && records.every((project) => project.id !== projectHint);
+      if (missingProjectHint) {
+        try {
+          const projectSnap = await getDoc(doc(services.db, "projects", projectHint));
+          if (projectSnap.exists()) {
+            const data = projectSnap.data() as Record<string, any>;
+            const injected: ProjectSummary = {
+              id: projectSnap.id,
+              name: typeof data.name === "string" ? data.name : null,
+              orderId: typeof data.orderId === "string" ? data.orderId : null,
+              orgId: typeof data.orgId === "string" ? data.orgId : null,
+              franchiseId: typeof data.franchiseId === "string" ? data.franchiseId : null,
+              status: typeof data.status === "string" ? data.status : null,
+            };
+            records = [injected, ...records];
+          }
+        } catch (error) {
+          console.warn("DriveAssetStager failed to fetch hinted project", error);
+        }
+      } else if (orderHint) {
+        const missingOrderMatch = records.every(
+          (project) => (project.orderId || "").trim() !== orderHint
+        );
+        if (missingOrderMatch) {
+          try {
+            const orderQuery = query(
+              collection(services.db, "projects"),
+              where("orderId", "==", orderHint),
+              limit(1)
+            );
+            const orderSnap = await getDocs(orderQuery);
+            if (!orderSnap.empty) {
+              const docSnap = orderSnap.docs[0];
+              const data = docSnap.data() as Record<string, any>;
+              const injected: ProjectSummary = {
+                id: docSnap.id,
+                name: typeof data.name === "string" ? data.name : null,
+                orderId: typeof data.orderId === "string" ? data.orderId : null,
+                orgId: typeof data.orgId === "string" ? data.orgId : null,
+                franchiseId: typeof data.franchiseId === "string" ? data.franchiseId : null,
+                status: typeof data.status === "string" ? data.status : null,
+              };
+              records = [injected, ...records];
+            }
+          } catch (error) {
+            console.warn("DriveAssetStager failed to fetch project for hinted order", error);
+          }
+        }
+      }
       setProjects(records);
       if (records.every((project) => project.id !== selectedProjectId)) {
         setSelectedProjectId("");
@@ -221,7 +280,14 @@ export default function DriveAssetStager({ className }: DriveAssetStagerProps) {
     } finally {
       setProjectsLoading(false);
     }
-  }, [services?.db, selectedProjectId, userContext.franchiseIds, userContext.isStaff]);
+  }, [
+    orderHint,
+    projectHint,
+    services?.db,
+    selectedProjectId,
+    userContext.franchiseIds,
+    userContext.isStaff,
+  ]);
 
   useEffect(() => {
     if (!services?.db || userContext.loading) return;
@@ -361,6 +427,27 @@ export default function DriveAssetStager({ className }: DriveAssetStagerProps) {
   );
 
   const productFolders = driveMeta?.productFolders || [];
+
+  useEffect(() => {
+    if (!projects.length) return;
+    if (!projectHint && !orderHint) return;
+    let target: ProjectSummary | undefined;
+    if (projectHint) {
+      target = projects.find((project) => project.id === projectHint);
+    }
+    if (!target && orderHint) {
+      target = projects.find((project) => (project.orderId || "").trim() === orderHint);
+    }
+    if (!target) return;
+    if (target.id === selectedProjectId) {
+      if (!driveItems.length) {
+        void listFolder(target);
+      }
+      return;
+    }
+    setSelectedProjectId(target.id);
+    void listFolder(target);
+  }, [driveItems, listFolder, orderHint, projectHint, projects, selectedProjectId]);
 
   return (
     <section className={className}>

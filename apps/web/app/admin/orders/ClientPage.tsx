@@ -239,6 +239,7 @@ export default function AdminOrdersPage() {
               <th className="p-2">Franchise Routing</th>
               <th className="p-2">Created</th>
               <th className="p-2">Project</th>
+              <th className="p-2">Items</th>
               <th className="p-2">Actions</th>
             </tr>
           </thead>
@@ -323,6 +324,15 @@ export default function AdminOrdersPage() {
               const royaltyTier = royalty?.tier as
                 | { minOrder?: number | null; maxOrder?: number | null }
                 | undefined;
+              const orderItems = Array.isArray(o.items)
+                ? (o.items as Array<Record<string, any>>)
+                : Array.isArray(o.budgetItems)
+                  ? (o.budgetItems as Array<Record<string, any>>)
+                  : [];
+              const projectId =
+                typeof o.projectId === "string" && o.projectId.trim().length > 0
+                  ? o.projectId
+                  : null;
               return (
                 <tr key={o.id} className="border-t">
                   <td className="p-2">{o.id}</td>
@@ -422,15 +432,87 @@ export default function AdminOrdersPage() {
                       : "-"}
                   </td>
                   <td className="p-2">
-                    {o.projectId ? (
+                    {projectId ? (
                       <Link
-                        href={`/projects/${o.projectId}`}
+                        href={`/projects/${projectId}`}
                         className="text-orange underline"
                       >
                         View
                       </Link>
                     ) : (
                       "-"
+                    )}
+                  </td>
+                  <td className="p-2 align-top">
+                    {orderItems.length === 0 ? (
+                      <span className="text-xs text-gray-500">No items</span>
+                    ) : (
+                      <ul className="grid gap-2">
+                        {orderItems.map((item, index) => {
+                          const itemId =
+                            typeof item?.id === "string" && item.id.trim().length > 0
+                              ? item.id
+                              : null;
+                          const quantity =
+                            typeof item?.quantity === "number" && Number.isFinite(item.quantity)
+                              ? item.quantity
+                              : null;
+                          const price =
+                            typeof item?.price === "number" && Number.isFinite(item.price)
+                              ? item.price
+                              : null;
+                          const rentalTotal =
+                            typeof item?.rentalTotal === "number" && Number.isFinite(item.rentalTotal)
+                              ? item.rentalTotal
+                              : null;
+                          const description =
+                            typeof item?.description === "string" ? item.description : null;
+                          const deliveryLink = projectId
+                            ? `/admin/deliveries/new?projectId=${encodeURIComponent(projectId)}${
+                                itemId ? `&itemId=${encodeURIComponent(itemId)}` : ""
+                              }${item?.name ? `&itemName=${encodeURIComponent(item.name)}` : ""}&orderId=${encodeURIComponent(o.id)}`
+                            : null;
+                          return (
+                            <li key={itemId || `${o.id}-item-${index}`} className="space-y-1">
+                              <div className="font-medium text-sm text-gray-900">
+                                {item?.name || "Line item"}
+                                {quantity ? (
+                                  <span className="text-xs text-gray-500"> · ×{quantity}</span>
+                                ) : null}
+                              </div>
+                              {description ? (
+                                <div className="text-xs text-gray-500 whitespace-pre-line">
+                                  {description}
+                                </div>
+                              ) : null}
+                              {(price || rentalTotal) && (
+                                <div className="text-xs text-gray-500">
+                                  {price ? `£${price.toFixed(2)}` : null}
+                                  {price && rentalTotal ? " · " : null}
+                                  {rentalTotal ? `Rental £${rentalTotal.toFixed(2)}` : null}
+                                </div>
+                              )}
+                              <div className="flex flex-wrap gap-2 text-xs">
+                                {projectId ? (
+                                  <Link
+                                    href={`/projects/${projectId}`}
+                                    className="text-orange underline"
+                                  >
+                                    Open project
+                                  </Link>
+                                ) : (
+                                  <span className="text-gray-400">Project pending</span>
+                                )}
+                                {deliveryLink ? (
+                                  <Link href={deliveryLink} className="btn btn-xs">
+                                    Delivery form
+                                  </Link>
+                                ) : null}
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
                     )}
                   </td>
                   <td className="p-2">
