@@ -181,6 +181,7 @@ export default function ProductDetail({
   venue?: Venue | null;
 }) {
   const isQuoteOnly = (product.salesMode ?? "ecommerce") === "quote";
+  const CUSTOM_VARIATION_ID = "__custom";
   const [basePrice, setBasePrice] = useState(product.price);
   const [variation, setVariation] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -300,6 +301,11 @@ export default function ProductDetail({
   );
 
   const handleVariation = (id: string) => {
+    if (id === CUSTOM_VARIATION_ID) {
+      setVariation(CUSTOM_VARIATION_ID);
+      setBasePrice(product.price);
+      return;
+    }
     const v = product.variations?.find((va) => va.id === id);
     setVariation(id);
     setBasePrice(v?.price ?? product.price);
@@ -310,7 +316,7 @@ export default function ProductDetail({
   const handleAdd = () => {
     const variationRequired = product.variations && product.variations.length > 0;
     if (variationRequired && !variation) return;
-    if (isQuoteOnly) {
+    if (isQuoteOnly || variation === CUSTOM_VARIATION_ID) {
       setQuoteOpen(true);
       return;
     }
@@ -333,6 +339,9 @@ export default function ProductDetail({
 
   const selectedVariationSummary = useMemo(() => {
     if (!variation) return null;
+    if (variation === CUSTOM_VARIATION_ID) {
+      return { label: "Custom request" };
+    }
     const label = variationNameById.get(variation) || "";
     return { id: variation, label };
   }, [variation, variationNameById]);
@@ -554,6 +563,9 @@ export default function ProductDetail({
                     {v.price > 0 ? ` – £${v.price.toFixed(2)}` : ""}
                   </option>
                 ))}
+                <option value={CUSTOM_VARIATION_ID}>
+                  Request a custom package
+                </option>
               </select>
               {variation && product.variations.find((v) => v.id === variation)?.features && (
                 <ul className="list-disc pl-5 text-sm">
@@ -574,12 +586,20 @@ export default function ProductDetail({
             }
             onClick={handleAdd}
           >
-            {isQuoteOnly ? "Request bespoke quote" : "Add to Cart"}
+            {isQuoteOnly
+              ? "Request bespoke quote"
+              : variation === CUSTOM_VARIATION_ID
+              ? "Request custom quote"
+              : "Add to Cart"}
           </button>
           {wizardOpen && !isQuoteOnly && (
             <AddToCartWizard
               product={product}
-              variationId={variation || undefined}
+              variationId={
+                variation && variation !== CUSTOM_VARIATION_ID
+                  ? variation
+                  : undefined
+              }
               basePrice={basePrice}
               onClose={() => setWizardOpen(false)}
             />

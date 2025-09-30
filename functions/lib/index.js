@@ -3510,6 +3510,7 @@ export const quote_request_public = functions.https.onCall(async (data) => {
     const productionPeriod = normaliseOptionalString(data.productionPeriod);
     const customRequest = normaliseOptionalString(data.customRequest);
     const requirements = normaliseOptionalString(data.requirements);
+    const projectScope = normaliseOptionalString(data.projectScope);
     const venueName = normaliseOptionalString(data.venueName);
     const venueLocation = normaliseOptionalString(data.venueLocation);
     const eventDate = normaliseOptionalString(data.eventDate);
@@ -3553,6 +3554,7 @@ export const quote_request_public = functions.https.onCall(async (data) => {
         originProductId,
         quoteMode,
         requirements,
+        projectScope,
         venueName,
         venueLocation,
         eventDate,
@@ -3582,6 +3584,9 @@ export const quote_request_public = functions.https.onCall(async (data) => {
     emailLines.push(`Email: ${contactEmail}`);
     if (requirements) {
         emailLines.push('', 'Requirements:', requirements);
+    }
+    if (projectScope) {
+        emailLines.push('', 'Project scope:', projectScope);
     }
     if (customRequest) {
         emailLines.push('', 'Additional notes:', customRequest);
