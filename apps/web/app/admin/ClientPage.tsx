@@ -65,11 +65,6 @@ export default function AdminPage() {
       href: '/admin/analytics',
     },
     {
-      label: 'Open CRM workspace',
-      description: 'Support sales follow-up and client care.',
-      href: '/crm',
-    },
-    {
       label: 'Audit login history',
       description: 'Check recent sign-ins across the platform.',
       href: '/admin/login-history',
@@ -332,8 +327,7 @@ export default function AdminPage() {
                 {
                   title: 'People',
                   links: [
-                    { href: '/crm', label: 'CRM Workspace' },
-                    { href: '/admin/users', label: 'Client Directory' },
+                    { href: '/admin/users', label: 'CRM' },
                     { href: '/admin/team', label: 'Manage Team' },
                     { href: '/admin/join-team-steps', label: 'Join Team Form' },
                     { href: '/admin/franchises', label: 'Franchise Network' },

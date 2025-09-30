@@ -17,12 +17,12 @@ This note captures portal features that are implemented in the codebase but are 
   1. Backfill recent login events (if required) by replaying authentication audit logs or prompting affected users.
   2. Verify that the admin login history page respects role-based access and shows scoped results for non-staff viewers after the change.
 
-## CRM workspace (`/crm`)
+## CRM navigation (`/crm`)
 - **What exists:** A dedicated CRM hub exposes links to leads, groups, opportunities, proposals, and quote requests for staff or client admins.【F:apps/web/app/crm/page.tsx†L1-L36】
-- **Status:** The admin dashboard quick links now surface the CRM workspace alongside the client directory, and the franchise portal highlights the leads view so territory owners can open the CRM without a deep link.【F:apps/web/app/admin/ClientPage.tsx†L236-L287】【F:apps/web/app/franchise/ClientPage.tsx†L912-L977】
+- **Status:** The admin dashboard quick links now surface the CRM area under a single “CRM” link, and the franchise portal highlights the filtered leads view without referencing a separate workspace button.【F:apps/web/app/admin/ClientPage.tsx†L236-L287】【F:apps/web/app/franchise/ClientPage.tsx†L912-L977】
 - **Remaining follow-up tasks:**
   1. Ensure CRM subpages inherit consistent layout and breadcrumbs when linked from the admin and franchise entry points.
-  2. Communicate the new navigation path to operations staff and franchisees so they know where to find CRM tools.
+  2. Communicate the refreshed navigation labels to operations staff and franchisees so they know where to find CRM tools.
 
 ## Storage automation (`/admin/storage`)
 - **What exists:** Administrators can configure the Google Drive automation defaults that provision client folders and assign HQ access for new orders.【F:apps/web/app/admin/storage/ClientPage.tsx†L1-L202】

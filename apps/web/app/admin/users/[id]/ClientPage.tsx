@@ -13,8 +13,14 @@ import {
   where,
 } from 'firebase/firestore';
 import { useRoleGate } from '@/hooks/useRoleGate';
-import { adminUpdateUser } from '@/lib/admin';
+import { adminListUsers, adminUpdateUser } from '@/lib/admin';
 import { ensureFirebase, functions } from '@/lib/firebase';
+import {
+  CRM_STAGE_OPTIONS,
+  CRM_STATUS_LABELS,
+  type CRMStatus,
+  normaliseCrmStatus,
+} from '@/lib/crm';
 
 interface CRMUserRecord {
   id: string;
@@ -182,6 +188,7 @@ export default function AdminUserDetailPage() {
   const [stageSaving, setStageSaving] = useState(false);
   const [discountDraft, setDiscountDraft] = useState<number>(0);
   const [discountSaving, setDiscountSaving] = useState(false);
+  const [mergeLoading, setMergeLoading] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -335,7 +342,7 @@ export default function AdminUserDetailPage() {
     };
   }, [orders, events, projects, quotes]);
 
-  const handleStageChange = async (nextStage: string) => {
+  const handleStageChange = async (nextStage: CRMStatus) => {
     if (!user) return;
     setStageSaving(true);
     try {
@@ -396,6 +403,44 @@ export default function AdminUserDetailPage() {
     }
   };
 
+  const handleMerge = async () => {
+    if (!user) return;
+    const email = prompt('Merge this profile into which email address?');
+    if (!email) return;
+    const trimmed = email.trim().toLowerCase();
+    if (!trimmed) {
+      return;
+    }
+    if (user.email && user.email.trim().toLowerCase() === trimmed) {
+      alert('Please choose a different email address to merge into.');
+      return;
+    }
+    setMergeLoading(true);
+    try {
+      const directory = await adminListUsers();
+      const target = Array.isArray(directory?.users)
+        ? (directory.users as Array<{ id: string; email?: string | null }>).find(
+            (entry) =>
+              typeof entry?.email === 'string' &&
+              entry.email.trim().toLowerCase() === trimmed &&
+              entry.id !== user.id
+          )
+        : null;
+      if (!target) {
+        alert('No matching account found for that email.');
+        return;
+      }
+      const callable = httpsCallable(functions, 'admin_mergeUsers');
+      await callable({ sourceId: user.id, targetId: target.id });
+      alert('Merge requested. The account list will update shortly.');
+    } catch (err: any) {
+      console.error('Failed to merge user', err);
+      alert(err?.message || 'Failed to merge users.');
+    } finally {
+      setMergeLoading(false);
+    }
+  };
+
   if (guardLoading || loading) {
     return <p>Loading…</p>;
   }
@@ -409,7 +454,7 @@ export default function AdminUserDetailPage() {
       <div className="grid gap-4">
         <p>Client record not found.</p>
         <Link className="text-orange" href="/admin/users">
-          ← Back to client directory
+          ← Back to CRM
         </Link>
       </div>
     );
@@ -429,7 +474,7 @@ export default function AdminUserDetailPage() {
           </div>
         </div>
         <Link className="btn-outline" href="/admin/users">
-          Back to client directory
+          Back to CRM
         </Link>
       </div>
 
@@ -472,14 +517,19 @@ export default function AdminUserDetailPage() {
             <span className="text-xs uppercase text-gray-500">CRM stage</span>
             <select
               className="input"
-              value={user.crmStatus || 'client'}
-              onChange={(event) => handleStageChange(event.target.value)}
+              value={normaliseCrmStatus(user.crmStatus)}
+              onChange={(event) => handleStageChange(event.target.value as CRMStatus)}
               disabled={stageSaving}
             >
-              <option value="client">Client</option>
-              <option value="prospect">Prospect</option>
-              <option value="outreach">Outreach</option>
+              {CRM_STAGE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
             </select>
+            <span className="text-xs text-gray-500">
+              Current: {CRM_STATUS_LABELS[normaliseCrmStatus(user.crmStatus)]}
+            </span>
           </label>
           <label className="grid gap-1 text-sm">
             <span className="text-xs uppercase text-gray-500">Discount (%)</span>
@@ -514,6 +564,13 @@ export default function AdminUserDetailPage() {
               disabled={sendingReset}
             >
               {sendingReset ? 'Sending reset…' : 'Send password reset'}
+            </button>
+            <button
+              className="btn-outline"
+              onClick={handleMerge}
+              disabled={mergeLoading}
+            >
+              {mergeLoading ? 'Merging…' : 'Merge with another account'}
             </button>
           </div>
         </div>

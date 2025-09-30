@@ -1016,16 +1016,13 @@ export default function FranchisePortalPage() {
                 <div>
                   <h2 className="text-lg font-semibold">Lead pipeline</h2>
                   <p className="text-sm text-gray-600">
-                    Review the leads and clients assigned to your franchise without leaving the portal. The CRM workspace
+                    Review the leads and clients assigned to your franchise without leaving the portal. The leads view
                     automatically filters records to the organisations you belong to.
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <Link href="/crm/leads" className="btn-sm">
                     Leads view
-                  </Link>
-                  <Link href="/crm" className="btn-sm btn-outline">
-                    Open CRM workspace
                   </Link>
                 </div>
               </div>
