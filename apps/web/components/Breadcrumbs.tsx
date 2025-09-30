@@ -12,6 +12,8 @@ const LABELS: Record<string, string> = {
   franchise: 'Franchise Portal',
   marketing: 'Marketing',
   remarketing: 'Remarketing',
+  affiliate: 'Affiliate Portal',
+  affiliates: 'Affiliates',
   expo: 'Expo Capture',
   'expo-support': 'Expo Support',
   'expo-pages': 'Expo Lead Pages',

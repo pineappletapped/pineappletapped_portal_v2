@@ -353,6 +353,7 @@ export default function AdminPage() {
                     { href: '/admin/exhibitions', label: 'Exhibitions' },
                     { href: '/admin/marketing/content-planner', label: 'Content Planner' },
                     { href: '/admin/marketing/remarketing', label: 'Remarketing' },
+                    { href: '/admin/marketing/affiliates', label: 'Affiliate Programme' },
                     { href: '/admin/voucher-codes', label: 'Voucher Management' },
                     { href: '/admin/email-schedules', label: 'Email Schedules' },
                   ],

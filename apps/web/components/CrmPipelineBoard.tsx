@@ -171,6 +171,17 @@ export default function CrmPipelineBoard<TRecord extends CrmPipelineRecord>(
                     (typeof record.email === "string" && record.email.trim()) ||
                     "Prospect";
                   const { pipeline, quoted } = extractProspectAmounts(record);
+                  const affiliateInfo =
+                    record.affiliate && typeof record.affiliate === "object"
+                      ? (record.affiliate as Record<string, unknown>)
+                      : null;
+                  const affiliateLabel = affiliateInfo
+                    ? typeof affiliateInfo.name === "string" && affiliateInfo.name.trim()
+                      ? affiliateInfo.name.trim()
+                      : typeof affiliateInfo.refCode === "string" && affiliateInfo.refCode.trim()
+                        ? `Affiliate ${affiliateInfo.refCode.trim()}`
+                        : null
+                    : null;
                   const suggestedProduct =
                     getSuggestedProductName?.(record) ??
                     (typeof record.suggestedProductName === "string" && record.suggestedProductName.trim()
@@ -231,6 +242,11 @@ export default function CrmPipelineBoard<TRecord extends CrmPipelineRecord>(
                           {quoted ? (
                             <span className="rounded-full bg-sky-50 px-2 py-1 font-medium text-sky-700">
                               Quoted: {formatCurrency(quoted)}
+                            </span>
+                          ) : null}
+                          {affiliateLabel ? (
+                            <span className="rounded-full bg-purple-50 px-2 py-1 font-medium text-purple-700">
+                              Referred by {affiliateLabel}
                             </span>
                           ) : null}
                         </div>

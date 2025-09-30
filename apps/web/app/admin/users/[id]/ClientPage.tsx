@@ -460,6 +460,20 @@ export default function AdminUserDetailPage() {
     );
   }
 
+  const affiliateInfo =
+    user.affiliate && typeof user.affiliate === 'object'
+      ? (user.affiliate as Record<string, unknown>)
+      : null;
+  const affiliateLabel = affiliateInfo
+    ? (typeof affiliateInfo.name === 'string' && affiliateInfo.name.trim()) ||
+      (typeof affiliateInfo.refCode === 'string' && affiliateInfo.refCode.trim()) ||
+      null
+    : null;
+  const affiliateNotes =
+    affiliateInfo && typeof affiliateInfo.notes === 'string' && affiliateInfo.notes.trim()
+      ? (affiliateInfo.notes as string)
+      : null;
+
   return (
     <div className="grid gap-8">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -471,6 +485,12 @@ export default function AdminUserDetailPage() {
             <p>{user.email}</p>
             {user.phone ? <p>{user.phone}</p> : null}
             {user.organisation ? <p>{user.organisation}</p> : null}
+            {affiliateLabel ? (
+              <p className="text-xs font-medium text-purple-600">
+                Referred by {affiliateLabel}
+                {affiliateNotes ? ` · ${affiliateNotes}` : ''}
+              </p>
+            ) : null}
           </div>
         </div>
         <Link className="btn-outline" href="/admin/users">

@@ -781,6 +781,7 @@ export default function AdminUsersPage() {
             <th className="p-2">Email</th>
             <th className="p-2">Name</th>
             <th className="p-2">Stage</th>
+            <th className="p-2">Affiliate</th>
             {showClientValue ? <th className="p-2">Client value</th> : null}
             {showCompliance ? <th className="p-2">Drone compliance</th> : null}
             <th className="p-2">Discount%</th>
@@ -808,6 +809,22 @@ export default function AdminUsersPage() {
                       </option>
                     ))}
                   </select>
+                </td>
+                <td className="p-2 text-sm text-gray-600">
+                  {(() => {
+                    const affiliate =
+                      user.affiliate && typeof user.affiliate === 'object'
+                        ? (user.affiliate as Record<string, unknown>)
+                        : null;
+                    if (!affiliate) {
+                      return '—';
+                    }
+                    const label =
+                      (typeof affiliate.name === 'string' && affiliate.name.trim()) ||
+                      (typeof affiliate.refCode === 'string' && affiliate.refCode.trim()) ||
+                      null;
+                    return label ?? '—';
+                  })()}
                 </td>
                 {showClientValue ? (
                   <td className="p-2">
