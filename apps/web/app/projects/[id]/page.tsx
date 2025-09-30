@@ -80,6 +80,19 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       ),
     [assets]
   );
+  const hasDroneAssignments = kitSummary?.hasDrone ?? false;
+  const hasDroneLineItem = Array.isArray(order?.items)
+    ? order.items.some((item: any) => {
+        if (!item || typeof item !== 'object') {
+          return false;
+        }
+        const record = item as Record<string, unknown>;
+        const name = typeof record.name === 'string' ? record.name.toLowerCase() : '';
+        const category = typeof record.category === 'string' ? record.category.toLowerCase() : '';
+        return name.includes('drone') || category.includes('drone');
+      })
+    : false;
+  const showFlightPlanSection = hasDroneAssignments || hasDroneLineItem || flightPlanAssets.length > 0;
 
   // Signature request
   const [pendingSignature, setPendingSignature] = useState<any | null>(null);
@@ -602,47 +615,49 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
           </div>
         )}
       </div>
-      <div className="card">
-        <h2 className="mb-2 text-base font-semibold text-gray-900">Flight plans &amp; approvals</h2>
-        {flightPlanAssets.length === 0 ? (
-          <p className="text-sm text-gray-600">
-            Upload or stage flight plans to kick off the drone compliance review for this project.
-          </p>
-        ) : (
-          <ul className="grid gap-3">
-            {flightPlanAssets.map((asset) => {
-              const releaseMeta = getAssetReleaseMeta(asset);
-              return (
-                <li key={asset.id} className="rounded border border-gray-200 p-4">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="space-y-1">
-                      <Link
-                        href={`/projects/${project.id}/assets/${asset.id}`}
-                        className="text-sm font-semibold text-blue-600 hover:underline"
-                      >
-                        {asset.name || asset.storageKey || 'Flight plan'}
-                      </Link>
-                      <p className="text-xs text-gray-500">Status: {asset.status || 'draft'}</p>
+      {showFlightPlanSection ? (
+        <div className="card">
+          <h2 className="mb-2 text-base font-semibold text-gray-900">Flight plans &amp; approvals</h2>
+          {flightPlanAssets.length === 0 ? (
+            <p className="text-sm text-gray-600">
+              Upload or stage flight plans to kick off the drone compliance review for this project.
+            </p>
+          ) : (
+            <ul className="grid gap-3">
+              {flightPlanAssets.map((asset) => {
+                const releaseMeta = getAssetReleaseMeta(asset);
+                return (
+                  <li key={asset.id} className="rounded border border-gray-200 p-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="space-y-1">
+                        <Link
+                          href={`/projects/${project.id}/assets/${asset.id}`}
+                          className="text-sm font-semibold text-blue-600 hover:underline"
+                        >
+                          {asset.name || asset.storageKey || 'Flight plan'}
+                        </Link>
+                        <p className="text-xs text-gray-500">Status: {asset.status || 'draft'}</p>
+                      </div>
+                      <div className="flex flex-col gap-1 sm:items-end">
+                        <AssetReleaseBadge asset={asset} />
+                        {releaseMeta?.description ? (
+                          <p className="text-xs text-gray-500 max-w-xs sm:text-right">
+                            {releaseMeta.description}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-gray-500 max-w-xs sm:text-right">
+                            Review and approve the plan so aerial work can proceed.
+                          </p>
+                        )}
+                      </div>
                     </div>
-                    <div className="flex flex-col gap-1 sm:items-end">
-                      <AssetReleaseBadge asset={asset} />
-                      {releaseMeta?.description ? (
-                        <p className="text-xs text-gray-500 max-w-xs sm:text-right">
-                          {releaseMeta.description}
-                        </p>
-                      ) : (
-                        <p className="text-xs text-gray-500 max-w-xs sm:text-right">
-                          Review and approve the plan so aerial work can proceed.
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      ) : null}
       {/* Brand pack selector */}
       <div className="card">
         <h2 className="mb-2 text-base font-semibold text-gray-900">Brand Pack</h2>

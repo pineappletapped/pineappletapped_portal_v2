@@ -446,10 +446,12 @@ export default function AdminUsersPage() {
       allowedStatuses,
       showSuggestedProduct = false,
       showClientValue = false,
+      showCompliance = false,
     }: {
       allowedStatuses: CRMStatus[];
       showSuggestedProduct?: boolean;
       showClientValue?: boolean;
+      showCompliance?: boolean;
     }
   ) => {
     if (list.length === 0) {
@@ -466,7 +468,7 @@ export default function AdminUsersPage() {
             <th className="p-2">Name</th>
             <th className="p-2">Stage</th>
             {showClientValue ? <th className="p-2">Client value</th> : null}
-            <th className="p-2">Drone compliance</th>
+            {showCompliance ? <th className="p-2">Drone compliance</th> : null}
             <th className="p-2">Discount%</th>
             {showSuggestedProduct ? <th className="p-2">Suggested product</th> : null}
             <th className="p-2">Actions</th>
@@ -475,7 +477,7 @@ export default function AdminUsersPage() {
         <tbody>
           {list.map((user) => {
             const stage = normaliseCrmStatus(user.crmStatus);
-            const complianceEntry = complianceByUser.get(user.id);
+            const complianceEntry = showCompliance ? complianceByUser.get(user.id) : null;
             return (
               <tr key={user.id} className="border-t">
                 <td className="p-2">{user.email}</td>
@@ -504,32 +506,34 @@ export default function AdminUsersPage() {
                     )}
                   </td>
                 ) : null}
-                <td className="p-2">
-                  {complianceEntry ? (
-                    <div className="flex flex-col gap-1">
-                      <ComplianceBadge
-                        status={complianceEntry.state.status}
-                        title={complianceEntry.state.issues.join('\n')}
-                      />
-                      <span
-                        className={`text-[0.7rem] ${
-                          complianceEntry.state.licenceExpired ? 'text-red-600' : 'text-gray-500'
-                        }`}
-                      >
-                        Licence: {complianceDateToDisplay(complianceEntry.record.licenceExpiry)}
-                      </span>
-                      <span
-                        className={`text-[0.7rem] ${
-                          complianceEntry.state.insuranceExpired ? 'text-red-600' : 'text-gray-500'
-                        }`}
-                      >
-                        Insurance: {complianceDateToDisplay(complianceEntry.record.insuranceExpiry)}
-                      </span>
-                    </div>
-                  ) : (
-                    <span className="text-xs text-gray-500">No record</span>
-                  )}
-                </td>
+                {showCompliance ? (
+                  <td className="p-2">
+                    {complianceEntry ? (
+                      <div className="flex flex-col gap-1">
+                        <ComplianceBadge
+                          status={complianceEntry.state.status}
+                          title={complianceEntry.state.issues.join('\n')}
+                        />
+                        <span
+                          className={`text-[0.7rem] ${
+                            complianceEntry.state.licenceExpired ? 'text-red-600' : 'text-gray-500'
+                          }`}
+                        >
+                          Licence: {complianceDateToDisplay(complianceEntry.record.licenceExpiry)}
+                        </span>
+                        <span
+                          className={`text-[0.7rem] ${
+                            complianceEntry.state.insuranceExpired ? 'text-red-600' : 'text-gray-500'
+                          }`}
+                        >
+                          Insurance: {complianceDateToDisplay(complianceEntry.record.insuranceExpiry)}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-gray-500">No record</span>
+                    )}
+                  </td>
+                ) : null}
                 <td className="p-2">
                   <input
                     type="number"

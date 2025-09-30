@@ -192,11 +192,11 @@ export default function AdminOrdersPage() {
   return (
     <div className="grid gap-4">
       <h1 className="text-xl font-semibold">Order Management</h1>
-      <div className="flex flex-wrap gap-2 items-end">
-        <label className="text-sm">
-          Status:
+      <div className="grid w-full gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <label className="grid gap-1 text-sm">
+          <span>Status</span>
           <select
-            className="input ml-1"
+            className="input"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
           >
@@ -208,24 +208,33 @@ export default function AdminOrdersPage() {
             ))}
           </select>
         </label>
-        <input
-          className="input"
-          placeholder="Filter by email"
-          value={emailFilter}
-          onChange={(e) => setEmailFilter(e.target.value)}
-        />
-        <input
-          type="date"
-          className="input"
-          value={startDate}
-          onChange={(e) => setStartDate(e.target.value)}
-        />
-        <input
-          type="date"
-          className="input"
-          value={endDate}
-          onChange={(e) => setEndDate(e.target.value)}
-        />
+        <label className="grid gap-1 text-sm">
+          <span>Email</span>
+          <input
+            className="input"
+            placeholder="Filter by email"
+            value={emailFilter}
+            onChange={(e) => setEmailFilter(e.target.value)}
+          />
+        </label>
+        <label className="grid gap-1 text-sm">
+          <span>Start date</span>
+          <input
+            type="date"
+            className="input"
+            value={startDate}
+            onChange={(e) => setStartDate(e.target.value)}
+          />
+        </label>
+        <label className="grid gap-1 text-sm">
+          <span>End date</span>
+          <input
+            type="date"
+            className="input"
+            value={endDate}
+            onChange={(e) => setEndDate(e.target.value)}
+          />
+        </label>
       </div>
       {filtered.length === 0 ? (
         <p>No orders found.</p>
