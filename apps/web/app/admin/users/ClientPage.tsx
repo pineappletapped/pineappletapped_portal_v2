@@ -20,8 +20,6 @@ import {
   CRM_STAGE_OPTIONS,
   CRM_STATUS_LABELS,
   type CRMStatus,
-  getNextPipelineStatus,
-  getPreviousPipelineStatus,
   normaliseCrmStatus,
 } from '@/lib/crm';
 import { ensureFirebase } from '@/lib/firebase';
@@ -44,6 +42,12 @@ interface AdminUser {
   crmStatus?: CRMStatus;
   discount?: number;
   suggestedProductId?: string | null;
+  organisation?: string | null;
+  phone?: string | null;
+  notes?: string | null;
+  updatedAt?: unknown;
+  lastContactedAt?: unknown;
+  createdAt?: unknown;
   [key: string]: any;
 }
 
@@ -94,6 +98,73 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
   return result;
 }
 
+function parseCurrencyAmount(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value === 0 ? null : value;
+  }
+  if (typeof value === 'string') {
+    const cleaned = value.replace(/[^0-9.,-]/g, '').replace(/,/g, '');
+    if (!cleaned.trim()) {
+      return null;
+    }
+    const parsed = Number(cleaned);
+    if (!Number.isNaN(parsed) && parsed !== 0) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+const PIPELINE_VALUE_KEYS = [
+  'pipelineValue',
+  'pipelineAmount',
+  'pipelineTotal',
+  'opportunityValue',
+  'potentialValue',
+  'expectedValue',
+  'estimatedValue',
+  'crmValue',
+  'value',
+];
+
+const QUOTED_VALUE_KEYS = [
+  'quotedValue',
+  'quoteValue',
+  'quoteAmount',
+  'quotedAmount',
+  'proposalValue',
+  'proposalAmount',
+  'latestQuoteValue',
+  'latestQuoteAmount',
+  'lastQuoteValue',
+  'lastQuoteTotal',
+];
+
+function extractProspectAmounts(user: AdminUser): {
+  pipeline?: number | null;
+  quoted?: number | null;
+} {
+  const result: { pipeline?: number | null; quoted?: number | null } = {};
+
+  for (const key of PIPELINE_VALUE_KEYS) {
+    const amount = parseCurrencyAmount(user[key]);
+    if (amount !== null && amount !== undefined) {
+      result.pipeline = amount;
+      break;
+    }
+  }
+
+  for (const key of QUOTED_VALUE_KEYS) {
+    const amount = parseCurrencyAmount(user[key]);
+    if (amount !== null && amount !== undefined) {
+      result.quoted = amount;
+      break;
+    }
+  }
+
+  return result;
+}
+
 export default function AdminUsersPage() {
   const { allowed, loading: guardLoading } = useRoleGate(['admin', 'sales']);
   const [users, setUsers] = useState<AdminUser[]>([]);
@@ -110,6 +181,8 @@ export default function AdminUsersPage() {
   const [clientValues, setClientValues] = useState<Map<string, number>>(new Map());
   const [clientValueLoading, setClientValueLoading] = useState(false);
   const [clientValueError, setClientValueError] = useState<string | null>(null);
+  const [draggedProspectId, setDraggedProspectId] = useState<string | null>(null);
+  const [hoveredProspectColumn, setHoveredProspectColumn] = useState<CRMStatus | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -350,6 +423,21 @@ export default function AdminUsersPage() {
       console.error(err);
       alert(err.message || 'Error updating user');
     }
+  };
+
+  const handleProspectDrop = (status: CRMStatus, userId: string | null) => {
+    if (!userId) {
+      return;
+    }
+    const target = userById.get(userId);
+    if (!target) {
+      return;
+    }
+    const currentStage = normaliseCrmStatus(target.crmStatus);
+    if (currentStage === status) {
+      return;
+    }
+    changeStatus(target, status);
   };
 
   const updateDiscount = async (user: any, discount: number) => {
@@ -750,16 +838,39 @@ export default function AdminUsersPage() {
           {crmStage === 'prospect' && (
             <section className="grid gap-4">
               <p className="text-sm text-gray-600">
-                Progress prospects through each pipeline milestone. Use the quick stage controls to
-                advance opportunities or return them to outreach when needed.
+                Progress prospects through each pipeline milestone. Drag cards between columns to
+                advance opportunities or return them to earlier stages.
               </p>
               <div className="flex gap-4 overflow-x-auto pb-2">
                 {CRM_PIPELINE_STATUSES.map((status) => {
                   const entries = pipelineByStatus.get(status) ?? [];
+                  const isHovered = hoveredProspectColumn === status;
                   return (
                     <section
                       key={status}
-                      className="flex w-72 min-w-[18rem] flex-col gap-3 rounded border bg-white p-3 shadow-sm"
+                      className={`flex w-72 min-w-[18rem] flex-col gap-3 rounded border bg-white p-3 shadow-sm transition ${
+                        isHovered ? 'border-orange-400 ring-2 ring-orange-200 bg-orange-50/60' : ''
+                      }`}
+                      onDragEnter={(event) => {
+                        event.preventDefault();
+                        setHoveredProspectColumn(status);
+                      }}
+                      onDragOver={(event) => {
+                        event.preventDefault();
+                        if (hoveredProspectColumn !== status) {
+                          setHoveredProspectColumn(status);
+                        }
+                      }}
+                      onDragLeave={() => {
+                        setHoveredProspectColumn((prev) => (prev === status ? null : prev));
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const droppedId = event.dataTransfer.getData('text/plain') || draggedProspectId;
+                        handleProspectDrop(status, droppedId || null);
+                        setHoveredProspectColumn(null);
+                        setDraggedProspectId(null);
+                      }}
                     >
                       <header className="flex items-center justify-between gap-2">
                         <h3 className="text-sm font-semibold text-gray-900">
@@ -772,85 +883,77 @@ export default function AdminUsersPage() {
                           <p className="text-xs text-gray-500">No records in this stage.</p>
                         ) : (
                           entries.map((user) => {
-                            const stage = normaliseCrmStatus(user.crmStatus);
-                            const nextStage = getNextPipelineStatus(stage);
-                            const previousStage = getPreviousPipelineStatus(stage);
                             const organisation =
                               typeof user.organisation === 'string' && user.organisation.trim().length
                                 ? user.organisation.trim()
                                 : null;
+                            const contactName = user.fullName || organisation || user.email || 'Prospect';
+                            const { pipeline, quoted } = extractProspectAmounts(user);
+                            const lastUpdated = formatDate(
+                              user.updatedAt || user.lastContactedAt || user.createdAt,
+                            );
                             const suggestedProduct =
                               user.suggestedProductId
                                 ? productById.get(user.suggestedProductId || '')?.name || null
                                 : null;
+
                             return (
                               <article
                                 key={user.id}
-                                className="grid gap-2 rounded border border-orange-200 bg-orange-50 p-3 text-sm"
+                                draggable
+                                onDragStart={(event) => {
+                                  event.dataTransfer.effectAllowed = 'move';
+                                  event.dataTransfer.setData('text/plain', user.id);
+                                  setDraggedProspectId(user.id);
+                                }}
+                                onDragEnd={() => {
+                                  setDraggedProspectId((current) => (current === user.id ? null : current));
+                                  setHoveredProspectColumn(null);
+                                }}
+                                className={`flex flex-col gap-2 rounded border p-3 text-sm shadow-sm transition ${
+                                  draggedProspectId === user.id
+                                    ? 'border-orange-400 bg-orange-50'
+                                    : 'border-gray-200 bg-white'
+                                }`}
                               >
-                                <div className="grid gap-1">
-                                  <p className="font-semibold text-gray-900">
-                                    {user.fullName || organisation || user.email || 'Prospect'}
-                                  </p>
-                                  <div className="text-xs text-gray-600">
-                                    {user.email ? <span className="block">{user.email}</span> : null}
-                                    {user.phone ? <span className="block">{user.phone}</span> : null}
-                                    {organisation ? (
-                                      <span className="block">{organisation}</span>
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex-1">
+                                    <p className="text-sm font-semibold text-gray-900">{contactName}</p>
+                                    <div className="mt-1 grid gap-0.5 text-xs text-gray-600">
+                                      {organisation ? <span>{organisation}</span> : null}
+                                      {user.email ? <span>{user.email}</span> : null}
+                                      {user.phone ? <span>{user.phone}</span> : null}
+                                    </div>
+                                  </div>
+                                  <Link className="btn-sm" href={`/admin/users/${user.id}`}>
+                                    View
+                                  </Link>
+                                </div>
+                                {(pipeline || quoted) && (
+                                  <div className="flex flex-wrap gap-2 text-xs">
+                                    {pipeline ? (
+                                      <span className="rounded-full bg-emerald-50 px-2 py-1 font-medium text-emerald-700">
+                                        Value: {formatCurrency(pipeline)}
+                                      </span>
+                                    ) : null}
+                                    {quoted ? (
+                                      <span className="rounded-full bg-sky-50 px-2 py-1 font-medium text-sky-700">
+                                        Quoted: {formatCurrency(quoted)}
+                                      </span>
                                     ) : null}
                                   </div>
-                                </div>
+                                )}
                                 {suggestedProduct ? (
                                   <p className="text-xs text-gray-600">
                                     Suggested: {suggestedProduct}
                                   </p>
                                 ) : null}
-                                {user.notes ? (
-                                  <p className="whitespace-pre-line text-xs text-gray-600">
-                                    {user.notes}
+                                {typeof user.notes === 'string' && user.notes.trim().length ? (
+                                  <p className="max-h-24 overflow-hidden text-xs text-gray-600 whitespace-pre-line">
+                                    {user.notes.trim()}
                                   </p>
                                 ) : null}
-                                <p className="text-xs text-gray-500">
-                                  Last update: {formatDate(user.updatedAt || user.lastContactedAt || user.createdAt)}
-                                </p>
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <select
-                                    className="border p-1 text-xs"
-                                    value={stage}
-                                    onChange={(event) =>
-                                      changeStatus(user, event.target.value as CRMStatus)
-                                    }
-                                  >
-                                    {CRM_ALL_STATUSES.map((option) => (
-                                      <option key={option} value={option}>
-                                        {CRM_STATUS_LABELS[option]}
-                                      </option>
-                                    ))}
-                                  </select>
-                                  <Link className="btn-sm" href={`/admin/users/${user.id}`}>
-                                    View
-                                  </Link>
-                                </div>
-                                <div className="flex flex-wrap gap-2">
-                                  {previousStage ? (
-                                    <button
-                                      className="btn-sm btn-outline"
-                                      onClick={() => changeStatus(user, previousStage)}
-                                    >
-                                      Move to {CRM_STATUS_LABELS[previousStage]}
-                                    </button>
-                                  ) : null}
-                                  {nextStage ? (
-                                    <button
-                                      className="btn-sm"
-                                      onClick={() => changeStatus(user, nextStage)}
-                                    >
-                                      {nextStage === 'client'
-                                        ? 'Mark as client'
-                                        : `Move to ${CRM_STATUS_LABELS[nextStage]}`}
-                                    </button>
-                                  ) : null}
-                                </div>
+                                <p className="text-[11px] text-gray-500">Last update: {lastUpdated}</p>
                               </article>
                             );
                           })
