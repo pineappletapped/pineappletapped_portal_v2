@@ -19,8 +19,8 @@ import ListingPriceNote from "./ListingPriceNote";
 export default function ProductListRow({ product }: { product: Product }) {
   const imageUrl =
     product.imageUrl || "https://placehold.co/600x400?text=No+Image";
-  const priceLabel =
-    getListingPriceLabel(product) ?? "Pricing on request";
+  const priceDetails = getListingPriceLabel(product);
+  const priceHeadline = priceDetails?.headline ?? "Pricing on request";
   const { visibleDeliverables, remainingDeliverableCount } =
     getDeliverableSummary(product);
   const showSummary = Boolean(product.deliveryTime || visibleDeliverables.length > 0);
@@ -93,13 +93,17 @@ export default function ProductListRow({ product }: { product: Product }) {
         <div className="flex w-full flex-col gap-2 sm:w-44 sm:items-end sm:self-stretch">
           <div className="flex w-full flex-col items-start gap-1 sm:items-end">
             <p className="text-base font-semibold text-gray-900 sm:text-right">
-              {priceLabel}
+              {priceHeadline}
             </p>
-            <ListingPriceNote className="text-gray-500 sm:text-right" />
+            <ListingPriceNote
+              className="text-gray-500 sm:text-right"
+              note={priceDetails?.note}
+              rangeNote={priceDetails?.rangeNote}
+            />
           </div>
           <Link
             href={`/products/${product.id}`}
-            className="btn btn-sm w-full sm:w-auto"
+            className="btn btn-sm btn-outline w-full sm:w-auto"
           >
             Learn More
           </Link>

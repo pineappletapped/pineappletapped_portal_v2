@@ -78,10 +78,10 @@ export default function HeroSection({
         <h1 className="text-4xl md:text-6xl font-bold mb-4">{title}</h1>
         <p className="max-w-2xl mb-6">{subtitle}</p>
         <div className="flex gap-4">
-          <Link href="/categories" className="btn">
+          <Link href="/categories" className="btn btn-primary">
             Browse Services
           </Link>
-          <Link href="/cart" className="btn-outline">
+          <Link href="/cart" className="btn btn-outline">
             View Cart
           </Link>
         </div>
