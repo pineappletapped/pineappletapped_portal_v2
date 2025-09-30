@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState, type SVGProps } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type SVGProps,
+} from "react";
 import clsx from "clsx";
 import AvailabilityCalendar, {
   AVAILABILITY_STATUS_META,
@@ -38,12 +44,16 @@ interface RawMember {
   isStaff?: boolean | null;
   contractorInfo?: { name?: string | null } | null;
   roles?: UserRoles;
+  franchiseIds?: unknown;
+  primaryFranchiseId?: string | null;
 }
 
 interface Member extends RawMember {
   crmStatus: CRMStatus;
   roles: UserRoles;
   isTeam: boolean;
+  franchiseIds: string[];
+  primaryFranchiseId: string | null;
 }
 
 export default function AdminAvailabilityPage() {
@@ -52,9 +62,11 @@ export default function AdminAvailabilityPage() {
   const [selected, setSelected] = useState<string>("");
   const [availability, setAvailability] = useState<Record<string, AvailabilityStatus>>({});
   const [bookings, setBookings] = useState<BookingSummary[]>([]);
+  const [allBookings, setAllBookings] = useState<BookingSummary[]>([]);
   const [bookingsLoading, setBookingsLoading] = useState(false);
   const [bookingsError, setBookingsError] = useState<string | null>(null);
   const [loadingMembers, setLoadingMembers] = useState(true);
+  const [conflictWarning, setConflictWarning] = useState<ConflictWarning | null>(null);
 
   const selectedMember = useMemo(
     () => members.find((member) => member.id === selected && member.isTeam) ?? null,
@@ -87,6 +99,8 @@ export default function AdminAvailabilityPage() {
         const enriched: Member[] = rawUsers.map((entry) => {
           const roles = extractUserRoles({ ...(entry ?? {}), uid: entry?.id });
           const crmStatus = normaliseCrmStatus(entry?.crmStatus);
+          const franchiseIds = normaliseFranchiseIds(entry?.franchiseIds);
+          const primaryFranchiseId = normaliseFranchiseId(entry?.primaryFranchiseId);
           const isTeam =
             entry?.contractor === true ||
             entry?.isStaff === true ||
@@ -101,6 +115,8 @@ export default function AdminAvailabilityPage() {
             roles,
             crmStatus,
             isTeam,
+            franchiseIds,
+            primaryFranchiseId,
           };
         });
         setMembers(enriched);
@@ -171,6 +187,7 @@ export default function AdminAvailabilityPage() {
   useEffect(() => {
     if (!allowed || !selectedMember) {
       setBookings([]);
+      setAllBookings([]);
       setBookingsLoading(false);
       setBookingsError(null);
       return;
@@ -218,15 +235,16 @@ export default function AdminAvailabilityPage() {
             const aTime = a.start ? a.start.getTime() : Number.POSITIVE_INFINITY;
             const bTime = b.start ? b.start.getTime() : Number.POSITIVE_INFINITY;
             return aTime - bTime;
-          })
-          .slice(0, 5);
+          });
 
-        setBookings(items);
+        setAllBookings(items);
+        setBookings(items.slice(0, 5));
       } catch (error) {
         console.error("Failed to load bookings", error);
         if (!cancelled) {
           setBookingsError("We couldn't load upcoming bookings. Please try again.");
           setBookings([]);
+          setAllBookings([]);
         }
       } finally {
         if (!cancelled) {
@@ -239,6 +257,62 @@ export default function AdminAvailabilityPage() {
       cancelled = true;
     };
   }, [allowed, selectedMember]);
+
+  const bookingConflictsByDate = useMemo(() => {
+    const index: Record<string, BookingSummary[]> = {};
+    allBookings.forEach((booking) => {
+      if (!booking.dateKey) return;
+      if (!index[booking.dateKey]) {
+        index[booking.dateKey] = [];
+      }
+      index[booking.dateKey].push(booking);
+    });
+    return index;
+  }, [allBookings]);
+
+  const memberType = useMemo(() => resolveMemberType(selectedMember), [selectedMember]);
+
+  useEffect(() => {
+    setConflictWarning(null);
+  }, [selectedMember?.id]);
+
+  useEffect(() => {
+    setConflictWarning((current) => {
+      if (!current) return current;
+      const conflicts = bookingConflictsByDate[current.date] ?? [];
+      if (conflicts.length === 0 || current.status === "booked") {
+        return null;
+      }
+      return { ...current, bookings: conflicts };
+    });
+  }, [bookingConflictsByDate]);
+
+  const checkForConflicts = useCallback(
+    (date: string, status: AvailabilityStatus) => {
+      if (!selectedMember) {
+        setConflictWarning(null);
+        return;
+      }
+      const conflicts = bookingConflictsByDate[date] ?? [];
+      if (conflicts.length === 0 || status === "booked") {
+        setConflictWarning((current) => {
+          if (!current) return current;
+          if (current.date !== date) return current;
+          return null;
+        });
+        return;
+      }
+
+      setConflictWarning({
+        date,
+        status,
+        bookings: conflicts,
+        member: selectedMember,
+        memberType,
+      });
+    },
+    [bookingConflictsByDate, memberType, selectedMember]
+  );
 
   const resolveDb = async (): Promise<Firestore> => {
     const { db } = await ensureFirebase();
@@ -254,6 +328,7 @@ export default function AdminAvailabilityPage() {
     }
     const previous = availability[date];
     setAvailability((current) => ({ ...current, [date]: status }));
+    checkForConflicts(date, status);
 
     try {
       const db = await resolveDb();
@@ -374,6 +449,11 @@ export default function AdminAvailabilityPage() {
 
             <AvailabilityCalendar availability={availability} onChange={updateDay} />
 
+            <AvailabilityConflictNotice
+              warning={conflictWarning}
+              onDismiss={() => setConflictWarning(null)}
+            />
+
             <section
               aria-labelledby="calendar-legend-heading"
               className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
@@ -430,6 +510,18 @@ interface BookingSummary {
   status: string | null;
   title: string | null;
   location: string | null;
+  dateKey: string | null;
+  projectId: string | null;
+}
+
+type MemberType = "franchisee" | "team";
+
+interface ConflictWarning {
+  date: string;
+  status: AvailabilityStatus;
+  bookings: BookingSummary[];
+  member: Member;
+  memberType: MemberType;
 }
 
 const ROLE_DISPLAY_PRIORITY: RoleKey[] = [
@@ -583,6 +675,110 @@ const UpcomingBookings = ({
   </section>
 );
 
+const AvailabilityConflictNotice = ({
+  warning,
+  onDismiss,
+}: {
+  warning: ConflictWarning | null;
+  onDismiss: () => void;
+}) => {
+  const [copied, setCopied] = useState(false);
+
+  if (!warning) {
+    return null;
+  }
+
+  const { date, bookings, member, memberType } = warning;
+  const friendlyDate = formatDisplayDate(date);
+  const label = resolveTeamMemberLabel(member);
+  const summary = buildConflictSummary(label, friendlyDate, bookings);
+
+  const handleCopy = async () => {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(summary);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 3000);
+        return;
+      }
+      throw new Error("Clipboard API is unavailable");
+    } catch (error) {
+      console.error("Failed to copy coverage request", error);
+      setCopied(false);
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 shadow-sm">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-amber-900">Existing booking on {friendlyDate}</h2>
+          <p className="mt-1 text-sm text-amber-900">
+            {memberType === "franchisee"
+              ? "This date already has a confirmed booking you are responsible for. Please either keep cover in place or offer it to HQ/another franchise before rescheduling with the client."
+              : "This date already has a confirmed booking. Please coordinate with your franchise owner or HQ so they can arrange cover before you step away."}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="self-start rounded-md border border-transparent bg-amber-100 px-2 py-1 text-xs font-medium text-amber-900 transition hover:bg-amber-200"
+        >
+          Dismiss
+        </button>
+      </div>
+      <ul className="mt-3 space-y-2">
+        {bookings.map((booking) => (
+          <li key={booking.id} className="rounded border border-amber-200 bg-white/60 px-3 py-2 text-sm text-amber-900">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium">{booking.title ?? "Booking"}</span>
+              {booking.status && <StatusPill status={booking.status} />}
+            </div>
+            <dl className="mt-1 space-y-1 text-xs text-amber-800">
+              <div className="flex items-center gap-1">
+                <CalendarIcon className="h-4 w-4 text-amber-600" aria-hidden="true" />
+                <dd>{formatDateRange(booking.start, booking.end)}</dd>
+              </div>
+              {booking.location && (
+                <div className="flex items-center gap-1">
+                  <MapPinIcon className="h-4 w-4 text-amber-600" aria-hidden="true" />
+                  <dd>{booking.location}</dd>
+                </div>
+              )}
+              {booking.projectId && (
+                <div className="flex items-center gap-1">
+                  <dd>
+                    Project ID: <span className="font-mono">{booking.projectId}</span>
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="inline-flex items-center justify-center rounded-md bg-amber-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-700"
+        >
+          {memberType === "franchisee" ? "Copy coverage request details" : "Copy handover summary"}
+        </button>
+        {copied && <span className="text-xs text-amber-800">Copied. Share this with your support contact.</span>}
+        {memberType === "franchisee" ? (
+          <p className="text-xs text-amber-800">
+            Tip: Share this summary with HQ or neighbouring franchises to request cover before contacting the client.
+          </p>
+        ) : (
+          <p className="text-xs text-amber-800">
+            Tip: Send this summary to your franchise owner or HQ so they can coordinate a replacement.
+          </p>
+        )}
+      </div>
+    </section>
+  );
+};
+
 const parseDate = (value: unknown): Date | null => {
   if (!value) return null;
   if (value instanceof Date) return new Date(value.getTime());
@@ -623,6 +819,8 @@ const toBookingSummary = (
       ? (rawSlot as { date?: string | null; start?: string | null; end?: string | null })
       : null;
 
+  const slotDate = typeof slot?.date === "string" && slot.date.trim().length > 0 ? slot.date.trim() : null;
+
   const start =
     parseDate(data.start) ||
     combineDateAndTime(slot?.date ?? null, slot?.start ?? null) ||
@@ -649,6 +847,19 @@ const toBookingSummary = (
       ? data.location.trim()
       : null;
 
+  const projectId =
+    typeof data.projectId === "string" && data.projectId.trim().length > 0
+      ? data.projectId.trim()
+      : null;
+
+  const derivedDate = start ?? parseDate(slotDate ?? null);
+  let dateKey: string | null = null;
+  if (derivedDate) {
+    dateKey = formatDateKey(derivedDate);
+  } else if (slotDate) {
+    dateKey = normaliseDateKey(slotDate);
+  }
+
   return {
     id,
     start,
@@ -656,6 +867,8 @@ const toBookingSummary = (
     status,
     title,
     location,
+    dateKey,
+    projectId,
   };
 };
 
@@ -690,6 +903,79 @@ const formatDateRange = (start: Date | null, end: Date | null) => {
     hour: "2-digit",
     minute: "2-digit",
   }).format(single!);
+};
+
+const formatDateKey = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const normaliseDateKey = (input: string) => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(input)) {
+    return input;
+  }
+  const parsed = parseDate(input);
+  return parsed ? formatDateKey(parsed) : null;
+};
+
+const formatDisplayDate = (input: string) => {
+  const parsed = parseDate(input) ?? parseDate(`${input}T00:00:00`);
+  if (!parsed) {
+    return input;
+  }
+  return new Intl.DateTimeFormat("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(parsed);
+};
+
+const buildConflictSummary = (
+  memberLabel: string,
+  dateLabel: string,
+  bookings: BookingSummary[]
+) => {
+  const lines = [`Availability change for ${memberLabel} on ${dateLabel}`, "Conflicting bookings:"];
+  bookings.forEach((booking, index) => {
+    const title = booking.title ?? "Booking";
+    const schedule = formatDateRange(booking.start, booking.end);
+    const location = booking.location ? ` @ ${booking.location}` : "";
+    const reference = booking.projectId ? ` [Project: ${booking.projectId}]` : "";
+    lines.push(`${index + 1}. ${title}${location}${reference} — ${schedule}`);
+  });
+  return lines.join("\n");
+};
+
+const normaliseFranchiseIds = (input: unknown): string[] => {
+  if (!input) return [];
+  const values = Array.isArray(input) ? input : [input];
+  return values
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((value) => value.length > 0);
+};
+
+const normaliseFranchiseId = (input: unknown): string | null => {
+  if (typeof input === "string") {
+    const trimmed = input.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  return null;
+};
+
+const resolveMemberType = (member: Member | null): MemberType => {
+  if (!member) {
+    return "team";
+  }
+  if (member.isStaff) {
+    return "team";
+  }
+  if (member.franchiseIds.length > 0) {
+    return "franchisee";
+  }
+  return "team";
 };
 
 const CalendarIcon = (props: SVGProps<SVGSVGElement>) => (
