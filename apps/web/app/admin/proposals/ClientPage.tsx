@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { auth, db } from '@/lib/firebase';
 import { collection, doc, getDoc, getDocs, updateDoc } from 'firebase/firestore';
@@ -20,6 +20,55 @@ export default function AdminQuotesProposalsPage() {
   const [proposals, setProposals] = useState<any[]>([]);
   const [quotes, setQuotes] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
+
+  const shortId = (id?: string) => (id ? id.substring(0, 6) : '');
+
+  const resolveProposalLabel = (proposal: any) => {
+    const coreLabel =
+      proposal?.title ||
+      proposal?.projectName ||
+      proposal?.name ||
+      proposal?.clientCompany ||
+      proposal?.clientName ||
+      '';
+
+    if (coreLabel) return coreLabel;
+    return `Proposal ${shortId(proposal?.id)}`.trim();
+  };
+
+  const userDirectory = useMemo(() => {
+    return new Map(users.map((user) => [user.id, user]));
+  }, [users]);
+
+  const resolveQuoteLabel = (quote: any) => {
+    const coreLabel =
+      quote?.projectName ||
+      quote?.service ||
+      quote?.projectType ||
+      quote?.eventType ||
+      quote?.requestType ||
+      quote?.title ||
+      quote?.companyName ||
+      quote?.contactName ||
+      '';
+
+    if (coreLabel) return coreLabel;
+    return `Quote ${shortId(quote?.id)}`.trim();
+  };
+
+  const resolveQuoteClient = (quote: any) => {
+    const user = quote?.userId ? userDirectory.get(quote.userId) : undefined;
+    return (
+      quote?.contactName ||
+      quote?.clientName ||
+      user?.fullName ||
+      quote?.companyName ||
+      user?.email ||
+      quote?.userEmail ||
+      quote?.userId ||
+      '—'
+    );
+  };
 
   useEffect(() => {
     (async () => {
@@ -68,7 +117,7 @@ export default function AdminQuotesProposalsPage() {
       <table className="w-full text-sm">
         <thead>
           <tr className="text-left">
-            <th>ID</th>
+            <th>Proposal</th>
             <th>Client</th>
             <th>Status</th>
             <th></th>
@@ -77,8 +126,13 @@ export default function AdminQuotesProposalsPage() {
         <tbody>
           {list.map((p) => (
             <tr key={p.id} className="border-t">
-              <td>{p.id.substring(0,6)}</td>
-              <td>{p.clientEmail}</td>
+              <td>
+                <div className="flex flex-col">
+                  <span className="font-medium">{resolveProposalLabel(p)}</span>
+                  <span className="text-xs text-gray-500">{shortId(p.id)}</span>
+                </div>
+              </td>
+              <td>{p.clientName || p.clientEmail || '—'}</td>
               <td>
                 <select
                   className="input p-1"
@@ -107,7 +161,7 @@ export default function AdminQuotesProposalsPage() {
       <table className="w-full text-sm">
         <thead>
           <tr className="text-left">
-            <th>ID</th>
+            <th>Quote</th>
             <th>Project</th>
             <th>Client</th>
             <th>Status</th>
@@ -117,9 +171,14 @@ export default function AdminQuotesProposalsPage() {
         <tbody>
           {list.map((q) => (
             <tr key={q.id} className="border-t">
-              <td>{q.id.substring(0,6)}</td>
+              <td>
+                <div className="flex flex-col">
+                  <span className="font-medium">{resolveQuoteLabel(q)}</span>
+                  <span className="text-xs text-gray-500">{shortId(q.id)}</span>
+                </div>
+              </td>
               <td>{q.projectName || '-'}</td>
-              <td>{users.find((u) => u.id === q.userId)?.fullName || q.userId}</td>
+              <td>{resolveQuoteClient(q)}</td>
               <td>
                 <select
                   className="input p-1"

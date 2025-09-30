@@ -49,12 +49,26 @@ interface QuoteRecord {
   id: string;
   status?: string | null;
   projectName?: string | null;
+  contactName?: string | null;
+  clientName?: string | null;
+  companyName?: string | null;
+  service?: string | null;
+  projectType?: string | null;
+  requestType?: string | null;
+  eventType?: string | null;
+  title?: string | null;
+  userId?: string | null;
+  userEmail?: string | null;
   createdAt?: any;
 }
 
 interface ProposalRecord {
   id: string;
   status?: string | null;
+  title?: string | null;
+  projectName?: string | null;
+  clientName?: string | null;
+  clientCompany?: string | null;
   clientEmail?: string | null;
   createdAt?: any;
 }
@@ -102,6 +116,51 @@ function formatCurrency(amount: number): string {
     currency: 'GBP',
     maximumFractionDigits: 2,
   }).format(amount || 0);
+}
+
+function shortId(value?: string | null): string {
+  if (!value) return '';
+  return value.slice(0, 8);
+}
+
+function resolveQuoteLabel(quote: QuoteRecord): string {
+  const label =
+    quote?.projectName ||
+    quote?.service ||
+    quote?.projectType ||
+    quote?.eventType ||
+    quote?.requestType ||
+    quote?.title ||
+    quote?.companyName ||
+    quote?.contactName ||
+    quote?.clientName ||
+    '';
+  if (label) return label;
+  return `Quote ${shortId(quote?.id)}`.trim();
+}
+
+function resolveQuoteClient(quote: QuoteRecord, customer?: CRMUserRecord | null): string {
+  return (
+    quote?.contactName ||
+    quote?.clientName ||
+    quote?.companyName ||
+    customer?.fullName ||
+    customer?.email ||
+    quote?.userEmail ||
+    quote?.userId ||
+    '—'
+  );
+}
+
+function resolveProposalLabel(proposal: ProposalRecord): string {
+  const label =
+    proposal?.title ||
+    proposal?.projectName ||
+    proposal?.clientCompany ||
+    proposal?.clientName ||
+    '';
+  if (label) return label;
+  return `Proposal ${shortId(proposal?.id)}`.trim();
 }
 
 export default function AdminUserDetailPage() {
@@ -553,7 +612,7 @@ export default function AdminUserDetailPage() {
                 <table className="min-w-full text-sm">
                   <thead>
                     <tr className="text-left text-xs uppercase text-gray-500">
-                      <th className="p-2">Reference</th>
+                      <th className="p-2">Quote</th>
                       <th className="p-2">Project</th>
                       <th className="p-2">Status</th>
                       <th className="p-2">Requested</th>
@@ -564,7 +623,15 @@ export default function AdminUserDetailPage() {
                       <tr key={quote.id} className="border-t">
                         <td className="p-2">
                           <Link className="text-orange" href={`/crm/quotes/${quote.id}`}>
-                            {quote.id.slice(0, 8)}
+                            <span className="block font-medium text-gray-900">
+                              {resolveQuoteLabel(quote)}
+                            </span>
+                            <span className="block text-xs text-gray-600">
+                              {resolveQuoteClient(quote, user)}
+                            </span>
+                            <span className="block text-xs text-gray-500">
+                              {shortId(quote.id)}
+                            </span>
                           </Link>
                         </td>
                         <td className="p-2">{quote.projectName || '—'}</td>
@@ -586,7 +653,7 @@ export default function AdminUserDetailPage() {
                 <table className="min-w-full text-sm">
                   <thead>
                     <tr className="text-left text-xs uppercase text-gray-500">
-                      <th className="p-2">Reference</th>
+                      <th className="p-2">Proposal</th>
                       <th className="p-2">Status</th>
                       <th className="p-2">Sent</th>
                     </tr>
@@ -594,7 +661,19 @@ export default function AdminUserDetailPage() {
                   <tbody>
                     {proposals.map((proposal) => (
                       <tr key={proposal.id} className="border-t">
-                        <td className="p-2">{proposal.id.slice(0, 8)}</td>
+                        <td className="p-2">
+                          <div className="grid gap-0.5">
+                            <span className="font-medium text-gray-900">
+                              {resolveProposalLabel(proposal)}
+                            </span>
+                            {(proposal.clientName || proposal.clientEmail) && (
+                              <span className="text-xs text-gray-600">
+                                {proposal.clientName || proposal.clientEmail}
+                              </span>
+                            )}
+                            <span className="text-xs text-gray-500">{shortId(proposal.id)}</span>
+                          </div>
+                        </td>
                         <td className="p-2 capitalize">{proposal.status || 'sent'}</td>
                         <td className="p-2">{formatDate(proposal.createdAt)}</td>
                       </tr>
