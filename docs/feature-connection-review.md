@@ -40,6 +40,15 @@ This note captures portal features that are implemented in the codebase but are 
   2. Clarify empty-state copy and permissions so users without email threads understand how the feature should be used.
   3. Add tracking to measure adoption once the entry point is live.
 
+## Social scheduling module (feature-flagged)
+- **What exists:** No surfaced UI yet, but product requirements now specify account connections, scheduling workflows, publishing workers, analytics integration, and feature flag layering for staged rollout.【F:docs/social-scheduling-module.md†L1-L152】
+- **Connection gap:** The client portal, franchise portal, and admin tools lack navigation, settings, and data structures to expose or control the module.
+- **Follow-up tasks:**
+  1. Implement Firestore collections and security rules for `socialAccounts`, `socialPosts`, variants, targets, and analytics, plus secure token storage.
+  2. Build admin and franchise feature flag management to enable the module for test organisations without global exposure.
+  3. Deliver the account connection hub, composer, calendar, approval flow, and CSV/ICS export experience in the portal before toggling visibility for clients.
+  4. Instrument publishing workers with alerting and reporting so operations can monitor failures prior to public launch.
+
 ## Organisation manager (`/orgs`)
 - **What exists:** Users can list their organisations, create new ones, and jump into an org detail page, with membership documents created automatically for new orgs.【F:apps/web/app/orgs/page.tsx†L1-L114】【F:apps/web/app/orgs/new/page.tsx†L1-L49】
 - **Connection gap:** There is no discoverable path to `/orgs`; current navigation omits any account or organisation management links, so the tooling is hidden behind direct URLs.【F:apps/web/components/AuthLinks.tsx†L342-L393】【F:apps/web/app/dashboard/ClientPage.tsx†L223-L240】
