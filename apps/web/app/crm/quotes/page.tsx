@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { collection, doc, getDoc, getDocs } from 'firebase/firestore';
 import { ensureFirebase } from '@/lib/firebase';
@@ -9,6 +9,45 @@ export default function QuoteRequestsPage() {
   const [requests, setRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const shortId = (id?: string) => (id ? id.substring(0, 6) : '');
+
+  const resolveQuoteLabel = (record: any) => {
+    const coreLabel =
+      record?.projectName ||
+      record?.service ||
+      record?.projectType ||
+      record?.eventType ||
+      record?.requestType ||
+      record?.title ||
+      record?.companyName ||
+      record?.contactName ||
+      '';
+
+    if (coreLabel) return coreLabel;
+    return `Quote ${shortId(record?.id)}`.trim();
+  };
+
+  const resolveClientLabel = (record: any) => {
+    return (
+      record?.contactName ||
+      record?.clientName ||
+      record?.user?.fullName ||
+      record?.companyName ||
+      record?.user?.email ||
+      record?.userEmail ||
+      record?.userId ||
+      '—'
+    );
+  };
+
+  const requestsSorted = useMemo(() => {
+    return [...requests].sort((a, b) => {
+      const aDate = a?.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
+      const bDate = b?.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
+      return bDate - aDate;
+    });
+  }, [requests]);
 
   useEffect(() => {
     let cancelled = false;
@@ -65,13 +104,13 @@ export default function QuoteRequestsPage() {
           {error}
         </p>
       )}
-      {requests.length === 0 ? (
+      {requestsSorted.length === 0 ? (
         <p>No quote requests.</p>
       ) : (
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left">
-              <th>ID</th>
+              <th>Quote</th>
               <th>Project</th>
               <th>Client</th>
               <th>Submitted</th>
@@ -80,11 +119,16 @@ export default function QuoteRequestsPage() {
             </tr>
           </thead>
           <tbody>
-            {requests.map((r) => (
+            {requestsSorted.map((r) => (
               <tr key={r.id} className="border-t">
-                <td>{r.id.substring(0, 6)}</td>
+                <td>
+                  <div className="flex flex-col">
+                    <span className="font-medium">{resolveQuoteLabel(r)}</span>
+                    <span className="text-xs text-gray-500">{shortId(r.id)}</span>
+                  </div>
+                </td>
                 <td>{r.projectName || '-'}</td>
-                <td>{r.user?.fullName || r.user?.email || r.userId}</td>
+                <td>{resolveClientLabel(r)}</td>
                 <td>
                   {r.createdAt?.toDate
                     ? r.createdAt.toDate().toLocaleDateString()

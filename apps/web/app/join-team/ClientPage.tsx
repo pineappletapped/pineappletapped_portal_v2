@@ -1,6 +1,6 @@
 "use client";
 import Image from 'next/image';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { db } from '@/lib/firebase';
 import {
   collection,
@@ -34,11 +34,29 @@ type TerritoryOption = {
   label: string;
   summary: string;
   categoryIds: string[];
+  type: 'postal' | 'radius';
+  centerLat: number | null;
+  centerLng: number | null;
+  postalCodes: string[];
 };
 
 type CategoryOption = {
   id: string;
   name: string;
+};
+
+const normalisePostalCodeValue = (value: string): string => value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+const haversineDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+  const toRad = (degrees: number) => (degrees * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distance = 6371 * c;
+  return Number.isFinite(distance) ? distance : Number.NaN;
 };
 
 export default function JoinTeamPage() {
@@ -64,6 +82,21 @@ export default function JoinTeamPage() {
   const [selectedTerritories, setSelectedTerritories] = useState<string[]>([]);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [franchiseValidationError, setFranchiseValidationError] = useState<string | null>(null);
+  const [postcodeInput, setPostcodeInput] = useState('');
+  const [postcodeLookupStatus, setPostcodeLookupStatus] = useState<'idle' | 'loading' | 'success' | 'notfound' | 'error'>('idle');
+  const [postcodeLookupError, setPostcodeLookupError] = useState<string | null>(null);
+  const [postcodeLookupResult, setPostcodeLookupResult] = useState<
+    | {
+        raw: string;
+        normalised: string;
+        resolved: string;
+        lat: number;
+        lng: number;
+      }
+    | null
+  >(null);
+  const [territorySuggestions, setTerritorySuggestions] = useState<Array<{ id: string; distanceKm: number | null }>>([]);
+  const postalCodeLocationCache = useRef(new Map<string, { lat: number; lng: number; resolved?: string }>());
 
   useEffect(() => {
     let isMounted = true;
@@ -125,6 +158,19 @@ export default function JoinTeamPage() {
               label,
               summary,
               categoryIds,
+              type: type === 'radius' ? 'radius' : 'postal',
+              centerLat: typeof data.centerLat === 'number' ? data.centerLat : null,
+              centerLng: typeof data.centerLng === 'number' ? data.centerLng : null,
+              postalCodes: Array.isArray(data.postalCodes)
+                ? (data.postalCodes as unknown[])
+                    .map((value) => (typeof value === 'string' ? value : String(value ?? '')).trim())
+                    .filter((value) => value.length > 0)
+                : typeof data.postalCodes === 'string'
+                ? data.postalCodes
+                    .split(/\r?\n|,/)
+                    .map((value) => value.trim())
+                    .filter((value) => value.length > 0)
+                : [],
             } satisfies TerritoryOption;
           })
           .filter((option): option is TerritoryOption => option !== null)
@@ -199,6 +245,198 @@ export default function JoinTeamPage() {
     return map;
   }, [categoryOptions]);
 
+  useEffect(() => {
+    setTerritorySuggestions((prev) => prev.filter((suggestion) => territoryMap.has(suggestion.id)));
+    setSelectedTerritories((prev) => prev.filter((id) => territoryMap.has(id)));
+  }, [territoryMap]);
+
+  const geocodePostalCode = useCallback(
+    async (postalCode: string): Promise<
+      | {
+          lat: number;
+          lng: number;
+          normalised: string;
+          resolved: string;
+        }
+      | null
+    > => {
+      const normalised = normalisePostalCodeValue(postalCode);
+      if (!normalised) {
+        return null;
+      }
+      const cached = postalCodeLocationCache.current.get(normalised);
+      if (cached) {
+        return {
+          lat: cached.lat,
+          lng: cached.lng,
+          normalised,
+          resolved: cached.resolved ?? normalised,
+        };
+      }
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 7000);
+      try {
+        const response = await fetch(
+          `https://api.postcodes.io/postcodes/${encodeURIComponent(normalised)}`,
+          {
+            headers: { Accept: 'application/json' },
+            signal: controller.signal,
+          }
+        );
+        if (response.status === 404) {
+          return null;
+        }
+        if (!response.ok) {
+          throw new Error(`Lookup failed with status ${response.status}`);
+        }
+        const payload = (await response.json()) as {
+          result?: { latitude?: number; longitude?: number; postcode?: string } | null;
+        };
+        const latitude = typeof payload?.result?.latitude === 'number' ? payload.result.latitude : null;
+        const longitude = typeof payload?.result?.longitude === 'number' ? payload.result.longitude : null;
+        if (latitude == null || longitude == null) {
+          return null;
+        }
+        const resolved = typeof payload?.result?.postcode === 'string' ? payload.result.postcode : normalised;
+        postalCodeLocationCache.current.set(normalised, { lat: latitude, lng: longitude, resolved });
+        return { lat: latitude, lng: longitude, normalised, resolved };
+      } catch (error) {
+        if ((error as Error)?.name === 'AbortError') {
+          throw new Error('Lookup timed out');
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+    },
+    []
+  );
+
+  const computeTerritoryDistance = useCallback(
+    async (
+      option: TerritoryOption,
+      reference: { lat: number; lng: number; normalised: string }
+    ): Promise<number | null> => {
+      if (option.type === 'radius' && option.centerLat != null && option.centerLng != null) {
+        const distance = haversineDistanceKm(reference.lat, reference.lng, option.centerLat, option.centerLng);
+        return Number.isFinite(distance) ? distance : null;
+      }
+      if (!option.postalCodes.length) {
+        return null;
+      }
+      let bestDistance: number | null = null;
+      for (const rawCode of option.postalCodes) {
+        const code = normalisePostalCodeValue(rawCode);
+        if (!code) {
+          continue;
+        }
+        let location = postalCodeLocationCache.current.get(code);
+        if (!location) {
+          const lookup = await geocodePostalCode(code);
+          if (!lookup) {
+            continue;
+          }
+          location = { lat: lookup.lat, lng: lookup.lng, resolved: lookup.resolved };
+          postalCodeLocationCache.current.set(code, location);
+        }
+        const distance = haversineDistanceKm(reference.lat, reference.lng, location.lat, location.lng);
+        if (Number.isFinite(distance)) {
+          bestDistance = bestDistance == null ? distance : Math.min(bestDistance, distance);
+        }
+      }
+      if (bestDistance != null) {
+        return bestDistance;
+      }
+      const inputCode = reference.normalised;
+      const hasTextMatch = option.postalCodes
+        .map((value) => normalisePostalCodeValue(value))
+        .filter((value) => value.length > 0)
+        .some((code) => code === inputCode || inputCode.startsWith(code) || code.startsWith(inputCode));
+      return hasTextMatch ? 0 : null;
+    },
+    [geocodePostalCode]
+  );
+
+  const handlePostcodeLookup = useCallback(async () => {
+    if (territoryOptions.length === 0) {
+      setPostcodeLookupStatus('error');
+      setPostcodeLookupError('We don\'t have any franchise territories open right now.');
+      setPostcodeLookupResult(null);
+      setTerritorySuggestions([]);
+      setSelectedTerritories([]);
+      return;
+    }
+    const trimmed = postcodeInput.trim();
+    if (!trimmed) {
+      setPostcodeLookupStatus('error');
+      setPostcodeLookupError('Please enter a postcode to search for nearby territories.');
+      setPostcodeLookupResult(null);
+      setTerritorySuggestions([]);
+      setSelectedTerritories([]);
+      return;
+    }
+    setPostcodeLookupStatus('loading');
+    setPostcodeLookupError(null);
+    try {
+      const lookup = await geocodePostalCode(trimmed);
+      if (!lookup) {
+        setPostcodeLookupStatus('notfound');
+        setPostcodeLookupResult(null);
+        setTerritorySuggestions([]);
+        setSelectedTerritories([]);
+        return;
+      }
+
+      setPostcodeLookupResult({
+        raw: trimmed,
+        normalised: lookup.normalised,
+        resolved: lookup.resolved,
+        lat: lookup.lat,
+        lng: lookup.lng,
+      });
+
+      const distanceResults = await Promise.all(
+        territoryOptions.map(async (option) => {
+          const distanceKm = await computeTerritoryDistance(option, lookup);
+          return { id: option.id, distanceKm };
+        })
+      );
+
+      const withDistance = distanceResults
+        .filter((item) => item.distanceKm != null && Number.isFinite(item.distanceKm))
+        .map((item) => ({ id: item.id, distanceKm: item.distanceKm as number }))
+        .sort((a, b) => a.distanceKm - b.distanceKm);
+
+      const withoutDistance = distanceResults
+        .filter((item) => item.distanceKm == null || !Number.isFinite(item.distanceKm))
+        .map((item) => ({ id: item.id, distanceKm: null }))
+        .sort((a, b) => {
+          const aLabel = territoryMap.get(a.id)?.label ?? '';
+          const bLabel = territoryMap.get(b.id)?.label ?? '';
+          return aLabel.localeCompare(bLabel);
+        });
+
+      const combined = [...withDistance, ...withoutDistance].slice(0, 3);
+      setTerritorySuggestions(combined);
+      setSelectedTerritories((prev) => prev.filter((id) => combined.some((item) => item.id === id)));
+      setPostcodeLookupStatus('success');
+      setFranchiseValidationError(null);
+    } catch (error) {
+      console.error('Postcode lookup failed', error);
+      setPostcodeLookupStatus('error');
+      setPostcodeLookupError('We were unable to search for nearby territories. Please try again.');
+      setPostcodeLookupResult(null);
+      setTerritorySuggestions([]);
+      setSelectedTerritories([]);
+    }
+  }, [
+    computeTerritoryDistance,
+    geocodePostalCode,
+    postcodeInput,
+    territoryMap,
+    territoryOptions,
+  ]);
+
   const resetAgreementForTab = (tab: 'team' | 'franchise') => {
     if (tab === 'team') {
       setTeamAgree(false);
@@ -266,7 +504,11 @@ export default function JoinTeamPage() {
   const handleFranchiseSubmit = async () => {
     if (franchiseSubmitting) return;
     const territorySelectionRequired = territoryOptions.length > 0;
-    if (territorySelectionRequired && selectedTerritories.length === 0) {
+    if (territorySelectionRequired && postcodeLookupStatus === 'idle') {
+      setFranchiseValidationError('Enter your postcode so we can suggest territories before submitting.');
+      return;
+    }
+    if (territorySelectionRequired && territorySuggestions.length > 0 && selectedTerritories.length === 0) {
       setFranchiseValidationError('Please choose at least one territory you would like to service.');
       return;
     }
@@ -279,6 +521,13 @@ export default function JoinTeamPage() {
       const selectedCategoryLabels = selectedCategories.map(
         (id) => categoryMap.get(id)?.name ?? id
       );
+      const trimmedPostcode = postcodeInput.trim();
+      const normalisedPostcode = trimmedPostcode ? normalisePostalCodeValue(trimmedPostcode) : '';
+      const suggestionIds = territorySuggestions.map((item) => item.id);
+      const suggestionLabels = territorySuggestions.map((item) => territoryMap.get(item.id)?.label ?? item.id);
+      const suggestionDistances = territorySuggestions.map((item) =>
+        item.distanceKm != null && Number.isFinite(item.distanceKm) ? item.distanceKm : null
+      );
       await addDoc(collection(db, 'franchiseApplications'), {
         ...franchiseForm,
         stepIds: franchiseSteps.map((item) => item.id),
@@ -288,11 +537,22 @@ export default function JoinTeamPage() {
         preferredTerritoryLabels: selectedTerritoryLabels,
         preferredCategoryIds: selectedCategories,
         preferredCategoryLabels: selectedCategoryLabels,
+        searchPostalCode: postcodeLookupResult?.raw ?? (trimmedPostcode || null),
+        searchPostalCodeNormalised:
+          postcodeLookupResult?.normalised ?? (normalisedPostcode ? normalisedPostcode : null),
+        searchPostalCodeResolved: postcodeLookupResult?.resolved ?? null,
+        searchPostalCodeLat: postcodeLookupResult?.lat ?? null,
+        searchPostalCodeLng: postcodeLookupResult?.lng ?? null,
+        territorySuggestionIds: suggestionIds,
+        territorySuggestionLabels: suggestionLabels,
+        territorySuggestionDistancesKm: suggestionDistances,
         createdAt: serverTimestamp()
       });
       setFranchiseSent(true);
       setSelectedTerritories([]);
       setSelectedCategories([]);
+      setTerritorySuggestions([]);
+      setPostcodeLookupResult(null);
       setFranchiseValidationError(null);
     } catch (error) {
       console.error('Failed to submit franchise application', error);
@@ -463,14 +723,15 @@ export default function JoinTeamPage() {
     }
 
     const territorySelectionRequired = territoryOptions.length > 0;
-    const submitEnabled = !territorySelectionRequired || selectedTerritories.length > 0;
+    const submitEnabled =
+      !territorySelectionRequired || territorySuggestions.length === 0 || selectedTerritories.length > 0;
 
     const territoryCard = (
       <section className="card grid gap-3 p-4">
         <div className="grid gap-1">
           <h2 className="text-lg font-semibold">Tell us where you&apos;d like to operate</h2>
           <p className="text-sm text-gray-600">
-            Choose the franchise territories you&apos;re interested in so we can prioritise them during review.
+            Enter your postcode so we can recommend the closest franchise territories and prioritise them during review.
           </p>
         </div>
         {territoryOptions.length === 0 ? (
@@ -480,35 +741,103 @@ export default function JoinTeamPage() {
           </p>
         ) : (
           <div className="grid gap-2">
-            {territoryOptions.map((option) => {
-              const selected = selectedTerritories.includes(option.id);
-              const territoryCategories = option.categoryIds
-                .map((categoryId) => categoryMap.get(categoryId)?.name ?? categoryId)
-                .filter((name) => name.length > 0);
-              const baseClasses = 'flex items-start gap-3 rounded border p-3 transition';
-              const stateClasses = selected
-                ? ' border-blue-500 bg-blue-50'
-                : ' border-neutral-200 hover:border-blue-300';
-              return (
-                <label key={option.id} className={`${baseClasses}${stateClasses}`}>
-                  <input
-                    type="checkbox"
-                    className="mt-1 h-4 w-4"
-                    checked={selected}
-                    onChange={() => toggleTerritory(option.id)}
-                  />
-                  <div className="grid gap-1">
-                    <span className="font-medium">{option.label}</span>
-                    <span className="text-xs text-gray-600">{option.summary}</span>
-                    {territoryCategories.length > 0 && (
-                      <span className="text-[11px] uppercase tracking-wide text-gray-500">
-                        Services: {territoryCategories.join(', ')}
-                      </span>
-                    )}
-                  </div>
-                </label>
-              );
-            })}
+            <form
+              className="flex flex-col gap-2 sm:flex-row"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handlePostcodeLookup();
+              }}
+            >
+              <input
+                className="input flex-1"
+                value={postcodeInput}
+                onChange={(event) => setPostcodeInput(event.target.value)}
+                placeholder="Enter your postcode"
+                autoComplete="postal-code"
+                aria-label="Postcode"
+              />
+              <button
+                type="submit"
+                className="btn"
+                disabled={postcodeLookupStatus === 'loading' || territoryOptions.length === 0}
+              >
+                {postcodeLookupStatus === 'loading' ? 'Searching…' : 'Find nearby territories'}
+              </button>
+            </form>
+            {postcodeLookupStatus === 'notfound' && (
+              <p className="text-sm text-amber-600">
+                We couldn&apos;t find that postcode. Please double-check it and try again.
+              </p>
+            )}
+            {postcodeLookupStatus === 'error' && postcodeLookupError && (
+              <p className="text-sm text-red-600">{postcodeLookupError}</p>
+            )}
+            {postcodeLookupStatus === 'success' && postcodeLookupResult && (
+              <p className="text-xs text-gray-500">
+                Showing territories near {postcodeLookupResult.resolved}.
+              </p>
+            )}
+            {territorySuggestions.length > 0 ? (
+              <div className="grid gap-2">
+                <p className="text-sm text-gray-600">
+                  Select the locations you&apos;d like us to prioritise when we review your application.
+                </p>
+                {territorySuggestions.map((suggestion) => {
+                  const option = territoryMap.get(suggestion.id);
+                  if (!option) {
+                    return null;
+                  }
+                  const selected = selectedTerritories.includes(option.id);
+                  const territoryCategories = option.categoryIds
+                    .map((categoryId) => categoryMap.get(categoryId)?.name ?? categoryId)
+                    .filter((name) => name.length > 0);
+                  const baseClasses = 'flex items-start gap-3 rounded border p-3 transition';
+                  const stateClasses = selected
+                    ? ' border-blue-500 bg-blue-50'
+                    : ' border-neutral-200 hover:border-blue-300';
+                  return (
+                    <label key={option.id} className={`${baseClasses}${stateClasses}`}>
+                      <input
+                        type="checkbox"
+                        className="mt-1 h-4 w-4"
+                        checked={selected}
+                        onChange={() => toggleTerritory(option.id)}
+                      />
+                      <div className="grid gap-1">
+                        <span className="font-medium">{option.label}</span>
+                        <span className="text-xs text-gray-600">{option.summary}</span>
+                        {Number.isFinite(suggestion.distanceKm) && suggestion.distanceKm != null && (
+                          <span className="text-[11px] uppercase tracking-wide text-gray-500">
+                            {suggestion.distanceKm < 1
+                              ? 'Less than 1km away'
+                              : `${suggestion.distanceKm.toFixed(1)}km away`}
+                          </span>
+                        )}
+                        {territoryCategories.length > 0 && (
+                          <span className="text-[11px] uppercase tracking-wide text-gray-500">
+                            Services: {territoryCategories.join(', ')}
+                          </span>
+                        )}
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="grid gap-1 text-sm text-gray-500">
+                {postcodeLookupStatus === 'success' && postcodeLookupResult ? (
+                  <p>
+                    We couldn&apos;t find franchise territories near {postcodeLookupResult.resolved}. Submit your
+                    application and we&apos;ll reach out as new locations launch.
+                  </p>
+                ) : (
+                  <p>
+                    Enter your postcode above and we&apos;ll recommend the three closest franchise locations that currently
+                    have availability.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </section>

@@ -8,7 +8,7 @@ import { ensureFirebase } from "@/lib/firebase";
 import { useLeadSourceTag } from "@/hooks/useLeadSourceTag";
 
 interface VariationSummary {
-  id: string;
+  id?: string;
   label: string;
 }
 
@@ -39,6 +39,7 @@ export default function ProductQuoteRequestDialog({
   const [venueName, setVenueName] = useState("");
   const [venueLocation, setVenueLocation] = useState("");
   const [requirements, setRequirements] = useState("");
+  const [projectScope, setProjectScope] = useState("");
   const [additionalNotes, setAdditionalNotes] = useState("");
   const [status, setStatus] = useState<QuoteStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -112,11 +113,14 @@ export default function ProductQuoteRequestDialog({
     if (venueLocation.trim()) {
       parts.push(venueLocation.trim());
     }
+    if (projectScope.trim()) {
+      parts.push(`Scope: ${projectScope.trim()}`);
+    }
     if (requirements.trim()) {
       parts.push(`Requirements: ${requirements.trim()}`);
     }
     return parts.length > 0 ? parts.join(" | ") : null;
-  }, [variation, venueName, venueLocation, requirements]);
+  }, [variation, venueName, venueLocation, projectScope, requirements]);
 
   if (!open) {
     return null;
@@ -142,6 +146,7 @@ export default function ProductQuoteRequestDialog({
         venueName: venueName.trim() || null,
         venueLocation: venueLocation.trim() || null,
         requirements: requirements.trim() || null,
+        projectScope: projectScope.trim() || null,
         customRequest: additionalNotes.trim() || null,
         originProductId: product.id,
         quoteMode: "product",
@@ -171,6 +176,7 @@ export default function ProductQuoteRequestDialog({
       setVenueName("");
       setVenueLocation("");
       setRequirements("");
+      setProjectScope("");
       setAdditionalNotes("");
     } catch (err) {
       console.error("Failed to submit quote request", err);
@@ -302,6 +308,15 @@ export default function ProductQuoteRequestDialog({
                 onChange={(event) => setRequirements(event.target.value)}
                 required
                 placeholder="Share the scale, deliverables or special considerations we should know about"
+              />
+            </label>
+            <label className="grid gap-1 text-sm">
+              <span className="font-medium">Project scope (optional)</span>
+              <textarea
+                className="input min-h-[120px]"
+                value={projectScope}
+                onChange={(event) => setProjectScope(event.target.value)}
+                placeholder="Explain the overall brief or unique elements for this project"
               />
             </label>
             <label className="grid gap-1 text-sm">

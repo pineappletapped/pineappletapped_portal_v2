@@ -97,6 +97,90 @@ function parseInteger(value: unknown): number | null {
   return null;
 }
 
+type AffiliateResolution = {
+  id: string;
+  refCode: string;
+  name: string;
+  commissionRate: number;
+  status: string | null;
+};
+
+const AFFILIATE_VAT_RATE = 0.2;
+const AFFILIATE_DEFAULT_COMMISSION_RATE = 0.5;
+
+function extractAffiliateDetailFromLeadSource(tag: string): string | null {
+  if (typeof tag !== 'string') {
+    return null;
+  }
+  const trimmed = tag.trim();
+  if (!trimmed.toLowerCase().startsWith('franchise_affiliate')) {
+    return null;
+  }
+  const [, detailRaw] = trimmed.split(':');
+  const detail = (detailRaw ?? '').trim();
+  return detail || null;
+}
+
+async function resolveAffiliateByCode(code: string): Promise<AffiliateResolution | null> {
+  const trimmed = code.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const normalised = trimmed.toLowerCase();
+
+  const attemptLookup = async (field: string, value: string) => {
+    const snapshot = await db.collection('affiliates').where(field, '==', value).limit(1).get();
+    if (snapshot.empty) {
+      return null;
+    }
+    const doc = snapshot.docs[0];
+    const data = (doc.data() as Record<string, any>) || {};
+    const name =
+      typeof data.name === 'string' && data.name.trim().length > 0 ? data.name.trim() : 'Affiliate partner';
+    const commissionRateRaw = data.commissionRate;
+    const commissionRate =
+      typeof commissionRateRaw === 'number' && Number.isFinite(commissionRateRaw)
+        ? commissionRateRaw
+        : AFFILIATE_DEFAULT_COMMISSION_RATE;
+    const status = typeof data.status === 'string' ? data.status : null;
+    return {
+      id: doc.id,
+      refCode: typeof data.refCode === 'string' && data.refCode.trim() ? data.refCode.trim() : trimmed,
+      name,
+      commissionRate,
+      status,
+    } as AffiliateResolution;
+  };
+
+  const byLower = await attemptLookup('refCodeLower', normalised);
+  if (byLower) {
+    return byLower;
+  }
+  return attemptLookup('refCode', trimmed);
+}
+
+async function resolveAffiliateFromLeadSource(tag: string): Promise<AffiliateResolution | null> {
+  const detail = extractAffiliateDetailFromLeadSource(tag);
+  if (!detail) {
+    return null;
+  }
+  try {
+    return await resolveAffiliateByCode(detail);
+  } catch (error) {
+    console.error('Failed to resolve affiliate for lead source', tag, error);
+    return null;
+  }
+}
+
+function computeAffiliateCommission(baseAmount: number, commissionRate: number) {
+  const safeBase = baseAmount > 0 ? baseAmount : 0;
+  const safeRate = commissionRate > 0 ? commissionRate : AFFILIATE_DEFAULT_COMMISSION_RATE;
+  const net = Math.round(safeBase * safeRate * 100) / 100;
+  const vat = Math.round(net * AFFILIATE_VAT_RATE * 100) / 100;
+  const gross = Math.round((net + vat) * 100) / 100;
+  return { base: safeBase, rate: safeRate, net, vat, gross };
+}
+
 function parseSplitTerms(raw: unknown): StripeSplitTermConfig[] {
   if (!Array.isArray(raw)) {
     return [];
@@ -470,6 +554,13 @@ interface DriveSetupContext {
     emails: string[];
   };
   products: DriveOrderProductContext[];
+  affiliate: {
+    id: string;
+    name: string;
+    refCode: string;
+    status: string | null;
+    commissionRate: number;
+  } | null;
 }
 
 function normaliseDriveId(input: unknown): string | null {
@@ -1527,6 +1618,16 @@ async function setupClientDriveStructure(context: DriveSetupContext): Promise<vo
   if (franchiseEmails.length > 0) {
     clientUpdate.franchiseEmails = admin.firestore.FieldValue.arrayUnion(...franchiseEmails);
   }
+  if (context.affiliate) {
+    clientUpdate.affiliate = {
+      id: context.affiliate.id,
+      name: context.affiliate.name,
+      refCode: context.affiliate.refCode,
+      status: context.affiliate.status ?? null,
+      commissionRate: context.affiliate.commissionRate,
+      lastReferralAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+  }
 
   await clientDocRef.set(clientUpdate, { merge: true });
 
@@ -2541,11 +2642,17 @@ export const onOrderCreated = functions.firestore
     const filmingDueAt = admin.firestore.Timestamp.fromDate(filmingDueDate);
     const editingDueAt = admin.firestore.Timestamp.fromDate(editingDueDate);
 
+    const kitReservationStatus =
+      order.kitReservationStatus === 'pending' ? 'pending' : 'confirmed';
     const projectUpdates: Record<string, any> = {
       kickoffDate: admin.firestore.FieldValue.serverTimestamp(),
       dueDate: editingDueAt,
       filmingDueDate: filmingDueAt,
+      kitReservationStatus,
     };
+    if (Array.isArray(order.kitReservationWarnings) && order.kitReservationWarnings.length > 0) {
+      projectUpdates.kitReservationWarnings = order.kitReservationWarnings;
+    }
     if (order.budgetTotals) projectUpdates.budgetTotals = order.budgetTotals;
     const budgetItems = (order.items || []).map((item: any) => ({
       id: item.id,
@@ -2771,7 +2878,7 @@ export const onOrderCreated = functions.firestore
 
     // Record equipment bookings and usage logs
     const kitItems: any[] = order.kitItems || [];
-    if (Array.isArray(kitItems) && kitItems.length) {
+    if (kitReservationStatus === 'confirmed' && Array.isArray(kitItems) && kitItems.length) {
       const batch = db.batch();
       for (const item of kitItems) {
         if (!item.id || !item.start || !item.end) continue;
@@ -2975,7 +3082,9 @@ export const reserveKit = functions.https.onCall(async (data) => {
   const eqIds: string[] = required.flatMap((g: any) => g.items || []);
   const conflicts: any[] = [];
   const kitItems: any[] = [];
+  const missingStandards: string[] = [];
   let rentalTotal = 0;
+  let reservationStatus: 'confirmed' | 'pending' = 'confirmed';
   for (const id of eqIds) {
     const eqRef = db.collection('equipment').doc(id);
     const eqSnap = await eqRef.get();
@@ -2988,6 +3097,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
       .get();
     if (!bookings.empty) {
       conflicts.push({ id, name: eq.name || id });
+      reservationStatus = 'pending';
       continue;
     }
     if (standardsToEnforce.size > 0) {
@@ -3022,30 +3132,48 @@ export const reserveKit = functions.https.onCall(async (data) => {
     rentalTotal += eq.rentalPrice || 0;
   }
   if (conflicts.length > 0) {
-    return { conflicts };
+    return {
+      conflicts,
+      kitItems,
+      rentalTotal,
+      status: 'pending',
+      missingStandards,
+    };
   }
   if (standardsToEnforce.size > 0) {
-    const missingStandards = requiredStandards.filter((standard) => {
+    const missingStandardsList = requiredStandards.filter((standard) => {
       const matches = standardMatches.get(standard);
       return !matches || matches.size === 0;
     });
-    if (missingStandards.length > 0) {
-      throw new functions.https.HttpsError('failed-precondition', 'missing-required-standards', {
-        missingStandards,
+    if (missingStandardsList.length > 0) {
+      missingStandardsList.forEach((standard) => {
+        if (!standard) return;
+        if (!missingStandards.includes(standard)) {
+          missingStandards.push(standard);
+        }
       });
+      reservationStatus = 'pending';
     }
   }
-  const batch = db.batch();
-  for (const item of kitItems) {
-    const eqRef = db.collection('equipment').doc(item.id);
-    batch.set(eqRef.collection('bookings').doc(), {
-      start: admin.firestore.Timestamp.fromDate(start),
-      end: admin.firestore.Timestamp.fromDate(end),
-      projectId: null,
-    });
+  if (reservationStatus === 'confirmed') {
+    const batch = db.batch();
+    for (const item of kitItems) {
+      const eqRef = db.collection('equipment').doc(item.id);
+      batch.set(eqRef.collection('bookings').doc(), {
+        start: admin.firestore.Timestamp.fromDate(start),
+        end: admin.firestore.Timestamp.fromDate(end),
+        projectId: null,
+      });
+    }
+    await batch.commit();
   }
-  await batch.commit();
-  return { conflicts: [], kitItems, rentalTotal };
+  return {
+    conflicts: [],
+    kitItems,
+    rentalTotal,
+    status: reservationStatus,
+    missingStandards,
+  };
 });
 
 type NormalisedRoles = Record<string, boolean>;
@@ -3758,7 +3886,8 @@ export const contact_send = functions.https.onCall(async (data) => {
   const leadSourceRaw =
     typeof data.leadSource === 'string' ? (data.leadSource as string).trim() : '';
   const leadSourceTag = leadSourceRaw || 'hq';
-  const msg = {
+  const affiliateContext = await resolveAffiliateFromLeadSource(leadSourceTag);
+  const msg: Record<string, any> = {
     kind: 'contact',
     fromName: data.name || null,
     fromEmail: data.email || null,
@@ -3773,7 +3902,35 @@ export const contact_send = functions.https.onCall(async (data) => {
     leadSource: leadSourceTag,
     leadSourceCapturedAt: timestamp,
   };
+  if (affiliateContext) {
+    msg.affiliate = {
+      id: affiliateContext.id,
+      name: affiliateContext.name,
+      refCode: affiliateContext.refCode,
+      status: affiliateContext.status,
+    };
+  }
   await db.collection('messages').add(msg);
+  if (affiliateContext) {
+    try {
+      await db
+        .collection('affiliates')
+        .doc(affiliateContext.id)
+        .set(
+          {
+            metrics: {
+              totalLeads: admin.firestore.FieldValue.increment(1),
+            },
+            updatedAt: timestamp,
+            lastReferralAt: timestamp,
+            refCodeLower: affiliateContext.refCode.toLowerCase(),
+          },
+          { merge: true }
+        );
+    } catch (err) {
+      console.error('Failed to update affiliate lead metrics', err);
+    }
+  }
   await sendEmail(
     'info@pineapple.local',
     `Contact form: ${data.name || 'Message'}`,
@@ -3792,6 +3949,13 @@ export const contact_send = functions.https.onCall(async (data) => {
         createdAt: timestamp,
         leadSource: leadSourceTag,
         leadSourceCapturedAt: timestamp,
+        affiliate: affiliateContext
+          ? {
+              id: affiliateContext.id,
+              name: affiliateContext.name,
+              refCode: affiliateContext.refCode,
+            }
+          : null,
       });
     } else {
       const leadUpdate: Record<string, any> = {
@@ -3801,6 +3965,13 @@ export const contact_send = functions.https.onCall(async (data) => {
       if (leadSourceRaw) {
         leadUpdate.leadSource = leadSourceTag;
         leadUpdate.leadSourceCapturedAt = timestamp;
+      }
+      if (affiliateContext) {
+        leadUpdate.affiliate = {
+          id: affiliateContext.id,
+          name: affiliateContext.name,
+          refCode: affiliateContext.refCode,
+        };
       }
       await existing.docs[0].ref.set(leadUpdate, { merge: true });
     }
@@ -4138,6 +4309,7 @@ export const quote_request_public = functions.https.onCall(async (data) => {
   const leadSourceRaw =
     typeof data.leadSource === 'string' ? (data.leadSource as string).trim() : '';
   const leadSourceTag = leadSourceRaw || 'hq';
+  const affiliateContext = await resolveAffiliateFromLeadSource(leadSourceTag);
 
   const normaliseOptionalString = (value: unknown): string | null => {
     if (typeof value !== 'string') return null;
@@ -4155,6 +4327,7 @@ export const quote_request_public = functions.https.onCall(async (data) => {
   const productionPeriod = normaliseOptionalString(data.productionPeriod);
   const customRequest = normaliseOptionalString(data.customRequest);
   const requirements = normaliseOptionalString((data as any).requirements);
+  const projectScope = normaliseOptionalString((data as any).projectScope);
   const venueName = normaliseOptionalString((data as any).venueName);
   const venueLocation = normaliseOptionalString((data as any).venueLocation);
   const eventDate = normaliseOptionalString((data as any).eventDate);
@@ -4200,12 +4373,41 @@ export const quote_request_public = functions.https.onCall(async (data) => {
     originProductId,
     quoteMode,
     requirements,
+    projectScope,
     venueName,
     venueLocation,
     eventDate,
+    affiliate: affiliateContext
+      ? {
+          id: affiliateContext.id,
+          name: affiliateContext.name,
+          refCode: affiliateContext.refCode,
+          status: affiliateContext.status,
+        }
+      : null,
   };
 
   const ref = await db.collection('quoteRequests').add(record);
+  if (affiliateContext) {
+    try {
+      await db
+        .collection('affiliates')
+        .doc(affiliateContext.id)
+        .set(
+          {
+            metrics: {
+              totalQuotes: admin.firestore.FieldValue.increment(1),
+            },
+            updatedAt: timestamp,
+            lastReferralAt: timestamp,
+            refCodeLower: affiliateContext.refCode.toLowerCase(),
+          },
+          { merge: true }
+        );
+    } catch (err) {
+      console.error('Failed to update affiliate quote metrics', err);
+    }
+  }
 
   const emailLines: string[] = [];
   if (projectName) emailLines.push(`Project: ${projectName}`);
@@ -4229,6 +4431,9 @@ export const quote_request_public = functions.https.onCall(async (data) => {
   emailLines.push(`Email: ${contactEmail}`);
   if (requirements) {
     emailLines.push('', 'Requirements:', requirements);
+  }
+  if (projectScope) {
+    emailLines.push('', 'Project scope:', projectScope);
   }
   if (customRequest) {
     emailLines.push('', 'Additional notes:', customRequest);
@@ -4258,6 +4463,13 @@ export const quote_request_public = functions.https.onCall(async (data) => {
           createdAt: timestamp,
           leadSource: leadSourceTag,
           leadSourceCapturedAt: timestamp,
+          affiliate: affiliateContext
+            ? {
+                id: affiliateContext.id,
+                name: affiliateContext.name,
+                refCode: affiliateContext.refCode,
+              }
+            : null,
         });
       } else {
         const leadUpdate: Record<string, any> = {
@@ -4267,6 +4479,13 @@ export const quote_request_public = functions.https.onCall(async (data) => {
         if (leadSourceRaw) {
           leadUpdate.leadSource = leadSourceTag;
           leadUpdate.leadSourceCapturedAt = timestamp;
+        }
+        if (affiliateContext) {
+          leadUpdate.affiliate = {
+            id: affiliateContext.id,
+            name: affiliateContext.name,
+            refCode: affiliateContext.refCode,
+          };
         }
         await existing.docs[0].ref.set(leadUpdate, { merge: true });
       }
@@ -5532,6 +5751,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     kitItems: kitItemsInput = [],
     rentalSubtotal = 0,
     leadSource: leadSourceInput,
+    kitReservationStatus: kitReservationStatusInput,
+    kitReservationWarnings: kitReservationWarningsInput = [],
   } = data;
   if (!items || !Array.isArray(items) || items.length === 0) {
     throw new functions.https.HttpsError('invalid-argument', 'items are required');
@@ -5564,6 +5785,16 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         )
     : [];
 
+  const kitReservationStatusInitial =
+    typeof kitReservationStatusInput === 'string' && kitReservationStatusInput === 'pending'
+      ? 'pending'
+      : 'confirmed';
+  const kitReservationWarningsInitial = Array.isArray(kitReservationWarningsInput)
+    ? (kitReservationWarningsInput as unknown[])
+        .map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .filter((value): value is string => value.length > 0)
+    : [];
+
   const postalCodeValue = typeof postalCode === 'string' ? postalCode : null;
   const normalisedPostalCode = normalisePostalCode(postalCodeValue);
   const assignmentResult = normalisedPostalCode
@@ -5580,6 +5811,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     typeof leadSourceInput === 'string' ? (leadSourceInput as string).trim() : '';
   const leadSourceTag = leadSourceRaw || 'hq';
   const leadSourceLower = leadSourceTag.toLowerCase();
+  const affiliateContext = await resolveAffiliateFromLeadSource(leadSourceTag);
   const leadSourceNormalised: RoyaltySource = ['franchise', 'affiliate', 'partner', 'referral', 'territory'].some(
     (indicator) => leadSourceLower.includes(indicator)
   )
@@ -5611,6 +5843,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   }
   const productSnaps = await db.getAll(...productRefs);
   const orderItems: any[] = [];
+  let aggregatedKitReservationStatus: 'confirmed' | 'pending' = kitReservationStatusInitial;
+  const aggregatedKitWarnings = new Set<string>(kitReservationWarningsInitial);
   const driveProducts: DriveOrderProductContext[] = [];
   let productSubtotal = 0;
   let labourSubtotal = 0;
@@ -5693,6 +5927,25 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       resolvedModifiers.push(payload);
     });
     const price = unitPrice + modifiersTotal;
+    const rawItemKitStatus =
+      items[idx] && typeof items[idx].kitStatus === 'string'
+        ? (items[idx].kitStatus as string)
+        : null;
+    const itemKitStatus: 'confirmed' | 'pending' =
+      rawItemKitStatus === 'pending' ? 'pending' : 'confirmed';
+    const itemKitWarnings = Array.isArray(items[idx]?.kitWarnings)
+      ? (items[idx].kitWarnings as unknown[])
+          .map((warning) => (typeof warning === 'string' ? warning.trim() : ''))
+          .filter((warning): warning is string => warning.length > 0)
+      : [];
+    if (itemKitStatus === 'pending') {
+      aggregatedKitReservationStatus = 'pending';
+    }
+    itemKitWarnings.forEach((warning) => {
+      if (warning.length > 0) {
+        aggregatedKitWarnings.add(warning);
+      }
+    });
     const budget = (prod as any).budget || {};
     const labourFilming = parseOptional(budget.labourFilming);
     const labourEditing = parseOptional(budget.labourEditing);
@@ -5730,6 +5983,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       category,
       rentalTotal: rental,
       modifiers: resolvedModifiers,
+      kitReservationStatus: itemKitStatus,
+      kitWarnings: itemKitWarnings,
       budget: {
         perUnit: {
           labour,
@@ -5828,6 +6083,24 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   const budgetSubtotal =
     labourSubtotal + kitSubtotal + travelSubtotal + parkingSubtotal;
   const profit = finalTotal - (budgetSubtotal + rentalSubtotal);
+  const affiliateCommission = affiliateContext
+    ? computeAffiliateCommission(profit, affiliateContext.commissionRate)
+    : null;
+  const affiliateSnapshot = affiliateContext
+    ? {
+        id: affiliateContext.id,
+        name: affiliateContext.name,
+        refCode: affiliateContext.refCode,
+        status: affiliateContext.status ?? null,
+        commissionRate: affiliateContext.commissionRate,
+        commissionBase: affiliateCommission?.base ?? 0,
+        commissionRateApplied: affiliateCommission?.rate ?? affiliateContext.commissionRate,
+        commissionNet: affiliateCommission?.net ?? 0,
+        commissionVat: affiliateCommission?.vat ?? 0,
+        commissionGross: affiliateCommission?.gross ?? 0,
+        commissionStatus: 'pending',
+      }
+    : null;
   const budgetTotals = {
     labour: labourSubtotal,
     kit: kitSubtotal,
@@ -5916,6 +6189,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     budgetSubtotal,
     budgetTotals,
     kitItems,
+    kitReservationStatus: aggregatedKitReservationStatus,
+    kitReservationWarnings: Array.from(aggregatedKitWarnings),
     voucherDiscount,
     discountPct,
     discountAmount,
@@ -5934,6 +6209,15 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
     priceTierLevel: territoryPriceTier,
   };
+
+  if (affiliateSnapshot) {
+    orderData.affiliate = {
+      ...affiliateSnapshot,
+      recordedAt: createdAt,
+    };
+  } else {
+    orderData.affiliate = null;
+  }
 
   if (assignmentResult) {
     orderData.franchiseId = assignmentResult.franchiseId;
@@ -6030,6 +6314,62 @@ export const createOrder = functions.https.onCall(async (data, context) => {
 
   const orderRef = await db.collection('orders').add(orderData);
 
+  if (affiliateSnapshot) {
+    const commissionNet = affiliateSnapshot.commissionNet ?? 0;
+    const commissionVat = affiliateSnapshot.commissionVat ?? 0;
+    const commissionGross = affiliateSnapshot.commissionGross ?? 0;
+    try {
+      await db
+        .collection('affiliates')
+        .doc(affiliateSnapshot.id)
+        .set(
+          {
+            metrics: {
+              totalOrders: admin.firestore.FieldValue.increment(1),
+              totalRevenueGross: admin.firestore.FieldValue.increment(price),
+              totalCommissionNet: admin.firestore.FieldValue.increment(commissionNet),
+              totalCommissionVat: admin.firestore.FieldValue.increment(commissionVat),
+              totalCommissionGross: admin.firestore.FieldValue.increment(commissionGross),
+              pendingCommissionNet: admin.firestore.FieldValue.increment(commissionNet),
+              pendingCommissionVat: admin.firestore.FieldValue.increment(commissionVat),
+              pendingCommissionGross: admin.firestore.FieldValue.increment(commissionGross),
+              lastOrderAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastReferralAt: admin.firestore.FieldValue.serverTimestamp(),
+            refCodeLower: affiliateSnapshot.refCode.toLowerCase(),
+          },
+          { merge: true }
+        );
+    } catch (affiliateUpdateError) {
+      console.error('Failed to update affiliate after order creation', affiliateSnapshot.id, affiliateUpdateError);
+    }
+
+    if (context.auth?.uid) {
+      try {
+        await db
+          .collection('users')
+          .doc(context.auth.uid)
+          .set(
+            {
+              affiliate: {
+                id: affiliateSnapshot.id,
+                name: affiliateSnapshot.name,
+                refCode: affiliateSnapshot.refCode,
+                status: affiliateSnapshot.status ?? null,
+                commissionRate: affiliateSnapshot.commissionRate,
+                linkedAt: admin.firestore.FieldValue.serverTimestamp(),
+              },
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+      } catch (userAffiliateError) {
+        console.error('Failed to record affiliate on user profile', context.auth.uid, userAffiliateError);
+      }
+    }
+  }
+
   const driveClientKeyBase = clientRoyaltyKey ?? (normalisedEmail ? `email:${normalisedEmail}` : null);
   const driveClientKey = driveClientKeyBase ?? `order:${orderRef.id}`;
   const driveClientKeyType: 'user_id' | 'email' | null =
@@ -6078,6 +6418,15 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             : [],
       },
       products: driveProducts,
+      affiliate: affiliateContext
+        ? {
+            id: affiliateContext.id,
+            name: affiliateContext.name,
+            refCode: affiliateContext.refCode,
+            status: affiliateContext.status ?? null,
+            commissionRate: affiliateContext.commissionRate,
+          }
+        : null,
     });
   } catch (driveError) {
     console.error('Failed to set up Drive structure for order', orderRef.id, driveError);

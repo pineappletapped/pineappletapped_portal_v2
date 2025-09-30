@@ -55,6 +55,11 @@ export default function AdminPage() {
       href: '/admin/orders',
     },
     {
+      label: 'Production tools',
+      description: 'Generate post-ready copy and package deliverables.',
+      href: '/admin/tools',
+    },
+    {
       label: 'Training library',
       description: 'Create and curate onboarding content for every audience.',
       href: '/admin/training',
@@ -63,11 +68,6 @@ export default function AdminPage() {
       label: 'Launch analytics',
       description: 'Monitor marketing and production performance.',
       href: '/admin/analytics',
-    },
-    {
-      label: 'Open CRM workspace',
-      description: 'Support sales follow-up and client care.',
-      href: '/crm',
     },
     {
       label: 'Audit login history',
@@ -309,6 +309,7 @@ export default function AdminPage() {
                   links: [
                     { href: '/admin/orders', label: 'Manage Orders' },
                     { href: '/admin/projects', label: 'Project Management' },
+                    { href: '/admin/tools', label: 'Content Tools' },
                     { href: '/admin/workflows', label: 'Manage Workflows' },
                     { href: '/admin/proposals', label: 'Quotes & Proposals' },
                     { href: '/admin/availability', label: 'Manage Availability' },
@@ -332,8 +333,7 @@ export default function AdminPage() {
                 {
                   title: 'People',
                   links: [
-                    { href: '/crm', label: 'CRM Workspace' },
-                    { href: '/admin/users', label: 'Client Directory' },
+                    { href: '/admin/users', label: 'CRM' },
                     { href: '/admin/team', label: 'Manage Team' },
                     { href: '/admin/join-team-steps', label: 'Join Team Form' },
                     { href: '/admin/franchises', label: 'Franchise Network' },
@@ -353,6 +353,7 @@ export default function AdminPage() {
                     { href: '/admin/exhibitions', label: 'Exhibitions' },
                     { href: '/admin/marketing/content-planner', label: 'Content Planner' },
                     { href: '/admin/marketing/remarketing', label: 'Remarketing' },
+                    { href: '/admin/marketing/affiliates', label: 'Affiliate Programme' },
                     { href: '/admin/voucher-codes', label: 'Voucher Management' },
                     { href: '/admin/email-schedules', label: 'Email Schedules' },
                   ],

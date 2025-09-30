@@ -42,6 +42,8 @@ interface FormState {
   description: string;
   notes: string;
   length: string;
+  focalLengthMin: string;
+  focalLengthMax: string;
   manualUrl: string;
   weightKg: string;
   damage: string;
@@ -61,6 +63,8 @@ const EMPTY_FORM: FormState = {
   description: "",
   notes: "",
   length: "",
+  focalLengthMin: "",
+  focalLengthMax: "",
   manualUrl: "",
   weightKg: "",
   damage: "",
@@ -462,6 +466,12 @@ export default function ContractorKitManager() {
     });
   }, [standards, form.category]);
 
+  const isLensCategory = useMemo(() => {
+    const category = form.category.trim().toLowerCase();
+    if (!category) return false;
+    return category.includes("lens");
+  }, [form.category]);
+
   const resetForm = () => {
     setForm(EMPTY_FORM);
     setEditingId(null);
@@ -491,6 +501,14 @@ export default function ContractorKitManager() {
       description: item.description || "",
       notes: item.notes || "",
       length: item.length || "",
+      focalLengthMin:
+        typeof item.focalLengthMin === "number" && Number.isFinite(item.focalLengthMin)
+          ? String(item.focalLengthMin)
+          : "",
+      focalLengthMax:
+        typeof item.focalLengthMax === "number" && Number.isFinite(item.focalLengthMax)
+          ? String(item.focalLengthMax)
+          : "",
       manualUrl: item.manualUrl || "",
       weightKg: item.weightKg != null ? String(item.weightKg) : "",
       damage: item.damage || "",
@@ -620,6 +638,26 @@ export default function ContractorKitManager() {
     if (!form.category.trim()) {
       return "Please enter a category for this kit item.";
     }
+    if (isLensCategory) {
+      const hasStart = form.focalLengthMin.trim().length > 0;
+      const hasEnd = form.focalLengthMax.trim().length > 0;
+      if (hasStart !== hasEnd) {
+        return "Enter both starting and ending focal lengths for lenses.";
+      }
+      if (hasStart && hasEnd) {
+        const startValue = Number.parseFloat(form.focalLengthMin);
+        const endValue = Number.parseFloat(form.focalLengthMax);
+        if (!Number.isFinite(startValue) || startValue <= 0) {
+          return "Enter a valid starting focal length greater than 0mm.";
+        }
+        if (!Number.isFinite(endValue) || endValue <= 0) {
+          return "Enter a valid ending focal length greater than 0mm.";
+        }
+        if (startValue > endValue) {
+          return "The starting focal length must be less than or equal to the ending focal length.";
+        }
+      }
+    }
     return null;
   };
 
@@ -716,6 +754,18 @@ export default function ContractorKitManager() {
         description: form.description.trim(),
         notes: form.notes.trim(),
         length: form.length.trim(),
+        focalLengthMin: (() => {
+          const trimmed = form.focalLengthMin.trim();
+          if (!trimmed) return null;
+          const parsed = Number.parseFloat(trimmed);
+          return Number.isFinite(parsed) ? parsed : null;
+        })(),
+        focalLengthMax: (() => {
+          const trimmed = form.focalLengthMax.trim();
+          if (!trimmed) return null;
+          const parsed = Number.parseFloat(trimmed);
+          return Number.isFinite(parsed) ? parsed : null;
+        })(),
         manualUrl: form.manualUrl.trim(),
         weightKg: toNumber(form.weightKg),
         damage: form.damage.trim(),
@@ -992,6 +1042,38 @@ export default function ContractorKitManager() {
               onChange={(e) => handleFieldChange("weightKg", e.target.value)}
             />
           </div>
+          {isLensCategory && (
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="space-y-1">
+                <label className="block text-sm font-medium" htmlFor="lens-focal-start">
+                  Starting focal length (mm)
+                </label>
+                <input
+                  id="lens-focal-start"
+                  className="input input-bordered"
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={form.focalLengthMin}
+                  onChange={(e) => handleFieldChange("focalLengthMin", e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="block text-sm font-medium" htmlFor="lens-focal-end">
+                  Ending focal length (mm)
+                </label>
+                <input
+                  id="lens-focal-end"
+                  className="input input-bordered"
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={form.focalLengthMax}
+                  onChange={(e) => handleFieldChange("focalLengthMax", e.target.value)}
+                />
+              </div>
+            </div>
+          )}
           <div className="space-y-2">
             <span className="block text-sm font-medium">Primary photo</span>
             {form.photoUrl && (
@@ -1098,6 +1180,7 @@ export default function ContractorKitManager() {
                 <th className="p-2">Category</th>
                 <th className="p-2">Purchase £</th>
                 <th className="p-2">Rental £</th>
+                <th className="p-2">Focal range</th>
                 <th className="p-2">Documents</th>
                 <th className="p-2">Standards</th>
                 <th className="p-2">Available</th>
@@ -1110,6 +1193,26 @@ export default function ContractorKitManager() {
                 const hasDroneStandard = Array.isArray(item.meetsStandards)
                   ? item.meetsStandards.includes(DRONE_STANDARD_ID)
                   : false;
+                const focalRange = (() => {
+                  const min =
+                    typeof item.focalLengthMin === "number" && Number.isFinite(item.focalLengthMin)
+                      ? item.focalLengthMin
+                      : null;
+                  const max =
+                    typeof item.focalLengthMax === "number" && Number.isFinite(item.focalLengthMax)
+                      ? item.focalLengthMax
+                      : null;
+                  if (min !== null && max !== null) {
+                    return `${min}–${max} mm`;
+                  }
+                  if (min !== null) {
+                    return `≥ ${min} mm`;
+                  }
+                  if (max !== null) {
+                    return `≤ ${max} mm`;
+                  }
+                  return "—";
+                })();
                 return (
                   <Fragment key={item.id}>
                     <tr className="border-t">
@@ -1130,6 +1233,7 @@ export default function ContractorKitManager() {
                     <td className="p-2 align-top">{item.category}</td>
                     <td className="p-2 align-top">£{(item.newValue || 0).toFixed(2)}</td>
                     <td className="p-2 align-top">£{(item.rentalPrice || 0).toFixed(2)}</td>
+                    <td className="p-2 align-top">{focalRange}</td>
                     <td className="p-2 align-top">
                       {Array.isArray(item.documents) && item.documents.length > 0 ? (
                         <ul className="space-y-1 text-xs">

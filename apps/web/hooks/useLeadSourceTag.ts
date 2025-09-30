@@ -12,6 +12,8 @@ import {
 
 const STORAGE_KEY = 'pt:lead-source-tag';
 
+const CLICK_TRACK_KEY = 'pt:affiliate-click-tracker';
+
 const loadStoredLeadSource = (): LeadSourceState | null => {
   if (typeof window === 'undefined') {
     return null;
@@ -52,6 +54,7 @@ export const useLeadSourceTag = (voucher?: string | null) => {
   );
   const userOverrideRef = useRef(false);
   const lastVoucherRef = useRef<string | null>(null);
+  const loggedAffiliateRef = useRef<Set<string>>(new Set());
 
   const setState = useCallback(
     (value: LeadSourceState | ((prev: LeadSourceState) => LeadSourceState)) => {
@@ -81,6 +84,67 @@ export const useLeadSourceTag = (voucher?: string | null) => {
 
   useEffect(() => {
     saveLeadSource(state);
+  }, [state]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (state.kind !== 'franchise_affiliate') {
+      return;
+    }
+
+    const detail = state.detail.trim();
+    if (!detail) {
+      return;
+    }
+
+    const normalized = detail.toLowerCase();
+    if (!loggedAffiliateRef.current.has(normalized)) {
+      try {
+        const raw = window.localStorage.getItem(CLICK_TRACK_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw) as unknown;
+          if (Array.isArray(parsed)) {
+            parsed
+              .map((entry) => (typeof entry === 'string' ? entry.toLowerCase() : ''))
+              .filter((entry) => entry)
+              .forEach((entry) => loggedAffiliateRef.current.add(entry));
+          }
+        }
+      } catch {
+        loggedAffiliateRef.current.clear();
+      }
+    }
+
+    if (loggedAffiliateRef.current.has(normalized)) {
+      return;
+    }
+
+    loggedAffiliateRef.current.add(normalized);
+    try {
+      const existing = Array.from(loggedAffiliateRef.current).slice(-50);
+      window.localStorage.setItem(CLICK_TRACK_KEY, JSON.stringify(existing));
+    } catch {
+      /* ignore storage errors */
+    }
+
+    const payload = {
+      code: detail,
+      url: typeof window !== 'undefined' ? window.location.href : null,
+      referrer: typeof document !== 'undefined' ? document.referrer || null : null,
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : null,
+    };
+
+    void fetch('/api/affiliates/track', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => {
+      /* ignore tracking failures */
+    });
   }, [state]);
 
   useEffect(() => {

@@ -4,7 +4,8 @@ export type RoleKey =
   | 'finance'
   | 'projects'
   | 'sales'
-  | 'marketing';
+  | 'marketing'
+  | 'affiliate';
 
 export type UserRoles = Partial<Record<RoleKey, boolean>>;
 
@@ -56,6 +57,11 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     key: 'marketing',
     label: 'Marketing',
     description: 'Control website content, email schedules, analytics, and brand assets.',
+  },
+  {
+    key: 'affiliate',
+    label: 'Affiliate',
+    description: 'Access the affiliate earnings portal and referral performance dashboards.',
   },
 ];
 
@@ -163,5 +169,6 @@ export function getDefaultAdminRoute(roles: UserRoles | null | undefined): strin
   if (roles.projects) return '/admin/projects';
   if (roles.sales) return '/admin/proposals';
   if (roles.marketing) return '/admin/analytics';
+  if (roles.affiliate) return '/affiliate';
   return '/admin';
 }

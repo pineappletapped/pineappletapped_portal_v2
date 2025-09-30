@@ -26,35 +26,69 @@ export function getProductPriceExtents(product: Product):
   | { min: number; max: number }
   | null {
   const prices: number[] = [];
-  if (typeof product.price === "number" && Number.isFinite(product.price)) {
-    prices.push(product.price);
-  }
+  const pushPrice = (value: unknown) => {
+    if (
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value > 0
+    ) {
+      prices.push(value);
+    }
+  };
+
+  pushPrice(product.price);
+
   if (Array.isArray(product.variations)) {
     for (const variation of product.variations) {
-      const value = variation?.price;
-      if (typeof value === "number" && Number.isFinite(value)) {
-        prices.push(value);
-      }
+      pushPrice(variation?.price);
     }
   }
+
   if (prices.length === 0) return null;
+
   return {
     min: Math.min(...prices),
     max: Math.max(...prices),
   };
 }
 
-export function getListingPriceLabel(product: Product): string | null {
+export type ListingPriceDetails = {
+  headline: string;
+  note?: string;
+  rangeNote?: string;
+};
+
+export function getListingPriceLabel(
+  product: Product,
+  options: { overrideMin?: number | null } = {}
+): ListingPriceDetails | null {
   if ((product.salesMode ?? "ecommerce") === "quote") {
-    return "Pricing available on request";
+    return { headline: "Pricing available on request" };
   }
+
   const range = getProductPriceExtents(product);
-  if (!range) return null;
-  const baseLabel = `From £${range.min.toFixed(2)} (login for accurate instant quote)`;
-  if (range.max > range.min) {
-    return `${baseLabel} · Packages up to £${range.max.toFixed(2)}`;
+  const overrideMin =
+    typeof options.overrideMin === "number" && options.overrideMin > 0
+      ? options.overrideMin
+      : null;
+
+  const minPrice = overrideMin ?? range?.min ?? null;
+
+  if (!minPrice) {
+    return null;
   }
-  return baseLabel;
+
+  const headline = `From £${minPrice.toFixed(2)}`;
+  const details: ListingPriceDetails = {
+    headline,
+    note: "login for instant quote",
+  };
+
+  if (range && range.max > minPrice + 0.005) {
+    details.rangeNote = `Packages up to £${range.max.toFixed(2)}`;
+  }
+
+  return details;
 }
 
 type DeliverableBadge = {

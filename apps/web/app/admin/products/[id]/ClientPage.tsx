@@ -69,6 +69,8 @@ interface ModifierOption {
   priceTiers?: PriceTiers | null;
   budgetAdjustments?: ProductBudgetOverride | null;
   crewAdjustments?: ModifierCrewAdjustment[] | null;
+  deliverableType?: DeliverableType | null;
+  deliverableLabel?: string | null;
 }
 
 interface ModifierGroup {
@@ -731,8 +733,6 @@ export default function EditProductPage() {
   >(null);
   const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
   const [manualKitCost, setManualKitCost] = useState("0");
-  const [equipmentSearch, setEquipmentSearch] = useState("");
-  const [activeKitGroup, setActiveKitGroup] = useState<number | null>(null);
   const [travelMiles, setTravelMiles] = useState("100");
   const [travelRate, setTravelRate] = useState("0.3");
   const [parkingCost, setParkingCost] = useState("0");
@@ -1413,16 +1413,6 @@ export default function EditProductPage() {
     }
   }, [selectedVenue, travelMilesTouched, parkingTouched]);
 
-  useEffect(() => {
-    if (kitGroups.length === 0) {
-      if (activeKitGroup !== null) setActiveKitGroup(null);
-      return;
-    }
-    if (activeKitGroup === null || activeKitGroup >= kitGroups.length) {
-      setActiveKitGroup(0);
-    }
-  }, [kitGroups, activeKitGroup]);
-
   const upload = async (path: string, file: File) => {
     const r = ref(storage, path);
     await uploadBytes(r, file);
@@ -2014,95 +2004,6 @@ export default function EditProductPage() {
     setTaskSubtasks("");
   };
 
-  const addKitGroup = () =>
-    setKitGroups((g) => {
-      const next = [...g, { groupId: "", items: [], label: "" }];
-      setActiveKitGroup(next.length - 1);
-      return next;
-    });
-  const updateKitGroupId = (index: number, groupId: string) =>
-    setKitGroups((prev) =>
-      prev.map((g, i) =>
-        i === index
-          ? {
-              ...g,
-              groupId,
-              ...(g.kitBagId ? {} : { label: groupId }),
-            }
-          : g
-      )
-    );
-  const addEquipmentToGroup = (index: number, eqId: string) =>
-    setKitGroups((prev) =>
-      prev.map((g, i) =>
-        i === index && !g.items.includes(eqId)
-          ? { ...g, items: [...g.items, eqId] }
-          : g
-      )
-    );
-  const removeEquipmentFromGroup = (index: number, eqId: string) =>
-    setKitGroups((prev) =>
-      prev.map((g, i) =>
-        i === index ? { ...g, items: g.items.filter((id) => id !== eqId) } : g
-      )
-    );
-  const removeKitGroup = (index: number) => {
-    setKitGroups((prev) => prev.filter((_, i) => i !== index));
-    setActiveKitGroup((prev) => {
-      if (prev === null) return null;
-      if (prev === index) return null;
-      if (prev > index) return prev - 1;
-      return prev;
-    });
-  };
-
-  const applyKitBag = (bag: KitBag) => {
-    if (!bag?.id) return;
-    const uniqueItems = Array.isArray(bag.itemIds)
-      ? Array.from(
-          new Set(
-            bag.itemIds.filter(
-              (value: unknown): value is string => typeof value === "string"
-            )
-          )
-        )
-      : [];
-    if (uniqueItems.length === 0) return;
-    let nextActive: number | null = null;
-    setKitGroups((prev) => {
-      const existingIndex = prev.findIndex((group) => group.kitBagId === bag.id);
-      if (existingIndex >= 0) {
-        nextActive = existingIndex;
-        return prev.map((group, idx) =>
-          idx === existingIndex
-            ? {
-                ...group,
-                items: uniqueItems,
-                label: bag.name || group.label || group.groupId,
-                kitBagId: bag.id,
-                groupId: group.groupId || `kitBag:${bag.id}`,
-              }
-            : group
-        );
-      }
-      const groupId = `kitBag:${bag.id}`;
-      const next = [
-        ...prev,
-        {
-          groupId,
-          items: uniqueItems,
-          label: bag.name || groupId,
-          kitBagId: bag.id,
-        },
-      ];
-      nextActive = next.length - 1;
-      return next;
-    });
-    if (nextActive !== null) {
-      setActiveKitGroup(nextActive);
-    }
-  };
-
   const removeProduct = async () => {
     if (confirm("Delete this product?")) {
       await deleteDoc(doc(db, "products", id));
@@ -2246,17 +2147,6 @@ export default function EditProductPage() {
   );
   const budgetTotal = labourValue + kitValue + travelCostValue + parkingValue;
   const profitValue = priceValue - budgetTotal;
-  const filteredEquipment = useMemo(() => {
-    const term = equipmentSearch.trim().toLowerCase();
-    if (!term) return equipmentList.slice(0, 50);
-    return equipmentList.filter((item) => {
-      const nameMatch = item.name.toLowerCase().includes(term);
-      const idMatch = item.id.toLowerCase().includes(term);
-      const categoryMatch = item.category?.toLowerCase().includes(term);
-      return nameMatch || idMatch || categoryMatch;
-    });
-  }, [equipmentList, equipmentSearch]);
-
   if (guardLoading || loading) return <p>Loading…</p>;
   if (!allowed) return <p>You do not have permission to edit products.</p>;
 
@@ -3573,83 +3463,14 @@ export default function EditProductPage() {
       {tab === "kit" && (
         <div className="grid gap-4">
           <div className="grid gap-2">
-            <h3 className="font-medium">Search kit database</h3>
-            <p className="text-xs text-gray-500">
-              Choose a group below, then search for equipment to add it directly from the
-              register. Drag-and-drop still works if you prefer.
-            </p>
-            <div className="flex flex-col gap-2 md:flex-row">
-              <input
-                className="input md:max-w-sm"
-                placeholder="Search by name, category, or ID"
-                value={equipmentSearch}
-                onChange={(e) => setEquipmentSearch(e.target.value)}
-              />
-              {kitGroups.length > 0 && activeKitGroup !== null && (
-                <div className="rounded border px-3 py-2 text-sm text-gray-600">
-                  Adding to: {
-                    kitGroups[activeKitGroup].label ||
-                    kitGroups[activeKitGroup].groupId ||
-                    `Group ${activeKitGroup + 1}`
-                  }
-                </div>
-              )}
-            </div>
-            <div className="max-h-64 overflow-y-auto rounded border divide-y">
-              {filteredEquipment.length === 0 ? (
-                <p className="p-3 text-sm text-gray-500">No equipment matches your search.</p>
-              ) : (
-                filteredEquipment.map((eq) => {
-                  const isAdded =
-                    activeKitGroup !== null &&
-                    kitGroups[activeKitGroup]?.items.includes(eq.id);
-                  return (
-                    <div key={eq.id} className="flex items-center justify-between gap-4 p-3">
-                      <div>
-                        <p className="font-medium">{eq.name}</p>
-                        <p className="text-xs text-gray-500">
-                          {eq.category && <span className="mr-2">{eq.category}</span>}
-                          {typeof eq.rentalPrice === "number"
-                            ? `Rental £${eq.rentalPrice.toFixed(2)}`
-                            : "No rental price"}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className="btn btn-xs"
-                        disabled={activeKitGroup === null || isAdded}
-                        onClick={() => {
-                          if (activeKitGroup === null) return;
-                          addEquipmentToGroup(activeKitGroup, eq.id);
-                        }}
-                      >
-                        {isAdded ? "Added" : "Add to group"}
-                      </button>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button type="button" className="btn btn-sm" onClick={addKitGroup}>
-              Add Group
-            </button>
-            {kitGroups.length === 0 && (
-              <span className="text-sm text-gray-600">Create a group to start assigning kit.</span>
-            )}
-          </div>
-          <div className="grid gap-2">
             <h3 className="font-medium">Required equipment standards</h3>
             <p className="text-xs text-gray-500">
               Select the standards a crew must meet before they can pick up this product in the portal.
             </p>
             {requiresDroneCoverage && (
               <div className="rounded border border-sky-200 bg-sky-50 p-2 text-xs text-sky-900">
-                Drone coverage is enabled for this product, so it automatically requires
-                {" "}
-                {droneStandardRecord?.title || "drone compliance"}.
-                {" "}
+                Drone coverage is enabled for this product, so it automatically requires{" "}
+                {droneStandardRecord?.title || "drone compliance"}.{ " "}
                 {droneStandardRecord
                   ? "Ensure at least one kit item is tagged with the drone compliance standard before launching sales."
                   : "Add the drone compliance standard in the equipment register so kit and crews can be approved."}
@@ -3695,137 +3516,8 @@ export default function EditProductPage() {
               </p>
             )}
           </div>
-          {kitBags.length > 0 && (
-            <div className="grid gap-2">
-              <h3 className="font-medium">Kit bag shortcuts</h3>
-              <p className="text-xs text-gray-500">
-                Attach a predefined kit bag to this product or refresh it after
-                updating the bag in the equipment register.
-              </p>
-              <div className="grid gap-3 md:grid-cols-2">
-                {kitBags.map((bag) => {
-                  const attachedIndex = kitGroups.findIndex(
-                    (group) => group.kitBagId === bag.id
-                  );
-                  const itemCount = Array.isArray(bag.itemIds)
-                    ? bag.itemIds.length
-                    : 0;
-                  return (
-                    <div key={bag.id} className="rounded border p-3 space-y-2">
-                      <div>
-                        <p className="font-medium">{bag.name}</p>
-                        {bag.description && (
-                          <p className="text-xs text-gray-500">{bag.description}</p>
-                        )}
-                        <p className="text-xs text-gray-500">
-                          {itemCount} item{itemCount === 1 ? "" : "s"}
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          className="btn btn-xs"
-                          onClick={() => applyKitBag(bag)}
-                        >
-                          {attachedIndex >= 0 ? "Refresh bag" : "Attach bag"}
-                        </button>
-                        {attachedIndex >= 0 && (
-                          <button
-                            type="button"
-                            className="btn btn-outline btn-xs"
-                            onClick={() => removeKitGroup(attachedIndex)}
-                          >
-                            Detach
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {kitGroups.map((g, i) => (
-            <div
-              key={g.kitBagId ? `bag-${g.kitBagId}` : `group-${i}-${g.groupId}`}
-              className={`border p-4 rounded grid gap-3 ${
-                activeKitGroup === i ? "border-black" : "border-gray-200"
-              }`}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => {
-                e.preventDefault();
-                const eqId = e.dataTransfer.getData("text/plain");
-                if (eqId) addEquipmentToGroup(i, eqId);
-              }}
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                {g.kitBagId ? (
-                  <div className="flex flex-1 flex-col gap-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{g.label || g.groupId}</span>
-                      <span className="inline-flex items-center rounded bg-orange-100 px-2 py-0.5 text-xs text-orange-700">
-                        Kit bag
-                      </span>
-                    </div>
-                    <p className="text-xs text-gray-500">
-                      Linked to kit bag {g.kitBagId}. Update its contents from the
-                      equipment register.
-                    </p>
-                  </div>
-                ) : (
-                  <input
-                    className="input flex-1"
-                    placeholder="Group label (e.g. Camera Ops)"
-                    value={g.groupId}
-                    onChange={(e) => updateKitGroupId(i, e.target.value)}
-                  />
-                )}
-                <button
-                  type="button"
-                  className={`btn btn-xs ${
-                    activeKitGroup === i ? "bg-black text-white hover:bg-black" : ""
-                  }`.trim()}
-                  onClick={() => setActiveKitGroup(i)}
-                >
-                  {activeKitGroup === i ? "Active" : "Set active"}
-                </button>
-              </div>
-              <div className="flex flex-wrap gap-2 min-h-[2rem]">
-                {g.items.map((id) => {
-                  const item = equipmentLookup.get(id);
-                  return (
-                    <span
-                      key={id}
-                      className="bg-gray-200 px-2 py-1 rounded flex items-center gap-2 text-sm"
-                    >
-                      <span>{item?.name || id}</span>
-                      <button
-                        type="button"
-                        className="text-gray-500 hover:text-black"
-                        onClick={() => removeEquipmentFromGroup(i, id)}
-                        aria-label={`Remove ${item?.name || id}`}
-                      >
-                        ×
-                      </button>
-                    </span>
-                  );
-                })}
-                {g.items.length === 0 && (
-                  <span className="text-xs text-gray-500">No equipment added yet.</span>
-                )}
-              </div>
-              <button
-                type="button"
-                className="text-sm text-red-600 w-fit"
-                onClick={() => removeKitGroup(i)}
-              >
-                {g.kitBagId ? "Detach kit bag" : "Remove Group"}
-              </button>
-            </div>
-          ))}
         </div>
       )}
-
       {tab === "tasks" && (
         <div className="grid gap-4">
           <div className="grid gap-2">

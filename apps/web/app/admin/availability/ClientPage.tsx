@@ -1,7 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import AvailabilityCalendar, { AvailabilityStatus } from "@/components/AvailabilityCalendar";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type SVGProps,
+} from "react";
+import clsx from "clsx";
+import AvailabilityCalendar, {
+  AVAILABILITY_STATUS_META,
+  type AvailabilityStatus,
+  type AvailabilityStatusMeta,
+} from "@/components/AvailabilityCalendar";
 import { ensureFirebase } from "@/lib/firebase";
 import {
   doc,
@@ -14,19 +25,63 @@ import {
 } from "firebase/firestore";
 import { adminListUsers } from "@/lib/admin";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import {
+  CRM_STATUS_LABELS,
+  normaliseCrmStatus,
+  type CRMStatus,
+} from "@/lib/crm";
+import { ROLE_LABELS, extractUserRoles, type RoleKey, type UserRoles } from "@/lib/roles";
 
-interface User {
+interface RawMember {
   id: string;
-  displayName?: string;
   email: string;
+  displayName?: string | null;
+  fullName?: string | null;
+  position?: string | null;
+  organisation?: string | null;
+  crmStatus?: string | null;
+  contractor?: boolean | null;
+  isStaff?: boolean | null;
+  contractorInfo?: { name?: string | null } | null;
+  roles?: UserRoles;
+  franchiseIds?: unknown;
+  primaryFranchiseId?: string | null;
+}
+
+interface Member extends RawMember {
+  crmStatus: CRMStatus;
+  roles: UserRoles;
+  isTeam: boolean;
+  franchiseIds: string[];
+  primaryFranchiseId: string | null;
 }
 
 export default function AdminAvailabilityPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["projects", "operations"]);
-  const [members, setMembers] = useState<User[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
   const [selected, setSelected] = useState<string>("");
   const [availability, setAvailability] = useState<Record<string, AvailabilityStatus>>({});
+  const [bookings, setBookings] = useState<BookingSummary[]>([]);
+  const [allBookings, setAllBookings] = useState<BookingSummary[]>([]);
+  const [bookingsLoading, setBookingsLoading] = useState(false);
+  const [bookingsError, setBookingsError] = useState<string | null>(null);
   const [loadingMembers, setLoadingMembers] = useState(true);
+  const [conflictWarning, setConflictWarning] = useState<ConflictWarning | null>(null);
+
+  const selectedMember = useMemo(
+    () => members.find((member) => member.id === selected && member.isTeam) ?? null,
+    [members, selected]
+  );
+
+  const teamMembers = useMemo(
+    () => members.filter((member) => member.isTeam),
+    [members]
+  );
+
+  const crmContacts = useMemo(
+    () => members.filter((member) => !member.isTeam),
+    [members]
+  );
 
   // load staff status and team list
   useEffect(() => {
@@ -38,11 +93,49 @@ export default function AdminAvailabilityPage() {
       }
       try {
         const result: any = await adminListUsers();
-        const users: User[] = result.users || [];
-        setMembers(users);
-        const def =
-          users.find((u) => u.email === "ryan@pineappletapped.com") || users[0];
-        if (def) setSelected(def.id);
+        const rawUsers: RawMember[] = Array.isArray(result?.users)
+          ? (result.users as RawMember[])
+          : [];
+        const enriched: Member[] = rawUsers.map((entry) => {
+          const roles = extractUserRoles({ ...(entry ?? {}), uid: entry?.id });
+          const crmStatus = normaliseCrmStatus(entry?.crmStatus);
+          const franchiseIds = normaliseFranchiseIds(entry?.franchiseIds);
+          const primaryFranchiseId = normaliseFranchiseId(entry?.primaryFranchiseId);
+          const isTeam =
+            entry?.contractor === true ||
+            entry?.isStaff === true ||
+            roles.admin === true ||
+            roles.operations === true ||
+            roles.projects === true ||
+            roles.finance === true ||
+            roles.sales === true ||
+            roles.marketing === true;
+          return {
+            ...entry,
+            roles,
+            crmStatus,
+            isTeam,
+            franchiseIds,
+            primaryFranchiseId,
+          };
+        });
+        setMembers(enriched);
+        setSelected((current) => {
+          if (
+            current &&
+            enriched.some((member) => member.id === current && member.isTeam)
+          ) {
+            return current;
+          }
+          const preferred = enriched.find(
+            (member) =>
+              member.isTeam &&
+              typeof member.email === "string" &&
+              member.email.toLowerCase() === "ryan@pineappletapped.com"
+          );
+          const fallback = enriched.find((member) => member.isTeam);
+          return preferred?.id ?? fallback?.id ?? "";
+        });
       } catch (err) {
         console.error(err);
       } finally {
@@ -53,7 +146,10 @@ export default function AdminAvailabilityPage() {
 
   // load availability for selected member
   useEffect(() => {
-    if (!allowed || !selected) return;
+    if (!allowed || !selectedMember) {
+      setAvailability({});
+      return;
+    }
 
     let cancelled = false;
 
@@ -64,7 +160,10 @@ export default function AdminAvailabilityPage() {
           return;
         }
 
-        const q = query(collection(db, "availability"), where("uid", "==", selected));
+        const q = query(
+          collection(db, "availability"),
+          where("uid", "==", selectedMember.id)
+        );
         const snap = await getDocs(q);
         const map: Record<string, AvailabilityStatus> = {};
         snap.docs.forEach((d) => {
@@ -82,7 +181,138 @@ export default function AdminAvailabilityPage() {
     return () => {
       cancelled = true;
     };
-  }, [allowed, selected]);
+  }, [allowed, selectedMember]);
+
+  // load upcoming bookings for the selected member
+  useEffect(() => {
+    if (!allowed || !selectedMember) {
+      setBookings([]);
+      setAllBookings([]);
+      setBookingsLoading(false);
+      setBookingsError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setBookingsLoading(true);
+    setBookingsError(null);
+
+    (async () => {
+      try {
+        const { db } = await ensureFirebase();
+        if (!db || cancelled) return;
+
+        const requests = [
+          getDocs(
+            query(collection(db, "bookings"), where("contractorUid", "==", selectedMember.id))
+          ),
+        ];
+
+        if (selectedMember.email) {
+          requests.push(
+            getDocs(query(collection(db, "bookings"), where("contractorEmail", "==", selectedMember.email)))
+          );
+        }
+
+        const snapshots = await Promise.all(requests);
+        if (cancelled) return;
+
+        const combined = new Map<string, Record<string, unknown>>();
+        snapshots.forEach((snap) => {
+          snap.docs.forEach((docSnap) => {
+            combined.set(docSnap.id, docSnap.data() as Record<string, unknown>);
+          });
+        });
+
+        const now = Date.now();
+        const items: BookingSummary[] = Array.from(combined.entries())
+          .map(([id, data]) => toBookingSummary(id, data))
+          .filter((item) => {
+            if (!item.start) return true;
+            return item.start.getTime() >= now;
+          })
+          .sort((a, b) => {
+            const aTime = a.start ? a.start.getTime() : Number.POSITIVE_INFINITY;
+            const bTime = b.start ? b.start.getTime() : Number.POSITIVE_INFINITY;
+            return aTime - bTime;
+          });
+
+        setAllBookings(items);
+        setBookings(items.slice(0, 5));
+      } catch (error) {
+        console.error("Failed to load bookings", error);
+        if (!cancelled) {
+          setBookingsError("We couldn't load upcoming bookings. Please try again.");
+          setBookings([]);
+          setAllBookings([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setBookingsLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [allowed, selectedMember]);
+
+  const bookingConflictsByDate = useMemo(() => {
+    const index: Record<string, BookingSummary[]> = {};
+    allBookings.forEach((booking) => {
+      if (!booking.dateKey) return;
+      if (!index[booking.dateKey]) {
+        index[booking.dateKey] = [];
+      }
+      index[booking.dateKey].push(booking);
+    });
+    return index;
+  }, [allBookings]);
+
+  const memberType = useMemo(() => resolveMemberType(selectedMember), [selectedMember]);
+
+  useEffect(() => {
+    setConflictWarning(null);
+  }, [selectedMember?.id]);
+
+  useEffect(() => {
+    setConflictWarning((current) => {
+      if (!current) return current;
+      const conflicts = bookingConflictsByDate[current.date] ?? [];
+      if (conflicts.length === 0 || current.status === "booked") {
+        return null;
+      }
+      return { ...current, bookings: conflicts };
+    });
+  }, [bookingConflictsByDate]);
+
+  const checkForConflicts = useCallback(
+    (date: string, status: AvailabilityStatus) => {
+      if (!selectedMember) {
+        setConflictWarning(null);
+        return;
+      }
+      const conflicts = bookingConflictsByDate[date] ?? [];
+      if (conflicts.length === 0 || status === "booked") {
+        setConflictWarning((current) => {
+          if (!current) return current;
+          if (current.date !== date) return current;
+          return null;
+        });
+        return;
+      }
+
+      setConflictWarning({
+        date,
+        status,
+        bookings: conflicts,
+        member: selectedMember,
+        memberType,
+      });
+    },
+    [bookingConflictsByDate, memberType, selectedMember]
+  );
 
   const resolveDb = async (): Promise<Firestore> => {
     const { db } = await ensureFirebase();
@@ -93,13 +323,17 @@ export default function AdminAvailabilityPage() {
   };
 
   const updateDay = async (date: string, status: AvailabilityStatus) => {
+    if (!selectedMember) {
+      return;
+    }
     const previous = availability[date];
     setAvailability((current) => ({ ...current, [date]: status }));
+    checkForConflicts(date, status);
 
     try {
       const db = await resolveDb();
-      await setDoc(doc(db, "availability", `${selected}_${date}`), {
-        uid: selected,
+      await setDoc(doc(db, "availability", `${selectedMember.id}_${date}`), {
+        uid: selectedMember.id,
         date,
         status,
       });
@@ -119,30 +353,640 @@ export default function AdminAvailabilityPage() {
   if (!allowed) return <p>You do not have permission to manage availability.</p>;
 
   return (
-    <div className="flex gap-6">
-      <div className="w-64 space-y-2">
-        <h1 className="text-xl font-semibold mb-4">Team Members</h1>
-        {members.map((m) => (
-          <button
-            key={m.id}
-            className={`block w-full text-left p-2 rounded border ${
-              selected === m.id ? "bg-blue-100" : "bg-white"
-            }`}
-            onClick={() => setSelected(m.id)}
-          >
-            {m.displayName || m.email}
-          </button>
-        ))}
+    <div className="flex flex-col gap-6 lg:flex-row">
+      <div className="space-y-6 lg:w-80 lg:flex-none">
+        <section>
+          <h1 className="mb-3 text-xl font-semibold text-slate-900">Team members</h1>
+          {teamMembers.length === 0 ? (
+            <p className="text-sm text-slate-600">
+              No active team members were found. Add staff or contractors to manage their availability.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {teamMembers.map((member) => {
+                const label = resolveTeamMemberLabel(member);
+                const positionLabel = describeTeamPosition(member);
+                return (
+                  <li key={member.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelected(member.id)}
+                      aria-pressed={selected === member.id}
+                      className={clsx(
+                        "flex w-full flex-col rounded-lg border px-3 py-2 text-left text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500",
+                        selected === member.id
+                          ? "border-blue-500 bg-blue-50 text-blue-900 shadow-sm"
+                          : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+                      )}
+                    >
+                      <span className="font-medium">{label}</span>
+                      {positionLabel && (
+                        <span className="text-xs text-slate-500">{positionLabel}</span>
+                      )}
+                      <span className="text-xs text-slate-500">{member.email}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        {crmContacts.length > 0 && (
+          <section>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-600">
+              CRM contacts
+            </h2>
+            <p className="mt-1 text-xs text-slate-500">
+              Prospects and clients appear here for reference and are not selectable for calendar availability.
+            </p>
+            <ul className="mt-3 space-y-2">
+              {crmContacts.map((contact) => {
+                const primary = resolveContactLabel(contact);
+                const organisation = resolveOrganisation(contact);
+                const positionLabel = resolveContactPosition(contact);
+                const stageLabel = CRM_STATUS_LABELS[contact.crmStatus];
+                return (
+                  <li
+                    key={contact.id}
+                    className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-medium text-slate-900">{primary}</p>
+                      <span className="inline-flex items-center rounded-full bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                        {stageLabel}
+                      </span>
+                    </div>
+                    <div className="mt-1 space-y-1 text-xs text-slate-600">
+                      {organisation ? <p>{organisation}</p> : <p>{contact.email}</p>}
+                      {organisation && contact.email && (
+                        <p className="text-slate-500">{contact.email}</p>
+                      )}
+                      {positionLabel && (
+                        <p className="text-slate-500">Role: {positionLabel}</p>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
       </div>
       <div className="flex-1">
-        <h1 className="text-xl font-semibold mb-4">Manage Availability</h1>
-        {selected ? (
-          <AvailabilityCalendar availability={availability} onChange={updateDay} />
+        <h1 className="mb-4 text-xl font-semibold text-slate-900">Manage availability</h1>
+        {selectedMember ? (
+          <div className="space-y-6">
+            <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
+              <p className="font-medium text-slate-900">{resolveTeamMemberLabel(selectedMember)}</p>
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                {describeTeamPosition(selectedMember) && (
+                  <span>{describeTeamPosition(selectedMember)}</span>
+                )}
+                <span>{selectedMember.email}</span>
+              </div>
+            </div>
+
+            <AvailabilityCalendar availability={availability} onChange={updateDay} />
+
+            <AvailabilityConflictNotice
+              warning={conflictWarning}
+              onDismiss={() => setConflictWarning(null)}
+            />
+
+            <section
+              aria-labelledby="calendar-legend-heading"
+              className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
+            >
+              <h2
+                id="calendar-legend-heading"
+                className="text-sm font-semibold uppercase tracking-wide text-slate-600"
+              >
+                Calendar key
+              </h2>
+              <dl className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                {(Object.entries(AVAILABILITY_STATUS_META) as [
+                  AvailabilityStatus,
+                  AvailabilityStatusMeta,
+                ][]).map(([status, meta]) => (
+                  <div key={status} className="flex items-start gap-3 text-sm text-slate-700">
+                    <span
+                      className={clsx(
+                        "mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-slate-200",
+                        meta.background,
+                        meta.text ?? "text-white"
+                      )}
+                      aria-hidden="true"
+                    >
+                      <span className="sr-only">{meta.label}</span>
+                    </span>
+                    <div>
+                      <dt className="font-medium text-slate-900">{meta.label}</dt>
+                      {meta.description && <dd className="text-xs text-slate-500">{meta.description}</dd>}
+                    </div>
+                  </div>
+                ))}
+              </dl>
+            </section>
+
+            <UpcomingBookings
+              bookings={bookings}
+              error={bookingsError}
+              loading={bookingsLoading}
+            />
+          </div>
         ) : (
-          <p>Select a team member to view availability.</p>
+          <p className="text-sm text-slate-600">Select a team member to view availability.</p>
         )}
       </div>
     </div>
   );
 }
+
+interface BookingSummary {
+  id: string;
+  start: Date | null;
+  end: Date | null;
+  status: string | null;
+  title: string | null;
+  location: string | null;
+  dateKey: string | null;
+  projectId: string | null;
+}
+
+type MemberType = "franchisee" | "team";
+
+interface ConflictWarning {
+  date: string;
+  status: AvailabilityStatus;
+  bookings: BookingSummary[];
+  member: Member;
+  memberType: MemberType;
+}
+
+const ROLE_DISPLAY_PRIORITY: RoleKey[] = [
+  "operations",
+  "projects",
+  "sales",
+  "marketing",
+  "finance",
+  "admin",
+];
+
+function resolveTeamMemberLabel(member: Member): string {
+  const candidates = [member.displayName, member.fullName, member.contractorInfo?.name];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
+  }
+  return member.email;
+}
+
+function describeTeamPosition(member: Member): string | null {
+  if (typeof member.position === "string") {
+    const trimmed = member.position.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+  for (const key of ROLE_DISPLAY_PRIORITY) {
+    if (member.roles?.[key]) {
+      return ROLE_LABELS[key];
+    }
+  }
+  if (member.contractor) {
+    return "Contractor";
+  }
+  if (member.isStaff) {
+    return "Staff";
+  }
+  return null;
+}
+
+function resolveContactLabel(member: Member): string {
+  const candidates = [member.displayName, member.fullName];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
+  }
+  const organisation = resolveOrganisation(member);
+  if (organisation) {
+    return organisation;
+  }
+  return member.email;
+}
+
+function resolveOrganisation(member: Member): string | null {
+  if (typeof member.organisation === "string") {
+    const trimmed = member.organisation.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+  return null;
+}
+
+function resolveContactPosition(member: Member): string | null {
+  if (typeof member.position === "string") {
+    const trimmed = member.position.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+  return null;
+}
+
+const STATUS_COLORS: Record<string, string> = {
+  confirmed: "bg-emerald-100 text-emerald-700 ring-emerald-200",
+  pending: "bg-amber-100 text-amber-700 ring-amber-200",
+  awaiting: "bg-amber-100 text-amber-700 ring-amber-200",
+  declined: "bg-rose-100 text-rose-700 ring-rose-200",
+  cancelled: "bg-rose-100 text-rose-700 ring-rose-200",
+  completed: "bg-slate-100 text-slate-700 ring-slate-200",
+};
+
+const StatusPill = ({ status }: { status: string }) => {
+  const normalized = status.toLowerCase().replace(/\s+/g, "_");
+  const className = STATUS_COLORS[normalized] ?? "bg-slate-100 text-slate-600 ring-slate-200";
+  return (
+    <span
+      className={clsx(
+        "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold capitalize ring-1 ring-inset",
+        className
+      )}
+    >
+      {status.replace(/_/g, " ")}
+    </span>
+  );
+};
+
+const UpcomingBookings = ({
+  bookings,
+  loading,
+  error,
+}: {
+  bookings: BookingSummary[];
+  loading: boolean;
+  error: string | null;
+}) => (
+  <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+    <div className="flex items-center justify-between gap-2">
+      <h2 className="text-base font-semibold text-slate-900">Upcoming bookings</h2>
+      {loading && <span className="text-sm text-slate-500">Loading…</span>}
+    </div>
+    {error ? (
+      <p className="mt-2 text-sm text-red-600">{error}</p>
+    ) : bookings.length === 0 ? (
+      <p className="mt-2 text-sm text-slate-500">No upcoming bookings on file.</p>
+    ) : (
+      <ul className="mt-3 space-y-3">
+        {bookings.map((booking) => (
+          <li key={booking.id} className="rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="font-medium text-slate-900">{booking.title ?? "Booking"}</p>
+              {booking.status && <StatusPill status={booking.status} />}
+            </div>
+            <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-500">
+              <div className="flex items-center gap-1">
+                <dt className="sr-only">Schedule</dt>
+                <CalendarIcon className="h-4 w-4 text-slate-400" aria-hidden="true" />
+                <dd>{formatDateRange(booking.start, booking.end)}</dd>
+              </div>
+              {booking.location && (
+                <div className="flex items-center gap-1">
+                  <dt className="sr-only">Location</dt>
+                  <MapPinIcon className="h-4 w-4 text-slate-400" aria-hidden="true" />
+                  <dd>{booking.location}</dd>
+                </div>
+              )}
+            </dl>
+          </li>
+        ))}
+      </ul>
+    )}
+  </section>
+);
+
+const AvailabilityConflictNotice = ({
+  warning,
+  onDismiss,
+}: {
+  warning: ConflictWarning | null;
+  onDismiss: () => void;
+}) => {
+  const [copied, setCopied] = useState(false);
+
+  if (!warning) {
+    return null;
+  }
+
+  const { date, bookings, member, memberType } = warning;
+  const friendlyDate = formatDisplayDate(date);
+  const label = resolveTeamMemberLabel(member);
+  const summary = buildConflictSummary(label, friendlyDate, bookings);
+
+  const handleCopy = async () => {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(summary);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 3000);
+        return;
+      }
+      throw new Error("Clipboard API is unavailable");
+    } catch (error) {
+      console.error("Failed to copy coverage request", error);
+      setCopied(false);
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 shadow-sm">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-amber-900">Existing booking on {friendlyDate}</h2>
+          <p className="mt-1 text-sm text-amber-900">
+            {memberType === "franchisee"
+              ? "This date already has a confirmed booking you are responsible for. Please either keep cover in place or offer it to HQ/another franchise before rescheduling with the client."
+              : "This date already has a confirmed booking. Please coordinate with your franchise owner or HQ so they can arrange cover before you step away."}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="self-start rounded-md border border-transparent bg-amber-100 px-2 py-1 text-xs font-medium text-amber-900 transition hover:bg-amber-200"
+        >
+          Dismiss
+        </button>
+      </div>
+      <ul className="mt-3 space-y-2">
+        {bookings.map((booking) => (
+          <li key={booking.id} className="rounded border border-amber-200 bg-white/60 px-3 py-2 text-sm text-amber-900">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium">{booking.title ?? "Booking"}</span>
+              {booking.status && <StatusPill status={booking.status} />}
+            </div>
+            <dl className="mt-1 space-y-1 text-xs text-amber-800">
+              <div className="flex items-center gap-1">
+                <CalendarIcon className="h-4 w-4 text-amber-600" aria-hidden="true" />
+                <dd>{formatDateRange(booking.start, booking.end)}</dd>
+              </div>
+              {booking.location && (
+                <div className="flex items-center gap-1">
+                  <MapPinIcon className="h-4 w-4 text-amber-600" aria-hidden="true" />
+                  <dd>{booking.location}</dd>
+                </div>
+              )}
+              {booking.projectId && (
+                <div className="flex items-center gap-1">
+                  <dd>
+                    Project ID: <span className="font-mono">{booking.projectId}</span>
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="inline-flex items-center justify-center rounded-md bg-amber-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-700"
+        >
+          {memberType === "franchisee" ? "Copy coverage request details" : "Copy handover summary"}
+        </button>
+        {copied && <span className="text-xs text-amber-800">Copied. Share this with your support contact.</span>}
+        {memberType === "franchisee" ? (
+          <p className="text-xs text-amber-800">
+            Tip: Share this summary with HQ or neighbouring franchises to request cover before contacting the client.
+          </p>
+        ) : (
+          <p className="text-xs text-amber-800">
+            Tip: Send this summary to your franchise owner or HQ so they can coordinate a replacement.
+          </p>
+        )}
+      </div>
+    </section>
+  );
+};
+
+const parseDate = (value: unknown): Date | null => {
+  if (!value) return null;
+  if (value instanceof Date) return new Date(value.getTime());
+  if (typeof value === "number") {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof value === "string") {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof value === "object" && typeof (value as any).toDate === "function") {
+    try {
+      const converted = (value as any).toDate();
+      return converted instanceof Date ? converted : null;
+    } catch (error) {
+      console.warn("parseDate failed", error);
+      return null;
+    }
+  }
+  return null;
+};
+
+const combineDateAndTime = (date: string | null | undefined, time: string | null | undefined) => {
+  if (!date) return null;
+  if (!time) return parseDate(date);
+  const isoCandidate = `${date}T${time}`;
+  return parseDate(isoCandidate) ?? parseDate(date);
+};
+
+const toBookingSummary = (
+  id: string,
+  data: Record<string, unknown>
+): BookingSummary => {
+  const rawSlot = data.slot;
+  const slot =
+    rawSlot && typeof rawSlot === "object"
+      ? (rawSlot as { date?: string | null; start?: string | null; end?: string | null })
+      : null;
+
+  const slotDate = typeof slot?.date === "string" && slot.date.trim().length > 0 ? slot.date.trim() : null;
+
+  const start =
+    parseDate(data.start) ||
+    combineDateAndTime(slot?.date ?? null, slot?.start ?? null) ||
+    parseDate(slot?.date ?? null);
+  const end =
+    parseDate(data.end) ||
+    combineDateAndTime(slot?.date ?? null, slot?.end ?? null) ||
+    parseDate(slot?.date ?? null);
+
+  const status = typeof data.status === "string" ? data.status : null;
+  const title =
+    (typeof data.projectName === "string" && data.projectName.trim().length > 0
+      ? data.projectName.trim()
+      : null) ||
+    (typeof data.serviceName === "string" && data.serviceName.trim().length > 0
+      ? data.serviceName.trim()
+      : null) ||
+    (typeof data.serviceId === "string" && data.serviceId.trim().length > 0
+      ? data.serviceId.trim()
+      : null) ||
+    null;
+  const location =
+    typeof data.location === "string" && data.location.trim().length > 0
+      ? data.location.trim()
+      : null;
+
+  const projectId =
+    typeof data.projectId === "string" && data.projectId.trim().length > 0
+      ? data.projectId.trim()
+      : null;
+
+  const derivedDate = start ?? parseDate(slotDate ?? null);
+  let dateKey: string | null = null;
+  if (derivedDate) {
+    dateKey = formatDateKey(derivedDate);
+  } else if (slotDate) {
+    dateKey = normaliseDateKey(slotDate);
+  }
+
+  return {
+    id,
+    start,
+    end,
+    status,
+    title,
+    location,
+    dateKey,
+    projectId,
+  };
+};
+
+const formatDateRange = (start: Date | null, end: Date | null) => {
+  if (!start && !end) return "Schedule TBC";
+  if (start && end) {
+    const sameDay =
+      start.getFullYear() === end.getFullYear() &&
+      start.getMonth() === end.getMonth() &&
+      start.getDate() === end.getDate();
+    const dateFormatter = new Intl.DateTimeFormat("en-GB", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+    const timeFormatter = new Intl.DateTimeFormat("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    if (sameDay) {
+      return `${dateFormatter.format(start)} • ${timeFormatter.format(start)} – ${timeFormatter.format(end)}`;
+    }
+    return `${dateFormatter.format(start)} ${timeFormatter.format(start)} – ${dateFormatter.format(end)} ${timeFormatter.format(end)}`;
+  }
+  const single = start || end;
+  return new Intl.DateTimeFormat("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(single!);
+};
+
+const formatDateKey = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const normaliseDateKey = (input: string) => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(input)) {
+    return input;
+  }
+  const parsed = parseDate(input);
+  return parsed ? formatDateKey(parsed) : null;
+};
+
+const formatDisplayDate = (input: string) => {
+  const parsed = parseDate(input) ?? parseDate(`${input}T00:00:00`);
+  if (!parsed) {
+    return input;
+  }
+  return new Intl.DateTimeFormat("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(parsed);
+};
+
+const buildConflictSummary = (
+  memberLabel: string,
+  dateLabel: string,
+  bookings: BookingSummary[]
+) => {
+  const lines = [`Availability change for ${memberLabel} on ${dateLabel}`, "Conflicting bookings:"];
+  bookings.forEach((booking, index) => {
+    const title = booking.title ?? "Booking";
+    const schedule = formatDateRange(booking.start, booking.end);
+    const location = booking.location ? ` @ ${booking.location}` : "";
+    const reference = booking.projectId ? ` [Project: ${booking.projectId}]` : "";
+    lines.push(`${index + 1}. ${title}${location}${reference} — ${schedule}`);
+  });
+  return lines.join("\n");
+};
+
+const normaliseFranchiseIds = (input: unknown): string[] => {
+  if (!input) return [];
+  const values = Array.isArray(input) ? input : [input];
+  return values
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((value) => value.length > 0);
+};
+
+const normaliseFranchiseId = (input: unknown): string | null => {
+  if (typeof input === "string") {
+    const trimmed = input.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  return null;
+};
+
+const resolveMemberType = (member: Member | null): MemberType => {
+  if (!member) {
+    return "team";
+  }
+  if (member.isStaff) {
+    return "team";
+  }
+  if (member.franchiseIds.length > 0) {
+    return "franchisee";
+  }
+  return "team";
+};
+
+const CalendarIcon = (props: SVGProps<SVGSVGElement>) => (
+  <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" {...props}>
+    <path d="M6 2a1 1 0 1 1 2 0v1h4V2a1 1 0 1 1 2 0v1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h1V2Zm9 5H5v9a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V7Z" />
+  </svg>
+);
+
+const MapPinIcon = (props: SVGProps<SVGSVGElement>) => (
+  <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" {...props}>
+    <path d="M10 2a6 6 0 0 0-6 6c0 4.116 4.19 8.244 5.431 9.377a1 1 0 0 0 1.138 0C11.81 16.244 16 12.116 16 8a6 6 0 0 0-6-6Zm0 8a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z" />
+  </svg>
+);
 

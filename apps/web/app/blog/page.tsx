@@ -1,37 +1,26 @@
-import Image from 'next/image';
-import Link from 'next/link';
-import { getPosts } from '@/lib/blog';
+import { getBlogCategories, getPosts } from '@/lib/blog';
+import BlogExplorer from '@/components/BlogExplorer';
 
 export default async function BlogPage() {
-  const posts = await getPosts();
+  const [posts, categories] = await Promise.all([getPosts(), getBlogCategories()]);
+  const tags = Array.from(
+    new Set(
+      posts
+        .flatMap((post) => post.tags || [])
+        .map((tag) => tag.trim())
+        .filter((tag) => tag.length > 0)
+    )
+  ).sort((a, b) => a.localeCompare(b));
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-6 space-y-8">
-      <h1 className="text-3xl font-semibold">Blog</h1>
-      <div className="grid gap-8 md:grid-cols-2">
-        {posts.map((p) => (
-          <article key={p.id} className="border rounded-md overflow-hidden">
-            {p.imageUrl && (
-              <div className="relative h-48 w-full">
-                <Image
-                  src={p.imageUrl}
-                  alt={p.title}
-                  fill
-                  sizes="(min-width: 768px) 50vw, 100vw"
-                  className="object-cover"
-                />
-              </div>
-            )}
-            <div className="p-4">
-              <h2 className="text-xl font-semibold mb-2">{p.title}</h2>
-              <p className="text-sm text-gray-600 mb-4">{p.excerpt}</p>
-              <Link href={`/blog/${p.id}`} className="text-orange hover:underline">
-                Read more
-              </Link>
-            </div>
-          </article>
-        ))}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <h1 className="text-3xl font-semibold">Blog</h1>
+        <p className="text-sm text-gray-600">
+          Explore the latest stories, updates, and production insights from the Pineapple team.
+        </p>
       </div>
+      <BlogExplorer posts={posts} categories={categories} tags={tags} />
     </div>
   );
 }

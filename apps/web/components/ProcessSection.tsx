@@ -115,7 +115,7 @@ export default function ProcessSection({
           <div className="flex flex-col gap-6">
             {(hasTitle || hasDescription) && (
               <div className="space-y-4">
-                <p className="text-sm uppercase tracking-[0.2em] text-white/70">Our process</p>
+                <p className="text-sm uppercase tracking-[0.2em] text-white">Our process</p>
                 {hasTitle && <h2 className="text-3xl font-semibold md:text-4xl">{title}</h2>}
                 {hasDescription && <p className="max-w-2xl text-white/90">{description}</p>}
               </div>
@@ -142,7 +142,7 @@ export default function ProcessSection({
                           'rounded-full border px-4 py-2 text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white',
                           isActive
                             ? 'border-white bg-white text-orange'
-                            : 'border-white/60 text-white/80 hover:border-white hover:text-white',
+                            : 'border-white/80 text-white hover:border-white hover:text-white',
                         )}
                         onClick={() => moveToIndex(index)}
                         onKeyDown={(event) => handleKeyDown(event, index)}
@@ -159,8 +159,8 @@ export default function ProcessSection({
                   aria-labelledby={`${tabGroupId}-tab-${safeIndex}`}
                   className="mt-6 rounded-2xl bg-white/10 p-6 shadow-lg backdrop-blur"
                 >
-                  <h3 className="text-xl font-semibold md:text-2xl">{activeStage.title}</h3>
-                  <p className="mt-2 text-base text-white/90">{activeStage.description}</p>
+                  <h3 className="text-xl font-semibold md:text-2xl text-white">{activeStage.title}</h3>
+                  <p className="mt-2 text-base text-white">{activeStage.description}</p>
                 </div>
               </div>
             )}

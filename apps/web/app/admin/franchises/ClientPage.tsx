@@ -273,6 +273,14 @@ interface FranchiseApplicationRecord {
   preferredTerritoryLabels: string[];
   preferredCategoryIds: string[];
   preferredCategoryLabels: string[];
+  searchPostalCode: string | null;
+  searchPostalCodeNormalised: string | null;
+  searchPostalCodeResolved: string | null;
+  searchPostalCodeLat: number | null;
+  searchPostalCodeLng: number | null;
+  territorySuggestionIds: string[];
+  territorySuggestionLabels: string[];
+  territorySuggestionDistancesKm: Array<number | null>;
   answers: Record<string, unknown>;
   reviewNotes: string;
 }
@@ -654,6 +662,39 @@ export default function AdminFranchisesPage() {
             .filter((value) => value.length > 0)
         : [];
       const reviewNotes = typeof data.reviewNotes === "string" ? data.reviewNotes : "";
+      const searchPostalCode =
+        typeof data.searchPostalCode === "string" && data.searchPostalCode.trim().length > 0
+          ? data.searchPostalCode.trim()
+          : null;
+      const searchPostalCodeNormalised =
+        typeof data.searchPostalCodeNormalised === "string" && data.searchPostalCodeNormalised.trim().length > 0
+          ? data.searchPostalCodeNormalised.trim()
+          : null;
+      const searchPostalCodeResolved =
+        typeof data.searchPostalCodeResolved === "string" && data.searchPostalCodeResolved.trim().length > 0
+          ? data.searchPostalCodeResolved.trim()
+          : null;
+      const searchPostalCodeLat = typeof data.searchPostalCodeLat === "number" ? data.searchPostalCodeLat : null;
+      const searchPostalCodeLng = typeof data.searchPostalCodeLng === "number" ? data.searchPostalCodeLng : null;
+      const territorySuggestionIds = Array.isArray(data.territorySuggestionIds)
+        ? (data.territorySuggestionIds as unknown[])
+            .map((value) => (typeof value === "string" ? value : String(value ?? "")))
+            .filter((value) => value.length > 0)
+        : [];
+      const territorySuggestionLabels = Array.isArray(data.territorySuggestionLabels)
+        ? (data.territorySuggestionLabels as unknown[])
+            .map((value) => (typeof value === "string" ? value : String(value ?? "")))
+            .filter((value) => value.length > 0)
+        : [];
+      const territorySuggestionDistancesKm = Array.isArray(data.territorySuggestionDistancesKm)
+        ? (data.territorySuggestionDistancesKm as unknown[]).map((value) => {
+            if (typeof value === "number" && Number.isFinite(value)) {
+              return value;
+            }
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : null;
+          })
+        : [];
       const excludedKeys = new Set([
         "status",
         "stepIds",
@@ -665,6 +706,14 @@ export default function AdminFranchisesPage() {
         "preferredCategoryIds",
         "preferredCategoryLabels",
         "reviewNotes",
+        "searchPostalCode",
+        "searchPostalCodeNormalised",
+        "searchPostalCodeResolved",
+        "searchPostalCodeLat",
+        "searchPostalCodeLng",
+        "territorySuggestionIds",
+        "territorySuggestionLabels",
+        "territorySuggestionDistancesKm",
       ]);
       const answers: Record<string, unknown> = {};
       Object.entries(data).forEach(([key, value]) => {
@@ -683,6 +732,14 @@ export default function AdminFranchisesPage() {
         preferredTerritoryLabels,
         preferredCategoryIds,
         preferredCategoryLabels,
+        searchPostalCode,
+        searchPostalCodeNormalised,
+        searchPostalCodeResolved,
+        searchPostalCodeLat,
+        searchPostalCodeLng,
+        territorySuggestionIds,
+        territorySuggestionLabels,
+        territorySuggestionDistancesKm,
         answers,
         reviewNotes,
       } satisfies FranchiseApplicationRecord;
@@ -3345,6 +3402,15 @@ export default function AdminFranchisesPage() {
                       const category = categoryMap.get(id);
                       return category?.name || application.preferredCategoryLabels[index] || id;
                     });
+                    const suggestionDetails = application.territorySuggestionIds.map((id, index) => {
+                      const label =
+                        application.territorySuggestionLabels[index] || territoryMap.get(id)?.label || id;
+                      const rawDistance = application.territorySuggestionDistancesKm[index];
+                      const distance = typeof rawDistance === 'number' && Number.isFinite(rawDistance)
+                        ? rawDistance
+                        : null;
+                      return { id, label, distance };
+                    });
                     const answers = Object.entries(application.answers)
                       .map(([key, value]) => ({ key, value: formatAnswerValue(value) }))
                       .filter((entry) => entry.value.length > 0);
@@ -3365,6 +3431,22 @@ export default function AdminFranchisesPage() {
                               </div>
                             )}
                             {applicantPhone && <div className="text-sm text-gray-600">{applicantPhone}</div>}
+                            {(application.searchPostalCodeResolved || application.searchPostalCode) && (
+                              <div className="text-xs text-gray-500">
+                                Postcode:
+                                <span className="ml-1 font-medium text-gray-700">
+                                  {application.searchPostalCodeResolved || application.searchPostalCode}
+                                </span>
+                                {application.searchPostalCode &&
+                                  application.searchPostalCodeResolved &&
+                                  application.searchPostalCode.toUpperCase() !==
+                                    application.searchPostalCodeResolved.toUpperCase() && (
+                                    <span className="ml-1 text-[11px] uppercase text-gray-400">
+                                      (entered {application.searchPostalCode})
+                                    </span>
+                                  )}
+                              </div>
+                            )}
                           </div>
                           <div className="grid gap-3 sm:w-72">
                             <label className="grid gap-1 text-xs">
@@ -3414,6 +3496,28 @@ export default function AdminFranchisesPage() {
                                 {territoryNames.map((name) => (
                                   <span key={`${application.id}-territory-${name}`} className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-700">
                                     {name}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {suggestionDetails.length > 0 && (
+                            <div>
+                              <span className="text-xs font-semibold uppercase text-gray-500">Suggested at submission</span>
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {suggestionDetails.map((suggestion) => (
+                                  <span
+                                    key={`${application.id}-suggestion-${suggestion.id}`}
+                                    className="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-700"
+                                  >
+                                    {suggestion.label}
+                                    {typeof suggestion.distance === 'number' && Number.isFinite(suggestion.distance) && (
+                                      <span className="ml-1 text-[11px] uppercase text-slate-500">
+                                        {suggestion.distance < 1
+                                          ? '<1km'
+                                          : `${suggestion.distance.toFixed(1)}km`}
+                                      </span>
+                                    )}
                                   </span>
                                 ))}
                               </div>

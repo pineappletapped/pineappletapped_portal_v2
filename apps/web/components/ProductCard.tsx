@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { Product } from "@/lib/products";
@@ -29,14 +29,19 @@ export default function ProductCard({ product }: { product: Product }) {
   const activeVariation = requiresVariation
     ? variations.find((variation) => variation.id === selectedVariation)
     : null;
+  const activePrice = activeVariation?.price;
+  const priceDetails = useMemo(
+    () =>
+      getListingPriceLabel(product, {
+        overrideMin:
+          typeof activePrice === "number" && activePrice > 0
+            ? activePrice
+            : undefined,
+      }),
+    [activePrice, product]
+  );
+  const priceHeadline = priceDetails?.headline ?? "Pricing on request";
   const basePrice = activeVariation?.price ?? product.price;
-  const priceRangeLabel =
-    getListingPriceLabel(product) ?? "Pricing on request";
-  const priceLabel = isQuoteOnly
-    ? "Pricing available on request"
-    : selectedVariation
-      ? `£${basePrice.toFixed(2)}`
-      : priceRangeLabel;
   const img =
     product.imageUrl || "https://placehold.co/600x400?text=No+Image";
   const { visibleDeliverables, remainingDeliverableCount } =
@@ -122,8 +127,14 @@ export default function ProductCard({ product }: { product: Product }) {
           </>
         )}
         <div className="flex flex-col gap-1">
-          <p className="font-bold text-sm">{priceLabel}</p>
-          <ListingPriceNote className="text-gray-500" />
+          <p className="text-sm font-semibold text-gray-900">
+            {priceHeadline}
+          </p>
+          <ListingPriceNote
+            className="text-gray-500"
+            note={priceDetails?.note}
+            rangeNote={priceDetails?.rangeNote}
+          />
         </div>
         <div className="mt-auto flex flex-col gap-2">
           {requiresVariation && (
@@ -144,7 +155,9 @@ export default function ProductCard({ product }: { product: Product }) {
                 {variations.map((variation) => (
                   <option key={variation.id} value={variation.id}>
                     {variation.name}
-                    {!isQuoteOnly && ` – £${variation.price.toFixed(2)}`}
+                    {!isQuoteOnly && variation.price > 0
+                      ? ` – £${variation.price.toFixed(2)}`
+                      : ""}
                   </option>
                 ))}
               </select>
@@ -153,7 +166,7 @@ export default function ProductCard({ product }: { product: Product }) {
           <div className="flex flex-col gap-2 sm:flex-row">
             <button
               type="button"
-              className="btn btn-sm w-full sm:flex-1"
+              className="btn btn-sm btn-primary w-full sm:flex-1"
               onClick={handleQuickAdd}
               disabled={requiresVariation && !selectedVariation}
               title={
@@ -168,7 +181,7 @@ export default function ProductCard({ product }: { product: Product }) {
             </button>
             <Link
               href={`/products/${product.id}`}
-              className="btn btn-sm w-full sm:flex-1"
+              className="btn btn-sm btn-outline w-full sm:flex-1"
             >
               Learn More
             </Link>

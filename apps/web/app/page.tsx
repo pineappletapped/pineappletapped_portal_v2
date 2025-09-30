@@ -99,26 +99,29 @@ export default async function Home() {
       <section className="mx-auto max-w-6xl px-4 py-16">
         <h2 className="text-2xl font-semibold mb-6 text-center">From the Blog</h2>
         <div className="grid gap-6 md:grid-cols-2">
-          {recent.map((p) => (
-            <article key={p.id} className="border rounded-md overflow-hidden">
-              {p.imageUrl && (
-                <Image
-                  src={p.imageUrl}
-                  alt={p.title}
-                  width={800}
-                  height={320}
-                  className="h-40 w-full object-cover"
-                />
-              )}
-              <div className="p-4">
-                <h3 className="font-semibold mb-2">{p.title}</h3>
-                <p className="text-sm text-gray-600 mb-2">{p.excerpt}</p>
-                <Link href={`/blog/${p.id}`} className="text-orange hover:underline">
-                  Read more
-                </Link>
-              </div>
-            </article>
-          ))}
+          {recent.map((p) => {
+            const slug = p.slug || p.id;
+            return (
+              <article key={p.id} className="border rounded-md overflow-hidden">
+                {p.imageUrl && (
+                  <Image
+                    src={p.imageUrl}
+                    alt={p.title}
+                    width={800}
+                    height={320}
+                    className="h-40 w-full object-cover"
+                  />
+                )}
+                <div className="p-4">
+                  <h3 className="font-semibold mb-2">{p.title}</h3>
+                  <p className="text-sm text-gray-600 mb-2">{p.excerpt}</p>
+                  <Link href={`/blog/${slug}`} className="text-orange hover:underline">
+                    Read more
+                  </Link>
+                </div>
+              </article>
+            );
+          })}
         </div>
         <div className="text-center mt-6">
           <Link href="/blog" className="text-orange hover:underline">

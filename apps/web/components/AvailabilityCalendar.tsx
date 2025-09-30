@@ -4,6 +4,40 @@ import { useMemo, useState } from 'react';
 
 export type AvailabilityStatus = "unavailable" | "available" | "partial" | "booked";
 
+export interface AvailabilityStatusMeta {
+  label: string;
+  background: string;
+  text?: string;
+  description?: string;
+}
+
+export const AVAILABILITY_STATUS_META: Record<AvailabilityStatus, AvailabilityStatusMeta> = {
+  unavailable: {
+    label: "Unavailable",
+    background: "bg-slate-500",
+    text: "text-white",
+    description: "Team member is not accepting work on this date.",
+  },
+  available: {
+    label: "Available",
+    background: "bg-emerald-500",
+    text: "text-white",
+    description: "Fully available for bookings.",
+  },
+  partial: {
+    label: "Limited",
+    background: "bg-amber-400",
+    text: "text-slate-900",
+    description: "Part-day availability or limited hours.",
+  },
+  booked: {
+    label: "Booked",
+    background: "bg-rose-500",
+    text: "text-white",
+    description: "Confirmed job scheduled for this date.",
+  },
+};
+
 const next: Record<AvailabilityStatus, AvailabilityStatus> = {
   unavailable: "available",
   available: "partial",
@@ -33,16 +67,8 @@ export default function AvailabilityCalendar({ availability, onChange }: Props) 
   }, [y, m]);
 
   const cellClasses = (status: AvailabilityStatus) => {
-    switch (status) {
-      case "available":
-        return "bg-green-500 text-white";
-      case "partial":
-        return "bg-yellow-400";
-      case "booked":
-        return "bg-red-500 text-white";
-      default:
-        return "bg-black text-white";
-    }
+    const meta = AVAILABILITY_STATUS_META[status];
+    return `${meta.background} ${meta.text ?? ""}`.trim();
   };
 
   return (
