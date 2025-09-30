@@ -34,6 +34,7 @@ Launch a managed affiliate programme within the admin marketing workspace that e
   - Create application record with status `pending_review`.
   - Notify marketing ops via email/Slack.
   - Auto-acknowledge applicant via email with expected review timeline.
+  - Marketing ops service-level objective: review and respond to applications within five business days.
 
 ## Affiliate portal requirements
 - Secure login (same auth as portal) with affiliate role gating.
@@ -61,6 +62,11 @@ Launch a managed affiliate programme within the admin marketing workspace that e
   - Tag CRM client record with `affiliateId`, `affiliateName`, referral code, attribution source, and original click reference.
   - Persist attribution for lifetime of client so future orders accrue commission until affiliate is removed/suspended.
 - Handle edge cases: duplicate clicks, multiple affiliates (last-touch vs. first-touch policy), cookie expiry, cross-device signups.
+- Attribution rules:
+  - Default cookie window 60 days from last click.
+  - Tie-breaker: if multiple affiliates have activity before first purchase, last-touch wins after four weeks of inactivity from the initial referral. If the client purchases and is inactive for 12 months, the first affiliate is released and a new referral can capture attribution.
+  - Existing CRM clients are ineligible for affiliate attribution; upsell opportunities remain in-house.
+  - Programme scope initially limited to UK-based affiliates and customers.
 
 ## Commission and payout logic
 - Default commission: 50% of HQ's commission on attributed orders; allow per-affiliate overrides.
@@ -74,9 +80,9 @@ Launch a managed affiliate programme within the admin marketing workspace that e
 - Allow adjustments (manual debit/credit) with notes for disputes or corrections.
 
 ## Payout workflow
-- Affiliates become payout-eligible when pending net balance ≥ £50.
+- Affiliates become payout-eligible when pending net balance ≥ £50 and the underlying customer order has been paid and delivered.
 - Admin payout run (monthly):
-  1. Filter eligible affiliates.
+  1. Filter eligible affiliates (run on the 1st of each month).
   2. Validate bank details and compliance docs.
   3. Mark entries as `scheduled` and export remittance report (per affiliate and consolidated CSV).
   4. Finance processes payments manually in banking system.
@@ -108,10 +114,16 @@ Launch a managed affiliate programme within the admin marketing workspace that e
 - Optional Slack/Teams notifications to marketing ops for new applications and high-performing affiliates.
 - Knowledge base/FAQ integration for affiliate guidance.
 
-## Open questions / decisions needed
-1. Attribution window duration and tie-breaker policy when multiple affiliates refer the same client.
-2. Whether affiliates can refer existing clients (upsell) or only net-new customers.
-3. Required tax documentation for international affiliates.
-4. Service-level objective for application review and payout processing.
-5. Branding/copy requirements for public marketing pages and portal UI.
+## Branding and copy
+- Align onboarding form, marketing landing copy, and portal UI with existing brand guidelines (typography, tone, colour palette).
+- Highlight value proposition for social media managers (earn 50% of HQ commission on new client work, transparent portal, timely payouts).
+- Provide reusable snippets for affiliates to share on their channels while allowing light customisation.
+- Include clear VAT/net payment messaging in portal and remittances.
+
+## Key decisions confirmed
+- Attribution window and tie-breaker rules set to last-touch after four weeks of inactivity pre-first purchase, with 12-month inactivity reset post-purchase.
+- Affiliate focus on net-new customers only; existing clients excluded from referral eligibility.
+- Initial rollout limited to UK-based affiliates, deferring international tax handling.
+- Application reviews targeted within five business days; payout run occurs on the 1st of each month for balances over £50 tied to fulfilled, paid orders.
+- Branding and copy to follow existing HQ guidelines with messaging tailored to marketer persona.
 
