@@ -19,16 +19,36 @@ import {
 } from "firebase/firestore";
 import { adminListUsers } from "@/lib/admin";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import {
+  CRM_STATUS_LABELS,
+  normaliseCrmStatus,
+  type CRMStatus,
+} from "@/lib/crm";
+import { ROLE_LABELS, extractUserRoles, type RoleKey, type UserRoles } from "@/lib/roles";
 
-interface User {
+interface RawMember {
   id: string;
-  displayName?: string;
   email: string;
+  displayName?: string | null;
+  fullName?: string | null;
+  position?: string | null;
+  organisation?: string | null;
+  crmStatus?: string | null;
+  contractor?: boolean | null;
+  isStaff?: boolean | null;
+  contractorInfo?: { name?: string | null } | null;
+  roles?: UserRoles;
+}
+
+interface Member extends RawMember {
+  crmStatus: CRMStatus;
+  roles: UserRoles;
+  isTeam: boolean;
 }
 
 export default function AdminAvailabilityPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["projects", "operations"]);
-  const [members, setMembers] = useState<User[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
   const [selected, setSelected] = useState<string>("");
   const [availability, setAvailability] = useState<Record<string, AvailabilityStatus>>({});
   const [bookings, setBookings] = useState<BookingSummary[]>([]);
@@ -37,8 +57,18 @@ export default function AdminAvailabilityPage() {
   const [loadingMembers, setLoadingMembers] = useState(true);
 
   const selectedMember = useMemo(
-    () => members.find((member) => member.id === selected) ?? null,
+    () => members.find((member) => member.id === selected && member.isTeam) ?? null,
     [members, selected]
+  );
+
+  const teamMembers = useMemo(
+    () => members.filter((member) => member.isTeam),
+    [members]
+  );
+
+  const crmContacts = useMemo(
+    () => members.filter((member) => !member.isTeam),
+    [members]
   );
 
   // load staff status and team list
@@ -51,11 +81,45 @@ export default function AdminAvailabilityPage() {
       }
       try {
         const result: any = await adminListUsers();
-        const users: User[] = result.users || [];
-        setMembers(users);
-        const def =
-          users.find((u) => u.email === "ryan@pineappletapped.com") || users[0];
-        if (def) setSelected(def.id);
+        const rawUsers: RawMember[] = Array.isArray(result?.users)
+          ? (result.users as RawMember[])
+          : [];
+        const enriched: Member[] = rawUsers.map((entry) => {
+          const roles = extractUserRoles({ ...(entry ?? {}), uid: entry?.id });
+          const crmStatus = normaliseCrmStatus(entry?.crmStatus);
+          const isTeam =
+            entry?.contractor === true ||
+            entry?.isStaff === true ||
+            roles.admin === true ||
+            roles.operations === true ||
+            roles.projects === true ||
+            roles.finance === true ||
+            roles.sales === true ||
+            roles.marketing === true;
+          return {
+            ...entry,
+            roles,
+            crmStatus,
+            isTeam,
+          };
+        });
+        setMembers(enriched);
+        setSelected((current) => {
+          if (
+            current &&
+            enriched.some((member) => member.id === current && member.isTeam)
+          ) {
+            return current;
+          }
+          const preferred = enriched.find(
+            (member) =>
+              member.isTeam &&
+              typeof member.email === "string" &&
+              member.email.toLowerCase() === "ryan@pineappletapped.com"
+          );
+          const fallback = enriched.find((member) => member.isTeam);
+          return preferred?.id ?? fallback?.id ?? "";
+        });
       } catch (err) {
         console.error(err);
       } finally {
@@ -66,7 +130,10 @@ export default function AdminAvailabilityPage() {
 
   // load availability for selected member
   useEffect(() => {
-    if (!allowed || !selected) return;
+    if (!allowed || !selectedMember) {
+      setAvailability({});
+      return;
+    }
 
     let cancelled = false;
 
@@ -77,7 +144,10 @@ export default function AdminAvailabilityPage() {
           return;
         }
 
-        const q = query(collection(db, "availability"), where("uid", "==", selected));
+        const q = query(
+          collection(db, "availability"),
+          where("uid", "==", selectedMember.id)
+        );
         const snap = await getDocs(q);
         const map: Record<string, AvailabilityStatus> = {};
         snap.docs.forEach((d) => {
@@ -95,12 +165,14 @@ export default function AdminAvailabilityPage() {
     return () => {
       cancelled = true;
     };
-  }, [allowed, selected]);
+  }, [allowed, selectedMember]);
 
   // load upcoming bookings for the selected member
   useEffect(() => {
-    if (!allowed || !selected) {
+    if (!allowed || !selectedMember) {
       setBookings([]);
+      setBookingsLoading(false);
+      setBookingsError(null);
       return;
     }
 
@@ -114,10 +186,12 @@ export default function AdminAvailabilityPage() {
         if (!db || cancelled) return;
 
         const requests = [
-          getDocs(query(collection(db, "bookings"), where("contractorUid", "==", selected))),
+          getDocs(
+            query(collection(db, "bookings"), where("contractorUid", "==", selectedMember.id))
+          ),
         ];
 
-        if (selectedMember?.email) {
+        if (selectedMember.email) {
           requests.push(
             getDocs(query(collection(db, "bookings"), where("contractorEmail", "==", selectedMember.email)))
           );
@@ -164,7 +238,7 @@ export default function AdminAvailabilityPage() {
     return () => {
       cancelled = true;
     };
-  }, [allowed, selected, selectedMember?.email]);
+  }, [allowed, selectedMember]);
 
   const resolveDb = async (): Promise<Firestore> => {
     const { db } = await ensureFirebase();
@@ -175,13 +249,16 @@ export default function AdminAvailabilityPage() {
   };
 
   const updateDay = async (date: string, status: AvailabilityStatus) => {
+    if (!selectedMember) {
+      return;
+    }
     const previous = availability[date];
     setAvailability((current) => ({ ...current, [date]: status }));
 
     try {
       const db = await resolveDb();
-      await setDoc(doc(db, "availability", `${selected}_${date}`), {
-        uid: selected,
+      await setDoc(doc(db, "availability", `${selectedMember.id}_${date}`), {
+        uid: selectedMember.id,
         date,
         status,
       });
@@ -202,41 +279,98 @@ export default function AdminAvailabilityPage() {
 
   return (
     <div className="flex flex-col gap-6 lg:flex-row">
-      <div className="lg:w-72">
-        <h1 className="mb-3 text-xl font-semibold text-slate-900">Team members</h1>
-        <ul className="space-y-2">
-          {members.map((member) => (
-            <li key={member.id}>
-              <button
-                type="button"
-                onClick={() => setSelected(member.id)}
-                aria-pressed={selected === member.id}
-                className={clsx(
-                  "flex w-full flex-col rounded-lg border px-3 py-2 text-left text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500",
-                  selected === member.id
-                    ? "border-blue-500 bg-blue-50 text-blue-900 shadow-sm"
-                    : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
-                )}
-              >
-                <span className="font-medium">{member.displayName || member.email}</span>
-                {member.displayName && <span className="text-xs text-slate-500">{member.email}</span>}
-              </button>
-            </li>
-          ))}
-        </ul>
+      <div className="space-y-6 lg:w-80 lg:flex-none">
+        <section>
+          <h1 className="mb-3 text-xl font-semibold text-slate-900">Team members</h1>
+          {teamMembers.length === 0 ? (
+            <p className="text-sm text-slate-600">
+              No active team members were found. Add staff or contractors to manage their availability.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {teamMembers.map((member) => {
+                const label = resolveTeamMemberLabel(member);
+                const positionLabel = describeTeamPosition(member);
+                return (
+                  <li key={member.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelected(member.id)}
+                      aria-pressed={selected === member.id}
+                      className={clsx(
+                        "flex w-full flex-col rounded-lg border px-3 py-2 text-left text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500",
+                        selected === member.id
+                          ? "border-blue-500 bg-blue-50 text-blue-900 shadow-sm"
+                          : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+                      )}
+                    >
+                      <span className="font-medium">{label}</span>
+                      {positionLabel && (
+                        <span className="text-xs text-slate-500">{positionLabel}</span>
+                      )}
+                      <span className="text-xs text-slate-500">{member.email}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        {crmContacts.length > 0 && (
+          <section>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-600">
+              CRM contacts
+            </h2>
+            <p className="mt-1 text-xs text-slate-500">
+              Prospects and clients appear here for reference and are not selectable for calendar availability.
+            </p>
+            <ul className="mt-3 space-y-2">
+              {crmContacts.map((contact) => {
+                const primary = resolveContactLabel(contact);
+                const organisation = resolveOrganisation(contact);
+                const positionLabel = resolveContactPosition(contact);
+                const stageLabel = CRM_STATUS_LABELS[contact.crmStatus];
+                return (
+                  <li
+                    key={contact.id}
+                    className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-medium text-slate-900">{primary}</p>
+                      <span className="inline-flex items-center rounded-full bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">
+                        {stageLabel}
+                      </span>
+                    </div>
+                    <div className="mt-1 space-y-1 text-xs text-slate-600">
+                      {organisation ? <p>{organisation}</p> : <p>{contact.email}</p>}
+                      {organisation && contact.email && (
+                        <p className="text-slate-500">{contact.email}</p>
+                      )}
+                      {positionLabel && (
+                        <p className="text-slate-500">Role: {positionLabel}</p>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
       </div>
       <div className="flex-1">
         <h1 className="mb-4 text-xl font-semibold text-slate-900">Manage availability</h1>
-        {selected ? (
+        {selectedMember ? (
           <div className="space-y-6">
-            {selectedMember && (
-              <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
-                <p className="font-medium text-slate-900">{selectedMember.displayName || selectedMember.email}</p>
-                {selectedMember.displayName && (
-                  <p className="text-xs text-slate-500">{selectedMember.email}</p>
+            <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
+              <p className="font-medium text-slate-900">{resolveTeamMemberLabel(selectedMember)}</p>
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                {describeTeamPosition(selectedMember) && (
+                  <span>{describeTeamPosition(selectedMember)}</span>
                 )}
+                <span>{selectedMember.email}</span>
               </div>
-            )}
+            </div>
 
             <AvailabilityCalendar availability={availability} onChange={updateDay} />
 
@@ -296,6 +430,86 @@ interface BookingSummary {
   status: string | null;
   title: string | null;
   location: string | null;
+}
+
+const ROLE_DISPLAY_PRIORITY: RoleKey[] = [
+  "operations",
+  "projects",
+  "sales",
+  "marketing",
+  "finance",
+  "admin",
+];
+
+function resolveTeamMemberLabel(member: Member): string {
+  const candidates = [member.displayName, member.fullName, member.contractorInfo?.name];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
+  }
+  return member.email;
+}
+
+function describeTeamPosition(member: Member): string | null {
+  if (typeof member.position === "string") {
+    const trimmed = member.position.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+  for (const key of ROLE_DISPLAY_PRIORITY) {
+    if (member.roles?.[key]) {
+      return ROLE_LABELS[key];
+    }
+  }
+  if (member.contractor) {
+    return "Contractor";
+  }
+  if (member.isStaff) {
+    return "Staff";
+  }
+  return null;
+}
+
+function resolveContactLabel(member: Member): string {
+  const candidates = [member.displayName, member.fullName];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
+  }
+  const organisation = resolveOrganisation(member);
+  if (organisation) {
+    return organisation;
+  }
+  return member.email;
+}
+
+function resolveOrganisation(member: Member): string | null {
+  if (typeof member.organisation === "string") {
+    const trimmed = member.organisation.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+  return null;
+}
+
+function resolveContactPosition(member: Member): string | null {
+  if (typeof member.position === "string") {
+    const trimmed = member.position.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+  return null;
 }
 
 const STATUS_COLORS: Record<string, string> = {
