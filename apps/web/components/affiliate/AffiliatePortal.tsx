@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { User } from "firebase/auth";
 import {
   Timestamp,
   collection,
@@ -57,7 +58,6 @@ export default function AffiliatePortal() {
   const [clients, setClients] = useState<ClientSummary[]>([]);
   const [payouts, setPayouts] = useState<AffiliatePayoutRecord[]>([]);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
-  const [linking, setLinking] = useState(false);
 
   useEffect(() => {
     let unsubscribeOrders: (() => void) | undefined;
@@ -71,7 +71,7 @@ export default function AffiliatePortal() {
         }
 
         await new Promise<void>((resolve) => {
-          const unsub = auth.onAuthStateChanged(async (user) => {
+          const unsub = auth.onAuthStateChanged(async (user: User | null) => {
             unsub();
             if (!user) {
               setError("Please sign in to view your affiliate dashboard.");
@@ -119,8 +119,7 @@ export default function AffiliatePortal() {
               setLoading(false);
               resolve();
 
-              if (!record.ownerUid && !linking) {
-                setLinking(true);
+              if (!record.ownerUid) {
                 try {
                   await updateDoc(doc(db, "affiliates", docSnap.id), {
                     ownerUid: user.uid,
@@ -131,8 +130,6 @@ export default function AffiliatePortal() {
                   });
                 } catch (linkErr) {
                   console.error("Failed to attach affiliate to user", linkErr);
-                } finally {
-                  setLinking(false);
                 }
               }
 
