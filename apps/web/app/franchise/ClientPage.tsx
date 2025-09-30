@@ -919,6 +919,11 @@ export default function FranchisePortalPage() {
       href: "/franchise/drive-staging",
     },
     {
+      label: "Draft social copy",
+      description: "Turn transcripts into posts for every platform.",
+      href: "/franchise/tools",
+    },
+    {
       label: "Coordinate leads",
       description: "Manage CRM activity for your territory.",
       href: "/crm",
@@ -1030,6 +1035,9 @@ export default function FranchisePortalPage() {
                   </Link>
                   <Link href="/franchise/marketing-materials" className="btn-sm btn-outline">
                     Marketing studio
+                  </Link>
+                  <Link href="/franchise/tools" className="btn-sm btn-outline">
+                    Content assistant
                   </Link>
                 </div>
               </div>

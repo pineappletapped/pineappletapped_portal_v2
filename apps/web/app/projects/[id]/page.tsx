@@ -2,7 +2,20 @@
 'use client';
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { db, auth } from '@/lib/firebase';
-import { doc, getDoc, collection, query, where, getDocs, addDoc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import {
+  doc,
+  getDoc,
+  collection,
+  query,
+  where,
+  getDocs,
+  addDoc,
+  serverTimestamp,
+  updateDoc,
+  onSnapshot,
+  orderBy,
+  limit,
+} from 'firebase/firestore';
 import { extractUserRoles, hasRole } from '@/lib/roles';
 import Link from 'next/link';
 import StatusBadge from '@/components/StatusBadge';
@@ -48,12 +61,66 @@ const isDroneAssignment = (name: string | null, category: string | null): boolea
   return nameMatch || categoryMatch;
 };
 
+const parseTimestamp = (value: any): Date | null => {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value === 'number') {
+    const fromNumber = new Date(value);
+    return Number.isNaN(fromNumber.getTime()) ? null : fromNumber;
+  }
+  if (value && typeof value === 'object') {
+    if (typeof value.toDate === 'function') {
+      try {
+        return value.toDate();
+      } catch (error) {
+        console.warn('Failed to convert timestamp', error);
+      }
+    }
+    if ('seconds' in value) {
+      const seconds = Number((value as any).seconds);
+      const nanos = Number((value as any).nanoseconds ?? 0);
+      if (Number.isFinite(seconds)) {
+        return new Date(seconds * 1000 + Math.floor(nanos / 1_000_000));
+      }
+    }
+  }
+  if (typeof value === 'string') {
+    const fromString = new Date(value);
+    return Number.isNaN(fromString.getTime()) ? null : fromString;
+  }
+  return null;
+};
+
+interface ContentDraftRecord {
+  id: string;
+  status: string;
+  summary: string;
+  youtubeTitles: string[];
+  youtubeDescription: string;
+  youtubeTags: string[];
+  socialPosts: Array<{
+    id: string;
+    platform: string;
+    headline: string;
+    body: string;
+    hashtags: string[];
+  }>;
+  deliverableLabel: string | null;
+  platforms: string[];
+  callToAction: string | null;
+  tone: string | null;
+  updatedAt: Date | null;
+  publishedAt: Date | null;
+}
+
 export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [project, setProject] = useState<any>(null);
   const [assets, setAssets] = useState<any[]>([]);
   const [messages, setMessages] = useState<any[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [brandPacks, setBrandPacks] = useState<any[]>([]);
+  const [contentDrafts, setContentDrafts] = useState<ContentDraftRecord[]>([]);
+  const [contentDraftsLoading, setContentDraftsLoading] = useState(true);
 
   // Internal messages (staff/contractor comms)
   const [internalMessages, setInternalMessages] = useState<any[]>([]);
@@ -220,6 +287,55 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       }
     })();
   },[params.id, loadMessages, loadInternalMessages]);
+
+  useEffect(() => {
+    setContentDraftsLoading(true);
+    const ref = query(
+      collection(db, 'projects', params.id, 'contentDrafts'),
+      orderBy('createdAt', 'desc'),
+      limit(10)
+    );
+    const unsubscribe = onSnapshot(
+      ref,
+      (snapshot) => {
+        const drafts: ContentDraftRecord[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as Record<string, any>;
+          const socialPosts = Array.isArray(data.socialPosts)
+            ? data.socialPosts.map((item: any, index: number) => ({
+                id: item?.id || `${docSnap.id}-post-${index}`,
+                platform: item?.platform || 'Social',
+                headline: item?.headline || '',
+                body: item?.body || '',
+                hashtags: Array.isArray(item?.hashtags) ? item.hashtags : [],
+              }))
+            : [];
+          return {
+            id: docSnap.id,
+            status: typeof data.status === 'string' ? data.status : 'published',
+            summary: typeof data.summary === 'string' ? data.summary : '',
+            youtubeTitles: Array.isArray(data.youtubeTitles) ? data.youtubeTitles : [],
+            youtubeDescription: typeof data.youtubeDescription === 'string' ? data.youtubeDescription : '',
+            youtubeTags: Array.isArray(data.youtubeTags) ? data.youtubeTags : [],
+            socialPosts,
+            deliverableLabel: typeof data.deliverableLabel === 'string' ? data.deliverableLabel : null,
+            platforms: Array.isArray(data.platforms) ? data.platforms : [],
+            callToAction: typeof data.callToAction === 'string' ? data.callToAction : null,
+            tone: typeof data.tone === 'string' ? data.tone : null,
+            updatedAt: parseTimestamp(data.updatedAt),
+            publishedAt: parseTimestamp(data.createdAt),
+          } satisfies ContentDraftRecord;
+        });
+        setContentDrafts(drafts);
+        setContentDraftsLoading(false);
+      },
+      (error) => {
+        console.error('Failed to load content drafts', error);
+        setContentDrafts([]);
+        setContentDraftsLoading(false);
+      }
+    );
+    return () => unsubscribe();
+  }, [params.id]);
 
   // Send a new message
   const sendMessage = async () => {
@@ -612,6 +728,74 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
         {deliverableAssets.length > 1 && (
           <div className="mt-2">
             <Link href={`/projects/${project.id}/compare`} className="text-sm text-blue-600 underline">Compare Versions</Link>
+          </div>
+        )}
+      </div>
+      <div className="card">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-base font-semibold text-gray-900">Content publishing kits</h2>
+          <span className="text-xs uppercase tracking-wide text-gray-500">
+            {contentDraftsLoading ? 'Loading…' : `${contentDrafts.length} ready`}
+          </span>
+        </div>
+        {contentDraftsLoading ? (
+          <p className="text-sm text-gray-600">Loading copy packs…</p>
+        ) : contentDrafts.length === 0 ? (
+          <p className="text-sm text-gray-600">
+            Once HQ or your franchise publishes social copy it will appear here ready for download and scheduling.
+          </p>
+        ) : (
+          <div className="grid gap-4 lg:grid-cols-2">
+            {contentDrafts.map((draft) => (
+              <article key={draft.id} className="rounded-lg border border-gray-200 p-4 shadow-sm">
+                <header className="flex flex-wrap items-baseline justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">{draft.deliverableLabel || 'Content kit'}</p>
+                    {draft.summary && <p className="text-sm text-gray-600">{draft.summary}</p>}
+                  </div>
+                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
+                    {draft.status}
+                  </span>
+                </header>
+                {draft.callToAction && (
+                  <p className="mt-2 text-xs text-gray-500">CTA: {draft.callToAction}</p>
+                )}
+                {draft.youtubeTitles.length > 0 && (
+                  <div className="mt-3">
+                    <p className="text-xs uppercase tracking-wide text-gray-500">YouTube titles</p>
+                    <ul className="list-disc space-y-1 pl-5 text-sm text-gray-700">
+                      {draft.youtubeTitles.slice(0, 2).map((title, index) => (
+                        <li key={index}>{title}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {draft.socialPosts.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    <p className="text-xs uppercase tracking-wide text-gray-500">Social copy</p>
+                    {draft.socialPosts.slice(0, 3).map((post) => (
+                      <div key={post.id} className="rounded border border-dashed border-gray-200 p-3">
+                        <p className="text-xs font-semibold text-gray-700">{post.platform}</p>
+                        {post.headline && <p className="text-sm font-medium text-gray-900">{post.headline}</p>}
+                        <p className="mt-1 whitespace-pre-wrap text-sm text-gray-700">{post.body}</p>
+                        {post.hashtags.length > 0 && (
+                          <p className="mt-1 text-xs text-gray-500">{post.hashtags.join(' ')}</p>
+                        )}
+                      </div>
+                    ))}
+                    {draft.socialPosts.length > 3 && (
+                      <p className="text-xs text-gray-500">
+                        +{draft.socialPosts.length - 3} additional platform
+                        {draft.socialPosts.length - 3 === 1 ? '' : 's'}
+                      </p>
+                    )}
+                  </div>
+                )}
+                <footer className="mt-4 text-xs text-gray-500">
+                  <p>Updated {draft.updatedAt ? draft.updatedAt.toLocaleString() : 'Recently'}</p>
+                </footer>
+              </article>
+            ))}
           </div>
         )}
       </div>

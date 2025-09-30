@@ -55,6 +55,11 @@ export default function AdminPage() {
       href: '/admin/orders',
     },
     {
+      label: 'Production tools',
+      description: 'Generate post-ready copy and package deliverables.',
+      href: '/admin/tools',
+    },
+    {
       label: 'Training library',
       description: 'Create and curate onboarding content for every audience.',
       href: '/admin/training',
@@ -304,6 +309,7 @@ export default function AdminPage() {
                   links: [
                     { href: '/admin/orders', label: 'Manage Orders' },
                     { href: '/admin/projects', label: 'Project Management' },
+                    { href: '/admin/tools', label: 'Content Tools' },
                     { href: '/admin/workflows', label: 'Manage Workflows' },
                     { href: '/admin/proposals', label: 'Quotes & Proposals' },
                     { href: '/admin/availability', label: 'Manage Availability' },
