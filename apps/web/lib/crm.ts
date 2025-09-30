@@ -164,3 +164,121 @@ export function getPreviousPipelineStatus(status: CRMStatus): CRMStatus | null {
   }
   return 'outreach';
 }
+
+const PIPELINE_VALUE_KEYS = [
+  'pipelineValue',
+  'pipelineAmount',
+  'pipelineTotal',
+  'pipeline',
+  'value',
+  'opportunityValue',
+  'opportunityAmount',
+];
+
+const PIPELINE_QUOTED_KEYS = [
+  'quotedValue',
+  'quotedAmount',
+  'quoteValue',
+  'quoteAmount',
+  'quoteTotal',
+  'quoted',
+];
+
+export function parseCrmCurrencyAmount(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value === 0 ? null : value;
+  }
+  if (typeof value === 'string') {
+    const cleaned = value.replace(/[^0-9.,-]/g, '').replace(/,/g, '');
+    if (!cleaned.trim()) {
+      return null;
+    }
+    const parsed = Number(cleaned);
+    if (!Number.isNaN(parsed) && parsed !== 0) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+export function extractProspectAmounts(
+  record: Record<string, any>
+): { pipeline?: number | null; quoted?: number | null } {
+  const result: { pipeline?: number | null; quoted?: number | null } = {};
+
+  for (const key of PIPELINE_VALUE_KEYS) {
+    const amount = parseCrmCurrencyAmount((record as Record<string, any>)[key]);
+    if (amount !== null) {
+      result.pipeline = amount;
+      break;
+    }
+  }
+
+  for (const key of PIPELINE_QUOTED_KEYS) {
+    const amount = parseCrmCurrencyAmount((record as Record<string, any>)[key]);
+    if (amount !== null) {
+      result.quoted = amount;
+      break;
+    }
+  }
+
+  return result;
+}
+
+const FRANCHISE_KEY_PATTERN = /(franchise|territor|region|area)/i;
+const FRANCHISE_VALUE_HINT = /(id|code|name|territor|region|owner|assignment)/i;
+
+function collectPotentialFranchiseTokens(value: unknown, hint?: string, depth = 0): string[] {
+  if (value == null) {
+    return [];
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return [];
+    }
+    if (!hint || FRANCHISE_VALUE_HINT.test(hint)) {
+      return [trimmed.toLowerCase()];
+    }
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    if (depth > 4) {
+      return [];
+    }
+    return value.flatMap((entry) => collectPotentialFranchiseTokens(entry, hint, depth + 1));
+  }
+
+  if (typeof value === 'object' && depth <= 4) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    return entries.flatMap(([key, entry]) => {
+      const lowerKey = key.toLowerCase();
+      if (!FRANCHISE_KEY_PATTERN.test(lowerKey) && hint && !FRANCHISE_VALUE_HINT.test(hint)) {
+        return [];
+      }
+      const nextHint = FRANCHISE_KEY_PATTERN.test(lowerKey) ? lowerKey : hint;
+      return collectPotentialFranchiseTokens(entry, nextHint, depth + 1);
+    });
+  }
+
+  return [];
+}
+
+export function collectCrmFranchiseTokens(record: Record<string, any>): string[] {
+  if (!record || typeof record !== 'object') {
+    return [];
+  }
+
+  const tokens = new Set<string>();
+  Object.entries(record).forEach(([key, value]) => {
+    const lowerKey = key.toLowerCase();
+    if (!FRANCHISE_KEY_PATTERN.test(lowerKey)) {
+      return;
+    }
+    collectPotentialFranchiseTokens(value, lowerKey).forEach((token) => tokens.add(token));
+  });
+
+  return Array.from(tokens);
+}

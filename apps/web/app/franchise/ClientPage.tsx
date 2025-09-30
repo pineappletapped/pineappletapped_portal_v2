@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import PortalContainer from "@/components/PortalContainer";
 import PortalHero from "@/components/PortalHero";
+import CrmPipelineBoard from "@/components/CrmPipelineBoard";
+import { CRM_PIPELINE_STATUSES, normaliseCrmStatus } from "@/lib/crm";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import type { User } from "firebase/auth";
 import { httpsCallable, type Functions } from "firebase/functions";
@@ -203,6 +205,9 @@ export default function FranchisePortalPage() {
   const [user, setUser] = useState<User | null>(null);
   const [franchises, setFranchises] = useState<FranchiseSummary[]>([]);
   const [activeFranchiseId, setActiveFranchiseId] = useState<string | null>(null);
+  const [crmRecords, setCrmRecords] = useState<any[]>([]);
+  const [crmLoading, setCrmLoading] = useState(false);
+  const [crmError, setCrmError] = useState<string | null>(null);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [uploads, setUploads] = useState<UploadRecord[]>([]);
@@ -253,6 +258,14 @@ export default function FranchisePortalPage() {
         minimumFractionDigits: 2,
       }),
     [currencyCode]
+  );
+
+  const crmPipelineRecords = useMemo(
+    () =>
+      crmRecords.filter((record) =>
+        CRM_PIPELINE_STATUSES.includes(normaliseCrmStatus(record?.crmStatus))
+      ),
+    [crmRecords]
   );
 
   const computeFranchiseShare = useCallback(
@@ -658,6 +671,52 @@ export default function FranchisePortalPage() {
     };
   }, [activeFranchiseId, loadFranchiseCollections]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!activeFranchiseId) {
+        setCrmRecords([]);
+        setCrmError(null);
+        setCrmLoading(false);
+        return;
+      }
+
+      setCrmLoading(true);
+      setCrmError(null);
+
+      try {
+        const response = await fetch(
+          `/api/franchise/crm?franchiseId=${encodeURIComponent(activeFranchiseId)}`
+        );
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || 'Failed to load CRM records.');
+        }
+        const payload = await response.json();
+        if (cancelled) {
+          return;
+        }
+        const records = Array.isArray(payload?.records) ? payload.records : [];
+        setCrmRecords(records);
+      } catch (error: any) {
+        if (cancelled) {
+          return;
+        }
+        console.error('Failed to load franchise CRM records', error);
+        setCrmError(error?.message || 'Failed to load CRM records for this franchise.');
+        setCrmRecords([]);
+      } finally {
+        if (!cancelled) {
+          setCrmLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeFranchiseId]);
+
   const handleExpoRequestSubmit = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
@@ -1016,20 +1075,28 @@ export default function FranchisePortalPage() {
                 <div>
                   <h2 className="text-lg font-semibold">Lead pipeline</h2>
                   <p className="text-sm text-gray-600">
-                    Review the leads and clients assigned to your franchise without leaving the portal. The leads view
-                    automatically filters records to the organisations you belong to.
+                    Review the leads and prospects assigned to your franchise and follow their progress through the sales
+                    journey.
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <Link href="/crm/leads" className="btn-sm">
-                    Leads view
-                  </Link>
-                </div>
               </div>
-              <p className="text-xs text-gray-500">
-                Use the workspace to capture outreach notes, store collateral, and monitor recent orders for accounts within
-                your territory.
-              </p>
+              {crmError ? <p className="text-sm text-red-600">{crmError}</p> : null}
+              <CrmPipelineBoard
+                records={crmPipelineRecords}
+                readOnly
+                loading={crmLoading}
+                formatCurrency={(value) => currencyFormatter.format(value)}
+                emptyMessage="No assigned prospects yet."
+              />
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
+                <p>
+                  Pipeline cards sync with the central CRM. HQ can help reassign or progress opportunities while franchise
+                  permissions roll out.
+                </p>
+                <Link href="/crm/leads" className="text-blue-600 hover:underline">
+                  Open full CRM workspace
+                </Link>
+              </div>
             </section>
 
             <section id="orders-pipeline" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">

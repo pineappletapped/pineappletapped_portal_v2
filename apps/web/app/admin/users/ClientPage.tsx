@@ -1,11 +1,25 @@
 "use client";
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { collection, collectionGroup, doc, getDocs, query, updateDoc, where, serverTimestamp } from 'firebase/firestore';
+import {
+  addDoc,
+  collection,
+  collectionGroup,
+  doc,
+  getDocs,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  updateDoc,
+  where,
+  serverTimestamp,
+} from 'firebase/firestore';
 
 import CRMRecordForm from '@/components/CRMRecordForm';
 import ComplianceBadge from '@/components/ComplianceBadge';
+import CrmPipelineBoard from '@/components/CrmPipelineBoard';
 import { useRoleGate } from '@/hooks/useRoleGate';
 import { adminListUsers, adminUpdateUser } from '@/lib/admin';
 import {
@@ -19,10 +33,12 @@ import {
   CRM_PIPELINE_STATUSES,
   CRM_STAGE_OPTIONS,
   CRM_STATUS_LABELS,
+  collectCrmFranchiseTokens,
   type CRMStatus,
   normaliseCrmStatus,
 } from '@/lib/crm';
 import { ensureFirebase } from '@/lib/firebase';
+import { coerceDate, formatDateTime } from '@/lib/datetime';
 
 interface ProductSummary {
   id: string;
@@ -55,6 +71,28 @@ interface AdminComplianceRecord extends ComplianceRecord {
   pathSegments: string[];
 }
 
+interface FranchiseSummary {
+  id: string;
+  name: string;
+  code: string | null;
+}
+
+interface CrmAuditLogEntry {
+  id: string;
+  recordId: string;
+  recordEmail: string | null;
+  action: string;
+  field: string | null;
+  before: unknown;
+  after: unknown;
+  actorUid: string | null;
+  actorEmail: string | null;
+  actorName: string | null;
+  createdAt: Date | null;
+  franchiseIds: string[];
+  note?: string | null;
+}
+
 function formatCurrency(amount: number): string {
   return new Intl.NumberFormat('en-GB', {
     style: 'currency',
@@ -63,105 +101,11 @@ function formatCurrency(amount: number): string {
   }).format(amount || 0);
 }
 
-function coerceDate(value: unknown): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return value;
-  if (typeof value === 'number') {
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? null : date;
-  }
-  if (typeof value === 'string') {
-    const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-  }
-  if (typeof (value as { toDate?: () => Date }).toDate === 'function') {
-    try {
-      return (value as { toDate: () => Date }).toDate();
-    } catch (error) {
-      console.warn('Failed to convert Firestore timestamp', error);
-      return null;
-    }
-  }
-  return null;
-}
-
-function formatDate(value: unknown): string {
-  const date = coerceDate(value);
-  return date ? date.toLocaleDateString() : '—';
-}
-
 function chunkArray<T>(items: T[], chunkSize: number): T[][] {
   const result: T[][] = [];
   for (let i = 0; i < items.length; i += chunkSize) {
     result.push(items.slice(i, i + chunkSize));
   }
-  return result;
-}
-
-function parseCurrencyAmount(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value === 0 ? null : value;
-  }
-  if (typeof value === 'string') {
-    const cleaned = value.replace(/[^0-9.,-]/g, '').replace(/,/g, '');
-    if (!cleaned.trim()) {
-      return null;
-    }
-    const parsed = Number(cleaned);
-    if (!Number.isNaN(parsed) && parsed !== 0) {
-      return parsed;
-    }
-  }
-  return null;
-}
-
-const PIPELINE_VALUE_KEYS = [
-  'pipelineValue',
-  'pipelineAmount',
-  'pipelineTotal',
-  'opportunityValue',
-  'potentialValue',
-  'expectedValue',
-  'estimatedValue',
-  'crmValue',
-  'value',
-];
-
-const QUOTED_VALUE_KEYS = [
-  'quotedValue',
-  'quoteValue',
-  'quoteAmount',
-  'quotedAmount',
-  'proposalValue',
-  'proposalAmount',
-  'latestQuoteValue',
-  'latestQuoteAmount',
-  'lastQuoteValue',
-  'lastQuoteTotal',
-];
-
-function extractProspectAmounts(user: AdminUser): {
-  pipeline?: number | null;
-  quoted?: number | null;
-} {
-  const result: { pipeline?: number | null; quoted?: number | null } = {};
-
-  for (const key of PIPELINE_VALUE_KEYS) {
-    const amount = parseCurrencyAmount(user[key]);
-    if (amount !== null && amount !== undefined) {
-      result.pipeline = amount;
-      break;
-    }
-  }
-
-  for (const key of QUOTED_VALUE_KEYS) {
-    const amount = parseCurrencyAmount(user[key]);
-    if (amount !== null && amount !== undefined) {
-      result.quoted = amount;
-      break;
-    }
-  }
-
   return result;
 }
 
@@ -181,8 +125,11 @@ export default function AdminUsersPage() {
   const [clientValues, setClientValues] = useState<Map<string, number>>(new Map());
   const [clientValueLoading, setClientValueLoading] = useState(false);
   const [clientValueError, setClientValueError] = useState<string | null>(null);
-  const [draggedProspectId, setDraggedProspectId] = useState<string | null>(null);
-  const [hoveredProspectColumn, setHoveredProspectColumn] = useState<CRMStatus | null>(null);
+  const [franchises, setFranchises] = useState<FranchiseSummary[]>([]);
+  const [franchiseFilter, setFranchiseFilter] = useState<string>('all');
+  const [auditLogs, setAuditLogs] = useState<CrmAuditLogEntry[]>([]);
+  const [auditLoading, setAuditLoading] = useState(true);
+  const [auditError, setAuditError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -354,6 +301,98 @@ export default function AdminUsersPage() {
     })();
   }, []);
 
+  useEffect(() => {
+    (async () => {
+      try {
+        const { db } = await ensureFirebase();
+        if (!db) {
+          return;
+        }
+        const snapshot = await getDocs(collection(db, 'franchises'));
+        const list: FranchiseSummary[] = snapshot.docs
+          .map((docSnap) => {
+            const data = docSnap.data() as Record<string, any>;
+            const rawName = typeof data?.name === 'string' ? data.name.trim() : '';
+            const rawCode = typeof data?.code === 'string' ? data.code.trim() : '';
+            return {
+              id: docSnap.id,
+              name: rawName || rawCode || 'Franchise',
+              code: rawCode || null,
+            } satisfies FranchiseSummary;
+          })
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setFranchises(list);
+      } catch (error) {
+        console.error('Failed to load franchises for CRM filter', error);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    (async () => {
+      try {
+        const { db } = await ensureFirebase();
+        if (!db) {
+          setAuditLoading(false);
+          return;
+        }
+        const logsQuery = query(
+          collection(db, 'crmAuditLogs'),
+          orderBy('createdAt', 'desc'),
+          limit(100)
+        );
+        unsubscribe = onSnapshot(
+          logsQuery,
+          (snapshot) => {
+            const entries: CrmAuditLogEntry[] = snapshot.docs.map((docSnap) => {
+              const data = docSnap.data() as Record<string, any>;
+              const createdAt = coerceDate(data.createdAt);
+              const franchiseIds = Array.isArray(data.franchiseIds)
+                ? (data.franchiseIds as unknown[])
+                    .map((value) => (typeof value === 'string' ? value : null))
+                    .filter((value): value is string => !!value && value.trim().length > 0)
+                : [];
+              return {
+                id: docSnap.id,
+                recordId: typeof data.recordId === 'string' ? data.recordId : docSnap.id,
+                recordEmail: typeof data.recordEmail === 'string' ? data.recordEmail : null,
+                action: typeof data.action === 'string' ? data.action : 'update',
+                field: typeof data.field === 'string' ? data.field : null,
+                before: data.before ?? null,
+                after: data.after ?? null,
+                actorUid: typeof data.actorUid === 'string' ? data.actorUid : null,
+                actorEmail: typeof data.actorEmail === 'string' ? data.actorEmail : null,
+                actorName: typeof data.actorName === 'string' ? data.actorName : null,
+                createdAt,
+                franchiseIds,
+                note: typeof data.note === 'string' ? data.note : null,
+              } satisfies CrmAuditLogEntry;
+            });
+            setAuditLogs(entries);
+            setAuditError(null);
+            setAuditLoading(false);
+          },
+          (error) => {
+            console.error('Failed to subscribe to CRM audit log', error);
+            setAuditError('Failed to load CRM activity log.');
+            setAuditLoading(false);
+          }
+        );
+      } catch (error) {
+        console.error('Failed to load CRM audit log', error);
+        setAuditError('Failed to load CRM activity log.');
+        setAuditLoading(false);
+      }
+    })();
+
+    return () => {
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
+  }, []);
+
   const productById = useMemo(() => {
     const map = new Map<string, ProductSummary>();
     products.forEach((product) => map.set(product.id, product));
@@ -383,67 +422,198 @@ export default function AdminUsersPage() {
     return map;
   }, [complianceRecords]);
 
-  const pipelineByStatus = useMemo(() => {
-    const grouped = new Map<CRMStatus, AdminUser[]>();
-    CRM_PIPELINE_STATUSES.forEach((status) => grouped.set(status, []));
-
-    users.forEach((user) => {
-      const stage = normaliseCrmStatus(user.crmStatus);
-      if (grouped.has(stage)) {
-        grouped.get(stage)!.push(user);
+  const franchiseIdIndex = useMemo(() => {
+    const map = new Map<string, string>();
+    franchises.forEach((franchise) => {
+      if (franchise.id) {
+        map.set(franchise.id.trim().toLowerCase(), franchise.id);
       }
     });
+    return map;
+  }, [franchises]);
 
-    CRM_PIPELINE_STATUSES.forEach((status) => {
-      const list = grouped.get(status);
-      if (!list) return;
-      list.sort((a, b) => {
-        const aTime =
-          coerceDate(a.updatedAt)?.getTime() ||
-          coerceDate(a.lastContactedAt)?.getTime() ||
-          coerceDate(a.createdAt)?.getTime() ||
-          0;
-        const bTime =
-          coerceDate(b.updatedAt)?.getTime() ||
-          coerceDate(b.lastContactedAt)?.getTime() ||
-          coerceDate(b.createdAt)?.getTime() ||
-          0;
-        return bTime - aTime;
-      });
+  const franchiseCodeIndex = useMemo(() => {
+    const map = new Map<string, string>();
+    franchises.forEach((franchise) => {
+      if (franchise.code) {
+        map.set(franchise.code.trim().toLowerCase(), franchise.id);
+      }
     });
+    return map;
+  }, [franchises]);
 
-    return grouped;
-  }, [users]);
+  const franchiseNameIndex = useMemo(() => {
+    const map = new Map<string, string>();
+    franchises.forEach((franchise) => {
+      const trimmed = franchise.name.trim().toLowerCase();
+      if (trimmed) {
+        map.set(trimmed, franchise.id);
+      }
+    });
+    return map;
+  }, [franchises]);
+
+  const franchiseMatchesByUser = useMemo(() => {
+    const map = new Map<string, string[]>();
+    users.forEach((user) => {
+      if (!user?.id) {
+        return;
+      }
+      const tokens = collectCrmFranchiseTokens(user);
+      const matches = new Set<string>();
+      tokens.forEach((token) => {
+        const trimmed = token.trim().toLowerCase();
+        if (!trimmed) return;
+        const byId = franchiseIdIndex.get(trimmed);
+        if (byId) {
+          matches.add(byId);
+        }
+        const byCode = franchiseCodeIndex.get(trimmed);
+        if (byCode) {
+          matches.add(byCode);
+        }
+        const byName = franchiseNameIndex.get(trimmed);
+        if (byName) {
+          matches.add(byName);
+        }
+      });
+      map.set(user.id, Array.from(matches));
+    });
+    return map;
+  }, [users, franchiseCodeIndex, franchiseIdIndex, franchiseNameIndex]);
+
+  const visibleUsers = useMemo(() => {
+    if (franchiseFilter === 'all') {
+      return users;
+    }
+    if (franchiseFilter === '__unassigned__') {
+      return users.filter((user) => (franchiseMatchesByUser.get(user.id) ?? []).length === 0);
+    }
+    return users.filter((user) =>
+      (franchiseMatchesByUser.get(user.id) ?? []).includes(franchiseFilter)
+    );
+  }, [users, franchiseFilter, franchiseMatchesByUser]);
+
+  const prospects = useMemo(
+    () =>
+      visibleUsers.filter((user) =>
+        CRM_PIPELINE_STATUSES.includes(normaliseCrmStatus(user.crmStatus))
+      ),
+    [visibleUsers]
+  );
+
+  const clients = useMemo(
+    () => visibleUsers.filter((user) => normaliseCrmStatus(user.crmStatus) === 'client'),
+    [visibleUsers]
+  );
+
+  const outreach = useMemo(
+    () =>
+      visibleUsers.filter((user) =>
+        CRM_OUTREACH_STATUSES.includes(normaliseCrmStatus(user.crmStatus))
+      ),
+    [visibleUsers]
+  );
+
+  const filteredOutreach = useMemo(
+    () =>
+      outreachProductFilter
+        ? outreach.filter((user) => (user.suggestedProductId || '') === outreachProductFilter)
+        : outreach,
+    [outreach, outreachProductFilter]
+  );
+
+  const formatAuditValue = useCallback((value: unknown): string => {
+    if (value === null || value === undefined || value === '') {
+      return '—';
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    if (typeof value === 'number') {
+      return value.toString();
+    }
+    if (typeof value === 'boolean') {
+      return value ? 'Yes' : 'No';
+    }
+    try {
+      return JSON.stringify(value);
+    } catch (error) {
+      console.warn('Failed to serialise audit value', error);
+      return String(value);
+    }
+  }, []);
+
+  const recordCrmAuditEvent = useCallback(
+    async (
+      record: AdminUser,
+      details: {
+        action: 'create' | 'status_change' | 'field_update';
+        field?: string | null;
+        before?: unknown;
+        after?: unknown;
+        note?: string | null;
+      }
+    ) => {
+      try {
+        const { db, auth: firebaseAuth } = await ensureFirebase();
+        if (!db) {
+          return;
+        }
+        const actor = firebaseAuth?.currentUser ?? null;
+        const franchiseIds = franchiseMatchesByUser.get(record.id) ?? [];
+        await addDoc(collection(db, 'crmAuditLogs'), {
+          recordId: record.id,
+          recordEmail: record.email ?? null,
+          action: details.action,
+          field: details.field ?? null,
+          before: details.before ?? null,
+          after: details.after ?? null,
+          note: details.note ?? null,
+          actorUid: actor?.uid ?? null,
+          actorEmail: actor?.email ?? null,
+          actorName: actor?.displayName ?? null,
+          franchiseIds,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (error) {
+        console.error('Failed to record CRM audit event', error);
+      }
+    },
+    [franchiseMatchesByUser]
+  );
 
   const changeStatus = async (user: AdminUser, status: CRMStatus) => {
+    const previousStatus = normaliseCrmStatus(user.crmStatus);
     try {
       await adminUpdateUser({ userId: user.id, updates: { crmStatus: status } });
-      setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, crmStatus: status } : u)));
+      const updatedRecord: AdminUser = { ...user, crmStatus: status };
+      setUsers((prev) => prev.map((u) => (u.id === user.id ? updatedRecord : u)));
+      void recordCrmAuditEvent(updatedRecord, {
+        action: 'status_change',
+        field: 'crmStatus',
+        before: previousStatus,
+        after: status,
+      });
     } catch (err: any) {
       console.error(err);
       alert(err.message || 'Error updating user');
     }
   };
 
-  const handleProspectDrop = (status: CRMStatus, userId: string | null) => {
-    if (!userId) {
-      return;
-    }
-    const target = userById.get(userId);
-    if (!target) {
-      return;
-    }
-    const currentStage = normaliseCrmStatus(target.crmStatus);
-    if (currentStage === status) {
-      return;
-    }
-    changeStatus(target, status);
-  };
-
-  const updateDiscount = async (user: any, discount: number) => {
+  const updateDiscount = async (user: AdminUser, discount: number) => {
+    const previous = typeof user.discount === 'number' ? user.discount : 0;
     try {
       await adminUpdateUser({ userId: user.id, updates: { discount } });
-      setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, discount } : u)));
+      const updatedRecord: AdminUser = { ...user, discount };
+      setUsers((prev) => prev.map((u) => (u.id === user.id ? updatedRecord : u)));
+      void recordCrmAuditEvent(updatedRecord, {
+        action: 'field_update',
+        field: 'discount',
+        before: previous,
+        after: discount,
+      });
     } catch (err: any) {
       console.error(err);
       alert(err.message || 'Error updating discount');
@@ -452,16 +622,72 @@ export default function AdminUsersPage() {
 
   const updateSuggestedProduct = async (user: AdminUser, productId: string) => {
     const value = productId || null;
+    const previous = user.suggestedProductId || null;
     try {
       await adminUpdateUser({ userId: user.id, updates: { suggestedProductId: value } });
+      const updatedRecord: AdminUser = { ...user, suggestedProductId: value };
       setUsers((prev) =>
-        prev.map((u) => (u.id === user.id ? { ...u, suggestedProductId: value } : u))
+        prev.map((u) => (u.id === user.id ? updatedRecord : u))
       );
+      void recordCrmAuditEvent(updatedRecord, {
+        action: 'field_update',
+        field: 'suggestedProductId',
+        before: previous,
+        after: value,
+      });
     } catch (err: any) {
       console.error(err);
       alert(err.message || 'Error updating suggested product');
     }
   };
+
+  const filteredAuditLogs = useMemo(() => {
+    if (franchiseFilter === 'all') {
+      return auditLogs;
+    }
+    if (franchiseFilter === '__unassigned__') {
+      return auditLogs.filter((log) => log.franchiseIds.length === 0);
+    }
+    return auditLogs.filter((log) => log.franchiseIds.includes(franchiseFilter));
+  }, [auditLogs, franchiseFilter]);
+
+  const auditEntries = useMemo(() => {
+    return filteredAuditLogs.map((log) => {
+      const userRecord = userById.get(log.recordId);
+      const displayName =
+        (userRecord?.fullName && userRecord.fullName.trim()) ||
+        (userRecord?.organisation && userRecord.organisation.trim()) ||
+        userRecord?.email ||
+        log.recordEmail ||
+        'CRM record';
+      let description = `Updated ${displayName}.`;
+      if (log.action === 'create') {
+        description = `Created CRM record for ${displayName}.`;
+      } else if ((log.field || '').toLowerCase() === 'crmstatus') {
+        const beforeStatus =
+          typeof log.before === 'string' ? normaliseCrmStatus(log.before) : null;
+        const afterStatus =
+          typeof log.after === 'string' ? normaliseCrmStatus(log.after) : null;
+        const beforeLabel = beforeStatus ? CRM_STATUS_LABELS[beforeStatus] : 'Unassigned';
+        const afterLabel = afterStatus ? CRM_STATUS_LABELS[afterStatus] : 'Unassigned';
+        description = `Moved ${displayName} from ${beforeLabel} to ${afterLabel}.`;
+      } else if (log.field) {
+        const label = log.field.replace(/[_-]+/g, ' ');
+        description = `Updated ${displayName}'s ${label} from ${formatAuditValue(
+          log.before
+        )} to ${formatAuditValue(log.after)}.`;
+      }
+      const actor = log.actorName || log.actorEmail || 'System';
+      const timestamp = formatDateTime(log.createdAt);
+      return {
+        ...log,
+        actor,
+        description,
+        timestamp,
+        displayName,
+      };
+    });
+  }, [filteredAuditLogs, formatAuditValue, userById]);
 
   const updateComplianceRecordLocally = (
     record: AdminComplianceRecord,
@@ -671,14 +897,6 @@ export default function AdminUsersPage() {
   if (guardLoading || loading) return <p>Loading…</p>;
   if (!allowed) return <p>You do not have permission to view this page.</p>;
 
-  const clients = users.filter((user) => normaliseCrmStatus(user.crmStatus) === 'client');
-  const outreach = users.filter((user) =>
-    CRM_OUTREACH_STATUSES.includes(normaliseCrmStatus(user.crmStatus))
-  );
-  const filteredOutreach = outreachProductFilter
-    ? outreach.filter((user) => (user.suggestedProductId || '') === outreachProductFilter)
-    : outreach;
-
   const handleAddRecord = async (data: Record<string, unknown>) => {
     setError(null);
     try {
@@ -760,6 +978,12 @@ export default function AdminUsersPage() {
       };
 
       setUsers((prev) => [...prev, newRecord]);
+      void recordCrmAuditEvent(newRecord, {
+        action: 'create',
+        field: 'crmStatus',
+        before: null,
+        after: defaultStage,
+      });
       setShowForm(false);
     } catch (err: any) {
       console.error(err);
@@ -792,18 +1016,40 @@ export default function AdminUsersPage() {
       {activePanel === 'crm' ? (
         <>
           {error && <p className="text-red-600">{error}</p>}
-          <div className="flex gap-4 border-b">
-            {['client', 'prospect', 'outreach'].map(tab => (
-              <button
-                key={tab}
-                className={`pb-2 ${crmStage === tab ? 'border-b-2 border-orange font-medium' : ''}`}
-                onClick={() => setCrmStage(tab as any)}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-2">
+            <div className="flex gap-4">
+              {(['client', 'prospect', 'outreach'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  className={`pb-2 ${crmStage === tab ? 'border-b-2 border-orange font-medium' : ''}`}
+                  onClick={() => setCrmStage(tab)}
+                >
+                  {tab === 'client' ? 'Clients' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              <label className="text-gray-600" htmlFor="crm-franchise-filter">
+                Franchise:
+              </label>
+              <select
+                id="crm-franchise-filter"
+                className="input input-sm min-w-[12rem]"
+                value={franchiseFilter}
+                onChange={(event) => setFranchiseFilter(event.target.value)}
               >
-                {tab === 'client' ? 'Clients' : tab.charAt(0).toUpperCase() + tab.slice(1)}
-              </button>
-            ))}
+                <option value="all">All franchises</option>
+                <option value="__unassigned__">Unassigned</option>
+                {franchises.map((franchise) => (
+                  <option key={franchise.id} value={franchise.id}>
+                    {franchise.name}
+                    {franchise.code ? ` (${franchise.code})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
-          <div className="flex justify-end">
+          <div className="flex justify-end pt-2">
             <button className="btn" onClick={() => setShowForm(true)}>Add Record</button>
           </div>
           {crmStage === 'outreach' && (
@@ -841,130 +1087,53 @@ export default function AdminUsersPage() {
                 Progress prospects through each pipeline milestone. Drag cards between columns to
                 advance opportunities or return them to earlier stages.
               </p>
-              <div className="flex gap-4 overflow-x-auto pb-2">
-                {CRM_PIPELINE_STATUSES.map((status) => {
-                  const entries = pipelineByStatus.get(status) ?? [];
-                  const isHovered = hoveredProspectColumn === status;
-                  return (
-                    <section
-                      key={status}
-                      className={`flex w-72 min-w-[18rem] flex-col gap-3 rounded border bg-white p-3 shadow-sm transition ${
-                        isHovered ? 'border-orange-400 ring-2 ring-orange-200 bg-orange-50/60' : ''
-                      }`}
-                      onDragEnter={(event) => {
-                        event.preventDefault();
-                        setHoveredProspectColumn(status);
-                      }}
-                      onDragOver={(event) => {
-                        event.preventDefault();
-                        if (hoveredProspectColumn !== status) {
-                          setHoveredProspectColumn(status);
-                        }
-                      }}
-                      onDragLeave={() => {
-                        setHoveredProspectColumn((prev) => (prev === status ? null : prev));
-                      }}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        const droppedId = event.dataTransfer.getData('text/plain') || draggedProspectId;
-                        handleProspectDrop(status, droppedId || null);
-                        setHoveredProspectColumn(null);
-                        setDraggedProspectId(null);
-                      }}
-                    >
-                      <header className="flex items-center justify-between gap-2">
-                        <h3 className="text-sm font-semibold text-gray-900">
-                          {CRM_STATUS_LABELS[status]}
-                        </h3>
-                        <span className="text-xs text-gray-500">{entries.length}</span>
-                      </header>
-                      <div className="grid gap-3">
-                        {entries.length === 0 ? (
-                          <p className="text-xs text-gray-500">No records in this stage.</p>
-                        ) : (
-                          entries.map((user) => {
-                            const organisation =
-                              typeof user.organisation === 'string' && user.organisation.trim().length
-                                ? user.organisation.trim()
-                                : null;
-                            const contactName = user.fullName || organisation || user.email || 'Prospect';
-                            const { pipeline, quoted } = extractProspectAmounts(user);
-                            const lastUpdated = formatDate(
-                              user.updatedAt || user.lastContactedAt || user.createdAt,
-                            );
-                            const suggestedProduct =
-                              user.suggestedProductId
-                                ? productById.get(user.suggestedProductId || '')?.name || null
-                                : null;
-
-                            return (
-                              <article
-                                key={user.id}
-                                draggable
-                                onDragStart={(event) => {
-                                  event.dataTransfer.effectAllowed = 'move';
-                                  event.dataTransfer.setData('text/plain', user.id);
-                                  setDraggedProspectId(user.id);
-                                }}
-                                onDragEnd={() => {
-                                  setDraggedProspectId((current) => (current === user.id ? null : current));
-                                  setHoveredProspectColumn(null);
-                                }}
-                                className={`flex flex-col gap-2 rounded border p-3 text-sm shadow-sm transition ${
-                                  draggedProspectId === user.id
-                                    ? 'border-orange-400 bg-orange-50'
-                                    : 'border-gray-200 bg-white'
-                                }`}
-                              >
-                                <div className="flex items-start justify-between gap-2">
-                                  <div className="flex-1">
-                                    <p className="text-sm font-semibold text-gray-900">{contactName}</p>
-                                    <div className="mt-1 grid gap-0.5 text-xs text-gray-600">
-                                      {organisation ? <span>{organisation}</span> : null}
-                                      {user.email ? <span>{user.email}</span> : null}
-                                      {user.phone ? <span>{user.phone}</span> : null}
-                                    </div>
-                                  </div>
-                                  <Link className="btn-sm" href={`/admin/users/${user.id}`}>
-                                    View
-                                  </Link>
-                                </div>
-                                {(pipeline || quoted) && (
-                                  <div className="flex flex-wrap gap-2 text-xs">
-                                    {pipeline ? (
-                                      <span className="rounded-full bg-emerald-50 px-2 py-1 font-medium text-emerald-700">
-                                        Value: {formatCurrency(pipeline)}
-                                      </span>
-                                    ) : null}
-                                    {quoted ? (
-                                      <span className="rounded-full bg-sky-50 px-2 py-1 font-medium text-sky-700">
-                                        Quoted: {formatCurrency(quoted)}
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                )}
-                                {suggestedProduct ? (
-                                  <p className="text-xs text-gray-600">
-                                    Suggested: {suggestedProduct}
-                                  </p>
-                                ) : null}
-                                {typeof user.notes === 'string' && user.notes.trim().length ? (
-                                  <p className="max-h-24 overflow-hidden text-xs text-gray-600 whitespace-pre-line">
-                                    {user.notes.trim()}
-                                  </p>
-                                ) : null}
-                                <p className="text-[11px] text-gray-500">Last update: {lastUpdated}</p>
-                              </article>
-                            );
-                          })
-                        )}
-                      </div>
-                    </section>
-                  );
-                })}
-              </div>
+              <CrmPipelineBoard
+                records={prospects}
+                formatCurrency={formatCurrency}
+                onStatusChange={(record, status) => changeStatus(record, status)}
+                getSuggestedProductName={(record) =>
+                  record.suggestedProductId
+                    ? productById.get(record.suggestedProductId || '')?.name || null
+                    : null
+                }
+                getViewHref={(record) => `/admin/users/${record.id}`}
+              />
             </section>
           )}
+          <section className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-base font-semibold text-gray-900">Activity log</h2>
+              {filteredAuditLogs.length > 0 ? (
+                <span className="text-xs text-gray-500">
+                  Showing {Math.min(auditEntries.length, 25)} of {filteredAuditLogs.length} updates
+                </span>
+              ) : null}
+            </div>
+            <div className="mt-3 grid gap-2">
+              {auditLoading ? (
+                <p className="text-sm text-gray-600">Loading recent updates…</p>
+              ) : auditError ? (
+                <p className="text-sm text-red-600">{auditError}</p>
+              ) : auditEntries.length === 0 ? (
+                <p className="text-sm text-gray-600">No recent activity for this view.</p>
+              ) : (
+                <ul className="grid gap-2">
+                  {auditEntries.slice(0, 25).map((log) => (
+                    <li
+                      key={log.id}
+                      className="rounded-lg border border-gray-200 bg-white p-3 text-sm shadow-sm"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="font-medium text-gray-900">{log.description}</p>
+                        <span className="text-xs text-gray-500">{log.timestamp}</span>
+                      </div>
+                      <p className="text-xs text-gray-500">By {log.actor}</p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </section>
           {crmStage === 'outreach' &&
             renderTable(filteredOutreach, {
               allowedStatuses: outreachSelectStatuses,
