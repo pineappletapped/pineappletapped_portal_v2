@@ -52,6 +52,8 @@ interface DraftRecord {
   transcriptPreview: string;
   projectName: string | null;
   deliverableLabel: string | null;
+  deliverableProductId: string | null;
+  deliverableProductName: string | null;
   createdAt: Date | null;
   updatedAt: Date | null;
 }
@@ -61,6 +63,12 @@ interface TranscriptSourceState {
   driveFileId?: string | null;
   driveFileUrl?: string | null;
   fileName?: string | null;
+}
+
+interface ProductRecord {
+  id: string;
+  name: string;
+  status: string | null;
 }
 
 const PLATFORM_OPTIONS = [
@@ -227,6 +235,10 @@ export default function ContentAssistantWorkspace() {
   const [deliverableLabel, setDeliverableLabel] = useState("");
   const [deliverableProductId, setDeliverableProductId] = useState("");
   const [deliverableProductName, setDeliverableProductName] = useState("");
+  const [products, setProducts] = useState<ProductRecord[]>([]);
+  const [productLoading, setProductLoading] = useState(false);
+  const [productError, setProductError] = useState<string | null>(null);
+  const [productSearch, setProductSearch] = useState("");
 
   const [driveLink, setDriveLink] = useState("");
   const [transcriptText, setTranscriptText] = useState("");
@@ -296,6 +308,31 @@ export default function ContentAssistantWorkspace() {
         setClientError(error?.message || "Unable to load clients");
       })
       .finally(() => setClientLoading(false));
+  }, [dbRef, firebaseReady]);
+
+  useEffect(() => {
+    if (!dbRef || !firebaseReady) return;
+    setProductLoading(true);
+    setProductError(null);
+    getDocs(query(collection(dbRef, "products"), limit(100)))
+      .then((snapshot) => {
+        const records: ProductRecord[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as DocumentData;
+          const name = typeof data.name === "string" && data.name.trim() ? data.name.trim() : `Product ${docSnap.id}`;
+          return {
+            id: docSnap.id,
+            name,
+            status: typeof data.status === "string" ? data.status : null,
+          } satisfies ProductRecord;
+        });
+        records.sort((a, b) => a.name.localeCompare(b.name));
+        setProducts(records);
+      })
+      .catch((error) => {
+        console.error("Failed to load products", error);
+        setProductError(error?.message || "Unable to load deliverable products");
+      })
+      .finally(() => setProductLoading(false));
   }, [dbRef, firebaseReady]);
 
   useEffect(() => {
@@ -376,6 +413,8 @@ export default function ContentAssistantWorkspace() {
             transcriptPreview: typeof data.transcriptPreview === "string" ? data.transcriptPreview : "",
             projectName: typeof data.projectName === "string" ? data.projectName : null,
             deliverableLabel: typeof data.deliverableLabel === "string" ? data.deliverableLabel : null,
+            deliverableProductId: typeof data.deliverableProductId === "string" ? data.deliverableProductId : null,
+            deliverableProductName: typeof data.deliverableProductName === "string" ? data.deliverableProductName : null,
             createdAt: toDate(data.createdAt),
             updatedAt: toDate(data.updatedAt),
           } satisfies DraftRecord;
@@ -405,6 +444,35 @@ export default function ContentAssistantWorkspace() {
 
   const activeClient = useMemo(() => clients.find((client) => client.id === selectedClientId) ?? null, [clients, selectedClientId]);
   const activeProject = useMemo(() => projects.find((project) => project.id === selectedProjectId) ?? null, [projects, selectedProjectId]);
+  const productOptions = useMemo(() => {
+    const search = productSearch.trim().toLowerCase();
+    let filtered = search
+      ? products.filter((product) => product.name.toLowerCase().includes(search))
+      : products;
+    if (deliverableProductId) {
+      const match = products.find((product) => product.id === deliverableProductId);
+      if (match && !filtered.some((product) => product.id === match.id)) {
+        filtered = [match, ...filtered];
+      }
+    }
+    return filtered;
+  }, [productSearch, products, deliverableProductId]);
+  const activeProduct = useMemo(
+    () => products.find((product) => product.id === deliverableProductId) ?? null,
+    [products, deliverableProductId]
+  );
+
+  useEffect(() => {
+    if (!activeProduct) return;
+    setDeliverableProductName((prev) => {
+      const trimmed = prev.trim();
+      return trimmed ? prev : activeProduct.name;
+    });
+    setDeliverableLabel((prev) => {
+      const trimmed = prev.trim();
+      return trimmed ? prev : activeProduct.name;
+    });
+  }, [activeProduct]);
 
   useEffect(() => {
     const clean = stripSrtCues(transcriptText);
@@ -452,6 +520,13 @@ export default function ContentAssistantWorkspace() {
     return manualProjectName.trim() || null;
   };
 
+  const handleProductSelect = (value: string) => {
+    setDeliverableProductId(value);
+    if (value) {
+      setProductSearch("");
+    }
+  };
+
   const handleGenerate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setGenerating(true);
@@ -496,6 +571,8 @@ export default function ContentAssistantWorkspace() {
         ...payload,
         projectName: buildProjectName(),
         deliverableLabel: deliverableLabel.trim() || null,
+        deliverableProductId: deliverableProductId.trim() || null,
+        deliverableProductName: deliverableProductName.trim() || activeProduct?.name || null,
       });
     } catch (error) {
       console.error("Generation error", error);
@@ -649,6 +726,30 @@ export default function ContentAssistantWorkspace() {
           <div className="grid gap-4 md:grid-cols-2">
             <div className="grid gap-2">
               <label className="text-sm font-medium text-gray-900">Deliverable link</label>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="Search deliverable products"
+                  value={productSearch}
+                  onChange={(event) => setProductSearch(event.target.value)}
+                />
+                <select
+                  className="input"
+                  value={deliverableProductId}
+                  onChange={(event) => handleProductSelect(event.target.value)}
+                  disabled={productLoading || productError !== null}
+                >
+                  <option value="">No linked product</option>
+                  {productOptions.map((product) => (
+                    <option key={product.id} value={product.id}>
+                      {product.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {productLoading && <p className="text-xs text-gray-500">Loading deliverable products…</p>}
+              {productError && <p className="text-xs text-red-600">{productError}</p>}
               <input
                 type="text"
                 className="input"
@@ -670,6 +771,12 @@ export default function ContentAssistantWorkspace() {
                 value={deliverableProductName}
                 onChange={(event) => setDeliverableProductName(event.target.value)}
               />
+              {activeProduct?.status && (
+                <p className="text-xs text-gray-500">Current status: {activeProduct.status}</p>
+              )}
+              <p className="text-xs text-gray-500">
+                Selecting a product links the kit back to the service clients purchased.
+              </p>
             </div>
 
             <div className="grid gap-2">
@@ -772,6 +879,26 @@ export default function ContentAssistantWorkspace() {
           <div className="grid gap-6 rounded-lg border border-dashed border-gray-200 p-4">
             <div>
               <h3 className="text-base font-semibold text-gray-900">YouTube suggestions</h3>
+              <div className="mt-1 space-y-1 text-xs text-gray-500">
+                {currentDraft.deliverableLabel && <p>Deliverable: {currentDraft.deliverableLabel}</p>}
+                {currentDraft.deliverableProductName && (
+                  <p>
+                    Linked product: {currentDraft.deliverableProductName}
+                    {currentDraft.deliverableProductId && (
+                      <>
+                        {" "}(
+                        <Link
+                          href={`/products/${currentDraft.deliverableProductId}`}
+                          className="text-blue-600 hover:underline"
+                        >
+                          View product
+                        </Link>
+                        )
+                      </>
+                    )}
+                  </p>
+                )}
+              </div>
               <div className="grid gap-3">
                 <div>
                   <p className="text-xs uppercase tracking-wide text-gray-500">Titles</p>
@@ -854,7 +981,22 @@ export default function ContentAssistantWorkspace() {
                   <tr key={draft.id} className="hover:bg-gray-50">
                     <td className="px-3 py-2">{draft.summary || "—"}</td>
                     <td className="px-3 py-2">{draft.projectName || "—"}</td>
-                    <td className="px-3 py-2">{draft.deliverableLabel || "—"}</td>
+                    <td className="px-3 py-2">
+                      <div className="space-y-1">
+                        <span>{draft.deliverableLabel || "—"}</span>
+                        {draft.deliverableProductName && (
+                          <span className="block text-xs text-gray-500">
+                            {draft.deliverableProductId ? (
+                              <Link href={`/products/${draft.deliverableProductId}`} className="text-blue-600 hover:underline">
+                                {draft.deliverableProductName}
+                              </Link>
+                            ) : (
+                              draft.deliverableProductName
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-3 py-2">
                       <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700">
                         {draft.status}
