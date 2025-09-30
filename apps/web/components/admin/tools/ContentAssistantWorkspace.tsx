@@ -624,6 +624,11 @@ export default function ContentAssistantWorkspace() {
             label: "View recent drafts",
             description: "Review previous kits shared with clients",
           },
+          {
+            href: "/admin/tools/qr-code-generator",
+            label: "Generate QR codes",
+            description: "Create scannable links for launches",
+          },
         ]}
         metrics={[
           { label: "Clients available", value: clients.length.toString() },
