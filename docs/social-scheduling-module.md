@@ -11,8 +11,8 @@ Deliver an opt-in social scheduling and performance module that lets Pineapple T
 
 ## Feature flag and rollout strategy
 - Introduce global booleans in remote config / Firestore (mirroring existing feature-flag approach) for `social_scheduler_enabled` and `marketplace_enabled`; default both to `false` until internal QA completes.
-- Add per-franchise overrides (stored under `franchises/{id}/featureFlags`) to selectively enable the scheduler for pilot franchises without exposing it to all clients.
-- Add per-organisation (client) visibility toggles so account managers can hide analytics and publishing UI from customers even when the franchise tests internally.
+- Add per-franchise overrides (stored under `franchises/{id}/featureFlags`) to selectively enable the scheduler for pilot franchises without exposing it to all clients. Admin tooling now writes scheduler overrides to `franchises/{id}/featureFlags/socialScheduler` with audit logging.
+- Add per-organisation (client) visibility toggles so account managers can hide analytics and publishing UI from customers even when the franchise tests internally. Organisation overrides live at `orgs/{id}/featureFlags/socialScheduler` and inherit global/franchise defaults until explicitly set.
 - Expose admin tooling to flip each layer of the toggle hierarchy and record an audit trail (user, timestamp, rationale) for compliance.
 - Provide fallbacks: when the scheduler is disabled, surface “Export plan” UX that downloads CSV/ICS data instead of offering publish buttons.
 

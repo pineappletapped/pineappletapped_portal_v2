@@ -20,7 +20,29 @@ interface StaffContext {
   roles: UserRoles;
 }
 
+interface SchedulerScopeDoc {
+  enabled?: boolean;
+  exportOnlyMode?: boolean;
+  analyticsEnabled?: boolean;
+  notes?: string | null;
+  updatedBy?: string | null;
+  updatedAt?: AdminTimestamp | Date | null;
+}
+
+interface SchedulerScopeResponse {
+  id: string;
+  name: string;
+  enabled: boolean;
+  exportOnlyMode: boolean;
+  analyticsEnabled: boolean;
+  notes: string | null;
+  updatedBy: string | null;
+  updatedAt: string | null;
+}
+
 const STAFF_ROLES: RoleKey[] = ['admin', 'marketing', 'projects'];
+
+type AdminDb = ReturnType<typeof getFirebaseAdminFirestore>;
 
 function unauthorized(message = 'Unauthorized') {
   return NextResponse.json({ error: message }, { status: 401 });
@@ -65,8 +87,8 @@ async function resolveStaffContext(requiredRoles: RoleKey[] = STAFF_ROLES): Prom
   }
 }
 
-function serialiseFlagDoc(doc: SchedulerFlagDoc) {
-  const updatedAtRaw = doc.updatedAt as any;
+function serialiseTimestamp(value: any): string | null {
+  const updatedAtRaw = value as any;
   let updatedAt: string | null = null;
   if (updatedAtRaw?.toDate) {
     try {
@@ -80,6 +102,12 @@ function serialiseFlagDoc(doc: SchedulerFlagDoc) {
     updatedAt = updatedAtRaw;
   }
 
+  return updatedAt;
+}
+
+function serialiseFlagDoc(doc: SchedulerFlagDoc) {
+  const updatedAt = serialiseTimestamp(doc.updatedAt);
+
   return {
     globalEnabled: doc.globalEnabled === true,
     exportOnlyMode: doc.exportOnlyMode === true,
@@ -88,6 +116,45 @@ function serialiseFlagDoc(doc: SchedulerFlagDoc) {
     updatedBy: doc.updatedBy ?? null,
     updatedAt,
   };
+}
+
+function serialiseScopeDoc(id: string, name: string, doc?: SchedulerScopeDoc | null): SchedulerScopeResponse {
+  const updatedAt = serialiseTimestamp(doc?.updatedAt);
+
+  return {
+    id,
+    name,
+    enabled: doc?.enabled === true,
+    exportOnlyMode: doc?.exportOnlyMode === true,
+    analyticsEnabled: doc?.analyticsEnabled !== false,
+    notes: typeof doc?.notes === 'string' && doc.notes.trim() ? doc.notes.trim() : null,
+    updatedBy: doc?.updatedBy ?? null,
+    updatedAt,
+  } satisfies SchedulerScopeResponse;
+}
+
+async function loadScopeOverrides(
+  firestore: AdminDb,
+  collectionName: 'franchises' | 'orgs',
+  fallbackLabel: string
+): Promise<SchedulerScopeResponse[]> {
+  const snapshot = await firestore.collection(collectionName).limit(200).get();
+  const entries = await Promise.all(
+    snapshot.docs.map(async (docSnap) => {
+      const data = (docSnap.data() ?? {}) as Record<string, unknown>;
+      const rawName = typeof data.name === 'string' ? data.name.trim() : '';
+      const name = rawName || `${fallbackLabel} ${docSnap.id}`;
+      try {
+        const flagSnap = await docSnap.ref.collection('featureFlags').doc('socialScheduler').get();
+        const flagData = flagSnap.exists ? ((flagSnap.data() ?? {}) as SchedulerScopeDoc) : {};
+        return serialiseScopeDoc(docSnap.id, name, flagData);
+      } catch (error) {
+        console.warn(`Failed to load scheduler flags for ${collectionName}/${docSnap.id}`, error);
+        return serialiseScopeDoc(docSnap.id, name, null);
+      }
+    })
+  );
+  return entries.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function GET() {
@@ -100,8 +167,19 @@ export async function GET() {
     const firestore = getFirebaseAdminFirestore();
     const docSnap = await firestore.collection('config').doc('socialScheduler').get();
     const data = docSnap.exists ? ((docSnap.data() ?? {}) as SchedulerFlagDoc) : {};
+    const [franchiseOverrides, organisationOverrides] = await Promise.all([
+      loadScopeOverrides(firestore, 'franchises', 'Franchise').catch(() => []),
+      loadScopeOverrides(firestore, 'orgs', 'Organisation').catch(() => []),
+    ]);
 
-    return NextResponse.json(serialiseFlagDoc(data));
+    const global = serialiseFlagDoc(data);
+
+    return NextResponse.json({
+      ...global,
+      global,
+      franchiseOverrides,
+      organisationOverrides,
+    });
   } catch (error) {
     console.error('Failed to load scheduler flags', error);
     return NextResponse.json({ error: 'Unable to load scheduler flags.' }, { status: 500 });
@@ -109,11 +187,6 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const context = await resolveStaffContext(['admin']);
-  if (!context) {
-    return forbidden();
-  }
-
   let payload: any;
   try {
     payload = await req.json();
@@ -125,45 +198,126 @@ export async function POST(req: NextRequest) {
     return badRequest('Invalid request payload.');
   }
 
-  const { globalEnabled, exportOnlyMode, analyticsEnabled, notes } = payload as {
-    globalEnabled?: unknown;
-    exportOnlyMode?: unknown;
-    analyticsEnabled?: unknown;
-    notes?: unknown;
-  };
+  const scopeTypeRaw = typeof payload.scopeType === 'string' ? payload.scopeType.toLowerCase() : 'global';
+  const scopeType: 'global' | 'franchise' | 'organisation' =
+    scopeTypeRaw === 'franchise' || scopeTypeRaw === 'organisation' ? scopeTypeRaw : 'global';
+  const scopeIdRaw = typeof payload.scopeId === 'string' ? payload.scopeId.trim() : '';
 
-  const parsedNotes = typeof notes === 'string' ? notes.trim() : '';
+  const context = await resolveStaffContext(scopeType === 'global' ? ['admin'] : STAFF_ROLES);
+  if (!context) {
+    return forbidden();
+  }
 
-  const nextFlags = {
-    globalEnabled: globalEnabled === true,
-    exportOnlyMode: exportOnlyMode === true,
-    analyticsEnabled: analyticsEnabled !== false,
-    notes: parsedNotes || null,
-  } satisfies SchedulerFlagDoc;
+  const enabledRaw = payload.enabled ?? payload.globalEnabled;
+  const exportOnlyRaw = payload.exportOnlyMode;
+  const analyticsRaw = payload.analyticsEnabled;
+  const notesRaw = payload.notes;
+
+  const parsedNotes = typeof notesRaw === 'string' ? notesRaw.trim() : '';
 
   try {
     const firestore = getFirebaseAdminFirestore();
-    const docRef = firestore.collection('config').doc('socialScheduler');
-    const currentSnap = await docRef.get();
-    const current = currentSnap.exists ? ((currentSnap.data() ?? {}) as SchedulerFlagDoc) : {};
+    if (scopeType === 'global') {
+      const docRef = firestore.collection('config').doc('socialScheduler');
+      const currentSnap = await docRef.get();
+      const current = currentSnap.exists ? ((currentSnap.data() ?? {}) as SchedulerFlagDoc) : {};
 
-    const updates = {
+      const nextFlags = {
+        globalEnabled: enabledRaw === true,
+        exportOnlyMode: exportOnlyRaw === true,
+        analyticsEnabled: analyticsRaw !== false,
+        notes: parsedNotes || null,
+      } satisfies SchedulerFlagDoc;
+
+      const updates = {
+        ...nextFlags,
+        updatedBy: context.uid,
+        updatedAt: FieldValue.serverTimestamp(),
+      } satisfies SchedulerFlagDoc;
+
+      await docRef.set(updates, { merge: true });
+
+      const changes: Record<string, { before: unknown; after: unknown }> = {};
+      if ((current.globalEnabled ?? false) !== nextFlags.globalEnabled) {
+        changes.globalEnabled = { before: current.globalEnabled ?? false, after: nextFlags.globalEnabled ?? false };
+      }
+      if ((current.exportOnlyMode ?? false) !== nextFlags.exportOnlyMode) {
+        changes.exportOnlyMode = { before: current.exportOnlyMode ?? false, after: nextFlags.exportOnlyMode ?? false };
+      }
+      if ((current.analyticsEnabled ?? true) !== nextFlags.analyticsEnabled) {
+        changes.analyticsEnabled = { before: current.analyticsEnabled ?? true, after: nextFlags.analyticsEnabled ?? true };
+      }
+      if ((current.notes ?? '') !== (nextFlags.notes ?? '')) {
+        changes.notes = { before: current.notes ?? '', after: nextFlags.notes ?? '' };
+      }
+
+      const auditPayload: Record<string, unknown> = {
+        actorUid: context.uid,
+        action: 'update_social_scheduler_flags',
+        entityType: 'featureFlags',
+        entityId: 'socialScheduler',
+        scopeType,
+        createdAt: FieldValue.serverTimestamp(),
+      };
+      if (Object.keys(changes).length > 0) {
+        auditPayload.changes = changes;
+      }
+      if (parsedNotes) {
+        auditPayload.metadata = { notes: parsedNotes };
+      }
+      await firestore.collection('adminAuditLogs').add(auditPayload);
+
+      const refreshed = await docRef.get();
+      const data = refreshed.exists ? ((refreshed.data() ?? {}) as SchedulerFlagDoc) : {};
+      return NextResponse.json({ scopeType, global: serialiseFlagDoc(data) });
+    }
+
+    if (!scopeIdRaw) {
+      return badRequest('Missing scope identifier.');
+    }
+
+    const trimmedScopeId = scopeIdRaw;
+    const baseCollection = scopeType === 'franchise' ? 'franchises' : 'orgs';
+    const docRef = firestore.collection(baseCollection).doc(trimmedScopeId);
+    const entitySnap = await docRef.get();
+    if (!entitySnap.exists) {
+      return badRequest('Scope not found.');
+    }
+
+    const flagsRef = docRef.collection('featureFlags').doc('socialScheduler');
+    const currentSnap = await flagsRef.get();
+    const current = currentSnap.exists ? ((currentSnap.data() ?? {}) as SchedulerScopeDoc) : {};
+
+    const nextFlags: SchedulerScopeDoc = {
+      enabled: enabledRaw === true,
+      exportOnlyMode: exportOnlyRaw === true,
+      analyticsEnabled: analyticsRaw !== false,
+      notes: parsedNotes || null,
+    };
+
+    const updates: SchedulerScopeDoc = {
       ...nextFlags,
       updatedBy: context.uid,
       updatedAt: FieldValue.serverTimestamp(),
     };
 
-    await docRef.set(updates, { merge: true });
+    await flagsRef.set(updates, { merge: true });
 
     const changes: Record<string, { before: unknown; after: unknown }> = {};
-    if ((current.globalEnabled ?? false) !== nextFlags.globalEnabled) {
-      changes.globalEnabled = { before: current.globalEnabled ?? false, after: nextFlags.globalEnabled ?? false };
+    if ((current.enabled ?? false) !== (nextFlags.enabled ?? false)) {
+      changes.enabled = { before: current.enabled ?? false, after: nextFlags.enabled ?? false };
     }
-    if ((current.exportOnlyMode ?? false) !== nextFlags.exportOnlyMode) {
-      changes.exportOnlyMode = { before: current.exportOnlyMode ?? false, after: nextFlags.exportOnlyMode ?? false };
+    if ((current.exportOnlyMode ?? false) !== (nextFlags.exportOnlyMode ?? false)) {
+      changes.exportOnlyMode = {
+        before: current.exportOnlyMode ?? false,
+        after: nextFlags.exportOnlyMode ?? false,
+      };
     }
-    if ((current.analyticsEnabled ?? true) !== nextFlags.analyticsEnabled) {
-      changes.analyticsEnabled = { before: current.analyticsEnabled ?? true, after: nextFlags.analyticsEnabled ?? true };
+    if ((current.analyticsEnabled ?? true) !== (nextFlags.analyticsEnabled ?? true)) {
+      changes.analyticsEnabled = {
+        before: current.analyticsEnabled ?? true,
+        after: nextFlags.analyticsEnabled ?? true,
+      };
     }
     if ((current.notes ?? '') !== (nextFlags.notes ?? '')) {
       changes.notes = { before: current.notes ?? '', after: nextFlags.notes ?? '' };
@@ -173,7 +327,9 @@ export async function POST(req: NextRequest) {
       actorUid: context.uid,
       action: 'update_social_scheduler_flags',
       entityType: 'featureFlags',
-      entityId: 'socialScheduler',
+      entityId: `${scopeType}:${trimmedScopeId}`,
+      scopeType,
+      scopeId: trimmedScopeId,
       createdAt: FieldValue.serverTimestamp(),
     };
     if (Object.keys(changes).length > 0) {
@@ -184,9 +340,16 @@ export async function POST(req: NextRequest) {
     }
     await firestore.collection('adminAuditLogs').add(auditPayload);
 
-    const refreshed = await docRef.get();
-    const data = refreshed.exists ? ((refreshed.data() ?? {}) as SchedulerFlagDoc) : {};
-    return NextResponse.json(serialiseFlagDoc(data));
+    const refreshed = await flagsRef.get();
+    const scopeDoc = refreshed.exists ? ((refreshed.data() ?? {}) as SchedulerScopeDoc) : {};
+    const entityData = (entitySnap.data() ?? {}) as Record<string, unknown>;
+    const rawName = typeof entityData.name === 'string' ? entityData.name.trim() : '';
+    const name = rawName || `${scopeType === 'franchise' ? 'Franchise' : 'Organisation'} ${trimmedScopeId}`;
+
+    return NextResponse.json({
+      scopeType,
+      scope: serialiseScopeDoc(trimmedScopeId, name, scopeDoc),
+    });
   } catch (error) {
     console.error('Failed to update scheduler flags', error);
     return NextResponse.json({ error: 'Unable to update scheduler flags.' }, { status: 500 });

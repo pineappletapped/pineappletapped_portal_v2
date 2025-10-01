@@ -41,11 +41,10 @@ This note captures portal features that are implemented in the codebase but are 
   3. Add tracking to measure adoption once the entry point is live.
 
 ## Social scheduling module (feature-flagged)
-- **What exists:** No surfaced UI yet, but product requirements now specify account connections, scheduling workflows, publishing workers, analytics integration, and feature flag layering for staged rollout.【F:docs/social-scheduling-module.md†L1-L152】
-- **Connection gap:** The client portal, franchise portal, and admin tools lack navigation, settings, and data structures to expose or control the module.
-- **Follow-up tasks:**
+- **Status:** Admin and franchise tools now surface global, franchise, and organisation-level rollout toggles with audit logging so HQ can stage the pilot while automation work continues.【F:apps/web/components/admin/tools/SocialSchedulerWorkspace.tsx†L43-L104】【F:apps/web/app/api/social-scheduler/feature-flags/route.ts†L1-L249】
+- **Remaining follow-up tasks:**
   1. Implement Firestore collections and security rules for `socialAccounts`, `socialPosts`, variants, targets, and analytics, plus secure token storage.
-  2. Build admin and franchise feature flag management to enable the module for test organisations without global exposure.
+  2. (Completed) Build admin and franchise feature flag management to enable the module for test organisations without global exposure.【F:apps/web/components/admin/tools/SocialSchedulerWorkspace.tsx†L916-L1119】【F:apps/web/app/api/social-scheduler/feature-flags/route.ts†L101-L249】
   3. Deliver the account connection hub, composer, calendar, approval flow, and CSV/ICS export experience in the portal before toggling visibility for clients.
   4. Instrument publishing workers with alerting and reporting so operations can monitor failures prior to public launch.
 

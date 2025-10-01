@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   Timestamp,
   addDoc,
@@ -93,6 +93,17 @@ interface SchedulerFeatureFlags {
   updatedAt: Date | null;
   updatedBy: string | null;
   notes: string | null;
+}
+
+interface SchedulerScopeFlag {
+  id: string;
+  name: string;
+  enabled: boolean;
+  exportOnlyMode: boolean;
+  analyticsEnabled: boolean;
+  notes: string | null;
+  updatedAt: Date | null;
+  updatedBy: string | null;
 }
 
 interface SocialSchedulerWorkspaceProps {
@@ -362,7 +373,83 @@ export default function SocialSchedulerWorkspace({
   const [flagSaving, setFlagSaving] = useState(false);
   const [flagNotes, setFlagNotes] = useState("");
 
+  const [franchiseFlags, setFranchiseFlags] = useState<SchedulerScopeFlag[]>([]);
+  const [organisationFlags, setOrganisationFlags] = useState<SchedulerScopeFlag[]>([]);
+  const [franchiseSearch, setFranchiseSearch] = useState("");
+  const [organisationSearch, setOrganisationSearch] = useState("");
+  const [scopeSavingKey, setScopeSavingKey] = useState<string | null>(null);
+  const [scopeError, setScopeError] = useState<string | null>(null);
+
   const [feedback, setFeedback] = useState<string | null>(null);
+
+  const loadFeatureFlags = useCallback(async () => {
+    setFlagLoading(true);
+    setFlagError(null);
+    setScopeError(null);
+    try {
+      const response = await fetch("/api/social-scheduler/feature-flags");
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error || `Failed to load feature flags (${response.status})`);
+      }
+      const payload = await response.json();
+      const globalPayload = payload?.global ?? payload ?? {};
+      const globalEnabledValue =
+        typeof globalPayload.globalEnabled === "boolean"
+          ? globalPayload.globalEnabled
+          : globalPayload.enabled === true;
+      const exportOnlyValue = globalPayload.exportOnlyMode === true;
+      const analyticsValue =
+        typeof globalPayload.analyticsEnabled === "boolean"
+          ? globalPayload.analyticsEnabled
+          : globalPayload.analyticsEnabled !== false;
+      const nextFlags: SchedulerFeatureFlags = {
+        globalEnabled: Boolean(globalEnabledValue),
+        exportOnlyMode: Boolean(exportOnlyValue),
+        analyticsEnabled: analyticsValue !== false,
+        updatedAt: toDate(globalPayload.updatedAt),
+        updatedBy: normaliseText(globalPayload.updatedBy),
+        notes: normaliseText(globalPayload.notes),
+      };
+      setFeatureFlags(nextFlags);
+      setFlagNotes(nextFlags.notes ?? "");
+
+      const transformOverrides = (input: unknown): SchedulerScopeFlag[] => {
+        if (!Array.isArray(input)) return [];
+        return input
+          .map((item) => {
+            if (!item || typeof item !== "object") return null;
+            const data = item as Record<string, unknown>;
+            const id = typeof data.id === "string" ? data.id : "";
+            if (!id) return null;
+            const name =
+              typeof data.name === "string" && data.name.trim()
+                ? data.name.trim()
+                : `Scope ${id}`;
+            return {
+              id,
+              name,
+              enabled: data.enabled === true,
+              exportOnlyMode: data.exportOnlyMode === true,
+              analyticsEnabled: data.analyticsEnabled !== false,
+              notes: normaliseText(data.notes),
+              updatedAt: toDate(data.updatedAt),
+              updatedBy: normaliseText(data.updatedBy),
+            } satisfies SchedulerScopeFlag;
+          })
+          .filter((item): item is SchedulerScopeFlag => item !== null)
+          .sort((a, b) => a.name.localeCompare(b.name));
+      };
+
+      setFranchiseFlags(transformOverrides(payload?.franchiseOverrides ?? []));
+      setOrganisationFlags(transformOverrides(payload?.organisationOverrides ?? []));
+    } catch (error) {
+      console.error("Failed to load scheduler feature flags", error);
+      setFlagError((error as Error)?.message || "Unable to load feature flags");
+    } finally {
+      setFlagLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -586,32 +673,8 @@ export default function SocialSchedulerWorkspace({
   }, [dbRef]);
 
   useEffect(() => {
-    setFlagLoading(true);
-    setFlagError(null);
-    fetch("/api/social-scheduler/feature-flags")
-      .then(async (response) => {
-        if (!response.ok) {
-          const payload = await response.json().catch(() => ({}));
-          throw new Error(payload?.error || `Failed to load feature flags (${response.status})`);
-        }
-        const payload = await response.json();
-        const updatedAt = payload.updatedAt ? new Date(payload.updatedAt) : null;
-        setFeatureFlags({
-          globalEnabled: Boolean(payload.globalEnabled),
-          exportOnlyMode: Boolean(payload.exportOnlyMode),
-          analyticsEnabled: payload.analyticsEnabled !== false,
-          updatedAt,
-          updatedBy: normaliseText(payload.updatedBy),
-          notes: normaliseText(payload.notes),
-        });
-        setFlagNotes(payload.notes || "");
-      })
-      .catch((error) => {
-        console.error("Failed to load scheduler feature flags", error);
-        setFlagError(error?.message || "Unable to load feature flags");
-      })
-      .finally(() => setFlagLoading(false));
-  }, []);
+    void loadFeatureFlags();
+  }, [loadFeatureFlags]);
   const filteredClients = useMemo(() => {
     if (!clientSearch.trim()) return clients;
     const term = clientSearch.trim().toLowerCase();
@@ -642,6 +705,18 @@ export default function SocialSchedulerWorkspace({
     const allowed: RoleKey[] = ["admin", "marketing", "projects"];
     return allowed.filter((role) => hasRole(roles, role)).map((role) => getRoleLabel(role));
   }, [roles]);
+
+  const filteredFranchiseFlags = useMemo(() => {
+    if (!franchiseSearch.trim()) return franchiseFlags;
+    const term = franchiseSearch.trim().toLowerCase();
+    return franchiseFlags.filter((flag) => flag.name.toLowerCase().includes(term));
+  }, [franchiseFlags, franchiseSearch]);
+
+  const filteredOrganisationFlags = useMemo(() => {
+    if (!organisationSearch.trim()) return organisationFlags;
+    const term = organisationSearch.trim().toLowerCase();
+    return organisationFlags.filter((flag) => flag.name.toLowerCase().includes(term));
+  }, [organisationFlags, organisationSearch]);
   async function handleCreateAccount(event: FormEvent) {
     event.preventDefault();
     if (!dbRef) return;
@@ -812,22 +887,66 @@ export default function SocialSchedulerWorkspace({
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload?.error || `Failed to update feature flags (${response.status})`);
       }
-      const payload = await response.json();
-      setFeatureFlags({
-        globalEnabled: Boolean(payload.globalEnabled),
-        exportOnlyMode: Boolean(payload.exportOnlyMode),
-        analyticsEnabled: payload.analyticsEnabled !== false,
-        updatedAt: payload.updatedAt ? new Date(payload.updatedAt) : null,
-        updatedBy: normaliseText(payload.updatedBy),
-        notes: normaliseText(payload.notes),
-      });
-      setFlagNotes(payload.notes || "");
+      await loadFeatureFlags();
       setFeedback("Feature flags updated.");
     } catch (error) {
       console.error("Failed to update scheduler flags", error);
       setFlagError((error as Error)?.message || "Unable to update scheduler settings");
     } finally {
       setFlagSaving(false);
+    }
+  }
+
+  type ScopeType = "franchise" | "organisation";
+
+  function handleScopeToggle(
+    scopeType: ScopeType,
+    scopeId: string,
+    field: "enabled" | "exportOnlyMode" | "analyticsEnabled",
+    value: boolean
+  ) {
+    const updater = scopeType === "franchise" ? setFranchiseFlags : setOrganisationFlags;
+    updater((prev) => prev.map((item) => (item.id === scopeId ? { ...item, [field]: value } : item)));
+  }
+
+  function handleScopeNoteChange(scopeType: ScopeType, scopeId: string, value: string) {
+    const updater = scopeType === "franchise" ? setFranchiseFlags : setOrganisationFlags;
+    updater((prev) => prev.map((item) => (item.id === scopeId ? { ...item, notes: value } : item)));
+  }
+
+  async function handleScopeSave(scopeType: ScopeType, scopeId: string) {
+    setScopeSavingKey(`${scopeType}:${scopeId}`);
+    setScopeError(null);
+    const source = scopeType === "franchise" ? franchiseFlags : organisationFlags;
+    const target = source.find((item) => item.id === scopeId);
+    if (!target) {
+      setScopeSavingKey(null);
+      return;
+    }
+    try {
+      const response = await fetch("/api/social-scheduler/feature-flags", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scopeType,
+          scopeId,
+          enabled: target.enabled,
+          exportOnlyMode: target.exportOnlyMode,
+          analyticsEnabled: target.analyticsEnabled,
+          notes: target.notes ? target.notes.trim() : "",
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error || `Failed to update feature flags (${response.status})`);
+      }
+      await loadFeatureFlags();
+      setFeedback("Rollout override saved.");
+    } catch (error) {
+      console.error("Failed to update scheduler scope", error);
+      setScopeError((error as Error)?.message || "Unable to update rollout override");
+    } finally {
+      setScopeSavingKey(null);
     }
   }
 
@@ -904,115 +1023,376 @@ export default function SocialSchedulerWorkspace({
         </div>
       </div>
       {activeTab === "overview" ? (
-        <section className="grid gap-6 rounded border bg-white p-6 shadow-sm">
-          <header className="space-y-1">
-            <h2 className="text-lg font-semibold text-gray-900">Pilot rollout controls</h2>
-            <p className="text-sm text-gray-600">
-              Use the switches below to decide when social scheduling surfaces to franchises and clients. All changes are logged
-              to the admin audit trail.
-            </p>
-          </header>
-          {flagLoading ? <p className="text-sm text-gray-500">Loading scheduler settings…</p> : null}
-          {featureFlags ? (
-            <form
-              className="grid gap-4 md:grid-cols-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (canEditFlags) {
-                  void handleFlagUpdate({
-                    globalEnabled: featureFlags.globalEnabled,
-                    exportOnlyMode: featureFlags.exportOnlyMode,
-                    analyticsEnabled: featureFlags.analyticsEnabled,
-                  });
-                }
-              }}
-            >
-              <label className="flex items-center justify-between rounded border p-4">
-                <span>
-                  <span className="block text-sm font-semibold">Enable scheduler for pilot orgs</span>
-                  <span className="mt-1 block text-xs text-gray-600">
-                    When off, clients only see CSV/ICS exports. Franchise and HQ users still access drafts for prep work.
-                  </span>
-                </span>
-                <input
-                  type="checkbox"
-                  disabled={!canEditFlags || flagSaving}
-                  checked={featureFlags.globalEnabled}
-                  onChange={(event) =>
-                    setFeatureFlags((prev) => (prev ? { ...prev, globalEnabled: event.target.checked } : prev))
+        <>
+          <section className="grid gap-6 rounded border bg-white p-6 shadow-sm">
+            <header className="space-y-1">
+              <h2 className="text-lg font-semibold text-gray-900">Pilot rollout controls</h2>
+              <p className="text-sm text-gray-600">
+                Use the switches below to decide when social scheduling surfaces to franchises and clients. All changes are
+                logged to the admin audit trail.
+              </p>
+            </header>
+            {flagLoading ? <p className="text-sm text-gray-500">Loading scheduler settings…</p> : null}
+            {featureFlags ? (
+              <form
+                className="grid gap-4 md:grid-cols-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (canEditFlags) {
+                    void handleFlagUpdate({
+                      globalEnabled: featureFlags.globalEnabled,
+                      exportOnlyMode: featureFlags.exportOnlyMode,
+                      analyticsEnabled: featureFlags.analyticsEnabled,
+                    });
                   }
-                  className="h-5 w-5"
-                />
-              </label>
-
-              <label className="flex items-center justify-between rounded border p-4">
-                <span>
-                  <span className="block text-sm font-semibold">Export-only fallback</span>
-                  <span className="mt-1 block text-xs text-gray-600">
-                    Keep publishing workers paused while allowing internal teams to prepare campaigns and export schedules.
+                }}
+              >
+                <label className="flex items-center justify-between rounded border p-4">
+                  <span>
+                    <span className="block text-sm font-semibold">Enable scheduler for pilot orgs</span>
+                    <span className="mt-1 block text-xs text-gray-600">
+                      When off, clients only see CSV/ICS exports. Franchise and HQ users still access drafts for prep work.
+                    </span>
                   </span>
-                </span>
-                <input
-                  type="checkbox"
-                  disabled={!canEditFlags || flagSaving}
-                  checked={featureFlags.exportOnlyMode}
-                  onChange={(event) =>
-                    setFeatureFlags((prev) => (prev ? { ...prev, exportOnlyMode: event.target.checked } : prev))
-                  }
-                  className="h-5 w-5"
-                />
-              </label>
+                  <input
+                    type="checkbox"
+                    disabled={!canEditFlags || flagSaving}
+                    checked={featureFlags.globalEnabled}
+                    onChange={(event) =>
+                      setFeatureFlags((prev) => (prev ? { ...prev, globalEnabled: event.target.checked } : prev))
+                    }
+                    className="h-5 w-5"
+                  />
+                </label>
 
-              <label className="flex items-center justify-between rounded border p-4">
-                <span>
-                  <span className="block text-sm font-semibold">Show analytics widgets to clients</span>
-                  <span className="mt-1 block text-xs text-gray-600">
-                    Disable if you only want HQ/franchise teams to view performance insights during the pilot.
+                <label className="flex items-center justify-between rounded border p-4">
+                  <span>
+                    <span className="block text-sm font-semibold">Export-only fallback</span>
+                    <span className="mt-1 block text-xs text-gray-600">
+                      Keep publishing workers paused while allowing internal teams to prepare campaigns and export schedules.
+                    </span>
                   </span>
-                </span>
-                <input
-                  type="checkbox"
-                  disabled={!canEditFlags || flagSaving}
-                  checked={featureFlags.analyticsEnabled}
-                  onChange={(event) =>
-                    setFeatureFlags((prev) => (prev ? { ...prev, analyticsEnabled: event.target.checked } : prev))
-                  }
-                  className="h-5 w-5"
-                />
-              </label>
+                  <input
+                    type="checkbox"
+                    disabled={!canEditFlags || flagSaving}
+                    checked={featureFlags.exportOnlyMode}
+                    onChange={(event) =>
+                      setFeatureFlags((prev) => (prev ? { ...prev, exportOnlyMode: event.target.checked } : prev))
+                    }
+                    className="h-5 w-5"
+                  />
+                </label>
 
-              <label className="md:col-span-2">
-                <span className="block text-sm font-semibold">Pilot notes</span>
-                <textarea
-                  value={flagNotes}
-                  onChange={(event) => setFlagNotes(event.target.value)}
-                  disabled={!canEditFlags || flagSaving}
-                  className="mt-1 w-full rounded border px-3 py-2 text-sm"
-                  rows={3}
-                  placeholder="Record why the toggle changed, impacted franchises, or any QA caveats."
-                />
-              </label>
+                <label className="flex items-center justify-between rounded border p-4">
+                  <span>
+                    <span className="block text-sm font-semibold">Show analytics widgets to clients</span>
+                    <span className="mt-1 block text-xs text-gray-600">
+                      Disable if you only want HQ/franchise teams to view performance insights during the pilot.
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    disabled={!canEditFlags || flagSaving}
+                    checked={featureFlags.analyticsEnabled}
+                    onChange={(event) =>
+                      setFeatureFlags((prev) => (prev ? { ...prev, analyticsEnabled: event.target.checked } : prev))
+                    }
+                    className="h-5 w-5"
+                  />
+                </label>
 
-              <div className="md:col-span-2 flex items-center justify-between text-xs text-gray-500">
-                <div>
-                  {featureFlags.updatedAt ? `Last updated ${featureFlags.updatedAt.toLocaleString()}` : "Not yet configured"}
-                  {featureFlags.updatedBy ? ` by ${featureFlags.updatedBy}` : null}
+                <label className="md:col-span-2">
+                  <span className="block text-sm font-semibold">Pilot notes</span>
+                  <textarea
+                    value={flagNotes}
+                    onChange={(event) => setFlagNotes(event.target.value)}
+                    disabled={!canEditFlags || flagSaving}
+                    className="mt-1 w-full rounded border px-3 py-2 text-sm"
+                    rows={3}
+                    placeholder="Record why the toggle changed, impacted franchises, or any QA caveats."
+                  />
+                </label>
+
+                <div className="md:col-span-2 flex items-center justify-between text-xs text-gray-500">
+                  <div>
+                    {featureFlags.updatedAt ? `Last updated ${featureFlags.updatedAt.toLocaleString()}` : "Not yet configured"}
+                    {featureFlags.updatedBy ? ` by ${featureFlags.updatedBy}` : null}
+                  </div>
+                  {canEditFlags ? (
+                    <button
+                      type="submit"
+                      disabled={flagSaving}
+                      className="rounded bg-orange px-3 py-2 text-sm font-semibold text-white shadow hover:bg-orange/90"
+                    >
+                      {flagSaving ? "Saving…" : "Save rollout settings"}
+                    </button>
+                  ) : (
+                    <span className="italic">Contact an admin to adjust rollout state.</span>
+                  )}
                 </div>
-                {canEditFlags ? (
-                  <button
-                    type="submit"
-                    disabled={flagSaving}
-                    className="rounded bg-orange px-3 py-2 text-sm font-semibold text-white shadow hover:bg-orange/90"
-                  >
-                    {flagSaving ? "Saving…" : "Save rollout settings"}
-                  </button>
-                ) : (
-                  <span className="italic">Contact an admin to adjust rollout state.</span>
-                )}
-              </div>
-            </form>
-          ) : null}
-        </section>
+              </form>
+            ) : null}
+          </section>
+
+          <section className="grid gap-4 rounded border bg-white p-6 shadow-sm">
+            <header className="space-y-1">
+              <h2 className="text-lg font-semibold text-gray-900">Franchise rollout overrides</h2>
+              <p className="text-sm text-gray-600">
+                Enable specific franchises to pilot the scheduler while the global toggle remains off. Overrides cascade to all
+                organisations managed by the franchise.
+              </p>
+            </header>
+            <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+              <label className="text-sm md:w-72">
+                <span className="font-medium">Search franchises</span>
+                <input
+                  type="search"
+                  value={franchiseSearch}
+                  onChange={(event) => setFranchiseSearch(event.target.value)}
+                  className="mt-1 w-full rounded border px-3 py-2"
+                  placeholder="Filter by name"
+                />
+              </label>
+              <span className="text-xs text-gray-500">
+                Showing {filteredFranchiseFlags.length} of {franchiseFlags.length}
+              </span>
+            </div>
+            {scopeError ? <p className="text-sm text-red-600">{scopeError}</p> : null}
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="bg-slate-100 text-left text-xs uppercase tracking-wide text-slate-600">
+                  <tr>
+                    <th className="p-3">Franchise</th>
+                    <th className="p-3">Scheduler</th>
+                    <th className="p-3">Export-only</th>
+                    <th className="p-3">Analytics</th>
+                    <th className="p-3">Notes</th>
+                    <th className="p-3">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {flagLoading ? (
+                    <tr>
+                      <td colSpan={6} className="p-4 text-center text-gray-500">
+                        Loading overrides…
+                      </td>
+                    </tr>
+                  ) : filteredFranchiseFlags.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="p-4 text-center text-gray-500">
+                        No franchises found.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredFranchiseFlags.map((flag) => {
+                      const saving = scopeSavingKey === `franchise:${flag.id}`;
+                      const disabled = flagLoading || saving;
+                      return (
+                        <tr key={flag.id} className="border-b last:border-0">
+                          <td className="p-3 align-top">
+                            <div className="font-medium text-gray-900">{flag.name}</div>
+                            <div className="text-xs text-gray-500">
+                              {flag.updatedAt ? `Updated ${flag.updatedAt.toLocaleString()}` : "No overrides set"}
+                              {flag.updatedBy ? ` by ${flag.updatedBy}` : null}
+                            </div>
+                          </td>
+                          <td className="p-3 align-top">
+                            <label className="flex items-center gap-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={flag.enabled}
+                                disabled={disabled}
+                                onChange={(event) =>
+                                  handleScopeToggle("franchise", flag.id, "enabled", event.target.checked)
+                                }
+                              />
+                              Enable scheduler
+                            </label>
+                          </td>
+                          <td className="p-3 align-top">
+                            <label className="flex items-center gap-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={flag.exportOnlyMode}
+                                disabled={disabled}
+                                onChange={(event) =>
+                                  handleScopeToggle("franchise", flag.id, "exportOnlyMode", event.target.checked)
+                                }
+                              />
+                              Export-only fallback
+                            </label>
+                          </td>
+                          <td className="p-3 align-top">
+                            <label className="flex items-center gap-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={flag.analyticsEnabled}
+                                disabled={disabled}
+                                onChange={(event) =>
+                                  handleScopeToggle("franchise", flag.id, "analyticsEnabled", event.target.checked)
+                                }
+                              />
+                              Show analytics
+                            </label>
+                          </td>
+                          <td className="p-3 align-top">
+                            <input
+                              type="text"
+                              value={flag.notes ?? ""}
+                              onChange={(event) => handleScopeNoteChange("franchise", flag.id, event.target.value)}
+                              disabled={disabled}
+                              placeholder="Optional note"
+                              className="w-48 rounded border px-2 py-1 text-xs md:w-56"
+                            />
+                          </td>
+                          <td className="p-3 align-top">
+                            <button
+                              type="button"
+                              onClick={() => handleScopeSave("franchise", flag.id)}
+                              disabled={disabled}
+                              className="rounded bg-orange px-2 py-1 text-xs font-semibold text-white shadow hover:bg-orange/90"
+                            >
+                              {saving ? "Saving…" : "Save"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="grid gap-4 rounded border bg-white p-6 shadow-sm">
+            <header className="space-y-1">
+              <h2 className="text-lg font-semibold text-gray-900">Client visibility overrides</h2>
+              <p className="text-sm text-gray-600">
+                Adjust analytics and scheduling visibility for individual client organisations once they are ready to test the
+                module in their portal.
+              </p>
+            </header>
+            <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+              <label className="text-sm md:w-72">
+                <span className="font-medium">Search organisations</span>
+                <input
+                  type="search"
+                  value={organisationSearch}
+                  onChange={(event) => setOrganisationSearch(event.target.value)}
+                  className="mt-1 w-full rounded border px-3 py-2"
+                  placeholder="Filter by name"
+                />
+              </label>
+              <span className="text-xs text-gray-500">
+                Showing {filteredOrganisationFlags.length} of {organisationFlags.length}
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="bg-slate-100 text-left text-xs uppercase tracking-wide text-slate-600">
+                  <tr>
+                    <th className="p-3">Organisation</th>
+                    <th className="p-3">Scheduler</th>
+                    <th className="p-3">Export-only</th>
+                    <th className="p-3">Analytics</th>
+                    <th className="p-3">Notes</th>
+                    <th className="p-3">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {flagLoading ? (
+                    <tr>
+                      <td colSpan={6} className="p-4 text-center text-gray-500">
+                        Loading overrides…
+                      </td>
+                    </tr>
+                  ) : filteredOrganisationFlags.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="p-4 text-center text-gray-500">
+                        No organisations found.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredOrganisationFlags.map((flag) => {
+                      const saving = scopeSavingKey === `organisation:${flag.id}`;
+                      const disabled = flagLoading || saving;
+                      return (
+                        <tr key={flag.id} className="border-b last:border-0">
+                          <td className="p-3 align-top">
+                            <div className="font-medium text-gray-900">{flag.name}</div>
+                            <div className="text-xs text-gray-500">
+                              {flag.updatedAt ? `Updated ${flag.updatedAt.toLocaleString()}` : "No overrides set"}
+                              {flag.updatedBy ? ` by ${flag.updatedBy}` : null}
+                            </div>
+                          </td>
+                          <td className="p-3 align-top">
+                            <label className="flex items-center gap-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={flag.enabled}
+                                disabled={disabled}
+                                onChange={(event) =>
+                                  handleScopeToggle("organisation", flag.id, "enabled", event.target.checked)
+                                }
+                              />
+                              Enable scheduler
+                            </label>
+                          </td>
+                          <td className="p-3 align-top">
+                            <label className="flex items-center gap-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={flag.exportOnlyMode}
+                                disabled={disabled}
+                                onChange={(event) =>
+                                  handleScopeToggle("organisation", flag.id, "exportOnlyMode", event.target.checked)
+                                }
+                              />
+                              Export-only fallback
+                            </label>
+                          </td>
+                          <td className="p-3 align-top">
+                            <label className="flex items-center gap-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={flag.analyticsEnabled}
+                                disabled={disabled}
+                                onChange={(event) =>
+                                  handleScopeToggle("organisation", flag.id, "analyticsEnabled", event.target.checked)
+                                }
+                              />
+                              Show analytics
+                            </label>
+                          </td>
+                          <td className="p-3 align-top">
+                            <input
+                              type="text"
+                              value={flag.notes ?? ""}
+                              onChange={(event) => handleScopeNoteChange("organisation", flag.id, event.target.value)}
+                              disabled={disabled}
+                              placeholder="Optional note"
+                              className="w-48 rounded border px-2 py-1 text-xs md:w-56"
+                            />
+                          </td>
+                          <td className="p-3 align-top">
+                            <button
+                              type="button"
+                              onClick={() => handleScopeSave("organisation", flag.id)}
+                              disabled={disabled}
+                              className="rounded bg-orange px-2 py-1 text-xs font-semibold text-white shadow hover:bg-orange/90"
+                            >
+                              {saving ? "Saving…" : "Save"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
       ) : null}
       {activeTab === "accounts" ? (
         <section className="grid gap-6 rounded border bg-white p-6 shadow-sm">
