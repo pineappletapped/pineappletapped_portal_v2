@@ -3,6 +3,49 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function userProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function isStaffUser() {
+      return isAuthenticated() && userProfile().data.isStaff == true;
+    }
+
+    function hasBackofficeRole() {
+      return isAuthenticated() && (
+        userProfile().data.roles.admin == true ||
+        userProfile().data.roles.marketing == true ||
+        userProfile().data.roles.projects == true ||
+        userProfile().data.roles.operations == true
+      );
+    }
+
+    function isServiceAccountRequest() {
+      return isAuthenticated() && request.auth.token.serviceAccount == true;
+    }
+
+    function canReadSocialAccounts() {
+      return isStaffUser() || hasBackofficeRole();
+    }
+
+    function isSocialAccountDocPath(path) {
+      return path.matches('/databases/([^/]+)/documents/socialAccounts/.*') ||
+        path.matches('/databases/([^/]+)/documents/socialAccountSecrets/.*');
+    }
+
+    match /socialAccountSecrets/{accountId} {
+      allow read, write: if isStaffUser() || isServiceAccountRequest();
+    }
+
+    match /socialAccounts/{accountId} {
+      allow read: if canReadSocialAccounts();
+      allow create, update, delete: if isStaffUser() || isServiceAccountRequest();
+    }
+
     // This rule allows anyone with your Firestore database reference to view, edit,
     // and delete all data in your Firestore database. It is useful for getting
     // started, but it is configured to expire after 30 days because it
@@ -13,7 +56,10 @@ service cloud.firestore {
     // all client requests to your Firestore database will be denied until you Update
     // your rules
     match /{document=**} {
-      allow read, write: if request.time < timestamp.date(2025, 10, 4);
+      allow read, write: if
+        request.time < timestamp.date(2025, 10, 4) &&
+        !isSocialAccountDocPath(resource.__name__) &&
+        !(request.resource != null && isSocialAccountDocPath(request.resource.__name__));
     }
   }
 }

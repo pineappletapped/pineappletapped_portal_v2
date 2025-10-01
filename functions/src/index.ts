@@ -209,6 +209,29 @@ function parseSplitTerms(raw: unknown): StripeSplitTermConfig[] {
 const secretManagerClient = new SecretManagerServiceClient();
 const STRIPE_SECRET_KEY_RESOURCE = normaliseString(process.env.STRIPE_SECRET_KEY_SECRET_NAME);
 const STRIPE_WEBHOOK_SECRET_RESOURCE = normaliseString(process.env.STRIPE_WEBHOOK_SECRET_SECRET_NAME);
+const SOCIAL_ACCOUNT_SERVICE_KEY_RESOURCE = normaliseString(
+  process.env.SOCIAL_ACCOUNT_SERVICE_KEY_SECRET_NAME
+);
+const SOCIAL_ACCOUNT_SERVICE_KEY_FALLBACK = normaliseString(process.env.SOCIAL_ACCOUNT_SERVICE_KEY ?? null);
+const SOCIAL_ACCOUNT_ENCRYPTION_KEY_RESOURCE = normaliseString(
+  process.env.SOCIAL_ACCOUNT_ENCRYPTION_KEY_SECRET_NAME
+);
+const SOCIAL_ACCOUNT_ENCRYPTION_KEY_FALLBACK = normaliseString(
+  process.env.SOCIAL_ACCOUNT_ENCRYPTION_KEY ?? null
+);
+
+let cachedSocialAccountServiceKey: string | null | undefined;
+let cachedSocialAccountEncryptionKey: Buffer | null | undefined;
+
+const SUPPORTED_SOCIAL_PLATFORMS = new Set<string>([
+  'youtube',
+  'linkedin',
+  'instagram',
+  'facebook',
+  'tiktok',
+  'twitter',
+  'vimeo',
+]);
 
 function parseSecretResource(resource: string): { parent: string; versionName: string } {
   const trimmed = resource.trim();
@@ -248,6 +271,549 @@ async function readSecretValue(
     throw new Error(`Unable to read ${label} from Secret Manager: ${(error as Error).message}`);
   }
 }
+
+async function getSocialAccountServiceKey(): Promise<string> {
+  if (cachedSocialAccountServiceKey !== undefined) {
+    if (!cachedSocialAccountServiceKey) {
+      throw new Error('Social account service key is not configured.');
+    }
+    return cachedSocialAccountServiceKey;
+  }
+
+  const secret = await readSecretValue(
+    SOCIAL_ACCOUNT_SERVICE_KEY_RESOURCE,
+    SOCIAL_ACCOUNT_SERVICE_KEY_FALLBACK,
+    'Social account service key'
+  );
+
+  cachedSocialAccountServiceKey = secret ?? null;
+  if (!cachedSocialAccountServiceKey) {
+    throw new Error('Social account service key is not configured.');
+  }
+
+  return cachedSocialAccountServiceKey;
+}
+
+function decodeEncryptionKey(raw: string): Buffer {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new Error('Encryption key is empty.');
+  }
+
+  const base64Candidate = (() => {
+    try {
+      return Buffer.from(trimmed, 'base64');
+    } catch (error) {
+      return Buffer.alloc(0);
+    }
+  })();
+  if (base64Candidate.length === 32) {
+    return base64Candidate;
+  }
+
+  const hexCandidate = (() => {
+    try {
+      return Buffer.from(trimmed, 'hex');
+    } catch (error) {
+      return Buffer.alloc(0);
+    }
+  })();
+  if (hexCandidate.length === 32) {
+    return hexCandidate;
+  }
+
+  if (trimmed.length === 32) {
+    const utf8Candidate = Buffer.from(trimmed, 'utf8');
+    if (utf8Candidate.length === 32) {
+      return utf8Candidate;
+    }
+  }
+
+  throw new Error('Encryption key must decode to 32 bytes for AES-256-GCM.');
+}
+
+async function getSocialAccountEncryptionKey(): Promise<Buffer> {
+  if (cachedSocialAccountEncryptionKey) {
+    return cachedSocialAccountEncryptionKey;
+  }
+  if (cachedSocialAccountEncryptionKey === null) {
+    throw new Error('Social account encryption key is not configured.');
+  }
+
+  const secret = await readSecretValue(
+    SOCIAL_ACCOUNT_ENCRYPTION_KEY_RESOURCE,
+    SOCIAL_ACCOUNT_ENCRYPTION_KEY_FALLBACK,
+    'Social account encryption key'
+  );
+
+  if (!secret) {
+    cachedSocialAccountEncryptionKey = null;
+    throw new Error('Social account encryption key is not configured.');
+  }
+
+  const decoded = decodeEncryptionKey(secret);
+  cachedSocialAccountEncryptionKey = decoded;
+  return decoded;
+}
+
+type SocialAccountScopeInput = {
+  publish?: boolean;
+  analytics?: boolean;
+} | null;
+
+type SocialAccountTokenInput = {
+  accessToken: string;
+  refreshToken?: string | null;
+  expiresIn?: number | string | null;
+  scope?: string | null;
+  tokenType?: string | null;
+  raw?: Record<string, unknown> | null;
+};
+
+type SocialAccountProviderInput = {
+  accountId?: string | null;
+  accountName?: string | null;
+} | null;
+
+type StoreSocialAccountCredentialRequest = {
+  stateId?: string | null;
+  accountId?: string | null;
+  platform?: string | null;
+  organisationId?: string | null;
+  organisationName?: string | null;
+  displayName?: string | null;
+  scopes?: SocialAccountScopeInput;
+  tokens?: SocialAccountTokenInput | null;
+  provider?: SocialAccountProviderInput;
+  initiator?: { uid?: string | null; email?: string | null } | null;
+  requestedBy?: string | null;
+};
+
+type StoreSocialAccountCredentialResponse = {
+  accountId: string;
+  platform: string;
+  status: string;
+  expiresAt: string | null;
+  displayName: string | null;
+  refreshAvailable: boolean;
+  requiresReauth: boolean;
+};
+
+type EncryptedSecretPayload = {
+  cipherText: string;
+  iv: string;
+  authTag: string;
+  hash: string;
+};
+
+function encryptSecretValue(plain: string, key: Buffer): EncryptedSecretPayload {
+  const value = plain.trim();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return {
+    cipherText: encrypted.toString('base64'),
+    iv: iv.toString('base64'),
+    authTag: authTag.toString('base64'),
+    hash: crypto.createHash('sha256').update(value, 'utf8').digest('hex'),
+  };
+}
+
+function scrubTokenPayload(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== 'object') {
+    return {};
+  }
+  const copy = JSON.parse(JSON.stringify(raw));
+  const redactKeys = [
+    'access_token',
+    'refresh_token',
+    'token',
+    'accessToken',
+    'refreshToken',
+    'id_token',
+    'code',
+  ];
+  redactKeys.forEach((key) => {
+    if (key in copy) {
+      copy[key] = '[redacted]';
+    }
+  });
+  return copy as Record<string, unknown>;
+}
+
+function parseExpiresInValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function parseExpiryTimestamp(value: unknown): Date | null {
+  if (!value && value !== 0) {
+    return null;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+    if (value > 1_000_000_000_000) {
+      return new Date(value);
+    }
+    if (value > 0) {
+      return new Date(value * 1000);
+    }
+    return null;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric)) {
+      return parseExpiryTimestamp(numeric);
+    }
+    const parsed = new Date(trimmed);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function computeTokenExpiry(tokens: SocialAccountTokenInput): Date | null {
+  const directSeconds = parseExpiresInValue(tokens.expiresIn);
+  if (directSeconds) {
+    return new Date(Date.now() + directSeconds * 1000);
+  }
+
+  const raw = tokens.raw ?? {};
+  if (raw && typeof raw === 'object') {
+    const rawSeconds =
+      parseExpiresInValue((raw as Record<string, unknown>).expires_in) ??
+      parseExpiresInValue((raw as Record<string, unknown>).expiresIn) ??
+      parseExpiresInValue((raw as Record<string, unknown>).expires);
+    if (rawSeconds) {
+      return new Date(Date.now() + rawSeconds * 1000);
+    }
+
+    const rawTimestamp =
+      parseExpiryTimestamp((raw as Record<string, unknown>).expires_at) ??
+      parseExpiryTimestamp((raw as Record<string, unknown>).expiry) ??
+      parseExpiryTimestamp((raw as Record<string, unknown>).expiration) ??
+      parseExpiryTimestamp((raw as Record<string, unknown>).expiration_time) ??
+      parseExpiryTimestamp((raw as Record<string, unknown>).expirationTime) ??
+      parseExpiryTimestamp((raw as Record<string, unknown>).token_expiry) ??
+      parseExpiryTimestamp((raw as Record<string, unknown>).tokenExpiry);
+    if (rawTimestamp) {
+      return rawTimestamp;
+    }
+  }
+
+  return null;
+}
+
+function determineConnectionFlags(refreshToken: string | null, expiresAt: Date | null) {
+  const now = Date.now();
+  const refreshAvailable = Boolean(refreshToken);
+  const expiryTime = expiresAt?.getTime() ?? null;
+  const expired = expiryTime !== null && expiryTime <= now + 30_000;
+  const requiresReauth = !refreshAvailable && (expired || expiryTime === null);
+  const reauthRecommended = requiresReauth || (expiryTime !== null && expiryTime <= now + 72 * 60 * 60 * 1000);
+  const status = requiresReauth || expired ? 'requires_reauth' : 'active';
+  return { status, refreshAvailable, requiresReauth, reauthRecommended };
+}
+
+function normalisePlatform(value: string | null | undefined): string {
+  if (!value) {
+    return '';
+  }
+  const trimmed = value.trim().toLowerCase();
+  return trimmed;
+}
+
+function coerceScopes(scopes: SocialAccountScopeInput | undefined): { publish: boolean; analytics: boolean } {
+  return {
+    publish: scopes?.publish === true,
+    analytics: scopes?.analytics === true,
+  };
+}
+
+function buildRotationHistory(
+  secretSnap: FirebaseFirestore.DocumentSnapshot<FirebaseFirestore.DocumentData>,
+  nowIso: string
+): Array<{ hash: string; rotatedAt: string | null }> {
+  const rawHistory = secretSnap.exists ? ((secretSnap.data() as any)?.rotation?.history ?? []) : [];
+  const parsedHistory: Array<{ hash: string; rotatedAt: string | null }> = Array.isArray(rawHistory)
+    ? rawHistory
+        .map((entry: any) => {
+          if (!entry || typeof entry !== 'object') {
+            return null;
+          }
+          const hash = typeof entry.hash === 'string' ? entry.hash : null;
+          if (!hash) {
+            return null;
+          }
+          const rotatedAt = typeof entry.rotatedAt === 'string' ? entry.rotatedAt : null;
+          return { hash, rotatedAt };
+        })
+        .filter((entry): entry is { hash: string; rotatedAt: string | null } => entry !== null)
+    : [];
+
+  const existingCurrent = secretSnap.exists ? (secretSnap.data() as any)?.current : null;
+  if (existingCurrent?.accessToken?.hash && typeof existingCurrent.accessToken.hash === 'string') {
+    const rotatedAtCandidate = existingCurrent?.accessToken?.storedAt ?? existingCurrent?.storedAt ?? null;
+    const rotatedAtString =
+      typeof rotatedAtCandidate === 'string'
+        ? rotatedAtCandidate
+        : rotatedAtCandidate instanceof admin.firestore.Timestamp
+        ? rotatedAtCandidate.toDate().toISOString()
+        : rotatedAtCandidate instanceof Date
+        ? rotatedAtCandidate.toISOString()
+        : nowIso;
+    parsedHistory.push({ hash: existingCurrent.accessToken.hash, rotatedAt: rotatedAtString });
+  }
+
+  while (parsedHistory.length > 5) {
+    parsedHistory.shift();
+  }
+
+  return parsedHistory;
+}
+
+async function storeSocialAccountCredentials(
+  payload: StoreSocialAccountCredentialRequest
+): Promise<StoreSocialAccountCredentialResponse> {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Request body is required.');
+  }
+
+  const platform = normalisePlatform(payload.platform);
+  if (!platform) {
+    throw new Error('Platform is required.');
+  }
+  if (!SUPPORTED_SOCIAL_PLATFORMS.has(platform)) {
+    throw new Error(`Unsupported platform: ${platform}`);
+  }
+
+  const tokens = payload.tokens;
+  if (!tokens || typeof tokens.accessToken !== 'string' || !tokens.accessToken.trim()) {
+    throw new Error('Access token is required.');
+  }
+
+  const encryptionKey = await getSocialAccountEncryptionKey();
+
+  const scopes = coerceScopes(payload.scopes);
+  const organisationId = normaliseString(payload.organisationId);
+  const organisationName = normaliseString(payload.organisationName);
+  const initiatorUid = normaliseString(payload.initiator?.uid);
+  const initiatorEmail = normaliseString(payload.initiator?.email);
+  const requestedBy = normaliseString(payload.requestedBy);
+  const stateId = normaliseString(payload.stateId);
+  const providerAccountId = normaliseString(payload.provider?.accountId);
+  const providerAccountName = normaliseString(payload.provider?.accountName);
+
+  const sanitizedAccessToken = tokens.accessToken.trim();
+  const sanitizedRefreshToken =
+    typeof tokens.refreshToken === 'string' && tokens.refreshToken.trim().length > 0
+      ? tokens.refreshToken.trim()
+      : null;
+
+  const expiresAt = computeTokenExpiry(tokens);
+  const { status, refreshAvailable, requiresReauth, reauthRecommended } = determineConnectionFlags(
+    sanitizedRefreshToken,
+    expiresAt
+  );
+
+  const accountRef = payload.accountId
+    ? db.collection('socialAccounts').doc(payload.accountId)
+    : db.collection('socialAccounts').doc();
+  const accountId = accountRef.id;
+  const secretRef = db.collection('socialAccountSecrets').doc(accountId);
+
+  const displayName =
+    normaliseString(payload.displayName) ??
+    providerAccountName ??
+    organisationName ??
+    `${platform.charAt(0).toUpperCase()}${platform.slice(1)} account`;
+
+  const expiresAtTimestamp = expiresAt ? admin.firestore.Timestamp.fromDate(expiresAt) : null;
+  const nowTimestamp = admin.firestore.Timestamp.now();
+  const nowIso = nowTimestamp.toDate().toISOString();
+  const usedMockProvider = Boolean((tokens.raw as any)?.mock === true);
+
+  const encryptedAccess = encryptSecretValue(sanitizedAccessToken, encryptionKey);
+  const encryptedRefresh = sanitizedRefreshToken ? encryptSecretValue(sanitizedRefreshToken, encryptionKey) : null;
+
+  await db.runTransaction(async (transaction) => {
+    const [accountSnap, secretSnap] = await Promise.all([transaction.get(accountRef), transaction.get(secretRef)]);
+
+    const statusHistoryEntry = {
+      status,
+      updatedAt: nowTimestamp,
+      expiresAt: expiresAtTimestamp,
+      refreshAvailable,
+      requiresReauth,
+      updatedBy: initiatorUid ?? requestedBy ?? null,
+    };
+
+    const accountData: FirebaseFirestore.DocumentData = {
+      platform,
+      organisationId: organisationId ?? null,
+      organisationName: organisationName ?? null,
+      displayName,
+      status,
+      scopes: { publish: scopes.publish, analytics: scopes.analytics },
+      provider: {
+        accountId: providerAccountId ?? null,
+        accountName: providerAccountName ?? displayName,
+      },
+      connection: {
+        status,
+        expiresAt: expiresAtTimestamp,
+        refreshAvailable,
+        requiresReauth,
+        reauthRecommended,
+        lastAuthorizedAt: nowTimestamp,
+        lastAuthorizedBy: initiatorUid ?? null,
+        lastAuthorizedByEmail: initiatorEmail ?? null,
+        requestedBy: requestedBy ?? null,
+        stateId: stateId ?? null,
+        mock: usedMockProvider,
+        updatedAt: nowTimestamp,
+      },
+      refreshAvailable,
+      expiresAt: expiresAtTimestamp,
+      updatedAt: nowTimestamp,
+      updatedBy: initiatorUid ?? null,
+      lastAuthorizedAt: nowTimestamp,
+      lastAuthorizedBy: initiatorUid ?? null,
+      lastAuthorizedByEmail: initiatorEmail ?? null,
+      requestedBy: requestedBy ?? null,
+      scopesUpdatedAt: nowTimestamp,
+      statusHistory: admin.firestore.FieldValue.arrayUnion(statusHistoryEntry),
+    };
+
+    if (!accountSnap.exists) {
+      accountData.createdAt = nowTimestamp;
+      accountData.createdBy = initiatorUid ?? null;
+    }
+
+    transaction.set(accountRef, accountData, { merge: true });
+
+    const rotationHistory = buildRotationHistory(secretSnap, nowIso);
+    const existingSecret = secretSnap.exists ? (secretSnap.data() as Record<string, unknown>) : null;
+    const currentScopes = { publish: scopes.publish, analytics: scopes.analytics };
+
+    const secretData: FirebaseFirestore.DocumentData = {
+      accountId,
+      platform,
+      organisationId: organisationId ?? null,
+      organisationName: organisationName ?? null,
+      current: {
+        accessToken: encryptedAccess,
+        refreshToken: encryptedRefresh,
+        scope: tokens.scope ?? null,
+        scopes: currentScopes,
+        tokenType: tokens.tokenType ?? null,
+        raw: scrubTokenPayload(tokens.raw ?? {}),
+        expiresAt: expiresAtTimestamp,
+        storedAt: nowTimestamp,
+      },
+      rotation: {
+        version: ((existingSecret?.rotation as Record<string, unknown>)?.version as number | undefined ?? 0) + 1,
+        updatedAt: nowTimestamp,
+        history: rotationHistory,
+      },
+      updatedAt: nowTimestamp,
+      updatedBy: initiatorUid ?? null,
+    };
+
+    if (!secretSnap.exists) {
+      secretData.createdAt = nowTimestamp;
+      secretData.createdBy = initiatorUid ?? null;
+    }
+
+    transaction.set(secretRef, secretData, { merge: true });
+  });
+
+  return {
+    accountId,
+    platform,
+    status,
+    expiresAt: expiresAt ? expiresAt.toISOString() : null,
+    displayName,
+    refreshAvailable,
+    requiresReauth,
+  };
+}
+
+export const socialAccountsStoreCredentials = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type,X-Service-Key');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  try {
+    const expectedKey = await getSocialAccountServiceKey();
+    const providedKey = req.get('x-service-key') ?? req.get('X-Service-Key') ?? null;
+    if (!providedKey || providedKey.trim() !== expectedKey) {
+      res.status(401).json({ error: 'Invalid service key.' });
+      return;
+    }
+
+    let body: unknown = req.body;
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch (error) {
+        res.status(400).json({ error: 'Invalid JSON payload.' });
+        return;
+      }
+    }
+
+    if (!body || (typeof body === 'object' && Object.keys(body as Record<string, unknown>).length === 0)) {
+      const rawBody: Buffer | undefined = (req as unknown as { rawBody?: Buffer }).rawBody;
+      if (rawBody && rawBody.length > 0) {
+        try {
+          body = JSON.parse(rawBody.toString('utf8'));
+        } catch (error) {
+          res.status(400).json({ error: 'Invalid JSON payload.' });
+          return;
+        }
+      }
+    }
+
+    const result = await storeSocialAccountCredentials(body as StoreSocialAccountCredentialRequest);
+    res.status(200).json(result);
+  } catch (error) {
+    console.error('Failed to store social account credentials', error);
+    if (error instanceof Error && /not configured/i.test(error.message)) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    res.status(400).json({ error: (error as Error)?.message ?? 'Unable to store credentials.' });
+  }
+});
 
 async function loadStripeSettingsFromFirestore(): Promise<{
   platformFeePercent: number | null;

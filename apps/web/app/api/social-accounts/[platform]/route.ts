@@ -70,6 +70,10 @@ interface StoreCredentialPayload {
     tokenType: string | null;
     raw: Record<string, unknown>;
   };
+  provider: {
+    accountId: string | null;
+    accountName: string | null;
+  } | null;
   initiator: {
     uid: string;
     email: string | null;
@@ -415,6 +419,10 @@ async function handleCallback(request: NextRequest, platform: SocialPlatform) {
         scope: tokenResult.scope,
         tokenType: tokenResult.tokenType,
         raw: tokenResult.raw,
+      },
+      provider: {
+        accountId: tokenResult.platformAccountId ?? null,
+        accountName: tokenResult.platformAccountName ?? null,
       },
       initiator: { uid: user.uid, email: user.email ?? null },
       requestedBy: stateData.createdBy ?? null,
