@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Timestamp,
   addDoc,
+  arrayUnion,
   collection,
   deleteDoc,
   doc,
@@ -21,6 +22,7 @@ import {
 import type { User as FirebaseUser } from "firebase/auth";
 
 import PortalHero from "@/components/PortalHero";
+import SchedulerCalendar from "@/components/admin/tools/SchedulerCalendar";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import { hasRole, type RoleKey, type UserRoles } from "@/lib/roles";
 
@@ -72,13 +74,51 @@ interface SchedulerAccount {
   updatedAt: Date | null;
 }
 
+interface SchedulerMediaAttachment {
+  id: string;
+  label: string | null;
+  url: string | null;
+  driveFileId: string | null;
+  driveFileUrl: string | null;
+  type: "drive" | "external" | "deliverable";
+}
+
+interface SchedulerVariantUtm {
+  source: string | null;
+  medium: string | null;
+  campaign: string | null;
+  term: string | null;
+  content: string | null;
+}
+
 interface SchedulerPostVariant {
   id: string;
   platform: string;
   caption: string;
   firstComment: string | null;
   hashtags: string[];
+  linkUrl: string | null;
+  utm: SchedulerVariantUtm | null;
+  thumbnailAssetId: string | null;
+  thumbnailUrl: string | null;
 }
+
+interface SchedulerApprovalNote {
+  id: string;
+  message: string;
+  createdBy: string | null;
+  createdAt: Date | null;
+}
+
+type VariantDraftState = {
+  caption: string;
+  hashtags: string;
+  firstComment: string;
+  linkUrl: string;
+  utm: SchedulerVariantUtm;
+  thumbnailAssetId: string;
+  thumbnailUrl: string;
+};
 
 interface SchedulerPost {
   id: string;
@@ -89,12 +129,15 @@ interface SchedulerPost {
   deliverableLabel: string | null;
   deliverableProductId: string | null;
   deliverableProductName: string | null;
+  baseLinkUrl: string | null;
   status: string;
   approvalState: string;
   scheduledAt: Date | null;
   timezone: string | null;
   notes: string | null;
   variants: SchedulerPostVariant[];
+  attachments: SchedulerMediaAttachment[];
+  approvalNotes: SchedulerApprovalNote[];
   createdBy: string | null;
   createdAt: Date | null;
   updatedAt: Date | null;
@@ -217,6 +260,64 @@ function normaliseText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+function extractDriveFileId(input: string): { id: string | null; url: string | null } {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return { id: null, url: null };
+  }
+  if (/^[A-Za-z0-9_-]{20,}$/.test(trimmed)) {
+    return { id: trimmed, url: `https://drive.google.com/file/d/${trimmed}/view` };
+  }
+  const idMatch = trimmed.match(/\/d\/([A-Za-z0-9_-]{20,})/) || trimmed.match(/id=([^&]+)/);
+  if (idMatch && idMatch[1]) {
+    return { id: idMatch[1], url: trimmed };
+  }
+  return { id: null, url: trimmed };
+}
+
+function buildTrackedLink(baseUrl: string | null | undefined, utm?: Partial<SchedulerVariantUtm>): string | null {
+  if (!baseUrl) return null;
+  try {
+    const url = new URL(baseUrl);
+    if (utm) {
+      if (utm.source) url.searchParams.set("utm_source", utm.source);
+      if (utm.medium) url.searchParams.set("utm_medium", utm.medium);
+      if (utm.campaign) url.searchParams.set("utm_campaign", utm.campaign);
+      if (utm.term) url.searchParams.set("utm_term", utm.term);
+      if (utm.content) url.searchParams.set("utm_content", utm.content);
+    }
+    return url.toString();
+  } catch (error) {
+    console.warn("Unable to build tracked link", error);
+    return baseUrl;
+  }
+}
+
+function sanitiseUtm(utm: SchedulerVariantUtm): SchedulerVariantUtm | null {
+  const cleaned: SchedulerVariantUtm = {
+    source: utm.source?.trim() || null,
+    medium: utm.medium?.trim() || null,
+    campaign: utm.campaign?.trim() || null,
+    term: utm.term?.trim() || null,
+    content: utm.content?.trim() || null,
+  };
+  if (cleaned.source || cleaned.medium || cleaned.campaign || cleaned.term || cleaned.content) {
+    return cleaned;
+  }
+  return null;
+}
+
+function generateLocalId(prefix: string): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    try {
+      return `${prefix}-${crypto.randomUUID()}`;
+    } catch (error) {
+      // ignore and fallback
+    }
+  }
+  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function downloadText(filename: string, contents: string) {
@@ -359,6 +460,7 @@ export default function SocialSchedulerWorkspace({
 
   const [products, setProducts] = useState<ProductRecord[]>([]);
   const [productLoading, setProductLoading] = useState(false);
+  const [productSearch, setProductSearch] = useState("");
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [selectedProductName, setSelectedProductName] = useState<string>("");
 
@@ -383,8 +485,10 @@ export default function SocialSchedulerWorkspace({
   });
   const [postCaption, setPostCaption] = useState("");
   const [postHashtags, setPostHashtags] = useState("");
+  const [baseLinkUrl, setBaseLinkUrl] = useState("");
   const [platformSelection, setPlatformSelection] = useState<Set<string>>(new Set(["youtube", "linkedin"]));
   const [postSaving, setPostSaving] = useState(false);
+  const [variantDrafts, setVariantDrafts] = useState<Record<string, VariantDraftState>>({});
 
   const [featureFlags, setFeatureFlags] = useState<SchedulerFeatureFlags | null>(null);
   const [flagLoading, setFlagLoading] = useState(false);
@@ -400,6 +504,144 @@ export default function SocialSchedulerWorkspace({
   const [scopeError, setScopeError] = useState<string | null>(null);
 
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [mediaAttachments, setMediaAttachments] = useState<SchedulerMediaAttachment[]>([]);
+  const [attachmentLabel, setAttachmentLabel] = useState("");
+  const [attachmentUrl, setAttachmentUrl] = useState("");
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
+
+  const getDefaultVariantDraft = useCallback(
+    (platform: string): VariantDraftState => ({
+      caption: postCaption,
+      hashtags: postHashtags,
+      firstComment: "",
+      linkUrl: baseLinkUrl,
+      utm: {
+        source: platform,
+        medium: "",
+        campaign: "",
+        term: "",
+        content: "",
+      },
+      thumbnailAssetId: "",
+      thumbnailUrl: "",
+    }),
+    [postCaption, postHashtags, baseLinkUrl]
+  );
+
+  const updateVariantDraft = useCallback(
+    (platform: string, updates: Partial<VariantDraftState>) => {
+      setVariantDrafts((prev) => {
+        const current = prev[platform] ?? getDefaultVariantDraft(platform);
+        return {
+          ...prev,
+          [platform]: { ...current, ...updates },
+        };
+      });
+    },
+    [getDefaultVariantDraft]
+  );
+
+  const handlePlatformToggle = useCallback(
+    (platform: string, checked: boolean) => {
+      setPlatformSelection((prev) => {
+        const next = new Set(prev);
+        if (checked) {
+          next.add(platform);
+        } else {
+          next.delete(platform);
+        }
+        return next;
+      });
+      setVariantDrafts((prev) => {
+        if (checked) {
+          if (prev[platform]) {
+            return prev;
+          }
+          return { ...prev, [platform]: getDefaultVariantDraft(platform) };
+        }
+        if (!prev[platform]) {
+          return prev;
+        }
+        const { [platform]: _removed, ...rest } = prev;
+        return rest;
+      });
+    },
+    [getDefaultVariantDraft]
+  );
+
+  const handleAddAttachment = useCallback(() => {
+    const rawUrl = attachmentUrl.trim();
+    const rawLabel = attachmentLabel.trim();
+    if (!rawUrl) {
+      setAttachmentError("Provide a link or Drive file ID to attach.");
+      return;
+    }
+    const { id: driveId, url } = extractDriveFileId(rawUrl);
+    const attachment: SchedulerMediaAttachment = {
+      id: generateLocalId("asset"),
+      label: rawLabel || null,
+      url,
+      driveFileId: driveId,
+      driveFileUrl: driveId ? `https://drive.google.com/file/d/${driveId}/view` : url,
+      type: driveId ? "drive" : "external",
+    };
+    setMediaAttachments((prev) => [...prev, attachment]);
+    setAttachmentLabel("");
+    setAttachmentUrl("");
+    setAttachmentError(null);
+  }, [attachmentLabel, attachmentUrl]);
+
+  const handleRemoveAttachment = useCallback((attachmentId: string) => {
+    setMediaAttachments((prev) => prev.filter((item) => item.id !== attachmentId));
+  }, []);
+
+  const handleReschedulePost = useCallback(
+    async (postId: string, nextDate: Date | null) => {
+      if (!dbRef) return;
+      try {
+        await updateDoc(doc(dbRef, "socialPosts", postId), {
+          scheduledAt: nextDate ? Timestamp.fromDate(nextDate) : null,
+          status: nextDate ? "scheduled" : "draft",
+          updatedAt: serverTimestamp(),
+        });
+        setFeedback("Post schedule updated.");
+      } catch (error) {
+        console.error("Failed to reschedule post", error);
+        setPostError((error as Error)?.message || "Unable to update schedule");
+      }
+    },
+    [dbRef]
+  );
+
+  const handleAddApprovalNote = useCallback(
+    async (postId: string) => {
+      if (!dbRef) return;
+      const draft = noteDrafts[postId]?.trim();
+      if (!draft) {
+        setPostError("Write a note before submitting.");
+        return;
+      }
+      try {
+        await updateDoc(doc(dbRef, "socialPosts", postId), {
+          approvalNotes: arrayUnion({
+            id: generateLocalId("note"),
+            message: draft,
+            createdBy: authUser?.uid ?? null,
+            createdAt: serverTimestamp(),
+          }),
+          updatedAt: serverTimestamp(),
+        });
+        setNoteDrafts((prev) => ({ ...prev, [postId]: "" }));
+        setFeedback("Approval note recorded.");
+        setPostError(null);
+      } catch (error) {
+        console.error("Failed to add approval note", error);
+        setPostError((error as Error)?.message || "Unable to add note");
+      }
+    },
+    [authUser?.uid, dbRef, noteDrafts]
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -759,17 +1001,84 @@ export default function SocialSchedulerWorkspace({
         const records: SchedulerPost[] = snapshot.docs.map((docSnap) => {
           const data = docSnap.data() as DocumentData;
           const variants: SchedulerPostVariant[] = Array.isArray(data.variants)
-            ? data.variants.map((variant, index) => ({
-                id: `${docSnap.id}-v${index}`,
-                platform: normaliseText((variant as any)?.platform) ?? "unknown",
-                caption: normaliseText((variant as any)?.caption) ?? "",
-                firstComment: normaliseText((variant as any)?.firstComment),
-                hashtags: Array.isArray((variant as any)?.hashtags)
-                  ? ((variant as any)?.hashtags as unknown[])
-                      .map((tag) => normaliseText(tag))
-                      .filter((tag): tag is string => Boolean(tag))
-                  : [],
-              }))
+            ? data.variants.map((variant, index) => {
+                const variantData = variant as Record<string, unknown>;
+                const utmData =
+                  variantData?.utm && typeof variantData.utm === "object"
+                    ? (variantData.utm as Record<string, unknown>)
+                    : null;
+                const utm: SchedulerVariantUtm | null = utmData
+                  ? {
+                      source: normaliseText(utmData.source) ?? null,
+                      medium: normaliseText(utmData.medium) ?? null,
+                      campaign: normaliseText(utmData.campaign) ?? null,
+                      term: normaliseText(utmData.term) ?? null,
+                      content: normaliseText(utmData.content) ?? null,
+                    }
+                  : null;
+                return {
+                  id: normaliseText(variantData?.id) ?? `${docSnap.id}-v${index}`,
+                  platform: normaliseText(variantData?.platform) ?? "unknown",
+                  caption: normaliseText(variantData?.caption) ?? "",
+                  firstComment: normaliseText(variantData?.firstComment),
+                  hashtags: Array.isArray(variantData?.hashtags)
+                    ? (variantData.hashtags as unknown[])
+                        .map((tag) => normaliseText(tag))
+                        .filter((tag): tag is string => Boolean(tag))
+                    : [],
+                  linkUrl: normaliseText(variantData?.linkUrl),
+                  utm,
+                  thumbnailAssetId: normaliseText(variantData?.thumbnailAssetId),
+                  thumbnailUrl:
+                    normaliseText(variantData?.thumbnailUrl) ??
+                    (variantData?.thumbnailAssetUrl && typeof variantData.thumbnailAssetUrl === "string"
+                      ? variantData.thumbnailAssetUrl
+                      : null),
+                } satisfies SchedulerPostVariant;
+              })
+            : [];
+          const attachments: SchedulerMediaAttachment[] = Array.isArray(data.attachments)
+            ? (data.attachments as unknown[])
+                .map((attachment, index) => {
+                  const attachmentData = attachment as Record<string, unknown>;
+                  const id = normaliseText(attachmentData?.id) ?? `${docSnap.id}-asset-${index}`;
+                  const label = normaliseText(attachmentData?.label);
+                  const url = normaliseText(attachmentData?.url) ?? normaliseText(attachmentData?.driveFileUrl);
+                  const driveFileId = normaliseText(attachmentData?.driveFileId);
+                  const driveFileUrl = normaliseText(attachmentData?.driveFileUrl) ?? null;
+                  const typeValue = normaliseText(attachmentData?.type);
+                  const type: SchedulerMediaAttachment["type"] =
+                    typeValue === "drive" || typeValue === "deliverable" ? typeValue : "external";
+                  if (!url && !driveFileId) {
+                    return null;
+                  }
+                  return {
+                    id,
+                    label,
+                    url,
+                    driveFileId,
+                    driveFileUrl,
+                    type,
+                  } satisfies SchedulerMediaAttachment;
+                })
+                .filter((item): item is SchedulerMediaAttachment => Boolean(item))
+            : [];
+          const approvalNotes: SchedulerApprovalNote[] = Array.isArray(data.approvalNotes)
+            ? (data.approvalNotes as unknown[])
+                .map((note, index) => {
+                  const noteData = note as Record<string, unknown>;
+                  const message = normaliseText(noteData?.message);
+                  if (!message) {
+                    return null;
+                  }
+                  return {
+                    id: normaliseText(noteData?.id) ?? `${docSnap.id}-note-${index}`,
+                    message,
+                    createdBy: normaliseText(noteData?.createdBy),
+                    createdAt: toDate(noteData?.createdAt),
+                  } satisfies SchedulerApprovalNote;
+                })
+                .filter((item): item is SchedulerApprovalNote => Boolean(item))
             : [];
           return {
             id: docSnap.id,
@@ -780,12 +1089,15 @@ export default function SocialSchedulerWorkspace({
             deliverableLabel: normaliseText(data.deliverableLabel) ?? null,
             deliverableProductId: normaliseText(data.deliverableProductId) ?? null,
             deliverableProductName: normaliseText(data.deliverableProductName) ?? null,
+            baseLinkUrl: normaliseText(data.baseLinkUrl) ?? null,
             status: normaliseText(data.status) ?? "draft",
             approvalState: normaliseText(data.approvalState) ?? "draft",
             scheduledAt: toDate(data.scheduledAt),
             timezone: normaliseText(data.timezone),
             notes: normaliseText(data.notes),
             variants,
+            attachments,
+            approvalNotes,
             createdBy: normaliseText(data.createdBy),
             createdAt: toDate(data.createdAt),
             updatedAt: toDate(data.updatedAt),
@@ -805,6 +1117,18 @@ export default function SocialSchedulerWorkspace({
   }, [dbRef]);
 
   useEffect(() => {
+    setNoteDrafts((prev) => {
+      const next: Record<string, string> = {};
+      posts.forEach((post) => {
+        if (prev[post.id]) {
+          next[post.id] = prev[post.id];
+        }
+      });
+      return next;
+    });
+  }, [posts]);
+
+  useEffect(() => {
     void loadFeatureFlags();
   }, [loadFeatureFlags]);
   const filteredClients = useMemo(() => {
@@ -821,6 +1145,19 @@ export default function SocialSchedulerWorkspace({
     ? projects.find((project) => project.id === selectedProjectId) || null
     : null;
 
+  const filteredProducts = useMemo(() => {
+    if (!productSearch.trim()) return products;
+    const term = productSearch.trim().toLowerCase();
+    const matches = products.filter((product) => product.name.toLowerCase().includes(term));
+    if (selectedProductId && !matches.some((product) => product.id === selectedProductId)) {
+      const current = products.find((product) => product.id === selectedProductId);
+      if (current) {
+        return [current, ...matches];
+      }
+    }
+    return matches;
+  }, [productSearch, products, selectedProductId]);
+
   const selectedProduct = selectedProductId
     ? products.find((product) => product.id === selectedProductId) || null
     : null;
@@ -831,6 +1168,56 @@ export default function SocialSchedulerWorkspace({
     if (!selectedClientId) return posts;
     return posts.filter((post) => post.organisationId === selectedClientId);
   }, [posts, selectedClientId]);
+
+  const analyticsSummary = useMemo(() => {
+    const totals = {
+      scheduled: 0,
+      awaitingApproval: 0,
+      drafts: 0,
+      published: 0,
+    };
+    const platformTotals = new Map<string, number>();
+    let upcomingWithinWeek = 0;
+    const now = new Date();
+    const weekAhead = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    posts.forEach((post) => {
+      if (post.status === "scheduled") totals.scheduled += 1;
+      if (post.status === "draft") totals.drafts += 1;
+      if (post.approvalState === "awaiting_approval" || post.approvalState === "pending") {
+        totals.awaitingApproval += 1;
+      }
+      if (post.status === "published") totals.published += 1;
+      if (post.scheduledAt && post.scheduledAt >= now && post.scheduledAt <= weekAhead) {
+        upcomingWithinWeek += 1;
+      }
+      post.variants.forEach((variant) => {
+        platformTotals.set(variant.platform, (platformTotals.get(variant.platform) ?? 0) + 1);
+      });
+    });
+    const breakdown = Array.from(platformTotals.entries()).map(([platform, count]) => ({
+      platform,
+      count,
+    }));
+    breakdown.sort((a, b) => b.count - a.count);
+    return { totals, upcomingWithinWeek, breakdown };
+  }, [posts]);
+
+  const calendarPosts = useMemo(
+    () =>
+      posts.map((post) => ({
+        id: post.id,
+        organisationName: post.organisationName,
+        deliverableProductName: post.deliverableProductName ?? post.deliverableLabel,
+        scheduledAt: post.scheduledAt,
+        status: post.status,
+        approvalState: post.approvalState,
+        variants: post.variants.map((variant) => ({
+          platform: variant.platform,
+          caption: variant.caption,
+        })),
+      })),
+    [posts]
+  );
 
   const pilotRoles = useMemo(() => {
     if (!roles) return [] as string[];
@@ -964,12 +1351,61 @@ export default function SocialSchedulerWorkspace({
       setPostError("Select at least one platform variant to generate.");
       return;
     }
-    if (!postCaption.trim()) {
-      setPostError("Write a caption to include in the post variants.");
-      return;
-    }
     setPostSaving(true);
     try {
+      const variantsPayload = [] as Array<Record<string, unknown>>;
+      for (const platform of platforms) {
+        const draft = variantDrafts[platform];
+        const baseCaption = draft?.caption ?? postCaption;
+        const caption = baseCaption.trim();
+        if (!caption) {
+          setPostError(`Add a caption for ${PLATFORM_LABELS[platform] ?? platform}.`);
+          setPostSaving(false);
+          return;
+        }
+        const hashtagsSource = (draft?.hashtags ?? postHashtags).trim();
+        const hashtags = hashtagsSource
+          ? hashtagsSource
+              .split(/[\s,]+/)
+              .map((tag) => tag.trim())
+              .filter(Boolean)
+          : [];
+        const utm = draft ? sanitiseUtm(draft.utm) : null;
+        const linkBase = draft?.linkUrl?.trim() || baseLinkUrl.trim() || null;
+        const trackedLink = buildTrackedLink(linkBase, utm ?? undefined);
+        const firstCommentValue = draft?.firstComment?.trim() || null;
+        const thumbnailAssetId = draft?.thumbnailAssetId?.trim() || null;
+        const thumbnailUrl = draft?.thumbnailUrl?.trim() || null;
+        variantsPayload.push({
+          id: generateLocalId("variant"),
+          platform,
+          caption,
+          hashtags,
+          firstComment: firstCommentValue,
+          linkUrl: trackedLink,
+          utm,
+          thumbnailAssetId,
+          thumbnailUrl,
+        });
+      }
+      const attachmentsPayload = mediaAttachments.map((attachment) => ({
+        id: attachment.id || generateLocalId("asset"),
+        label: attachment.label?.trim() || null,
+        url: attachment.url?.trim() || null,
+        driveFileId: attachment.driveFileId?.trim() || null,
+        driveFileUrl: attachment.driveFileUrl?.trim() || null,
+        type: attachment.type,
+      }));
+      const approvalNotesPayload = postForm.notes.trim()
+        ? [
+            {
+              id: generateLocalId("note"),
+              message: postForm.notes.trim(),
+              createdBy: authUser?.uid ?? null,
+              createdAt: serverTimestamp(),
+            },
+          ]
+        : [];
       const payload: Record<string, unknown> = {
         organisationId,
         organisationName,
@@ -978,6 +1414,7 @@ export default function SocialSchedulerWorkspace({
         deliverableLabel: selectedProject?.reference ?? null,
         deliverableProductId: selectedProduct?.id ?? null,
         deliverableProductName: selectedProduct?.name ?? selectedProductName.trim() || null,
+        baseLinkUrl: baseLinkUrl.trim() || null,
         status: postForm.status,
         approvalState: postForm.approvalState,
         timezone: postForm.timezone ?? null,
@@ -986,15 +1423,9 @@ export default function SocialSchedulerWorkspace({
         createdBy: authUser?.uid ?? null,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-        variants: platforms.map((platform) => ({
-          platform,
-          caption: postCaption.trim(),
-          hashtags: postHashtags
-            .split(/[\s,]+/)
-            .map((tag) => tag.trim())
-            .filter(Boolean),
-          firstComment: null,
-        })),
+        variants: variantsPayload,
+        attachments: attachmentsPayload,
+        approvalNotes: approvalNotesPayload,
       };
       await addDoc(collection(dbRef, "socialPosts"), payload);
       setFeedback("Draft created and queued for approval.");
@@ -1008,7 +1439,12 @@ export default function SocialSchedulerWorkspace({
       });
       setPostCaption("");
       setPostHashtags("");
+      setBaseLinkUrl("");
       setPlatformSelection(new Set(["youtube", "linkedin"]));
+      setVariantDrafts({});
+      setMediaAttachments([]);
+      setAttachmentLabel("");
+      setAttachmentUrl("");
     } catch (error) {
       console.error("Failed to create social post", error);
       setPostError((error as Error)?.message || "Unable to create post");
@@ -1815,6 +2251,46 @@ export default function SocialSchedulerWorkspace({
             </p>
           </header>
 
+          {featureFlags?.analyticsEnabled ? (
+            <div className="grid gap-4 rounded border border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-wrap gap-4 text-sm text-slate-700">
+                <div className="flex min-w-[120px] flex-col rounded bg-white p-3 shadow-sm">
+                  <span className="text-xs uppercase text-slate-500">Scheduled</span>
+                  <span className="text-xl font-semibold text-slate-900">{analyticsSummary.totals.scheduled}</span>
+                </div>
+                <div className="flex min-w-[120px] flex-col rounded bg-white p-3 shadow-sm">
+                  <span className="text-xs uppercase text-slate-500">Awaiting approval</span>
+                  <span className="text-xl font-semibold text-slate-900">{analyticsSummary.totals.awaitingApproval}</span>
+                </div>
+                <div className="flex min-w-[120px] flex-col rounded bg-white p-3 shadow-sm">
+                  <span className="text-xs uppercase text-slate-500">Drafts</span>
+                  <span className="text-xl font-semibold text-slate-900">{analyticsSummary.totals.drafts}</span>
+                </div>
+                <div className="flex min-w-[120px] flex-col rounded bg-white p-3 shadow-sm">
+                  <span className="text-xs uppercase text-slate-500">Next 7 days</span>
+                  <span className="text-xl font-semibold text-slate-900">{analyticsSummary.upcomingWithinWeek}</span>
+                </div>
+              </div>
+              <div className="grid gap-2 text-sm text-slate-700">
+                <span className="text-xs uppercase text-slate-500">Platform mix (last 100 drafts)</span>
+                {analyticsSummary.breakdown.length === 0 ? (
+                  <p className="text-xs text-slate-500">No platform activity yet.</p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {analyticsSummary.breakdown.map((entry) => (
+                      <span
+                        key={entry.platform}
+                        className="rounded-full bg-white px-3 py-1 text-xs font-medium shadow-sm"
+                      >
+                        {PLATFORM_LABELS[entry.platform] ?? entry.platform}: {entry.count}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : null}
+
           <form className="grid gap-4 rounded border border-slate-200 p-4" onSubmit={handleCreatePost}>
             <h3 className="text-sm font-semibold text-gray-900">Create draft</h3>
             <div className="grid gap-4 md:grid-cols-2">
@@ -1874,22 +2350,31 @@ export default function SocialSchedulerWorkspace({
                 />
               </label>
 
-              <label className="text-sm">
+              <div className="grid gap-1 text-sm">
                 <span className="font-medium">Deliverable</span>
-                <select
-                  value={selectedProductId}
-                  onChange={(event) => setSelectedProductId(event.target.value)}
-                  className="mt-1 w-full rounded border px-3 py-2"
-                >
-                  <option value="">Select deliverable (optional)</option>
-                  {products.map((product) => (
-                    <option key={product.id} value={product.id}>
-                      {product.name}
-                    </option>
-                  ))}
-                </select>
-                {productLoading ? <span className="mt-1 block text-xs text-gray-500">Loading products…</span> : null}
-              </label>
+                <div className="grid gap-2 sm:grid-cols-[1fr_200px]">
+                  <input
+                    type="search"
+                    value={productSearch}
+                    onChange={(event) => setProductSearch(event.target.value)}
+                    className="rounded border px-3 py-2"
+                    placeholder="Search deliverable products"
+                  />
+                  <select
+                    value={selectedProductId}
+                    onChange={(event) => setSelectedProductId(event.target.value)}
+                    className="rounded border px-3 py-2"
+                  >
+                    <option value="">Select deliverable (optional)</option>
+                    {filteredProducts.map((product) => (
+                      <option key={product.id} value={product.id}>
+                        {product.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {productLoading ? <span className="text-xs text-gray-500">Loading products…</span> : null}
+              </div>
 
               <label className="text-sm">
                 <span className="font-medium">Manual deliverable label</span>
@@ -1963,17 +2448,7 @@ export default function SocialSchedulerWorkspace({
                       <input
                         type="checkbox"
                         checked={platformSelection.has(option.value)}
-                        onChange={(event) => {
-                          setPlatformSelection((prev) => {
-                            const next = new Set(prev);
-                            if (event.target.checked) {
-                              next.add(option.value);
-                            } else {
-                              next.delete(option.value);
-                            }
-                            return next;
-                          });
-                        }}
+                        onChange={(event) => handlePlatformToggle(option.value, event.target.checked)}
                       />
                       {option.label}
                     </label>
@@ -1993,7 +2468,7 @@ export default function SocialSchedulerWorkspace({
               </label>
 
               <label className="text-sm">
-                <span className="font-medium">Hashtags</span>
+                <span className="font-medium">Default hashtags</span>
                 <input
                   type="text"
                   value={postHashtags}
@@ -2002,6 +2477,278 @@ export default function SocialSchedulerWorkspace({
                   placeholder="#video #marketing #pineappletapped"
                 />
               </label>
+
+              <label className="text-sm">
+                <span className="font-medium">Default link (optional)</span>
+                <input
+                  type="url"
+                  value={baseLinkUrl}
+                  onChange={(event) => setBaseLinkUrl(event.target.value)}
+                  className="mt-1 w-full rounded border px-3 py-2"
+                  placeholder="https://example.com/landing-page"
+                />
+                <span className="mt-1 block text-xs text-gray-500">
+                  Variants inherit this link unless overridden. UTM tags are applied per platform below.
+                </span>
+              </label>
+
+              <div className="grid gap-2">
+                <span className="text-sm font-medium text-gray-900">Media attachments</span>
+                <p className="text-xs text-gray-500">
+                  Link drive files or hosted assets so the post references the actual deliverable. Attachments are shared with
+                  clients once approved.
+                </p>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <input
+                    type="text"
+                    value={attachmentLabel}
+                    onChange={(event) => setAttachmentLabel(event.target.value)}
+                    className="w-full rounded border px-3 py-2 sm:w-48"
+                    placeholder="Label (e.g. Final edit)"
+                  />
+                  <input
+                    type="text"
+                    value={attachmentUrl}
+                    onChange={(event) => setAttachmentUrl(event.target.value)}
+                    className="w-full flex-1 rounded border px-3 py-2"
+                    placeholder="Google Drive link, file ID, or URL"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddAttachment}
+                    className="rounded bg-slate-800 px-3 py-2 text-sm font-semibold text-white shadow hover:bg-slate-900"
+                  >
+                    Add attachment
+                  </button>
+                </div>
+                {attachmentError ? <p className="text-xs text-red-600">{attachmentError}</p> : null}
+                {mediaAttachments.length > 0 ? (
+                  <ul className="divide-y divide-slate-200 rounded border border-slate-200 text-sm">
+                    {mediaAttachments.map((attachment) => (
+                      <li key={attachment.id} className="flex flex-wrap items-center justify-between gap-2 p-2">
+                        <div>
+                          <div className="font-medium text-gray-900">{attachment.label || attachment.url || attachment.driveFileUrl}</div>
+                          <div className="text-xs text-gray-500">
+                            {attachment.type === "drive" ? "Google Drive" : "External"} ·{" "}
+                            {attachment.url || attachment.driveFileUrl}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveAttachment(attachment.id)}
+                          className="text-xs font-semibold text-red-600 hover:underline"
+                        >
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-gray-500">No attachments yet.</p>
+                )}
+              </div>
+
+              <div className="grid gap-3">
+                <div>
+                  <h4 className="text-sm font-semibold text-gray-900">Per-platform variants</h4>
+                  <p className="text-xs text-gray-500">
+                    Customise captions, first comments, tracking links, and thumbnails per platform. Leave fields blank to use
+                    the defaults above.
+                  </p>
+                </div>
+                {platformSelection.size === 0 ? (
+                  <p className="text-xs text-gray-500">Select at least one platform to configure variants.</p>
+                ) : (
+                  Array.from(platformSelection).map((platform) => {
+                    const draft = variantDrafts[platform] ?? getDefaultVariantDraft(platform);
+                    const previewUtm = sanitiseUtm(draft.utm) ?? undefined;
+                    const previewLink = buildTrackedLink(draft.linkUrl?.trim() || baseLinkUrl.trim() || null, previewUtm);
+                    return (
+                      <div key={platform} className="rounded border border-slate-200 p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h5 className="text-sm font-semibold text-gray-900">{PLATFORM_LABELS[platform] ?? platform}</h5>
+                          <button
+                            type="button"
+                            className="text-xs text-slate-500 hover:underline"
+                            onClick={() =>
+                              updateVariantDraft(platform, getDefaultVariantDraft(platform))
+                            }
+                          >
+                            Reset to defaults
+                          </button>
+                        </div>
+                        <div className="mt-3 grid gap-3 md:grid-cols-2">
+                          <label className="text-xs font-medium text-gray-700">
+                            Caption
+                            <textarea
+                              value={draft.caption}
+                              onChange={(event) => updateVariantDraft(platform, { caption: event.target.value })}
+                              className="mt-1 w-full rounded border px-2 py-2 text-sm"
+                              rows={4}
+                            />
+                          </label>
+                          <label className="text-xs font-medium text-gray-700">
+                            First comment (optional)
+                            <textarea
+                              value={draft.firstComment}
+                              onChange={(event) => updateVariantDraft(platform, { firstComment: event.target.value })}
+                              className="mt-1 w-full rounded border px-2 py-2 text-sm"
+                              rows={4}
+                            />
+                          </label>
+                          <label className="text-xs font-medium text-gray-700">
+                            Platform hashtags
+                            <input
+                              type="text"
+                              value={draft.hashtags}
+                              onChange={(event) => updateVariantDraft(platform, { hashtags: event.target.value })}
+                              className="mt-1 w-full rounded border px-2 py-2 text-sm"
+                              placeholder={postHashtags || "#hashtags"}
+                            />
+                          </label>
+                          <label className="text-xs font-medium text-gray-700">
+                            Link override
+                            <input
+                              type="url"
+                              value={draft.linkUrl}
+                              onChange={(event) => updateVariantDraft(platform, { linkUrl: event.target.value })}
+                              className="mt-1 w-full rounded border px-2 py-2 text-sm"
+                              placeholder={baseLinkUrl || "https://example.com"}
+                            />
+                          </label>
+                        </div>
+                        <div className="mt-3 grid gap-3 md:grid-cols-2">
+                          <fieldset className="grid gap-2 text-xs">
+                            <legend className="font-medium text-gray-700">UTM parameters</legend>
+                            <div className="grid grid-cols-2 gap-2">
+                              <label className="grid gap-1">
+                                <span>Source</span>
+                                <input
+                                  type="text"
+                                  value={draft.utm.source}
+                                  onChange={(event) =>
+                                    updateVariantDraft(platform, {
+                                      utm: { ...draft.utm, source: event.target.value },
+                                    })
+                                  }
+                                  className="rounded border px-2 py-1"
+                                />
+                              </label>
+                              <label className="grid gap-1">
+                                <span>Medium</span>
+                                <input
+                                  type="text"
+                                  value={draft.utm.medium}
+                                  onChange={(event) =>
+                                    updateVariantDraft(platform, {
+                                      utm: { ...draft.utm, medium: event.target.value },
+                                    })
+                                  }
+                                  className="rounded border px-2 py-1"
+                                />
+                              </label>
+                              <label className="grid gap-1">
+                                <span>Campaign</span>
+                                <input
+                                  type="text"
+                                  value={draft.utm.campaign}
+                                  onChange={(event) =>
+                                    updateVariantDraft(platform, {
+                                      utm: { ...draft.utm, campaign: event.target.value },
+                                    })
+                                  }
+                                  className="rounded border px-2 py-1"
+                                />
+                              </label>
+                              <label className="grid gap-1">
+                                <span>Content</span>
+                                <input
+                                  type="text"
+                                  value={draft.utm.content}
+                                  onChange={(event) =>
+                                    updateVariantDraft(platform, {
+                                      utm: { ...draft.utm, content: event.target.value },
+                                    })
+                                  }
+                                  className="rounded border px-2 py-1"
+                                />
+                              </label>
+                              <label className="grid gap-1">
+                                <span>Term</span>
+                                <input
+                                  type="text"
+                                  value={draft.utm.term}
+                                  onChange={(event) =>
+                                    updateVariantDraft(platform, {
+                                      utm: { ...draft.utm, term: event.target.value },
+                                    })
+                                  }
+                                  className="rounded border px-2 py-1"
+                                />
+                              </label>
+                            </div>
+                          </fieldset>
+                          <div className="grid gap-2 text-xs">
+                            <label className="font-medium text-gray-700">
+                              Thumbnail from attachments
+                              <select
+                                value={draft.thumbnailAssetId}
+                                onChange={(event) => {
+                                  const selectedId = event.target.value;
+                                  if (!selectedId) {
+                                    updateVariantDraft(platform, { thumbnailAssetId: "", thumbnailUrl: draft.thumbnailUrl });
+                                    return;
+                                  }
+                                  const selectedAttachment = mediaAttachments.find((item) => item.id === selectedId) || null;
+                                  updateVariantDraft(platform, {
+                                    thumbnailAssetId: selectedId,
+                                    thumbnailUrl:
+                                      selectedAttachment?.url ??
+                                      selectedAttachment?.driveFileUrl ??
+                                      draft.thumbnailUrl,
+                                  });
+                                }}
+                                className="mt-1 w-full rounded border px-2 py-1"
+                              >
+                                <option value="">No linked attachment</option>
+                                {mediaAttachments.map((attachment) => (
+                                  <option key={attachment.id} value={attachment.id}>
+                                    {attachment.label || attachment.url || attachment.driveFileUrl}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="font-medium text-gray-700">
+                              Thumbnail URL override
+                              <input
+                                type="url"
+                                value={draft.thumbnailUrl}
+                                onChange={(event) =>
+                                  updateVariantDraft(platform, { thumbnailUrl: event.target.value })
+                                }
+                                className="mt-1 w-full rounded border px-2 py-1"
+                                placeholder="https://example.com/thumbnail.jpg"
+                              />
+                            </label>
+                            <div className="text-xs text-gray-500">
+                              {previewLink ? (
+                                <span>
+                                  Tracked link preview:{" "}
+                                  <a href={previewLink} target="_blank" rel="noopener noreferrer" className="text-orange">
+                                    {previewLink}
+                                  </a>
+                                </span>
+                              ) : (
+                                <span>Tracked link preview will appear once a base URL is set.</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
 
               <label className="text-sm">
                 <span className="font-medium">Notes for approvers</span>
@@ -2031,48 +2778,71 @@ export default function SocialSchedulerWorkspace({
           </form>
 
           <div className="grid gap-4">
-            <h3 className="text-sm font-semibold text-gray-900">Recent drafts</h3>
-            {postLoading ? (
-              <p className="text-sm text-gray-500">Loading drafts…</p>
-            ) : posts.length === 0 ? (
-              <p className="text-sm text-gray-500">No drafts yet. Create your first kit to populate this table.</p>
+            <h3 className="text-sm font-semibold text-gray-900">Schedule overview</h3>
+            <SchedulerCalendar posts={calendarPosts} loading={postLoading} onReschedule={handleReschedulePost} />
+            <p className="text-xs text-gray-500">
+              Drag posts between days to adjust timing or drop them into the Unscheduled tray to remove publishing dates.
+            </p>
+          </div>
+
+          <div className="grid gap-3 rounded border border-slate-200 p-4">
+            <h3 className="text-sm font-semibold text-gray-900">Approval notes</h3>
+            {posts.length === 0 ? (
+              <p className="text-xs text-gray-500">Create a post to capture approval context.</p>
             ) : (
-              <div className="grid gap-3">
+              <div className="grid gap-4">
                 {posts.map((post) => (
-                  <article key={post.id} className="rounded border border-slate-200 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-gray-600">
+                  <div key={post.id} className="grid gap-2 rounded border border-slate-200 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
                       <div>
-                        <h4 className="text-base font-semibold text-gray-900">
-                          {post.organisationName || post.organisationId || "Unnamed client"}
-                        </h4>
-                        <div className="text-xs text-gray-500">
-                          {post.projectName || post.projectId ? `Project: ${post.projectName || post.projectId}` : null}
+                        <div className="font-semibold text-slate-900">
+                          {post.deliverableProductName || post.organisationName || post.organisationId || "Campaign"}
+                        </div>
+                        <div>
+                          Status: {post.status} · {post.approvalState}
                         </div>
                       </div>
-                      <div className="flex gap-4 text-xs">
-                        <span className="rounded bg-slate-100 px-2 py-1 font-medium capitalize">{post.status}</span>
-                        <span className="rounded bg-slate-100 px-2 py-1 font-medium capitalize">
-                          {post.approvalState}
-                        </span>
-                        <span className="rounded bg-slate-100 px-2 py-1">
-                          {post.scheduledAt ? `Scheduled ${formatDateTime(post.scheduledAt)}` : "Not scheduled"}
-                        </span>
+                      <div className="text-xs text-slate-500">
+                        {post.scheduledAt ? `Scheduled ${formatDateTime(post.scheduledAt)}` : "Not scheduled"}
                       </div>
                     </div>
-                    <div className="mt-4 grid gap-3">
-                      {post.variants.map((variant) => (
-                        <div key={variant.id} className="rounded border border-slate-100 bg-slate-50 p-3 text-sm">
-                          <div className="flex items-center justify-between">
-                            <span className="font-semibold capitalize">{variant.platform}</span>
-                            <span className="text-xs text-gray-500">
-                              {variant.hashtags.length > 0 ? variant.hashtags.join(" ") : "No hashtags"}
-                            </span>
+                    <div className="grid gap-1 text-xs text-slate-600">
+                      {post.approvalNotes.length === 0 ? (
+                        <p className="text-xs text-gray-500">No notes yet.</p>
+                      ) : (
+                        post.approvalNotes.map((note) => (
+                          <div key={note.id} className="rounded border border-slate-100 bg-slate-50 p-2">
+                            <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                              {note.createdAt ? formatDateTime(note.createdAt) : "Pending timestamp"}
+                              {note.createdBy ? ` · ${note.createdBy}` : ""}
+                            </div>
+                            <div className="whitespace-pre-line text-slate-700">{note.message}</div>
                           </div>
-                          <p className="mt-2 whitespace-pre-line text-gray-700">{variant.caption}</p>
-                        </div>
-                      ))}
+                        ))
+                      )}
                     </div>
-                  </article>
+                    <div className="grid gap-2">
+                      <textarea
+                        value={noteDrafts[post.id] ?? ""}
+                        onChange={(event) =>
+                          setNoteDrafts((prev) => ({ ...prev, [post.id]: event.target.value }))
+                        }
+                        className="w-full rounded border px-2 py-2 text-xs"
+                        rows={2}
+                        placeholder="Add context for approvers or delivery teams"
+                      />
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleAddApprovalNote(post.id)}
+                          disabled={!(noteDrafts[post.id]?.trim())}
+                          className="rounded bg-slate-800 px-3 py-1 text-xs font-semibold text-white shadow hover:bg-slate-900 disabled:cursor-not-allowed disabled:bg-slate-300"
+                        >
+                          Add note
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 ))}
               </div>
             )}
