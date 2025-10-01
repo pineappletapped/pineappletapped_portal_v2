@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Timestamp,
   addDoc,
@@ -53,6 +53,20 @@ interface SchedulerAccount {
   displayName: string;
   status: string;
   scopes: { publish: boolean; analytics: boolean };
+  providerAccountId: string | null;
+  providerAccountName: string | null;
+  providerAccountHandle: string | null;
+  providerAccountUrl: string | null;
+  connection: {
+    status: string | null;
+    expiresAt: Date | null;
+    refreshAvailable: boolean;
+    requiresReauth: boolean;
+    reauthRecommended: boolean;
+    lastAuthorizedAt: Date | null;
+    lastAuthorizedBy: string | null;
+    updatedAt: Date | null;
+  };
   createdBy: string | null;
   createdAt: Date | null;
   updatedAt: Date | null;
@@ -121,6 +135,14 @@ const PLATFORM_OPTIONS = [
   { value: "twitter", label: "X" },
   { value: "vimeo", label: "Vimeo" },
 ];
+
+const PLATFORM_LABELS = PLATFORM_OPTIONS.reduce(
+  (acc, option) => {
+    acc[option.value] = option.label;
+    return acc;
+  },
+  {} as Record<string, string>
+);
 
 const ACCOUNT_STATUSES = [
   { value: "active", label: "Active" },
@@ -344,13 +366,10 @@ export default function SocialSchedulerWorkspace({
   const [accountsLoading, setAccountsLoading] = useState(true);
   const [accountError, setAccountError] = useState<string | null>(null);
   const [accountForm, setAccountForm] = useState({
-    platform: "youtube",
     displayName: "",
-    status: "active",
     publishEnabled: true,
     analyticsEnabled: true,
   });
-  const [accountSaving, setAccountSaving] = useState(false);
 
   const [posts, setPosts] = useState<SchedulerPost[]>([]);
   const [postLoading, setPostLoading] = useState(true);
@@ -381,6 +400,37 @@ export default function SocialSchedulerWorkspace({
   const [scopeError, setScopeError] = useState<string | null>(null);
 
   const [feedback, setFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const current = new URL(window.location.href);
+    const status = current.searchParams.get("socialConnection");
+    if (!status) {
+      return;
+    }
+    setActiveTab("accounts");
+    const message = current.searchParams.get("message");
+    if (status === "success") {
+      setFeedback(message || "Social account connected.");
+      setAccountError(null);
+      setAccountForm({ displayName: "", publishEnabled: true, analyticsEnabled: true });
+    } else {
+      setAccountError(message || "Unable to connect the social account.");
+      setFeedback(null);
+    }
+    [
+      "socialConnection",
+      "message",
+      "accountId",
+      "platform",
+      "expiresAt",
+      "reauth",
+      "errorCode",
+    ].forEach((param) => current.searchParams.delete(param));
+    window.history.replaceState({}, "", `${current.pathname}${current.search}${current.hash}`);
+  }, []);
 
   const loadFeatureFlags = useCallback(async () => {
     setFlagLoading(true);
@@ -591,6 +641,53 @@ export default function SocialSchedulerWorkspace({
                   analytics: Boolean((data.scopes as any).analytics ?? (data.scopes as any).insights),
                 }
               : { publish: false, analytics: false };
+          const provider = (data.provider ?? {}) as Record<string, unknown>;
+          const connectionData = (data.connection ?? {}) as Record<string, unknown>;
+          const connectionStatus =
+            normaliseText(connectionData.status) ?? normaliseText(data.status) ?? "active";
+          const connectionExpiresAt = toDate(connectionData.expiresAt ?? connectionData.expiry ?? null);
+          const requiresReauthFlag =
+            connectionStatus === "requires_reauth" ||
+            Boolean(connectionData.requiresReauth ?? connectionData.reauthRequired);
+          const reauthRecommendedFlag =
+            requiresReauthFlag ||
+            Boolean(
+              connectionData.reauthRecommended ??
+                connectionData.reauthSoon ??
+                connectionData.requiresReauthSoon
+            ) ||
+            (connectionExpiresAt
+              ? connectionExpiresAt.getTime() - Date.now() < 48 * 60 * 60 * 1000
+              : false);
+          const connection: SchedulerAccount["connection"] = {
+            status: connectionStatus,
+            expiresAt: connectionExpiresAt,
+            refreshAvailable: Boolean(
+              connectionData.refreshAvailable ??
+                connectionData.canRefresh ??
+                (data.refreshAvailable ?? data.refreshable ?? false)
+            ),
+            requiresReauth: requiresReauthFlag,
+            reauthRecommended: reauthRecommendedFlag,
+            lastAuthorizedAt: toDate(
+              connectionData.lastAuthorizedAt ??
+                connectionData.lastLinkedAt ??
+                connectionData.authorizedAt ??
+                data.lastAuthorizedAt ??
+                data.lastLinkedAt ??
+                null
+            ),
+            lastAuthorizedBy:
+              normaliseText(
+                connectionData.lastAuthorizedBy ??
+                  connectionData.authorizedBy ??
+                  connectionData.linkedBy ??
+                  data.lastAuthorizedBy ??
+                  data.authorizedBy ??
+                  null
+              ) ?? null,
+            updatedAt: toDate(connectionData.updatedAt ?? data.updatedAt),
+          };
           return {
             id: docSnap.id,
             organisationId: normaliseText(data.organisationId) ?? null,
@@ -599,6 +696,41 @@ export default function SocialSchedulerWorkspace({
             displayName: normaliseText(data.displayName) ?? `Account ${docSnap.id}`,
             status: normaliseText(data.status) ?? "active",
             scopes,
+            providerAccountId:
+              normaliseText(
+                provider.accountId ??
+                  provider.id ??
+                  data.providerAccountId ??
+                  data.channelId ??
+                  null
+              ) ?? null,
+            providerAccountName:
+              normaliseText(
+                provider.accountName ??
+                  provider.name ??
+                  data.providerAccountName ??
+                  data.channelName ??
+                  null
+              ) ?? null,
+            providerAccountHandle:
+              normaliseText(
+                provider.accountHandle ??
+                  provider.handle ??
+                  provider.username ??
+                  data.accountHandle ??
+                  data.channelHandle ??
+                  null
+              ) ?? null,
+            providerAccountUrl:
+              normaliseText(
+                provider.accountUrl ??
+                  provider.url ??
+                  provider.profileUrl ??
+                  data.accountUrl ??
+                  data.channelUrl ??
+                  null
+              ) ?? null,
+            connection,
             createdBy: normaliseText(data.createdBy),
             createdAt: toDate(data.createdAt),
             updatedAt: toDate(data.updatedAt),
@@ -717,51 +849,63 @@ export default function SocialSchedulerWorkspace({
     const term = organisationSearch.trim().toLowerCase();
     return organisationFlags.filter((flag) => flag.name.toLowerCase().includes(term));
   }, [organisationFlags, organisationSearch]);
-  async function handleCreateAccount(event: FormEvent) {
-    event.preventDefault();
-    if (!dbRef) return;
-    const organisationId = selectedClient?.id ?? null;
-    const organisationName = selectedClient?.name ?? manualClientName.trim() || null;
-    if (!organisationName) {
-      setAccountError("Select a client or provide an organisation name before adding an account.");
+  function startOAuthFlow(platformKey: string, account?: SchedulerAccount | null) {
+    if (typeof window === "undefined") {
       return;
     }
-    if (!accountForm.displayName.trim()) {
-      setAccountError("Provide a display name for the connected account.");
+
+    const targetPlatform = PLATFORM_OPTIONS.find((option) => option.value === platformKey);
+    if (!targetPlatform) {
+      setAccountError("Unsupported platform selected.");
       return;
     }
-    setAccountSaving(true);
-    try {
-      await addDoc(collection(dbRef, "socialAccounts"), {
-        organisationId,
-        organisationName,
-        platform: accountForm.platform,
-        displayName: accountForm.displayName.trim(),
-        status: accountForm.status,
-        scopes: {
-          publish: accountForm.publishEnabled,
-          analytics: accountForm.analyticsEnabled,
-        },
-        createdBy: authUser?.uid ?? null,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      setAccountError(null);
-      setFeedback("Account connection recorded.");
-      setAccountForm({
-        platform: "youtube",
-        displayName: "",
-        status: "active",
-        publishEnabled: true,
-        analyticsEnabled: true,
-      });
-      setManualClientName("");
-    } catch (error) {
-      console.error("Failed to create social account", error);
-      setAccountError((error as Error)?.message || "Unable to create account");
-    } finally {
-      setAccountSaving(false);
+
+    const organisationId = account?.organisationId ?? selectedClient?.id ?? null;
+    const organisationName =
+      account?.organisationName ?? selectedClient?.name ?? manualClientName.trim() || null;
+
+    if (!organisationId && !organisationName) {
+      setAccountError("Select a client or enter an organisation name before connecting an account.");
+      return;
     }
+
+    const origin = window.location.origin;
+    const redirectUrl = new URL("/admin/tools/social-scheduler", origin);
+    redirectUrl.searchParams.set("tab", "accounts");
+
+    const authUrl = new URL(`/api/social-accounts/${platformKey}`, origin);
+    if (organisationId) {
+      authUrl.searchParams.set("organisationId", organisationId);
+    }
+    if (organisationName) {
+      authUrl.searchParams.set("organisationName", organisationName);
+    }
+
+    const displayName =
+      account?.displayName ||
+      accountForm.displayName.trim() ||
+      organisationName ||
+      targetPlatform.label;
+    authUrl.searchParams.set("displayName", displayName);
+
+    const publishEnabled = account ? account.scopes.publish : accountForm.publishEnabled;
+    const analyticsEnabled = account ? account.scopes.analytics : accountForm.analyticsEnabled;
+    const requestedScopes: string[] = [];
+    if (publishEnabled) requestedScopes.push("publish");
+    if (analyticsEnabled) requestedScopes.push("analytics");
+    if (requestedScopes.length > 0) {
+      authUrl.searchParams.set("scopes", requestedScopes.join(","));
+    }
+
+    authUrl.searchParams.set("redirect", redirectUrl.toString());
+
+    if (account?.id) {
+      authUrl.searchParams.set("accountId", account.id);
+    }
+
+    setAccountError(null);
+    setFeedback(null);
+    window.location.href = authUrl.toString();
   }
 
   async function handleUpdateAccount(accountId: string, updates: Partial<SchedulerAccount>) {
@@ -1160,16 +1304,18 @@ export default function SocialSchedulerWorkspace({
             {scopeError ? <p className="text-sm text-red-600">{scopeError}</p> : null}
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-200 text-sm">
-                <thead className="bg-slate-100 text-left text-xs uppercase tracking-wide text-slate-600">
-                  <tr>
-                    <th className="p-3">Franchise</th>
-                    <th className="p-3">Scheduler</th>
-                    <th className="p-3">Export-only</th>
-                    <th className="p-3">Analytics</th>
-                    <th className="p-3">Notes</th>
-                    <th className="p-3">Actions</th>
-                  </tr>
-                </thead>
+  <thead className="bg-slate-100 text-left text-xs uppercase tracking-wide text-slate-600">
+  <tr>
+    <th className="p-2">Client</th>
+    <th className="p-2">Platform</th>
+    <th className="p-2">Permissions</th>
+    <th className="p-2">Connection</th>
+    <th className="p-2">Status</th>
+    <th className="p-2">Updated</th>
+    <th className="p-2">Actions</th>
+  </tr>
+</thead>
+
                 <tbody>
                   {flagLoading ? (
                     <tr>
@@ -1404,121 +1550,95 @@ export default function SocialSchedulerWorkspace({
             </p>
           </header>
 
-          <form className="grid gap-4 rounded border border-slate-200 p-4" onSubmit={handleCreateAccount}>
-            <h3 className="text-sm font-semibold text-gray-900">Record a connection</h3>
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="text-sm">
-                <span className="font-medium">Client</span>
-                <input
-                  type="search"
-                  placeholder="Search clients…"
-                  value={clientSearch}
-                  onChange={(event) => setClientSearch(event.target.value)}
-                  className="mt-1 w-full rounded border px-3 py-2"
-                />
-                <select
-                  value={selectedClientId}
-                  onChange={(event) => setSelectedClientId(event.target.value)}
-                  className="mt-2 w-full rounded border px-3 py-2"
-                >
-                  <option value="">Select a client (optional)</option>
-                  {filteredClients.map((client) => (
-                    <option key={client.id} value={client.id}>
-                      {client.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="text-sm">
-                <span className="font-medium">Organisation name override</span>
-                <input
-                  type="text"
-                  value={manualClientName}
-                  onChange={(event) => setManualClientName(event.target.value)}
-                  placeholder="Use when the client is not yet in CRM"
-                  className="mt-1 w-full rounded border px-3 py-2"
-                />
-              </label>
-              <label className="text-sm">
-                <span className="font-medium">Platform</span>
-                <select
-                  value={accountForm.platform}
-                  onChange={(event) =>
-                    setAccountForm((prev) => ({ ...prev, platform: event.target.value }))
-                  }
-                  className="mt-1 w-full rounded border px-3 py-2"
-                >
-                  {PLATFORM_OPTIONS.map((platform) => (
-                    <option key={platform.value} value={platform.value}>
-                      {platform.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="text-sm">
-                <span className="font-medium">Display name</span>
-                <input
-                  type="text"
-                  value={accountForm.displayName}
-                  onChange={(event) =>
-                    setAccountForm((prev) => ({ ...prev, displayName: event.target.value }))
-                  }
-                  className="mt-1 w-full rounded border px-3 py-2"
-                  placeholder="Brand channel name"
-                />
-              </label>
-              <label className="text-sm">
-                <span className="font-medium">Status</span>
-                <select
-                  value={accountForm.status}
-                  onChange={(event) => setAccountForm((prev) => ({ ...prev, status: event.target.value }))}
-                  className="mt-1 w-full rounded border px-3 py-2"
-                >
-                  {ACCOUNT_STATUSES.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="flex flex-col justify-end gap-2 text-sm">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={accountForm.publishEnabled}
-                    onChange={(event) =>
-                      setAccountForm((prev) => ({ ...prev, publishEnabled: event.target.checked }))
-                    }
-                  />
-                  Allow scheduling
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={accountForm.analyticsEnabled}
-                    onChange={(event) =>
-                      setAccountForm((prev) => ({ ...prev, analyticsEnabled: event.target.checked }))
-                    }
-                  />
-                  Allow analytics syncing
-                </label>
-              </div>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-gray-500">
-                Capture connections while OAuth integrations are under development. Publishing workers use this metadata once
-                enabled.
-              </span>
-              <button
-                type="submit"
-                disabled={accountSaving}
-                className="rounded bg-orange px-3 py-2 text-sm font-semibold text-white shadow hover:bg-orange/90"
-              >
-                {accountSaving ? "Saving…" : "Add connection"}
-              </button>
-            </div>
-            {accountError ? <p className="text-sm text-red-600">{accountError}</p> : null}
-          </form>
+<div className="grid gap-4 rounded border border-slate-200 p-4">
+  <h3 className="text-sm font-semibold text-gray-900">Connect a social profile</h3>
+  <div className="grid gap-4 md:grid-cols-2">
+    <label className="text-sm">
+      <span className="font-medium">Client</span>
+      <input
+        type="search"
+        placeholder="Search clients…"
+        value={clientSearch}
+        onChange={(event) => setClientSearch(event.target.value)}
+        className="mt-1 w-full rounded border px-3 py-2"
+      />
+      <select
+        value={selectedClientId}
+        onChange={(event) => setSelectedClientId(event.target.value)}
+        className="mt-2 w-full rounded border px-3 py-2"
+      >
+        <option value="">Select a client (optional)</option>
+        {filteredClients.map((client) => (
+          <option key={client.id} value={client.id}>
+            {client.name}
+          </option>
+        ))}
+      </select>
+    </label>
+    <label className="text-sm">
+      <span className="font-medium">Organisation name override</span>
+      <input
+        type="text"
+        value={manualClientName}
+        onChange={(event) => setManualClientName(event.target.value)}
+        placeholder="Use when the client is not yet in CRM"
+        className="mt-1 w-full rounded border px-3 py-2"
+      />
+    </label>
+    <label className="text-sm md:col-span-2">
+      <span className="font-medium">Display name</span>
+      <input
+        type="text"
+        value={accountForm.displayName}
+        onChange={(event) =>
+          setAccountForm((prev) => ({ ...prev, displayName: event.target.value }))
+        }
+        className="mt-1 w-full rounded border px-3 py-2"
+        placeholder="Shown in the scheduler when referencing this account"
+      />
+    </label>
+  </div>
+  <div className="flex flex-wrap gap-6 text-sm">
+    <label className="flex items-center gap-2">
+      <input
+        type="checkbox"
+        checked={accountForm.publishEnabled}
+        onChange={(event) =>
+          setAccountForm((prev) => ({ ...prev, publishEnabled: event.target.checked }))
+        }
+      />
+      Allow scheduling / publishing permissions
+    </label>
+    <label className="flex items-center gap-2">
+      <input
+        type="checkbox"
+        checked={accountForm.analyticsEnabled}
+        onChange={(event) =>
+          setAccountForm((prev) => ({ ...prev, analyticsEnabled: event.target.checked }))
+        }
+      />
+      Allow analytics insights
+    </label>
+  </div>
+  <div className="space-y-2">
+    <p className="text-xs text-gray-500">
+      Choose a platform to launch the OAuth flow. We&apos;ll return you to this page once permissions are granted.
+    </p>
+    <div className="flex flex-wrap gap-2">
+      {PLATFORM_OPTIONS.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => startOAuthFlow(option.value)}
+          className="rounded bg-orange px-3 py-2 text-sm font-semibold text-white shadow hover:bg-orange/90"
+        >
+          Connect {option.label}
+        </button>
+      ))}
+    </div>
+  </div>
+  {accountError ? <p className="text-sm text-red-600">{accountError}</p> : null}
+</div>
 
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -1526,6 +1646,7 @@ export default function SocialSchedulerWorkspace({
                 <tr>
                   <th className="p-2">Client</th>
                   <th className="p-2">Platform</th>
+                  <th className="p-2">Connection</th>
                   <th className="p-2">Permissions</th>
                   <th className="p-2">Status</th>
                   <th className="p-2">Updated</th>
@@ -1535,13 +1656,13 @@ export default function SocialSchedulerWorkspace({
               <tbody>
                 {accountsLoading ? (
                   <tr>
-                    <td colSpan={6} className="p-4 text-center text-gray-500">
+                    <td colSpan={7} className="p-4 text-center text-gray-500">
                       Loading connections…
                     </td>
                   </tr>
                 ) : accounts.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="p-4 text-center text-gray-500">
+                    <td colSpan={7} className="p-4 text-center text-gray-500">
                       No connections captured yet.
                     </td>
                   </tr>
@@ -1554,7 +1675,63 @@ export default function SocialSchedulerWorkspace({
                         </div>
                         <div className="text-xs text-gray-500">{account.displayName}</div>
                       </td>
-                      <td className="p-2 align-top capitalize">{account.platform}</td>
+                      <td className="p-2 align-top">
+                        <div className="font-medium text-gray-900">
+                          {PLATFORM_LABELS[account.platform] ?? account.platform}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {account.providerAccountName || account.providerAccountHandle || "—"}
+                        </div>
+                        {account.providerAccountHandle ? (
+                          <div className="text-xs text-gray-500">
+                            @{account.providerAccountHandle.replace(/^@/, "")}
+                          </div>
+                        ) : null}
+                        {account.providerAccountUrl ? (
+                          <div className="text-xs">
+                            <a
+                              href={account.providerAccountUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-slate-500 underline"
+                            >
+                              View channel
+                            </a>
+                          </div>
+                        ) : null}
+                      </td>
+                      <td className="p-2 align-top text-xs">
+                        <div
+                          className={`font-semibold ${
+                            account.connection.requiresReauth
+                              ? "text-red-600"
+                              : account.connection.reauthRecommended
+                              ? "text-amber-600"
+                              : "text-emerald-600"
+                          }`}
+                        >
+                          {account.connection.requiresReauth
+                            ? "Re-auth required"
+                            : account.connection.reauthRecommended
+                            ? "Re-auth soon"
+                            : account.connection.status
+                            ? account.connection.status.replace(/_/g, " ")
+                            : "Active"}
+                        </div>
+                        <div className="text-gray-500">
+                          {account.connection.expiresAt
+                            ? `Expires ${formatDateTime(account.connection.expiresAt)}`
+                            : "No expiry provided"}
+                        </div>
+                        {account.connection.lastAuthorizedAt ? (
+                          <div className="text-gray-500">
+                            Linked {formatDateTime(account.connection.lastAuthorizedAt)}
+                          </div>
+                        ) : null}
+                        {account.connection.lastAuthorizedBy ? (
+                          <div className="text-gray-400">by {account.connection.lastAuthorizedBy}</div>
+                        ) : null}
+                      </td>
                       <td className="p-2 align-top text-xs text-gray-600">
                         <div>{account.scopes.publish ? "Publishing enabled" : "Scheduling blocked"}</div>
                         <div>{account.scopes.analytics ? "Analytics enabled" : "Analytics hidden"}</div>
@@ -1601,6 +1778,17 @@ export default function SocialSchedulerWorkspace({
                             />
                             Allow analytics
                           </label>
+                          <button
+                            type="button"
+                            onClick={() => startOAuthFlow(account.platform, account)}
+                            className={`rounded px-2 py-1 text-left text-xs font-semibold shadow ${
+                              account.connection.requiresReauth
+                                ? "bg-red-600 text-white hover:bg-red-700"
+                                : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                            }`}
+                          >
+                            {account.connection.requiresReauth ? "Reconnect now" : "Reconnect"}
+                          </button>
                           <button
                             type="button"
                             onClick={() => handleDeleteAccount(account.id)}
