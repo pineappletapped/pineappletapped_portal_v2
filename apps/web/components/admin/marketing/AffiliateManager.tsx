@@ -74,6 +74,13 @@ interface PayoutFormState {
   status: AffiliateCommissionStatus;
 }
 
+interface PayoutModalOptions {
+  statuses?: AffiliateCommissionStatus[];
+  preselectIds?: string[];
+  initialStatus?: AffiliateCommissionStatus;
+  payoutId?: string;
+}
+
 const STATUS_OPTIONS: { value: AffiliateStatus; label: string }[] = [
   { value: "pending", label: "Pending" },
   { value: "active", label: "Active" },
@@ -149,6 +156,10 @@ export default function AffiliateManager() {
   const [editingForm, setEditingForm] = useState<AffiliateFormState | null>(null);
   const [payoutTarget, setPayoutTarget] = useState<AffiliateRecord | null>(null);
   const [payoutForm, setPayoutForm] = useState<PayoutFormState | null>(null);
+  const [payoutCandidateStatuses, setPayoutCandidateStatuses] = useState<
+    AffiliateCommissionStatus[]
+  >(["pending"]);
+  const [payoutCandidatePayoutId, setPayoutCandidatePayoutId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
   const [reviewTarget, setReviewTarget] = useState<AffiliateApplicationRecord | null>(null);
@@ -406,9 +417,57 @@ export default function AffiliateManager() {
       return [] as AffiliateCommissionRecord[];
     }
     return commissions.filter(
-      (entry) => entry.affiliateId === payoutTarget.id && entry.status === "pending"
+      (entry) =>
+        entry.affiliateId === payoutTarget.id &&
+        payoutCandidateStatuses.includes(entry.status as AffiliateCommissionStatus)
+        && (!payoutCandidatePayoutId || entry.payoutId === payoutCandidatePayoutId)
     );
-  }, [commissions, payoutTarget]);
+  }, [
+    commissions,
+    payoutCandidatePayoutId,
+    payoutCandidateStatuses,
+    payoutTarget,
+  ]);
+
+  const payoutCandidateStatusLabel = useMemo(() => {
+    if (payoutCandidateStatuses.length === 0) {
+      return "selected";
+    }
+    const labels = payoutCandidateStatuses.map(
+      (status) => status.charAt(0).toUpperCase() + status.slice(1)
+    );
+    if (labels.length === 1) {
+      return labels[0];
+    }
+    if (labels.length === 2) {
+      return `${labels[0]} or ${labels[1]}`;
+    }
+    return `${labels.slice(0, -1).join(", ")} or ${labels[labels.length - 1]}`;
+  }, [payoutCandidateStatuses]);
+
+  const payoutCandidateStatusSummary = useMemo(() => {
+    if (payoutCandidateStatusLabel === "selected") {
+      if (payoutCandidatePayoutId) {
+        return `Showing commissions from payout ${payoutCandidatePayoutId.slice(0, 8)}`;
+      }
+      return null;
+    }
+    const base = `Showing ${payoutCandidateStatusLabel.toLowerCase()} commissions`;
+    if (payoutCandidatePayoutId) {
+      return `${base} from payout ${payoutCandidatePayoutId.slice(0, 8)}`;
+    }
+    return base;
+  }, [payoutCandidatePayoutId, payoutCandidateStatusLabel]);
+
+  const payoutCandidateEmptyMessage = useMemo(() => {
+    const payoutContext = payoutCandidatePayoutId
+      ? ` from payout ${payoutCandidatePayoutId.slice(0, 8)}`
+      : "";
+    if (payoutCandidateStatusLabel === "selected") {
+      return `No commission entries${payoutContext} are ready for payout yet.`;
+    }
+    return `No ${payoutCandidateStatusLabel.toLowerCase()} commission entries${payoutContext} are ready for payout yet.`;
+  }, [payoutCandidatePayoutId, payoutCandidateStatusLabel]);
 
   const applicationCounts = useMemo<Record<ApplicationFilterKey, number>>(() => {
     const counts: Record<ApplicationFilterKey, number> = {
@@ -580,22 +639,55 @@ export default function AffiliateManager() {
     }
   };
 
-  const openPayoutModal = (record: AffiliateRecord) => {
+  const openPayoutModal = (record: AffiliateRecord, options?: PayoutModalOptions) => {
+    const statuses = options?.statuses?.length
+      ? (Array.from(new Set(options.statuses)) as AffiliateCommissionStatus[])
+      : (["pending"] as AffiliateCommissionStatus[]);
+    const existingPayoutRecord = options?.payoutId
+      ? payouts.find((payout) => payout.id === options.payoutId) ?? null
+      : null;
     const eligibleEntries = commissions.filter(
-      (entry) => entry.affiliateId === record.id && entry.status === "pending"
+      (entry) =>
+        entry.affiliateId === record.id &&
+        statuses.includes(entry.status as AffiliateCommissionStatus) &&
+        (!options?.payoutId || entry.payoutId === options.payoutId)
     );
-    const totals = sumCommissionTotals(eligibleEntries);
+    const defaultSelectedIds = options?.preselectIds?.length
+      ? eligibleEntries
+          .filter((entry) => options.preselectIds?.includes(entry.id))
+          .map((entry) => entry.id)
+      : eligibleEntries.map((entry) => entry.id);
+    const selectedEntries = eligibleEntries.filter((entry) =>
+      defaultSelectedIds.includes(entry.id)
+    );
+    const totals = sumCommissionTotals(selectedEntries);
+    setPayoutCandidateStatuses(statuses);
+    setPayoutCandidatePayoutId(options?.payoutId ?? null);
     setPayoutTarget(record);
     setPayoutForm({
       amountNet: totals.net ? totals.net.toFixed(2) : "",
       amountVat: totals.vat ? totals.vat.toFixed(2) : "",
       amountGross: totals.gross ? totals.gross.toFixed(2) : "",
-      periodStart: "",
-      periodEnd: "",
-      notes: "",
-      selectedCommissionIds: eligibleEntries.map((entry) => entry.id),
-      status: "paid",
+      periodStart: existingPayoutRecord?.periodStart
+        ? toDateInput(existingPayoutRecord.periodStart)
+        : "",
+      periodEnd: existingPayoutRecord?.periodEnd
+        ? toDateInput(existingPayoutRecord.periodEnd)
+        : "",
+      notes: existingPayoutRecord?.notes ?? "",
+      selectedCommissionIds: defaultSelectedIds,
+      status:
+        options?.initialStatus ??
+        (statuses.length === 1 && statuses[0] === "scheduled" ? "paid" : "paid"),
     });
+    setActionError(null);
+  };
+
+  const resetPayoutModalState = () => {
+    setPayoutTarget(null);
+    setPayoutForm(null);
+    setPayoutCandidateStatuses(["pending"]);
+    setPayoutCandidatePayoutId(null);
     setActionError(null);
   };
 
@@ -637,6 +729,9 @@ export default function AffiliateManager() {
       const roundedPendingSelection = roundTotals(pendingTotalsSelection);
       const roundedScheduledSelection = roundTotals(scheduledTotalsSelection);
 
+      const statusToApply: AffiliateCommissionStatus =
+        payoutForm.status === "scheduled" ? "scheduled" : "paid";
+
       const computeDelta = (total: number, snapshot?: number) => {
         const safeTotal = roundCurrency(total);
         if (safeTotal <= 0) {
@@ -649,42 +744,119 @@ export default function AffiliateManager() {
         return Math.max(0, Math.min(safeTotal, safeSnapshot));
       };
 
+      const candidatePayoutIds = new Set(
+        selectedEntries
+          .map((entry) => entry.payoutId)
+          .filter((id): id is string => Boolean(id))
+      );
+      const existingPayoutId =
+        statusToApply === "paid" &&
+        candidatePayoutIds.size === 1 &&
+        selectedEntries.every((entry) => Boolean(entry.payoutId))
+          ? Array.from(candidatePayoutIds)[0]
+          : null;
+      const reuseExistingPayout = Boolean(existingPayoutId);
+      const payoutRef = reuseExistingPayout
+        ? doc(db, "affiliatePayouts", existingPayoutId as string)
+        : doc(collection(db, "affiliatePayouts"));
+      const existingPayoutRecord = reuseExistingPayout
+        ? payouts.find((payout) => payout.id === existingPayoutId) ?? null
+        : null;
+
       const parseDate = (value: string): Timestamp | null => {
         if (!value) return null;
         const safe = new Date(value);
         return Number.isNaN(safe.getTime()) ? null : Timestamp.fromDate(safe);
       };
 
-      const payoutRef = doc(collection(db, "affiliatePayouts"));
+      const resolvedPeriodStart =
+        !reuseExistingPayout || payoutForm.periodStart
+          ? parseDate(payoutForm.periodStart)
+          : undefined;
+      const resolvedPeriodEnd =
+        !reuseExistingPayout || payoutForm.periodEnd
+          ? parseDate(payoutForm.periodEnd)
+          : undefined;
+      const trimmedNotes = payoutForm.notes.trim();
+      const resolvedNotes =
+        !reuseExistingPayout || trimmedNotes.length > 0
+          ? trimmedNotes || null
+          : undefined;
+
+      const buildLineItem = (entry: AffiliateCommissionRecord) => ({
+        commissionId: entry.id,
+        orderId: entry.orderId,
+        orderLabel: entry.orderLabel,
+        clientName: entry.clientName,
+        commissionNet: roundCurrency(entry.commissionNet),
+        commissionVat: roundCurrency(entry.commissionVat),
+        commissionGross: roundCurrency(entry.commissionGross),
+        currency: entry.currency,
+        deliverables: entry.deliverables,
+        orderTotalGross: entry.orderTotalGross,
+        orderTotalNet: entry.orderTotalNet,
+        statusApplied: statusToApply,
+      });
+
+      const payoutLineItems = (() => {
+        if (reuseExistingPayout && existingPayoutRecord) {
+          const map = new Map(
+            existingPayoutRecord.lineItems.map((item) => [item.commissionId, item])
+          );
+          selectedEntries.forEach((entry) => {
+            map.set(entry.id, buildLineItem(entry));
+          });
+          return Array.from(map.values());
+        }
+        return selectedEntries.map((entry) => buildLineItem(entry));
+      })();
+
+      const payoutDocTotals = payoutLineItems.reduce(
+        (acc, item) => {
+          acc.net += roundCurrency(item.commissionNet);
+          acc.vat += roundCurrency(item.commissionVat);
+          acc.gross += roundCurrency(item.commissionGross);
+          return acc;
+        },
+        { net: 0, vat: 0, gross: 0 }
+      );
+      const roundedPayoutDocTotals = roundTotals(payoutDocTotals);
+
       const batch = writeBatch(db);
 
-      batch.set(payoutRef, {
+      const payoutDocData: Record<string, any> = {
         affiliateId: payoutTarget.id,
         affiliateName: payoutTarget.name,
         affiliateRefCode: payoutTarget.refCode,
-        amountNet: roundedOverall.net,
-        amountVat: roundedOverall.vat,
-        amountGross: roundedOverall.gross,
+        amountNet: roundedPayoutDocTotals.net,
+        amountVat: roundedPayoutDocTotals.vat,
+        amountGross: roundedPayoutDocTotals.gross,
         currency: "GBP",
-        periodStart: parseDate(payoutForm.periodStart),
-        periodEnd: parseDate(payoutForm.periodEnd),
-        notes: payoutForm.notes.trim() || null,
-        createdAt: serverTimestamp(),
-        lineItems: selectedEntries.map((entry) => ({
-          commissionId: entry.id,
-          orderId: entry.orderId,
-          orderLabel: entry.orderLabel,
-          clientName: entry.clientName,
-          commissionNet: roundCurrency(entry.commissionNet),
-          commissionVat: roundCurrency(entry.commissionVat),
-          commissionGross: roundCurrency(entry.commissionGross),
-          currency: entry.currency,
-          deliverables: entry.deliverables,
-          orderTotalGross: entry.orderTotalGross,
-          orderTotalNet: entry.orderTotalNet,
-          statusApplied: payoutForm.status,
-        })),
-      });
+        lineItems: payoutLineItems,
+        updatedAt: serverTimestamp(),
+      };
+
+      if (!reuseExistingPayout) {
+        payoutDocData.createdAt = serverTimestamp();
+        payoutDocData.periodStart = resolvedPeriodStart ?? null;
+        payoutDocData.periodEnd = resolvedPeriodEnd ?? null;
+        payoutDocData.notes = resolvedNotes ?? null;
+      } else {
+        if (typeof resolvedPeriodStart !== "undefined") {
+          payoutDocData.periodStart = resolvedPeriodStart;
+        }
+        if (typeof resolvedPeriodEnd !== "undefined") {
+          payoutDocData.periodEnd = resolvedPeriodEnd;
+        }
+        if (typeof resolvedNotes !== "undefined") {
+          payoutDocData.notes = resolvedNotes;
+        }
+        if (statusToApply === "paid") {
+          payoutDocData.finalisedAt = serverTimestamp();
+        }
+      }
+
+      batch.set(payoutRef, payoutDocData, { merge: reuseExistingPayout });
 
       const pendingSnapshot = pendingCommissionTotals.get(payoutTarget.id);
       const scheduledSnapshot = scheduledCommissionTotals.get(payoutTarget.id);
@@ -700,10 +872,6 @@ export default function AffiliateManager() {
         vat: computeDelta(roundedScheduledSelection.vat, scheduledSnapshot?.vat),
         gross: computeDelta(roundedScheduledSelection.gross, scheduledSnapshot?.gross),
       };
-
-      const statusToApply: AffiliateCommissionStatus =
-        payoutForm.status === "scheduled" ? "scheduled" : "paid";
-
       const metricsUpdate: Record<string, any> = {
         pendingCommissionNet: increment(-pendingDelta.net),
         pendingCommissionVat: increment(-pendingDelta.vat),
@@ -756,8 +924,7 @@ export default function AffiliateManager() {
 
       await batch.commit();
 
-      setPayoutTarget(null);
-      setPayoutForm(null);
+      resetPayoutModalState();
     } catch (err: any) {
       console.error("Failed to record payout", err);
       setActionError(err?.message || "Unable to record payout");
@@ -1482,6 +1649,7 @@ export default function AffiliateManager() {
                   const delivered = entry.deliveredAt?.toDate?.();
                   const scheduled = entry.scheduledAt?.toDate?.();
                   const paid = entry.paidAt?.toDate?.();
+                  const affiliateRecord = affiliates.find((item) => item.id === entry.affiliateId) || null;
                   return (
                     <tr key={entry.id} className="hover:bg-emerald-50/40">
                       <td className="px-3 py-2">
@@ -1515,7 +1683,25 @@ export default function AffiliateManager() {
                         {delivered ? delivered.toLocaleDateString() : "—"}
                       </td>
                       <td className="px-3 py-2 text-sm text-gray-700">
-                        {entry.payoutId ? entry.payoutId.slice(0, 8) : "—"}
+                        <div className="flex flex-col items-start gap-1">
+                          <span>{entry.payoutId ? entry.payoutId.slice(0, 8) : "—"}</span>
+                          {entry.status === "scheduled" && affiliateRecord ? (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-xs text-emerald-700 hover:text-emerald-900"
+                              onClick={() =>
+                                openPayoutModal(affiliateRecord, {
+                                  statuses: ["scheduled"],
+                                  preselectIds: [entry.id],
+                                  initialStatus: "paid",
+                                  payoutId: entry.payoutId ?? undefined,
+                                })
+                              }
+                            >
+                              Mark as paid
+                            </button>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1755,16 +1941,19 @@ export default function AffiliateManager() {
             {actionError ? <p className="mt-2 text-sm text-red-600">{actionError}</p> : null}
             <div className="mt-4 space-y-4">
               <div>
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
                   <h4 className="text-sm font-semibold text-gray-900">Commission ledger lines</h4>
-                  <span className="text-xs text-gray-500">
-                    {payoutSelectionEntries.length} selected of {payoutCandidateEntries.length}
-                  </span>
+                  <div className="flex flex-col items-start text-xs text-gray-500 sm:items-end">
+                    <span>
+                      {payoutSelectionEntries.length} selected of {payoutCandidateEntries.length}
+                    </span>
+                    {payoutCandidateStatusSummary ? (
+                      <span>{payoutCandidateStatusSummary}</span>
+                    ) : null}
+                  </div>
                 </div>
                 {payoutCandidateEntries.length === 0 ? (
-                  <p className="mt-2 text-sm text-gray-600">
-                    No pending commission entries are ready for payout yet.
-                  </p>
+                  <p className="mt-2 text-sm text-gray-600">{payoutCandidateEmptyMessage}</p>
                 ) : (
                   <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-gray-200">
                     <table className="min-w-full divide-y divide-gray-200 text-sm">
@@ -1772,6 +1961,7 @@ export default function AffiliateManager() {
                         <tr>
                           <th className="px-3 py-2 text-left">Include</th>
                           <th className="px-3 py-2 text-left">Order</th>
+                          <th className="px-3 py-2 text-left">Status</th>
                           <th className="px-3 py-2 text-right">Net</th>
                           <th className="px-3 py-2 text-right">VAT</th>
                           <th className="px-3 py-2 text-right">Gross</th>
@@ -1800,6 +1990,9 @@ export default function AffiliateManager() {
                                   Ref: {entry.orderId}
                                   {entry.clientName ? ` · ${entry.clientName}` : ""}
                                 </div>
+                              </td>
+                              <td className="px-3 py-2 text-left text-xs font-medium capitalize text-gray-700">
+                                {entry.status}
                               </td>
                               <td className="px-3 py-2 text-right font-medium text-gray-900">
                                 {formatCurrencyGBP(entry.commissionNet)}
@@ -1892,7 +2085,7 @@ export default function AffiliateManager() {
               >
                 Record payout
               </button>
-              <button type="button" className="btn btn-outline" onClick={() => setPayoutTarget(null)}>
+              <button type="button" className="btn btn-outline" onClick={resetPayoutModalState}>
                 Cancel
               </button>
             </div>
