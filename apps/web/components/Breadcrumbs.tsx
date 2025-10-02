@@ -35,6 +35,7 @@ const LABELS: Record<string, string> = {
   training: 'Training',
   engagements: 'Engagement Log',
   'ai-management': 'AI Management',
+  'email-templates': 'Email Templates',
 };
 
 const HIDDEN_ROOT_SEGMENTS = new Set(['admin', 'dashboard', 'franchise', 'contractors', 'team']);

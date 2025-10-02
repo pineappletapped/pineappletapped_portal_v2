@@ -65,6 +65,11 @@ export default function AdminPage() {
       href: '/admin/ai-management',
     },
     {
+      label: 'Email templates',
+      description: 'Control automated messaging and sending identities.',
+      href: '/admin/email-templates',
+    },
+    {
       label: 'QR code generator',
       description: 'Create scannable links for campaign assets.',
       href: '/admin/tools/qr-code-generator',
