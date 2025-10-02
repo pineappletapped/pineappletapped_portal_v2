@@ -6,6 +6,15 @@ import { httpsCallable } from 'firebase/functions';
 import { collection, getDocs } from 'firebase/firestore';
 import { useRoleGate } from '@/hooks/useRoleGate';
 import PortalContainer from '@/components/PortalContainer';
+import BookingTaskConfigurator, {
+  BookingAgreementCopy,
+  BookingResponseField,
+  BookingResponseFieldType,
+  BookingSlotTemplate,
+  BookingTaskConfig,
+  BookingUploadRequirement,
+  createDefaultBookingConfig,
+} from '@/components/admin/workflows/BookingTaskConfigurator';
 
 /**
  * Admin Workflows Management
@@ -15,7 +24,15 @@ import PortalContainer from '@/components/PortalContainer';
  * can request information from the client (via fieldType) or represent internal
  * steps. Only staff can manage workflows.
  */
-type TaskFieldType = 'none' | 'text' | 'textarea' | 'date' | 'file' | 'select' | 'team-member';
+type TaskFieldType =
+  | 'none'
+  | 'text'
+  | 'textarea'
+  | 'date'
+  | 'file'
+  | 'select'
+  | 'team-member'
+  | 'booking-form';
 
 type AssignmentScope = 'team' | 'contractor';
 
@@ -43,6 +60,8 @@ interface Task {
   dependsOn: string[];
   shareAssigneeContact: boolean;
   assignmentScope: AssignmentScope;
+  bookingTemplateId: string | null;
+  bookingConfig: BookingTaskConfig | null;
 }
 
 interface TaskFieldTemplate {
@@ -136,6 +155,7 @@ const FIELD_TYPE_OPTIONS: { value: TaskFieldType; label: string }[] = [
   { value: 'file', label: 'File upload' },
   { value: 'select', label: 'Dropdown' },
   { value: 'team-member', label: 'Team member assignment' },
+  { value: 'booking-form', label: 'Booking form' },
 ];
 
 const createSelectOption = (label = '', value?: string): TaskSelectOption => ({
@@ -164,6 +184,8 @@ const createEmptyTask = (defaults?: Partial<Task>): Task => {
     dependsOn: defaults?.dependsOn ?? [],
     shareAssigneeContact: defaults?.shareAssigneeContact ?? false,
     assignmentScope: defaults?.assignmentScope ?? 'team',
+    bookingTemplateId: defaults?.bookingTemplateId ?? null,
+    bookingConfig: defaults?.bookingConfig ?? null,
   };
 };
 
@@ -226,9 +248,153 @@ const applyTemplateToTask = (task: Task, template: TaskFieldTemplate, tasks: Tas
   };
 };
 
-const serializeTasksForSave = (tasks: Task[]) => {
+interface WorkflowBookingTemplatePayload {
+  id: string;
+  workflowTaskId: string;
+  taskTitle: string;
+  taskDescription: string;
+  introduction: string;
+  slots: BookingSlotTemplate[];
+  responseFields: BookingResponseField[];
+  uploadRequirements: BookingUploadRequirement[];
+  agreement: BookingAgreementCopy;
+}
+
+const ALLOWED_BOOKING_RESPONSE_TYPES: BookingResponseFieldType[] = [
+  'text',
+  'textarea',
+  'email',
+  'phone',
+  'website',
+];
+
+const ensureUniqueBookingTemplateId = (
+  rawId: string,
+  fallback: string,
+  used: Set<string>,
+) => {
+  const base = (rawId || '').trim() || fallback;
+  let candidate = base;
+  let counter = 2;
+  while (used.has(candidate)) {
+    candidate = `${base}-${counter}`;
+    counter += 1;
+  }
+  used.add(candidate);
+  return candidate;
+};
+
+const sanitizeBookingTemplateForTask = (
+  task: Task,
+  usedTemplateIds: Set<string>,
+): { template: WorkflowBookingTemplatePayload; bookingTemplateId: string } => {
+  const config = task.bookingConfig ?? createDefaultBookingConfig(task.id);
+  const fallbackId = `booking-${task.id.slice(0, 6)}`;
+  const templateId = ensureUniqueBookingTemplateId(config.templateId, fallbackId, usedTemplateIds);
+
+  const slots: BookingSlotTemplate[] = (config.slots ?? [])
+    .map((slot, index) => {
+      const label = (slot.label || '').trim();
+      const startAt = (slot.startAt || '').trim();
+      const endAt = (slot.endAt || '').trim();
+      if (!label || !startAt || !endAt) {
+        return null;
+      }
+      const capacityRaw = Number(slot.capacity);
+      const capacity = Number.isFinite(capacityRaw) ? Math.max(1, Math.round(capacityRaw)) : 1;
+      const priceClass = (slot.priceClass || '').trim() || 'included';
+      const notes = (slot.notes || '').trim();
+      const slotId = (slot.id || '').trim() || `${templateId}-slot-${index + 1}`;
+      return {
+        id: slotId,
+        label,
+        startAt,
+        endAt,
+        capacity,
+        priceClass,
+        notes,
+      } satisfies BookingSlotTemplate;
+    })
+    .filter((slot): slot is BookingSlotTemplate => Boolean(slot));
+
+  if (slots.length === 0) {
+    const label = task.title.trim() || 'Untitled task';
+    throw new Error(`Add at least one slot for the booking task "${label}".`);
+  }
+
+  const allowedResponseTypes = new Set(ALLOWED_BOOKING_RESPONSE_TYPES);
+
+  const responseFields: BookingResponseField[] = (config.responseFields ?? [])
+    .map((field, index) => {
+      const label = (field.label || '').trim();
+      if (!label) return null;
+      const type = allowedResponseTypes.has(field.type) ? field.type : 'text';
+      const placeholder = (field.placeholder || '').trim();
+      const fieldId = (field.id || '').trim() || `${templateId}-question-${index + 1}`;
+      return {
+        id: fieldId,
+        type,
+        label,
+        placeholder,
+        required: field.required === true,
+      } satisfies BookingResponseField;
+    })
+    .filter((field): field is BookingResponseField => Boolean(field));
+
+  if (responseFields.length === 0) {
+    const label = task.title.trim() || 'Untitled task';
+    throw new Error(`Add at least one participant question for the booking task "${label}".`);
+  }
+
+  const uploadRequirements: BookingUploadRequirement[] = (config.uploadRequirements ?? [])
+    .map((requirement, index) => {
+      const label = (requirement.label || '').trim();
+      const description = (requirement.description || '').trim();
+      const accept = (requirement.accept || '').trim();
+      if (!label && !description && !accept) return null;
+      const requirementId = (requirement.id || '').trim() || `${templateId}-upload-${index + 1}`;
+      return {
+        id: requirementId,
+        label: label || 'Supporting asset',
+        description,
+        accept,
+        required: requirement.required === true,
+      } satisfies BookingUploadRequirement;
+    })
+    .filter((requirement): requirement is BookingUploadRequirement => Boolean(requirement));
+
+  const introduction = (config.introduction || '').trim();
+  const agreementHeading = (config.agreement.heading || '').trim() || 'Participation agreement';
+  const agreementBody = (config.agreement.body || '').trim();
+  const acknowledgement =
+    (config.agreement.acknowledgementLabel || '').trim() || 'I agree to the terms and conditions';
+  const agreement: BookingAgreementCopy = {
+    heading: agreementHeading,
+    body: agreementBody,
+    acknowledgementLabel: acknowledgement,
+    requireSignature: config.agreement.requireSignature !== false,
+  };
+
+  return {
+    template: {
+      id: templateId,
+      workflowTaskId: task.id,
+      taskTitle: task.title.trim() || 'Untitled task',
+      taskDescription: task.description.trim(),
+      introduction,
+      slots,
+      responseFields,
+      uploadRequirements,
+      agreement,
+    },
+    bookingTemplateId: templateId,
+  };
+};
+
+const prepareWorkflowPayloadForSave = (tasks: Task[]) => {
   const idSet = new Set(tasks.map((task) => task.id));
-  return tasks.map((task) => {
+  const usedBookingTemplateIds = new Set<string>();
+  const serializedTasks = tasks.map((task) => {
     const title = task.title.trim();
     const description = task.description.trim();
     const dueDays = task.dueDays.trim();
@@ -239,6 +405,7 @@ const serializeTasksForSave = (tasks: Task[]) => {
     const dependsOn = task.dependsOn.filter(
       (depId) => depId && depId !== task.id && idSet.has(depId)
     );
+    const isBookingTask = task.fieldType === 'booking-form';
     const fieldOptions =
       task.fieldType === 'select'
         ? task.fieldOptions
@@ -254,19 +421,32 @@ const serializeTasksForSave = (tasks: Task[]) => {
     const normalizedFieldKey = ensureUniqueFieldKey(rawFieldKey, tasks, task.id);
     const templateKey =
       task.templateKey && task.templateKey !== 'custom' ? task.templateKey : null;
+    const effectiveFieldLabel = isBookingTask
+      ? fieldLabel || title || 'Booking form'
+      : fieldLabel || (task.fieldType === 'none' ? '' : title);
+    const effectivePlaceholder = isBookingTask ? '' : fieldPlaceholder;
+    const effectiveHelpText = isBookingTask
+      ? fieldHelpText || 'Participants will choose a slot and provide their details to confirm.'
+      : fieldHelpText;
+    const effectiveForCustomer = isBookingTask ? true : task.forCustomer;
+    const effectiveFieldRequired = isBookingTask
+      ? true
+      : task.fieldType === 'none'
+        ? false
+        : task.fieldRequired;
     return {
       id: task.id,
       title,
       description,
       dueDays,
-      forCustomer: task.forCustomer,
+      forCustomer: effectiveForCustomer,
       fieldType: task.fieldType === 'none' ? null : task.fieldType,
       fieldTemplateKey: templateKey,
       fieldKey: normalizedFieldKey,
-      fieldLabel: fieldLabel || (task.fieldType === 'none' ? '' : title),
-      fieldPlaceholder,
-      fieldHelpText,
-      fieldRequired: task.fieldType === 'none' ? false : task.fieldRequired,
+      fieldLabel: effectiveFieldLabel,
+      fieldPlaceholder: effectivePlaceholder,
+      fieldHelpText: effectiveHelpText,
+      fieldRequired: effectiveFieldRequired,
       fieldAccept: task.fieldType === 'file' ? fieldAccept : '',
       fieldOptions,
       dependsOn,
@@ -274,8 +454,22 @@ const serializeTasksForSave = (tasks: Task[]) => {
         task.fieldType === 'team-member' ? task.shareAssigneeContact === true : false,
       assignmentScope:
         task.fieldType === 'team-member' ? task.assignmentScope : null,
+      bookingTemplateId: null as string | null,
     };
   });
+
+  const bookingTemplates: WorkflowBookingTemplatePayload[] = [];
+  const finalTasks = serializedTasks.map((serializedTask, index) => {
+    const source = tasks[index];
+    if (serializedTask.fieldType === 'booking-form') {
+      const { template, bookingTemplateId } = sanitizeBookingTemplateForTask(source, usedBookingTemplateIds);
+      bookingTemplates.push(template);
+      return { ...serializedTask, bookingTemplateId };
+    }
+    return { ...serializedTask, bookingTemplateId: null };
+  });
+
+  return { tasks: finalTasks, bookingTemplates };
 };
 
 export default function AdminWorkflowsPage() {
@@ -303,7 +497,22 @@ export default function AdminWorkflowsPage() {
     try {
       const { db } = await ensureFirebase();
       const snap = await getDocs(collection(db, 'workflows'));
-      setWorkflows(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      const workflowsWithBookings = await Promise.all(
+        snap.docs.map(async (docSnap) => {
+          let bookingTemplates: any[] = [];
+          try {
+            const bookingSnap = await getDocs(collection(docSnap.ref, 'workflowBookingTemplates'));
+            bookingTemplates = bookingSnap.docs.map((bookingDoc) => ({
+              id: bookingDoc.id,
+              ...bookingDoc.data(),
+            }));
+          } catch (bookingError) {
+            console.error('Failed to load booking templates for workflow', docSnap.id, bookingError);
+          }
+          return { id: docSnap.id, ...docSnap.data(), bookingTemplates };
+        }),
+      );
+      setWorkflows(workflowsWithBookings);
     } catch (error) {
       console.error('Failed to load workflows', error);
       setWorkflows([]);
@@ -407,6 +616,8 @@ export default function AdminWorkflowsPage() {
             fieldAccept: '',
             fieldOptions: [],
             shareAssigneeContact: false,
+            bookingTemplateId: null,
+            bookingConfig: null,
           };
         }
         if (templateKey === 'custom') {
@@ -414,13 +625,16 @@ export default function AdminWorkflowsPage() {
             ...task,
             templateKey: 'custom',
             fieldType: task.fieldType === 'none' ? 'text' : task.fieldType,
+            bookingTemplateId: null,
+            bookingConfig: null,
           };
         }
         const template = FIELD_TEMPLATES.find((tpl) => tpl.key === templateKey);
         if (!template) {
-          return { ...task, templateKey };
+          return { ...task, templateKey, bookingTemplateId: null, bookingConfig: null };
         }
-        return applyTemplateToTask(task, template, prev);
+        const next = applyTemplateToTask(task, template, prev);
+        return { ...next, bookingTemplateId: null, bookingConfig: null };
       })
     );
   };
@@ -433,11 +647,12 @@ export default function AdminWorkflowsPage() {
     try {
       const { functions } = await ensureFirebase();
       const callable = httpsCallable(functions, 'admin_createWorkflow');
-      const payloadTasks = serializeTasksForSave(tasks);
+      const payload = prepareWorkflowPayloadForSave(tasks);
       await callable({
         name: name.trim(),
         description: description.trim(),
-        tasks: payloadTasks,
+        tasks: payload.tasks,
+        bookingTemplates: payload.bookingTemplates,
       });
       await loadWorkflows();
       setName('');
@@ -650,6 +865,7 @@ export default function AdminWorkflowsPage() {
                                   <input
                                     type="checkbox"
                                     checked={task.forCustomer}
+                                    disabled={task.fieldType === 'booking-form'}
                                     onChange={(e) => {
                                       const checked = e.target.checked;
                                       updateTask(task.id, {
@@ -693,13 +909,33 @@ export default function AdminWorkflowsPage() {
                                             ? task.fieldOptions
                                             : [createSelectOption('Option 1'), createSelectOption('Option 2')]
                                           : [];
+                                      const isBookingForm = nextType === 'booking-form';
+                                      const nextBookingConfig = isBookingForm
+                                        ? task.bookingConfig ?? createDefaultBookingConfig(task.id)
+                                        : null;
+                                      const nextTemplateKey = isBookingForm
+                                        ? null
+                                        : task.templateKey && task.templateKey !== 'custom'
+                                          ? 'custom'
+                                          : task.templateKey;
                                       updateTask(task.id, {
                                         fieldType: nextType,
                                         fieldOptions: nextOptions,
-                                        templateKey:
-                                          task.templateKey && task.templateKey !== 'custom'
-                                            ? 'custom'
-                                            : task.templateKey,
+                                        templateKey: nextTemplateKey,
+                                        forCustomer: isBookingForm ? true : task.forCustomer,
+                                        fieldRequired:
+                                          nextType === 'none'
+                                            ? false
+                                            : isBookingForm
+                                              ? true
+                                              : task.fieldRequired,
+                                        fieldPlaceholder: isBookingForm ? '' : task.fieldPlaceholder,
+                                        fieldHelpText: isBookingForm
+                                          ? task.fieldHelpText ||
+                                            'Participants will choose a slot and provide their details to confirm.'
+                                          : task.fieldHelpText,
+                                        bookingConfig: nextBookingConfig,
+                                        bookingTemplateId: nextBookingConfig?.templateId ?? null,
                                       });
                                     }}
                                   >
@@ -711,7 +947,21 @@ export default function AdminWorkflowsPage() {
                                   </select>
                                 </div>
                               </div>
-                              {task.fieldType !== 'none' ? (
+                              {task.fieldType === 'booking-form' ? (
+                                <BookingTaskConfigurator
+                                  value={task.bookingConfig ?? createDefaultBookingConfig(task.id)}
+                                  onChange={(nextConfig) =>
+                                    updateTask(task.id, {
+                                      bookingConfig: nextConfig,
+                                      bookingTemplateId: nextConfig.templateId,
+                                      fieldLabel: task.fieldLabel || 'Booking form',
+                                      fieldHelpText:
+                                        task.fieldHelpText ||
+                                        'Participants will choose a slot and provide their details to confirm.',
+                                    })
+                                  }
+                                />
+                              ) : task.fieldType !== 'none' ? (
                                 <div className="grid gap-2">
                                   <div className="grid gap-1">
                                     <label className="text-sm font-medium">Field label</label>
@@ -886,6 +1136,9 @@ export default function AdminWorkflowsPage() {
           <div className="grid gap-4">
             {workflows.map((wf) => {
               const tasksList: any[] = Array.isArray(wf.tasks) ? wf.tasks : [];
+              const bookingTemplates: any[] = Array.isArray(wf.bookingTemplates)
+                ? wf.bookingTemplates
+                : [];
               const taskKey = (task: any, idx: number) =>
                 typeof task?.id === 'string' && task.id.trim().length > 0
                   ? task.id
@@ -966,16 +1219,31 @@ export default function AdminWorkflowsPage() {
                                   ? String(t.dueDays)
                                   : '';
                             const audience = t?.forCustomer ? 'Client' : 'Internal';
-                            const rawType =
-                              typeof t?.fieldType === 'string' && t.fieldType.trim().length > 0
-                                ? t.fieldType.trim()
-                                : typeof t?.responseType === 'string'
-                                  ? t.responseType
-                                  : null;
+                          const rawType =
+                            typeof t?.fieldType === 'string' && t.fieldType.trim().length > 0
+                              ? t.fieldType.trim()
+                              : typeof t?.responseType === 'string'
+                                ? t.responseType
+                                : null;
+                            const isBookingTask = rawType === 'booking-form';
+                            const bookingTemplate =
+                              isBookingTask && typeof t?.bookingTemplateId === 'string'
+                                ? bookingTemplates.find(
+                                    (tpl) => tpl && tpl.id === t.bookingTemplateId,
+                                  )
+                                : null;
+                            const slotCount = Array.isArray(bookingTemplate?.slots)
+                              ? bookingTemplate.slots.length
+                              : 0;
+                            const questionCount = Array.isArray(bookingTemplate?.responseFields)
+                              ? bookingTemplate.responseFields.length
+                              : 0;
                             const typeLabel = rawType && rawType !== 'none'
                               ? rawType === 'team-member'
                                 ? `Assignment ${(t?.assignmentScope || 'team') as string}`
-                                : `Field ${rawType}`
+                                : isBookingTask
+                                  ? `Booking form${slotCount > 0 ? ` · ${slotCount} slot${slotCount === 1 ? '' : 's'}` : ''}`
+                                  : `Field ${rawType}`
                               : null;
                             const fieldLabel =
                               typeof t?.fieldLabel === 'string' && t.fieldLabel.trim().length > 0
@@ -1003,6 +1271,16 @@ export default function AdminWorkflowsPage() {
                                   <p className="text-xs text-gray-500">
                                     {typeLabel}
                                     {fieldLabel ? ` · ${fieldLabel}` : ''}
+                                  </p>
+                                ) : null}
+                                {isBookingTask ? (
+                                  <p className="text-xs text-emerald-700">
+                                    {questionCount > 0
+                                      ? `${questionCount} ${questionCount === 1 ? 'question' : 'questions'}`
+                                      : 'Collects attendee details'}
+                                    {bookingTemplate?.agreement?.heading
+                                      ? ` · Agreement: ${bookingTemplate.agreement.heading}`
+                                      : ''}
                                   </p>
                                 ) : null}
                                 {dependencyText ? (

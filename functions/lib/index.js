@@ -2664,6 +2664,14 @@ export const onOrderCreated = functions.firestore
             if (prod?.workflowId) {
                 const wfDoc = await db.collection('workflows').doc(prod.workflowId).get();
                 const wf = wfDoc.data();
+                let workflowBookingTemplates = [];
+                try {
+                    const bookingSnap = await wfDoc.ref.collection('workflowBookingTemplates').get();
+                    workflowBookingTemplates = bookingSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+                }
+                catch (bookingErr) {
+                    console.error('Failed to load workflow booking templates', prod.workflowId, bookingErr);
+                }
                 if (Array.isArray(wf?.tasks)) {
                     for (const t of wf.tasks) {
                         const dueDays = parseInt(t.dueDays, 10);
@@ -2674,11 +2682,10 @@ export const onOrderCreated = functions.firestore
                             ? t.fieldType.trim()
                             : null;
                         const fieldType = rawFieldType && rawFieldType !== 'none' ? rawFieldType : null;
+                        const workflowTitle = typeof t.title === 'string' ? t.title.trim() : '';
                         const fieldLabel = typeof t.fieldLabel === 'string' && t.fieldLabel.trim().length > 0
                             ? t.fieldLabel.trim()
-                            : typeof t.title === 'string'
-                                ? t.title
-                                : '';
+                            : workflowTitle;
                         const fieldPlaceholder = typeof t.fieldPlaceholder === 'string' ? t.fieldPlaceholder : '';
                         const fieldHelpText = typeof t.fieldHelpText === 'string' ? t.fieldHelpText : '';
                         const fieldAccept = typeof t.fieldAccept === 'string' ? t.fieldAccept : '';
@@ -2711,16 +2718,25 @@ export const onOrderCreated = functions.firestore
                         const templateKey = typeof t.fieldTemplateKey === 'string' && t.fieldTemplateKey.trim().length > 0
                             ? t.fieldTemplateKey.trim()
                             : null;
+                        const bookingTemplateId = fieldType === 'booking-form' && typeof t.bookingTemplateId === 'string'
+                            ? t.bookingTemplateId.trim()
+                            : null;
+                        const effectiveFieldLabel = fieldType === 'booking-form'
+                            ? fieldLabel || workflowTitle || 'Booking form'
+                            : fieldLabel;
+                        const effectiveFieldHelpText = fieldType === 'booking-form'
+                            ? fieldHelpText || 'Participants will choose a slot and provide their details to confirm.'
+                            : fieldHelpText;
                         taskDocs.push({
-                            title: typeof t.title === 'string' ? t.title : 'Untitled task',
+                            title: workflowTitle || 'Untitled task',
                             description: typeof t.description === 'string' ? t.description : '',
                             fieldType,
                             fieldTemplateKey: templateKey,
                             fieldKey,
-                            fieldLabel,
+                            fieldLabel: effectiveFieldLabel,
                             fieldPlaceholder,
-                            fieldHelpText,
-                            fieldRequired,
+                            fieldHelpText: effectiveFieldHelpText,
+                            fieldRequired: fieldType === 'booking-form' ? true : fieldRequired,
                             fieldAccept: fieldType === 'file' ? fieldAccept : '',
                             fieldOptions,
                             dependsOn,
@@ -2734,7 +2750,57 @@ export const onOrderCreated = functions.firestore
                             assigneeName: null,
                             assignmentScope,
                             shareAssigneeContact,
+                            bookingTemplateId,
                         });
+                    }
+                }
+                if (workflowBookingTemplates.length > 0) {
+                    const projectBookingCollection = projRef.collection('workflowBookingTemplates');
+                    const bookingBatch = db.batch();
+                    let hasBookingWrites = false;
+                    workflowBookingTemplates.forEach((template) => {
+                        if (!template || typeof template !== 'object')
+                            return;
+                        const templateId = typeof template.id === 'string' && template.id ? template.id : uuidv4();
+                        const docRef = projectBookingCollection.doc(templateId);
+                        const agreementHeading = typeof template.agreement?.heading === 'string' && template.agreement.heading.trim().length > 0
+                            ? template.agreement.heading.trim()
+                            : 'Participation agreement';
+                        const agreementBody = typeof template.agreement?.body === 'string' ? template.agreement.body.trim() : '';
+                        const agreementAcknowledgement = typeof template.agreement?.acknowledgementLabel === 'string' &&
+                            template.agreement.acknowledgementLabel.trim().length > 0
+                            ? template.agreement.acknowledgementLabel.trim()
+                            : 'I agree to the terms and conditions';
+                        const agreementRequireSignature = template.agreement?.requireSignature === false ? false : true;
+                        const data = {
+                            workflowId: prod.workflowId,
+                            workflowTaskId: typeof template.workflowTaskId === 'string' && template.workflowTaskId.trim().length > 0
+                                ? template.workflowTaskId.trim()
+                                : null,
+                            workflowTemplateId: templateId,
+                            taskTitle: typeof template.taskTitle === 'string' ? template.taskTitle : 'Booking form',
+                            taskDescription: typeof template.taskDescription === 'string' ? template.taskDescription : '',
+                            introduction: typeof template.introduction === 'string' ? template.introduction : '',
+                            slots: Array.isArray(template.slots) ? template.slots : [],
+                            responseFields: Array.isArray(template.responseFields) ? template.responseFields : [],
+                            uploadRequirements: Array.isArray(template.uploadRequirements)
+                                ? template.uploadRequirements
+                                : [],
+                            agreement: {
+                                heading: agreementHeading,
+                                body: agreementBody,
+                                acknowledgementLabel: agreementAcknowledgement,
+                                requireSignature: agreementRequireSignature,
+                            },
+                            projectId: projRef.id,
+                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        };
+                        bookingBatch.set(docRef, data, { merge: true });
+                        hasBookingWrites = true;
+                    });
+                    if (hasBookingWrites) {
+                        await bookingBatch.commit();
                     }
                 }
             }
@@ -8393,23 +8459,154 @@ export const admin_deleteProduct = functions.https.onCall(async (data, context) 
     }
     return { ok: true };
 });
-function sanitizeWorkflowTasks(raw) {
-    if (!Array.isArray(raw))
-        return [];
-    const seenIds = new Set();
-    const usedFieldKeys = new Set();
-    const provisional = raw.map((task, index) => {
-        const input = task || {};
-        const preferredId = typeof input.id === 'string' && input.id.trim().length > 0
-            ? input.id.trim()
-            : uuidv4();
-        let id = preferredId;
-        let idSuffix = 2;
-        while (seenIds.has(id)) {
-            id = `${preferredId}-${idSuffix}`;
-            idSuffix += 1;
+const ALLOWED_BOOKING_FIELD_TYPES = new Set(['text', 'textarea', 'email', 'phone', 'website']);
+function normalizeBookingTemplateId(preferredId, fallbackId, used) {
+    const base = (preferredId || '').trim() || fallbackId;
+    let candidate = base;
+    let suffix = 2;
+    while (used.has(candidate)) {
+        candidate = `${base}-${suffix}`;
+        suffix += 1;
+    }
+    used.add(candidate);
+    return candidate;
+}
+function coerceCapacity(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return Math.max(1, Math.round(value));
+    }
+    if (typeof value === 'string') {
+        const parsed = parseInt(value, 10);
+        if (!Number.isNaN(parsed)) {
+            return Math.max(1, Math.round(parsed));
         }
-        seenIds.add(id);
+    }
+    return 1;
+}
+function sanitizeWorkflowBookingTemplate(templateId, taskMeta, rawTemplate) {
+    const slotsInput = Array.isArray(rawTemplate?.slots) ? rawTemplate.slots : [];
+    const slots = slotsInput
+        .map((slot, index) => {
+        const label = typeof slot?.label === 'string' ? slot.label.trim() : '';
+        const startAt = typeof slot?.startAt === 'string' ? slot.startAt.trim() : '';
+        const endAt = typeof slot?.endAt === 'string' ? slot.endAt.trim() : '';
+        if (!label || !startAt || !endAt)
+            return null;
+        const capacity = coerceCapacity(slot?.capacity);
+        const priceClass = typeof slot?.priceClass === 'string' && slot.priceClass.trim().length > 0
+            ? slot.priceClass.trim()
+            : 'included';
+        const notes = typeof slot?.notes === 'string' ? slot.notes.trim() : '';
+        const slotId = typeof slot?.id === 'string' && slot.id.trim().length > 0
+            ? slot.id.trim()
+            : `${templateId}-slot-${index + 1}`;
+        return {
+            id: slotId,
+            label,
+            startAt,
+            endAt,
+            capacity,
+            priceClass,
+            notes,
+        };
+    })
+        .filter((slot) => Boolean(slot));
+    if (slots.length === 0) {
+        throw new functions.https.HttpsError('invalid-argument', `Booking task "${taskMeta.taskTitle || 'Untitled task'}" must include at least one slot.`);
+    }
+    const responseInputs = Array.isArray(rawTemplate?.responseFields)
+        ? rawTemplate.responseFields
+        : [];
+    const responseFields = responseInputs
+        .map((field, index) => {
+        const label = typeof field?.label === 'string' ? field.label.trim() : '';
+        if (!label)
+            return null;
+        const type = typeof field?.type === 'string' && ALLOWED_BOOKING_FIELD_TYPES.has(field.type)
+            ? field.type
+            : 'text';
+        const placeholder = typeof field?.placeholder === 'string' ? field.placeholder.trim() : '';
+        const required = field?.required === true;
+        const fieldId = typeof field?.id === 'string' && field.id.trim().length > 0
+            ? field.id.trim()
+            : `${templateId}-question-${index + 1}`;
+        return {
+            id: fieldId,
+            type,
+            label,
+            placeholder,
+            required,
+        };
+    })
+        .filter((field) => Boolean(field));
+    if (responseFields.length === 0) {
+        throw new functions.https.HttpsError('invalid-argument', `Booking task "${taskMeta.taskTitle || 'Untitled task'}" must collect at least one response field.`);
+    }
+    const uploadInputs = Array.isArray(rawTemplate?.uploadRequirements)
+        ? rawTemplate.uploadRequirements
+        : [];
+    const uploadRequirements = uploadInputs
+        .map((upload, index) => {
+        const label = typeof upload?.label === 'string' ? upload.label.trim() : '';
+        const description = typeof upload?.description === 'string' ? upload.description.trim() : '';
+        const accept = typeof upload?.accept === 'string' ? upload.accept.trim() : '';
+        if (!label && !description && !accept)
+            return null;
+        const uploadId = typeof upload?.id === 'string' && upload.id.trim().length > 0
+            ? upload.id.trim()
+            : `${templateId}-upload-${index + 1}`;
+        return {
+            id: uploadId,
+            label: label || 'Supporting asset',
+            description,
+            accept,
+            required: upload?.required === true,
+        };
+    })
+        .filter((upload) => Boolean(upload));
+    const introduction = typeof rawTemplate?.introduction === 'string' ? rawTemplate.introduction.trim() : '';
+    const agreementHeading = typeof rawTemplate?.agreement?.heading === 'string' && rawTemplate.agreement.heading.trim().length > 0
+        ? rawTemplate.agreement.heading.trim()
+        : 'Participation agreement';
+    const agreementBody = typeof rawTemplate?.agreement?.body === 'string' ? rawTemplate.agreement.body.trim() : '';
+    const acknowledgement = typeof rawTemplate?.agreement?.acknowledgementLabel === 'string' &&
+        rawTemplate.agreement.acknowledgementLabel.trim().length > 0
+        ? rawTemplate.agreement.acknowledgementLabel.trim()
+        : 'I agree to the terms and conditions';
+    const requireSignature = rawTemplate?.agreement?.requireSignature === false ? false : true;
+    return {
+        id: templateId,
+        workflowTaskId: taskMeta.workflowTaskId,
+        taskTitle: taskMeta.taskTitle,
+        taskDescription: taskMeta.taskDescription,
+        introduction,
+        slots,
+        responseFields,
+        uploadRequirements,
+        agreement: {
+            heading: agreementHeading,
+            body: agreementBody,
+            acknowledgementLabel: acknowledgement,
+            requireSignature,
+        },
+    };
+}
+function sanitizeWorkflowTasks(raw, rawBookingTemplates) {
+    const inputs = Array.isArray(raw) ? raw : [];
+    const seenTaskIds = new Set();
+    const usedFieldKeys = new Set();
+    const usedBookingTemplateIds = new Set();
+    const bookingTaskMeta = new Map();
+    const provisional = inputs.map((task) => {
+        const input = task || {};
+        const preferredId = typeof input.id === 'string' && input.id.trim().length > 0 ? input.id.trim() : uuidv4();
+        let id = preferredId;
+        let suffix = 2;
+        while (seenTaskIds.has(id)) {
+            id = `${preferredId}-${suffix}`;
+            suffix += 1;
+        }
+        seenTaskIds.add(id);
         const title = typeof input.title === 'string' ? input.title.trim() : '';
         const description = typeof input.description === 'string' ? input.description.trim() : '';
         const dueDaysValue = input.dueDays;
@@ -8422,14 +8619,17 @@ function sanitizeWorkflowTasks(raw) {
             ? input.fieldType.trim()
             : null;
         const fieldType = rawFieldType && rawFieldType !== 'none' ? rawFieldType : null;
-        const forCustomer = input.forCustomer === true;
+        const isBookingTask = fieldType === 'booking-form';
+        const forCustomer = isBookingTask ? true : input.forCustomer === true;
         const fieldLabel = typeof input.fieldLabel === 'string' ? input.fieldLabel.trim() : '';
-        const fieldPlaceholder = typeof input.fieldPlaceholder === 'string'
-            ? input.fieldPlaceholder.trim()
-            : '';
+        const fieldPlaceholder = typeof input.fieldPlaceholder === 'string' ? input.fieldPlaceholder.trim() : '';
         const fieldHelpText = typeof input.fieldHelpText === 'string' ? input.fieldHelpText.trim() : '';
         const fieldAccept = typeof input.fieldAccept === 'string' ? input.fieldAccept.trim() : '';
-        const fieldRequired = fieldType ? input.fieldRequired === true : false;
+        const fieldRequired = isBookingTask
+            ? true
+            : fieldType
+                ? input.fieldRequired === true
+                : false;
         const templateKey = typeof input.fieldTemplateKey === 'string' && input.fieldTemplateKey.trim().length > 0
             ? input.fieldTemplateKey.trim()
             : null;
@@ -8465,6 +8665,20 @@ function sanitizeWorkflowTasks(raw) {
             })
                 .filter((opt) => Boolean(opt))
             : [];
+        let bookingTemplateId = null;
+        if (isBookingTask) {
+            const preferredTemplateId = typeof input.bookingTemplateId === 'string' && input.bookingTemplateId.trim().length > 0
+                ? input.bookingTemplateId.trim()
+                : null;
+            bookingTemplateId = normalizeBookingTemplateId(preferredTemplateId, `booking-${id.slice(0, 8)}`, usedBookingTemplateIds);
+            const fallbackConfig = typeof input.bookingConfig === 'object' ? input.bookingConfig : null;
+            bookingTaskMeta.set(bookingTemplateId, {
+                workflowTaskId: id,
+                taskTitle: title || 'Untitled task',
+                taskDescription: description,
+                fallbackConfig,
+            });
+        }
         return {
             id,
             title,
@@ -8474,22 +8688,83 @@ function sanitizeWorkflowTasks(raw) {
             fieldType,
             fieldTemplateKey: templateKey,
             fieldKey,
-            fieldLabel: fieldLabel || (fieldType ? title : ''),
-            fieldPlaceholder,
-            fieldHelpText,
+            fieldLabel: isBookingTask
+                ? fieldLabel || title || 'Booking form'
+                : fieldLabel || (fieldType ? title : ''),
+            fieldPlaceholder: isBookingTask ? '' : fieldPlaceholder,
+            fieldHelpText: isBookingTask
+                ? fieldHelpText || 'Participants will choose a slot and provide their details to confirm.'
+                : fieldHelpText,
             fieldRequired,
             fieldAccept: fieldType === 'file' ? fieldAccept : '',
             fieldOptions,
             dependsOn,
             shareAssigneeContact,
             assignmentScope,
+            bookingTemplateId,
         };
     });
     const validIds = new Set(provisional.map((task) => task.id));
-    return provisional.map((task) => ({
+    const tasks = provisional.map((task) => ({
         ...task,
         dependsOn: task.dependsOn.filter((depId) => validIds.has(depId)),
     }));
+    const templateInputs = Array.isArray(rawBookingTemplates) ? rawBookingTemplates : [];
+    const templateInputMap = new Map();
+    templateInputs.forEach((tpl) => {
+        const templateId = typeof tpl?.id === 'string' && tpl.id.trim().length > 0
+            ? tpl.id.trim()
+            : typeof tpl?.templateId === 'string' && tpl.templateId.trim().length > 0
+                ? tpl.templateId.trim()
+                : null;
+        if (templateId) {
+            templateInputMap.set(templateId, tpl);
+        }
+    });
+    const bookingTemplates = [];
+    bookingTaskMeta.forEach((meta, templateId) => {
+        const rawTemplate = templateInputMap.get(templateId) ?? meta.fallbackConfig ?? {};
+        const sanitizedTemplate = sanitizeWorkflowBookingTemplate(templateId, meta, rawTemplate);
+        bookingTemplates.push(sanitizedTemplate);
+    });
+    return { tasks, bookingTemplates };
+}
+async function replaceWorkflowBookingTemplates(workflowRef, templates) {
+    const collectionRef = workflowRef.collection('workflowBookingTemplates');
+    const existingSnap = await collectionRef.get();
+    const existingIds = new Set(existingSnap.docs.map((doc) => doc.id));
+    const templateIds = new Set(templates.map((template) => template.id));
+    const batch = db.batch();
+    let hasChanges = false;
+    existingSnap.docs.forEach((doc) => {
+        if (!templateIds.has(doc.id)) {
+            batch.delete(doc.ref);
+            hasChanges = true;
+        }
+    });
+    templates.forEach((template) => {
+        const docRef = collectionRef.doc(template.id);
+        const data = {
+            workflowId: workflowRef.id,
+            workflowTaskId: template.workflowTaskId,
+            taskTitle: template.taskTitle,
+            taskDescription: template.taskDescription,
+            introduction: template.introduction,
+            slots: template.slots,
+            responseFields: template.responseFields,
+            uploadRequirements: template.uploadRequirements,
+            agreement: template.agreement,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        if (!existingIds.has(template.id)) {
+            data.createdAt = admin.firestore.FieldValue.serverTimestamp();
+        }
+        batch.set(docRef, data, { merge: true });
+        hasChanges = true;
+    });
+    if (hasChanges) {
+        await batch.commit();
+    }
 }
 /**
  * Create a new workflow. Expects { name, description, tasks } where tasks include metadata for
@@ -8497,10 +8772,10 @@ function sanitizeWorkflowTasks(raw) {
  */
 export const admin_createWorkflow = functions.https.onCall(async (data, context) => {
     await assertStaff(context, ['admin', 'operations']);
-    const { name, description, tasks } = data;
+    const { name, description, tasks, bookingTemplates: rawBookingTemplates } = data;
     if (!name)
         throw new functions.https.HttpsError('invalid-argument', 'Name required');
-    const safeTasks = sanitizeWorkflowTasks(tasks);
+    const { tasks: safeTasks, bookingTemplates } = sanitizeWorkflowTasks(tasks, rawBookingTemplates);
     const workflow = {
         name,
         description: description || '',
@@ -8508,6 +8783,7 @@ export const admin_createWorkflow = functions.https.onCall(async (data, context)
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
     const ref = await db.collection('workflows').add(workflow);
+    await replaceWorkflowBookingTemplates(ref, bookingTemplates);
     if (context.auth?.uid) {
         await writeAuditLog({
             actorUid: context.auth.uid,
@@ -8528,12 +8804,21 @@ export const admin_updateWorkflow = functions.https.onCall(async (data, context)
     if (!workflowId || !updates)
         throw new functions.https.HttpsError('invalid-argument', 'workflowId and updates required');
     const workflowRef = db.collection('workflows').doc(workflowId);
+    let sanitizedBookingTemplates = null;
     if (Array.isArray(updates?.tasks)) {
-        updates.tasks = sanitizeWorkflowTasks(updates.tasks);
+        const result = sanitizeWorkflowTasks(updates.tasks, updates.bookingTemplates);
+        updates.tasks = result.tasks;
+        sanitizedBookingTemplates = result.bookingTemplates;
+        if (Array.isArray(updates.bookingTemplates)) {
+            delete updates.bookingTemplates;
+        }
     }
     const beforeSnap = await workflowRef.get();
     const beforeData = beforeSnap.exists ? beforeSnap.data() : undefined;
     await workflowRef.set(updates, { merge: true });
+    if (sanitizedBookingTemplates) {
+        await replaceWorkflowBookingTemplates(workflowRef, sanitizedBookingTemplates);
+    }
     if (context.auth?.uid) {
         const changes = buildChangesFromUpdates(beforeData, updates);
         await writeAuditLog({
