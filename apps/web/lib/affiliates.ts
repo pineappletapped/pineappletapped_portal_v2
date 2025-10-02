@@ -97,6 +97,10 @@ export interface AffiliatePayoutRecord {
   recordedByUid: string | null;
   recordedByEmail: string | null;
   lineItems: AffiliatePayoutLineItem[];
+  remittanceStoragePath: string | null;
+  remittanceFileName: string | null;
+  remittanceGeneratedAt: Timestamp | null;
+  remittanceDownloadUrl: string | null;
 }
 
 export interface AffiliatePayoutLineItem {
@@ -145,6 +149,18 @@ export interface AffiliateCommissionRecord {
   deliveredAt: Timestamp | null;
   scheduledAt: Timestamp | null;
   paidAt: Timestamp | null;
+}
+
+export interface AffiliateResourceRecord {
+  id: string;
+  title: string;
+  description: string | null;
+  linkUrl: string | null;
+  category: string | null;
+  pinned: boolean;
+  publishedAt: Timestamp | null;
+  updatedAt: Timestamp | null;
+  createdByName: string | null;
 }
 
 export const AFFILIATE_DEFAULT_COMMISSION_RATE = 0.5;
@@ -368,6 +384,11 @@ export function parseAffiliatePayoutDoc(
   doc: QueryDocumentSnapshot<DocumentData>
 ): AffiliatePayoutRecord {
   const data = doc.data() as Record<string, any>;
+  const remittance = (data.remittance ?? {}) as Record<string, any>;
+  const remittancePath =
+    stringOrNull(remittance.storagePath) ??
+    stringOrNull(remittance.path) ??
+    stringOrNull(data.remittancePath);
   return {
     id: doc.id,
     affiliateId: stringOrNull(data.affiliateId) ?? doc.id,
@@ -395,6 +416,14 @@ export function parseAffiliatePayoutDoc(
           statusApplied: normaliseCommissionStatus(item.statusApplied),
         }))
       : [],
+    remittanceStoragePath: remittancePath,
+    remittanceFileName:
+      stringOrNull(remittance.fileName) ??
+      (remittancePath ? remittancePath.split('/').pop() ?? null : null),
+    remittanceGeneratedAt:
+      parseTimestamp(remittance.generatedAt) ?? parseTimestamp(data.remittanceGeneratedAt),
+    remittanceDownloadUrl:
+      stringOrNull(remittance.downloadUrl) ?? stringOrNull(data.remittanceDownloadUrl),
   };
 }
 
@@ -524,6 +553,26 @@ export function buildAffiliateShareLink(refCode: string, origin?: string | null)
   const prefix = base || host || 'https://pineappletapped.com';
   const separator = prefix.includes('?') ? '&' : '?';
   return `${prefix}${separator}affiliate=${encodeURIComponent(safeCode)}`;
+}
+
+export function parseAffiliateResourceDoc(
+  doc: QueryDocumentSnapshot<DocumentData>
+): AffiliateResourceRecord {
+  const data = doc.data() as Record<string, any>;
+  return {
+    id: doc.id,
+    title: stringOrNull(data.title) ?? 'Resource',
+    description: stringOrNull(data.description) ?? stringOrNull(data.summary),
+    linkUrl:
+      stringOrNull(data.url) ??
+      stringOrNull(data.linkUrl) ??
+      stringOrNull(data.ctaUrl),
+    category: stringOrNull(data.category) ?? stringOrNull(data.topic),
+    pinned: Boolean(data.pinned === true || data.isPinned === true),
+    publishedAt: parseTimestamp(data.publishedAt) ?? parseTimestamp(data.createdAt),
+    updatedAt: parseTimestamp(data.updatedAt),
+    createdByName: stringOrNull(data.createdByName) ?? stringOrNull(data.authorName),
+  };
 }
 
 export function formatCurrencyGBP(amount: number): string {
