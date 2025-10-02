@@ -19,6 +19,9 @@ export interface AffiliateMetrics {
   pendingCommissionNet: number;
   pendingCommissionVat: number;
   pendingCommissionGross: number;
+  scheduledCommissionNet: number;
+  scheduledCommissionVat: number;
+  scheduledCommissionGross: number;
   paidCommissionNet: number;
   paidCommissionVat: number;
   paidCommissionGross: number;
@@ -302,6 +305,9 @@ const extractMetrics = (data: Record<string, any>): AffiliateMetrics => {
     pendingCommissionNet: numberOrZero(metrics.pendingCommissionNet),
     pendingCommissionVat: numberOrZero(metrics.pendingCommissionVat),
     pendingCommissionGross: numberOrZero(metrics.pendingCommissionGross),
+    scheduledCommissionNet: numberOrZero(metrics.scheduledCommissionNet),
+    scheduledCommissionVat: numberOrZero(metrics.scheduledCommissionVat),
+    scheduledCommissionGross: numberOrZero(metrics.scheduledCommissionGross),
     paidCommissionNet: numberOrZero(metrics.paidCommissionNet),
     paidCommissionVat: numberOrZero(metrics.paidCommissionVat),
     paidCommissionGross: numberOrZero(metrics.paidCommissionGross),

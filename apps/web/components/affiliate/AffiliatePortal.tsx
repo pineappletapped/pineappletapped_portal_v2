@@ -510,6 +510,14 @@ export default function AffiliatePortal() {
     () => (affiliate ? Math.max(0, affiliate.metrics.pendingCommissionGross) : 0),
     [affiliate]
   );
+  const scheduledNet = useMemo(
+    () => (affiliate ? Math.max(0, affiliate.metrics.scheduledCommissionNet) : 0),
+    [affiliate]
+  );
+  const scheduledGross = useMemo(
+    () => (affiliate ? Math.max(0, affiliate.metrics.scheduledCommissionGross) : 0),
+    [affiliate]
+  );
   const eligibleForWithdrawal = pendingNet >= AFFILIATE_MIN_WITHDRAWAL_NET;
 
   const commissionFilterOptions: Array<{ key: "all" | AffiliateCommissionStatus; label: string }> = [
@@ -838,6 +846,13 @@ export default function AffiliatePortal() {
                     ? 'Great! You’ve met the £50 minimum.'
                     : `You’ll be able to withdraw once you reach £${AFFILIATE_MIN_WITHDRAWAL_NET.toFixed(0)} net.`}
                 </p>
+                {scheduledGross > 0 ? (
+                  <p className='mt-1 text-xs text-amber-600'>
+                    {`${formatCurrencyGBP(scheduledGross)} scheduled for payout${
+                      scheduledNet > 0 ? ` (${formatCurrencyGBP(scheduledNet)} net)` : ""
+                    }.`}
+                  </p>
+                ) : null}
               </div>
               <div className='rounded-2xl border border-gray-200 bg-white p-4 shadow-sm'>
                 <p className='text-xs font-medium uppercase text-gray-500'>Orders influenced</p>

@@ -348,6 +348,21 @@ export default function AffiliateManager() {
     return map;
   }, [commissions]);
 
+  const scheduledCommissionTotals = useMemo(() => {
+    const map = new Map<string, { net: number; vat: number; gross: number }>();
+    commissions.forEach((entry) => {
+      if (entry.status !== "scheduled") {
+        return;
+      }
+      const existing = map.get(entry.affiliateId) ?? { net: 0, vat: 0, gross: 0 };
+      existing.net += roundCurrency(entry.commissionNet);
+      existing.vat += roundCurrency(entry.commissionVat);
+      existing.gross += roundCurrency(entry.commissionGross);
+      map.set(entry.affiliateId, existing);
+    });
+    return map;
+  }, [commissions]);
+
   const commissionFilterOptions: Array<{ key: "all" | AffiliateCommissionStatus; label: string }> = [
     { key: "all", label: "All" },
     { key: "pending", label: "Pending" },
@@ -484,6 +499,9 @@ export default function AffiliateManager() {
           pendingCommissionNet: 0,
           pendingCommissionVat: 0,
           pendingCommissionGross: 0,
+          scheduledCommissionNet: 0,
+          scheduledCommissionVat: 0,
+          scheduledCommissionGross: 0,
           paidCommissionNet: 0,
           paidCommissionVat: 0,
           paidCommissionGross: 0,
@@ -597,10 +615,39 @@ export default function AffiliateManager() {
         throw new Error("Select at least one commission ledger entry.");
       }
 
-      const totals = sumCommissionTotals(selectedEntries);
-      if (totals.net <= 0) {
+      const overallTotals = sumCommissionTotals(selectedEntries);
+      if (overallTotals.net <= 0) {
         throw new Error("Selected commission total must be greater than zero.");
       }
+
+      const pendingTotalsSelection = sumCommissionTotals(
+        selectedEntries.filter((entry) => entry.status === "pending")
+      );
+      const scheduledTotalsSelection = sumCommissionTotals(
+        selectedEntries.filter((entry) => entry.status === "scheduled")
+      );
+
+      const roundTotals = (totals: { net: number; vat: number; gross: number }) => ({
+        net: roundCurrency(totals.net),
+        vat: roundCurrency(totals.vat),
+        gross: roundCurrency(totals.gross),
+      });
+
+      const roundedOverall = roundTotals(overallTotals);
+      const roundedPendingSelection = roundTotals(pendingTotalsSelection);
+      const roundedScheduledSelection = roundTotals(scheduledTotalsSelection);
+
+      const computeDelta = (total: number, snapshot?: number) => {
+        const safeTotal = roundCurrency(total);
+        if (safeTotal <= 0) {
+          return 0;
+        }
+        const safeSnapshot =
+          typeof snapshot === "number" && Number.isFinite(snapshot)
+            ? Math.max(0, roundCurrency(snapshot))
+            : safeTotal;
+        return Math.max(0, Math.min(safeTotal, safeSnapshot));
+      };
 
       const parseDate = (value: string): Timestamp | null => {
         if (!value) return null;
@@ -615,9 +662,9 @@ export default function AffiliateManager() {
         affiliateId: payoutTarget.id,
         affiliateName: payoutTarget.name,
         affiliateRefCode: payoutTarget.refCode,
-        amountNet: totals.net,
-        amountVat: totals.vat,
-        amountGross: totals.gross,
+        amountNet: roundedOverall.net,
+        amountVat: roundedOverall.vat,
+        amountGross: roundedOverall.gross,
         currency: "GBP",
         periodStart: parseDate(payoutForm.periodStart),
         periodEnd: parseDate(payoutForm.periodEnd),
@@ -640,31 +687,55 @@ export default function AffiliateManager() {
       });
 
       const pendingSnapshot = pendingCommissionTotals.get(payoutTarget.id);
-      const netDelta = pendingSnapshot ? Math.min(totals.net, roundCurrency(pendingSnapshot.net)) : totals.net;
-      const vatDelta = pendingSnapshot ? Math.min(totals.vat, roundCurrency(pendingSnapshot.vat)) : totals.vat;
-      const grossDelta = pendingSnapshot
-        ? Math.min(totals.gross, roundCurrency(pendingSnapshot.gross))
-        : totals.gross;
+      const scheduledSnapshot = scheduledCommissionTotals.get(payoutTarget.id);
 
-      batch.set(
-        doc(db, "affiliates", payoutTarget.id),
-        {
-          metrics: {
-            pendingCommissionNet: increment(-netDelta),
-            pendingCommissionVat: increment(-vatDelta),
-            pendingCommissionGross: increment(-grossDelta),
-            paidCommissionNet: increment(totals.net),
-            paidCommissionVat: increment(totals.vat),
-            paidCommissionGross: increment(totals.gross),
-          },
-          updatedAt: serverTimestamp(),
-          lastPayoutAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+      const pendingDelta = {
+        net: computeDelta(roundedPendingSelection.net, pendingSnapshot?.net),
+        vat: computeDelta(roundedPendingSelection.vat, pendingSnapshot?.vat),
+        gross: computeDelta(roundedPendingSelection.gross, pendingSnapshot?.gross),
+      };
+
+      const scheduledDelta = {
+        net: computeDelta(roundedScheduledSelection.net, scheduledSnapshot?.net),
+        vat: computeDelta(roundedScheduledSelection.vat, scheduledSnapshot?.vat),
+        gross: computeDelta(roundedScheduledSelection.gross, scheduledSnapshot?.gross),
+      };
 
       const statusToApply: AffiliateCommissionStatus =
         payoutForm.status === "scheduled" ? "scheduled" : "paid";
+
+      const metricsUpdate: Record<string, any> = {
+        pendingCommissionNet: increment(-pendingDelta.net),
+        pendingCommissionVat: increment(-pendingDelta.vat),
+        pendingCommissionGross: increment(-pendingDelta.gross),
+      };
+
+      if (statusToApply === "scheduled") {
+        metricsUpdate.scheduledCommissionNet = increment(roundedOverall.net);
+        metricsUpdate.scheduledCommissionVat = increment(roundedOverall.vat);
+        metricsUpdate.scheduledCommissionGross = increment(roundedOverall.gross);
+      } else {
+        metricsUpdate.paidCommissionNet = increment(roundedOverall.net);
+        metricsUpdate.paidCommissionVat = increment(roundedOverall.vat);
+        metricsUpdate.paidCommissionGross = increment(roundedOverall.gross);
+
+        if (scheduledDelta.net > 0 || scheduledDelta.vat > 0 || scheduledDelta.gross > 0) {
+          metricsUpdate.scheduledCommissionNet = increment(-scheduledDelta.net);
+          metricsUpdate.scheduledCommissionVat = increment(-scheduledDelta.vat);
+          metricsUpdate.scheduledCommissionGross = increment(-scheduledDelta.gross);
+        }
+      }
+
+      const affiliateUpdate: Record<string, any> = {
+        metrics: metricsUpdate,
+        updatedAt: serverTimestamp(),
+      };
+
+      if (statusToApply === "paid") {
+        affiliateUpdate.lastPayoutAt = serverTimestamp();
+      }
+
+      batch.set(doc(db, "affiliates", payoutTarget.id), affiliateUpdate, { merge: true });
 
       selectedEntries.forEach((entry) => {
         const entryRef = doc(db, "affiliateCommissions", entry.id);
@@ -1014,14 +1085,19 @@ export default function AffiliateManager() {
               {sortedAffiliates.map((affiliate) => {
                 const link = buildAffiliateShareLink(affiliate.refCode);
                 const ledgerPending = pendingCommissionTotals.get(affiliate.id);
+                const ledgerScheduled = scheduledCommissionTotals.get(affiliate.id);
                 const pendingNet = roundCurrency(
                   ledgerPending?.net ?? affiliate.metrics.pendingCommissionNet
                 );
                 const pendingGross = roundCurrency(
                   ledgerPending?.gross ?? affiliate.metrics.pendingCommissionGross
                 );
-                const hasLedgerLines = (ledgerPending?.net ?? 0) > 0;
-                const eligibleForPayout = hasLedgerLines && pendingNet >= AFFILIATE_MIN_WITHDRAWAL_NET;
+                const scheduledGross = roundCurrency(
+                  ledgerScheduled?.gross ?? affiliate.metrics.scheduledCommissionGross
+                );
+                const hasPendingLedgerLines = (ledgerPending?.net ?? 0) > 0;
+                const eligibleForPayout =
+                  hasPendingLedgerLines && pendingNet >= AFFILIATE_MIN_WITHDRAWAL_NET;
                 return (
                   <article
                     key={affiliate.id}
@@ -1055,6 +1131,12 @@ export default function AffiliateManager() {
                         <dt className="font-medium">Pending payout</dt>
                         <dd>{formatCurrencyGBP(pendingGross)}</dd>
                       </div>
+                      {scheduledGross > 0 ? (
+                        <div className="flex items-center justify-between text-amber-700">
+                          <dt className="font-medium">Scheduled</dt>
+                          <dd>{formatCurrencyGBP(scheduledGross)}</dd>
+                        </div>
+                      ) : null}
                       <div className="flex items-center justify-between">
                         <dt className="font-medium">Total orders</dt>
                         <dd>{affiliate.metrics.totalOrders}</dd>
