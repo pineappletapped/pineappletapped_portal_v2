@@ -34,6 +34,7 @@ const LABELS: Record<string, string> = {
   'marketing-materials': 'Marketing Materials',
   training: 'Training',
   engagements: 'Engagement Log',
+  'ai-management': 'AI Management',
 };
 
 const HIDDEN_ROOT_SEGMENTS = new Set(['admin', 'dashboard', 'franchise', 'contractors', 'team']);
