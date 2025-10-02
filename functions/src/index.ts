@@ -5488,6 +5488,152 @@ function isPaidOrderStatus(value: unknown): boolean {
   return status === 'paid' || status === 'balance_paid';
 }
 
+interface AffiliateCommissionLedgerOptions {
+  orderId: string;
+  orderData: FirebaseFirestore.DocumentData;
+  releaseSummaries: Array<{
+    projectId: string;
+    projectName: string | null;
+    assetIds: string[];
+  }>;
+}
+
+async function ensureAffiliateCommissionLedgerEntry(
+  options: AffiliateCommissionLedgerOptions
+): Promise<void> {
+  const { orderId, orderData, releaseSummaries } = options;
+  const affiliateInfo = (orderData.affiliate ?? {}) as Record<string, any>;
+  const affiliateId = typeof affiliateInfo.id === 'string' ? affiliateInfo.id : null;
+  if (!affiliateId) {
+    return;
+  }
+
+  const commissionNetRaw = Number(affiliateInfo.commissionNet);
+  const commissionVatRaw = Number(affiliateInfo.commissionVat);
+  const commissionGrossRaw = Number(affiliateInfo.commissionGross);
+  const commissionNet = Number.isFinite(commissionNetRaw) ? Math.round(commissionNetRaw * 100) / 100 : 0;
+  const commissionVat = Number.isFinite(commissionVatRaw) ? Math.round(commissionVatRaw * 100) / 100 : 0;
+  const commissionGross = Number.isFinite(commissionGrossRaw)
+    ? Math.round(commissionGrossRaw * 100) / 100
+    : Math.round((commissionNet + commissionVat) * 100) / 100;
+
+  const currencyRaw = typeof affiliateInfo.currency === 'string' ? affiliateInfo.currency : null;
+  const currency = currencyRaw && currencyRaw.trim().length > 0 ? currencyRaw.trim().toUpperCase() : 'GBP';
+  const orderCurrencyRaw = typeof orderData.currency === 'string' ? orderData.currency : null;
+  const orderCurrency = orderCurrencyRaw && orderCurrencyRaw.trim().length > 0 ? orderCurrencyRaw.trim().toUpperCase() : currency;
+
+  const orderLabel =
+    (typeof orderData.projectName === 'string' && orderData.projectName) ||
+    (typeof orderData.customerName === 'string' && orderData.customerName) ||
+    (typeof orderData.companyName === 'string' && orderData.companyName) ||
+    `Order ${orderId}`;
+
+  const orderTotalGrossRaw = Number(orderData.price ?? orderData.total ?? orderData.orderTotal);
+  const orderTotalNetRaw = Number(orderData.netTotal ?? orderData.subtotal ?? orderData.totalNet);
+  const orderTotalGross = Number.isFinite(orderTotalGrossRaw)
+    ? Math.round(orderTotalGrossRaw * 100) / 100
+    : null;
+  const orderTotalNet = Number.isFinite(orderTotalNetRaw)
+    ? Math.round(orderTotalNetRaw * 100) / 100
+    : null;
+
+  const clientId = typeof orderData.clientId === 'string' ? orderData.clientId : null;
+  const clientName =
+    (typeof orderData.clientName === 'string' && orderData.clientName) ||
+    (typeof orderData.companyName === 'string' && orderData.companyName) ||
+    (typeof orderData.customerName === 'string' && orderData.customerName) ||
+    null;
+
+  const deliverables = releaseSummaries.map((summary) => ({
+    projectId: summary.projectId,
+    projectName: summary.projectName,
+    assetIds: summary.assetIds,
+  }));
+
+  const ledgerRef = db.collection('affiliateCommissions').doc(orderId);
+  const ledgerSnap = await ledgerRef.get();
+
+  let affiliateOwnerUid: string | null = null;
+  let affiliateEmail: string | null =
+    typeof affiliateInfo.email === 'string' && affiliateInfo.email.trim().length > 0
+      ? affiliateInfo.email.trim()
+      : null;
+
+  try {
+    const affiliateSnap = await db.collection('affiliates').doc(affiliateId).get();
+    if (affiliateSnap.exists) {
+      const affiliateData = affiliateSnap.data() as Record<string, any>;
+      if (!affiliateEmail && typeof affiliateData.email === 'string') {
+        const candidate = affiliateData.email.trim();
+        affiliateEmail = candidate.length > 0 ? candidate : affiliateEmail;
+      }
+      affiliateOwnerUid =
+        typeof affiliateData.ownerUid === 'string' && affiliateData.ownerUid.trim().length > 0
+          ? affiliateData.ownerUid.trim()
+          : null;
+    }
+  } catch (err) {
+    console.error('Failed to load affiliate for commission ledger', { orderId, affiliateId }, err);
+  }
+
+  const timestamp = admin.firestore.FieldValue.serverTimestamp();
+
+  if (!ledgerSnap.exists) {
+    await ledgerRef.set({
+      affiliateId,
+      affiliateName:
+        (typeof affiliateInfo.name === 'string' && affiliateInfo.name) ||
+        (typeof affiliateInfo.fullName === 'string' && affiliateInfo.fullName) ||
+        null,
+      affiliateRefCode:
+        (typeof affiliateInfo.refCode === 'string' && affiliateInfo.refCode) ||
+        (typeof affiliateInfo.code === 'string' && affiliateInfo.code) ||
+        null,
+      affiliateOwnerUid,
+      affiliateEmail,
+      orderId,
+      orderLabel,
+      orderTotalGross,
+      orderTotalNet,
+      orderCurrency,
+      clientId,
+      clientName,
+      commissionNet,
+      commissionVat,
+      commissionGross,
+      currency,
+      status: 'pending',
+      payoutId: null,
+      notes: null,
+      deliverables,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      deliveredAt: timestamp,
+      scheduledAt: null,
+      paidAt: null,
+    });
+    return;
+  }
+
+  const updates: Record<string, any> = {
+    updatedAt: timestamp,
+  };
+
+  if (deliverables.length > 0) {
+    updates.deliverables = deliverables;
+  }
+  if (affiliateEmail && !ledgerSnap.get('affiliateEmail')) {
+    updates.affiliateEmail = affiliateEmail;
+  }
+  if (!ledgerSnap.get('deliveredAt')) {
+    updates.deliveredAt = timestamp;
+  }
+
+  if (Object.keys(updates).length > 1) {
+    await ledgerRef.set(updates, { merge: true });
+  }
+}
+
 interface AssetTaskSyncOptions {
   projectId: string;
   assetId: string;
@@ -6019,6 +6165,22 @@ export const onOrderStatusUpdated = functions.firestore
         } catch (notifyError) {
           console.error('onOrderStatusUpdated notification dispatch failed', { orderId, orgId }, notifyError);
         }
+      }
+    }
+
+    if (releaseSummaries.length > 0) {
+      try {
+        await ensureAffiliateCommissionLedgerEntry({
+          orderId,
+          orderData: after as FirebaseFirestore.DocumentData,
+          releaseSummaries: releaseSummaries.map((summary) => ({
+            projectId: summary.projectId,
+            projectName: summary.projectName,
+            assetIds: summary.assetIds,
+          })),
+        });
+      } catch (ledgerError) {
+        console.error('Failed to persist affiliate commission ledger', { orderId }, ledgerError);
       }
     }
 

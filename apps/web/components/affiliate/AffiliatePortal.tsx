@@ -23,10 +23,14 @@ import {
   AFFILIATE_MIN_WITHDRAWAL_NET,
   AffiliateRecord,
   AffiliatePayoutRecord,
+  AffiliateCommissionRecord,
+  AffiliateCommissionStatus,
   buildAffiliateShareLink,
   formatCurrencyGBP,
   parseAffiliateDoc,
   parseAffiliatePayoutDoc,
+  parseAffiliateCommissionDoc,
+  buildAffiliateCommissionCsv,
 } from "@/lib/affiliates";
 
 interface OrderSummary {
@@ -57,11 +61,18 @@ export default function AffiliatePortal() {
   const [orders, setOrders] = useState<OrderSummary[]>([]);
   const [clients, setClients] = useState<ClientSummary[]>([]);
   const [payouts, setPayouts] = useState<AffiliatePayoutRecord[]>([]);
+  const [commissions, setCommissions] = useState<AffiliateCommissionRecord[]>([]);
+  const [commissionFilter, setCommissionFilter] = useState<
+    "all" | AffiliateCommissionStatus
+  >("pending");
+  const [exportingLedger, setExportingLedger] = useState(false);
+  const [ledgerError, setLedgerError] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let unsubscribeOrders: (() => void) | undefined;
     let unsubscribePayouts: (() => void) | undefined;
+    let unsubscribeCommissions: (() => void) | undefined;
 
     (async () => {
       try {
@@ -176,6 +187,20 @@ export default function AffiliatePortal() {
                 (err) => console.error("Failed to load affiliate payout history", err)
               );
 
+              unsubscribeCommissions = onSnapshot(
+                query(
+                  collection(db, "affiliateCommissions"),
+                  where("affiliateId", "==", docSnap.id),
+                  orderBy("createdAt", "desc"),
+                  limit(100)
+                ),
+                (snapshot) => {
+                  const list = snapshot.docs.map((commissionDoc) => parseAffiliateCommissionDoc(commissionDoc));
+                  setCommissions(list);
+                },
+                (err) => console.error("Failed to load affiliate commission ledger", err)
+              );
+
               const clientQuery = await getDocs(
                 query(
                   collection(db, "clients"),
@@ -215,6 +240,7 @@ export default function AffiliatePortal() {
     return () => {
       unsubscribeOrders?.();
       unsubscribePayouts?.();
+      unsubscribeCommissions?.();
     };
   }, []);
 
@@ -227,6 +253,64 @@ export default function AffiliatePortal() {
     [affiliate]
   );
   const eligibleForWithdrawal = pendingNet >= AFFILIATE_MIN_WITHDRAWAL_NET;
+
+  const commissionFilterOptions: Array<{ key: "all" | AffiliateCommissionStatus; label: string }> = [
+    { key: "all", label: "All" },
+    { key: "pending", label: "Pending" },
+    { key: "scheduled", label: "Scheduled" },
+    { key: "paid", label: "Paid" },
+    { key: "cancelled", label: "Cancelled" },
+  ];
+
+  const filteredCommissions = useMemo(() => {
+    if (commissionFilter === "all") {
+      return commissions;
+    }
+    return commissions.filter((entry) => entry.status === commissionFilter);
+  }, [commissions, commissionFilter]);
+
+  const commissionCounts = useMemo(() => {
+    const counts: Record<"all" | AffiliateCommissionStatus, number> = {
+      all: commissions.length,
+      pending: 0,
+      scheduled: 0,
+      paid: 0,
+      cancelled: 0,
+    };
+    commissions.forEach((entry) => {
+      counts[entry.status] += 1;
+    });
+    return counts;
+  }, [commissions]);
+
+  const handleExportLedger = () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (filteredCommissions.length === 0) {
+      setLedgerError("No ledger entries to export yet.");
+      return;
+    }
+    setLedgerError(null);
+    setExportingLedger(true);
+    try {
+      const csv = buildAffiliateCommissionCsv(filteredCommissions);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `affiliate-ledger-${Date.now()}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to export affiliate ledger", err);
+      setLedgerError("Unable to export ledger CSV. Please try again.");
+    } finally {
+      setExportingLedger(false);
+    }
+  };
 
   const handleCopyLink = () => {
     if (!affiliate) return;
@@ -393,6 +477,91 @@ export default function AffiliatePortal() {
         </section>
 
         <section className="grid gap-3 rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Commission ledger</h2>
+              <p className="text-xs text-gray-500">{commissionCounts.all} entries</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {commissionFilterOptions.map((option) => (
+                <button
+                  key={option.key}
+                  type="button"
+                  className={`btn btn-xs ${commissionFilter === option.key ? "btn-primary" : "btn-ghost"}`}
+                  onClick={() => setCommissionFilter(option.key)}
+                >
+                  {option.label}
+                  <span className="ml-2 rounded-full bg-gray-200 px-2 text-[10px] font-medium text-gray-700">
+                    {commissionCounts[option.key]}
+                  </span>
+                </button>
+              ))}
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={handleExportLedger}
+                disabled={exportingLedger || filteredCommissions.length === 0}
+              >
+                {exportingLedger ? "Exporting…" : "Export CSV"}
+              </button>
+            </div>
+          </div>
+          {ledgerError ? <p className="text-sm text-red-600">{ledgerError}</p> : null}
+          {filteredCommissions.length === 0 ? (
+            <p className="text-sm text-gray-600">We’ll log commission entries here once orders you refer are delivered.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium text-gray-500">Order</th>
+                    <th className="px-3 py-2 text-right font-medium text-gray-500">Net</th>
+                    <th className="px-3 py-2 text-right font-medium text-gray-500">VAT</th>
+                    <th className="px-3 py-2 text-right font-medium text-gray-500">Gross</th>
+                    <th className="px-3 py-2 text-left font-medium text-gray-500">Status</th>
+                    <th className="px-3 py-2 text-left font-medium text-gray-500">Delivered</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {filteredCommissions.map((entry) => {
+                    const delivered = entry.deliveredAt?.toDate?.();
+                    const paid = entry.paidAt?.toDate?.();
+                    return (
+                      <tr key={entry.id}>
+                        <td className="px-3 py-2">
+                          <div className="font-medium text-gray-900">{entry.orderLabel ?? entry.orderId}</div>
+                          <div className="text-xs text-gray-500">Ref: {entry.orderId}</div>
+                        </td>
+                        <td className="px-3 py-2 text-right font-medium text-gray-900">
+                          {formatCurrencyGBP(entry.commissionNet)}
+                        </td>
+                        <td className="px-3 py-2 text-right text-gray-700">
+                          {formatCurrencyGBP(entry.commissionVat)}
+                        </td>
+                        <td className="px-3 py-2 text-right text-gray-900">
+                          {formatCurrencyGBP(entry.commissionGross)}
+                        </td>
+                        <td className="px-3 py-2 text-sm capitalize text-gray-700">
+                          {entry.status}
+                          {paid ? (
+                            <span className="ml-1 text-xs text-gray-500">
+                              · Paid {paid.toLocaleDateString()}
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="px-3 py-2 text-sm text-gray-700">
+                          {delivered ? delivered.toLocaleDateString() : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <section className="grid gap-3 rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-gray-900">Payout history</h2>
           {payouts.length === 0 ? (
             <p className="text-sm text-gray-600">Once HQ processes a payout it will appear here along with the VAT breakdown.</p>
@@ -405,6 +574,7 @@ export default function AffiliatePortal() {
                     <th className="px-3 py-2 text-left font-medium text-gray-500">Net</th>
                     <th className="px-3 py-2 text-left font-medium text-gray-500">VAT</th>
                     <th className="px-3 py-2 text-left font-medium text-gray-500">Gross</th>
+                    <th className="px-3 py-2 text-left font-medium text-gray-500">Orders</th>
                     <th className="px-3 py-2 text-left font-medium text-gray-500">Notes</th>
                   </tr>
                 </thead>
@@ -419,6 +589,22 @@ export default function AffiliatePortal() {
                         <td className="px-3 py-2">{formatCurrencyGBP(payout.amountNet)}</td>
                         <td className="px-3 py-2">{formatCurrencyGBP(payout.amountVat)}</td>
                         <td className="px-3 py-2">{formatCurrencyGBP(payout.amountGross)}</td>
+                        <td className="px-3 py-2 text-sm text-gray-700">
+                          {payout.lineItems.length === 0 ? (
+                            <span className="text-xs text-gray-500">Awaiting ledger breakdown</span>
+                          ) : (
+                            <div className="space-y-1">
+                              {payout.lineItems.map((item) => (
+                                <div key={item.commissionId} className="rounded bg-gray-50 px-2 py-1">
+                                  <div className="text-xs font-medium text-gray-800">{item.orderLabel ?? item.orderId}</div>
+                                  <div className="text-[11px] text-gray-500">
+                                    Net {formatCurrencyGBP(item.commissionNet)} · VAT {formatCurrencyGBP(item.commissionVat)}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-xs text-gray-500">{payout.notes ?? '—'}</td>
                       </tr>
                     );

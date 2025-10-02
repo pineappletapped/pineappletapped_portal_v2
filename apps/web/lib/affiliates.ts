@@ -96,6 +96,55 @@ export interface AffiliatePayoutRecord {
   createdAt: Timestamp | null;
   recordedByUid: string | null;
   recordedByEmail: string | null;
+  lineItems: AffiliatePayoutLineItem[];
+}
+
+export interface AffiliatePayoutLineItem {
+  commissionId: string;
+  orderId: string;
+  orderLabel: string | null;
+  commissionNet: number;
+  commissionVat: number;
+  commissionGross: number;
+  currency: string;
+  statusApplied: AffiliateCommissionStatus | null;
+}
+
+export type AffiliateCommissionStatus = 'pending' | 'scheduled' | 'paid' | 'cancelled';
+
+export interface AffiliateCommissionDeliverableSummary {
+  projectId: string | null;
+  projectName: string | null;
+  assetIds: string[];
+}
+
+export interface AffiliateCommissionRecord {
+  id: string;
+  affiliateId: string;
+  affiliateName: string | null;
+  affiliateRefCode: string | null;
+  affiliateOwnerUid: string | null;
+  affiliateEmail: string | null;
+  orderId: string;
+  orderLabel: string | null;
+  orderTotalGross: number | null;
+  orderTotalNet: number | null;
+  orderCurrency: string | null;
+  clientId: string | null;
+  clientName: string | null;
+  commissionNet: number;
+  commissionVat: number;
+  commissionGross: number;
+  currency: string;
+  status: AffiliateCommissionStatus;
+  payoutId: string | null;
+  notes: string | null;
+  deliverables: AffiliateCommissionDeliverableSummary[];
+  createdAt: Timestamp | null;
+  updatedAt: Timestamp | null;
+  deliveredAt: Timestamp | null;
+  scheduledAt: Timestamp | null;
+  paidAt: Timestamp | null;
 }
 
 export const AFFILIATE_DEFAULT_COMMISSION_RATE = 0.5;
@@ -334,7 +383,129 @@ export function parseAffiliatePayoutDoc(
     createdAt: parseTimestamp(data.createdAt),
     recordedByUid: stringOrNull(data.recordedByUid),
     recordedByEmail: stringOrNull(data.recordedByEmail),
+    lineItems: Array.isArray(data.lineItems)
+      ? (data.lineItems as Record<string, any>[]).map((item) => ({
+          commissionId: stringOrNull(item.commissionId) ?? '',
+          orderId: stringOrNull(item.orderId) ?? '',
+          orderLabel: stringOrNull(item.orderLabel),
+          commissionNet: numberOrZero(item.commissionNet),
+          commissionVat: numberOrZero(item.commissionVat),
+          commissionGross: numberOrZero(item.commissionGross),
+          currency: stringOrNull(item.currency) ?? 'GBP',
+          statusApplied: normaliseCommissionStatus(item.statusApplied),
+        }))
+      : [],
   };
+}
+
+const normaliseCommissionStatus = (value: unknown): AffiliateCommissionStatus => {
+  if (typeof value !== 'string') {
+    return 'pending';
+  }
+  const normalised = value.trim().toLowerCase();
+  if (normalised === 'scheduled' || normalised === 'pay_scheduled') {
+    return 'scheduled';
+  }
+  if (normalised === 'paid' || normalised === 'complete' || normalised === 'completed') {
+    return 'paid';
+  }
+  if (normalised === 'cancelled' || normalised === 'void') {
+    return 'cancelled';
+  }
+  return 'pending';
+};
+
+export function parseAffiliateCommissionDoc(
+  doc: QueryDocumentSnapshot<DocumentData>
+): AffiliateCommissionRecord {
+  const data = doc.data() as Record<string, any>;
+  const deliverablesRaw = Array.isArray(data.deliverables) ? data.deliverables : [];
+  const deliverables: AffiliateCommissionDeliverableSummary[] = deliverablesRaw
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+      const record = entry as Record<string, any>;
+      return {
+        projectId: stringOrNull(record.projectId),
+        projectName: stringOrNull(record.projectName),
+        assetIds: Array.isArray(record.assetIds)
+          ? record.assetIds.filter((id): id is string => typeof id === 'string')
+          : [],
+      } as AffiliateCommissionDeliverableSummary;
+    })
+    .filter((entry): entry is AffiliateCommissionDeliverableSummary => Boolean(entry));
+
+  return {
+    id: doc.id,
+    affiliateId: stringOrNull(data.affiliateId) ?? '',
+    affiliateName: stringOrNull(data.affiliateName),
+    affiliateRefCode: stringOrNull(data.affiliateRefCode),
+    affiliateOwnerUid: stringOrNull(data.affiliateOwnerUid),
+    affiliateEmail: stringOrNull(data.affiliateEmail),
+    orderId: stringOrNull(data.orderId) ?? doc.id,
+    orderLabel: stringOrNull(data.orderLabel),
+    orderTotalGross: data.orderTotalGross === null ? null : numberOrZero(data.orderTotalGross),
+    orderTotalNet: data.orderTotalNet === null ? null : numberOrZero(data.orderTotalNet),
+    orderCurrency: stringOrNull(data.orderCurrency),
+    clientId: stringOrNull(data.clientId),
+    clientName: stringOrNull(data.clientName),
+    commissionNet: numberOrZero(data.commissionNet),
+    commissionVat: numberOrZero(data.commissionVat),
+    commissionGross: numberOrZero(data.commissionGross),
+    currency: stringOrNull(data.currency) ?? 'GBP',
+    status: normaliseCommissionStatus(data.status),
+    payoutId: stringOrNull(data.payoutId),
+    notes: stringOrNull(data.notes),
+    deliverables,
+    createdAt: parseTimestamp(data.createdAt),
+    updatedAt: parseTimestamp(data.updatedAt),
+    deliveredAt: parseTimestamp(data.deliveredAt),
+    scheduledAt: parseTimestamp(data.scheduledAt),
+    paidAt: parseTimestamp(data.paidAt),
+  };
+}
+
+const escapeCsvValue = (value: string): string => {
+  if (value.includes('"') || value.includes(',') || value.includes('\n')) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+};
+
+export function buildAffiliateCommissionCsv(entries: AffiliateCommissionRecord[]): string {
+  const header = [
+    'Affiliate',
+    'Affiliate code',
+    'Order',
+    'Client',
+    'Net',
+    'VAT',
+    'Gross',
+    'Currency',
+    'Status',
+    'Delivered at',
+    'Payout ID',
+  ];
+  const rows = entries.map((entry) => {
+    const deliveredAt = entry.deliveredAt?.toDate?.();
+    return [
+      entry.affiliateName ?? entry.affiliateId,
+      entry.affiliateRefCode ?? '',
+      entry.orderLabel ?? entry.orderId,
+      entry.clientName ?? '',
+      Number(entry.commissionNet ?? 0).toFixed(2),
+      Number(entry.commissionVat ?? 0).toFixed(2),
+      Number(entry.commissionGross ?? 0).toFixed(2),
+      entry.currency ?? 'GBP',
+      entry.status,
+      deliveredAt ? deliveredAt.toISOString() : '',
+      entry.payoutId ?? '',
+    ];
+  });
+  return [header, ...rows]
+    .map((cols) => cols.map((value) => escapeCsvValue(String(value ?? ''))).join(','))
+    .join('\n');
 }
 
 export function buildAffiliateShareLink(refCode: string, origin?: string | null): string {
