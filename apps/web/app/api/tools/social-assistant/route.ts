@@ -44,6 +44,10 @@ interface GenerationResult {
     hashtags: string[];
   }>;
   transcriptPreview: string;
+  projectName: string | null;
+  deliverableLabel: string | null;
+  deliverableProductId: string | null;
+  deliverableProductName: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -341,6 +345,10 @@ function mapToResult(id: string, _payload: GenerationPayload | {}, data: any): G
         }))
       : [],
     transcriptPreview: typeof data.transcriptPreview === 'string' ? data.transcriptPreview : '',
+    projectName: typeof data.projectName === 'string' ? data.projectName : null,
+    deliverableLabel: typeof data.deliverableLabel === 'string' ? data.deliverableLabel : null,
+    deliverableProductId: typeof data.deliverableProductId === 'string' ? data.deliverableProductId : null,
+    deliverableProductName: typeof data.deliverableProductName === 'string' ? data.deliverableProductName : null,
     createdAt: typeof data.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
     updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : new Date().toISOString(),
   };
@@ -421,6 +429,10 @@ export async function POST(req: NextRequest) {
       youtubeTags,
       socialPosts,
       transcriptPreview: transcriptText,
+      projectName: payload.projectName || null,
+      deliverableLabel: payload.deliverableLabel || null,
+      deliverableProductId: payload.deliverableProductId || null,
+      deliverableProductName: payload.deliverableProductName || null,
       createdAt: timestamp,
       updatedAt: timestamp,
     },

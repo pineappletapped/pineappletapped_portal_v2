@@ -19,6 +19,9 @@ export interface AffiliateMetrics {
   pendingCommissionNet: number;
   pendingCommissionVat: number;
   pendingCommissionGross: number;
+  scheduledCommissionNet: number;
+  scheduledCommissionVat: number;
+  scheduledCommissionGross: number;
   paidCommissionNet: number;
   paidCommissionVat: number;
   paidCommissionGross: number;
@@ -47,6 +50,21 @@ export interface AffiliateRecord {
   notes: string | null;
 }
 
+export type AffiliateApplicationDecisionAction = 'approve' | 'reject' | 'request_info';
+
+export interface AffiliateApplicationReviewEntry {
+  action: AffiliateApplicationDecisionAction;
+  status: string | null;
+  stage: string | null;
+  notes: string | null;
+  reviewerUid: string | null;
+  reviewerName: string | null;
+  reviewerEmail: string | null;
+  decidedAt: Timestamp | null;
+}
+
+export type AffiliateApplicationReviewState = AffiliateApplicationReviewEntry;
+
 export interface AffiliateApplicationRecord {
   id: string;
   fullName: string;
@@ -62,6 +80,8 @@ export interface AffiliateApplicationRecord {
   stage: string | null;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
+  review: AffiliateApplicationReviewState | null;
+  reviewHistory: AffiliateApplicationReviewEntry[];
 }
 
 export interface AffiliatePayoutRecord {
@@ -79,6 +99,71 @@ export interface AffiliatePayoutRecord {
   createdAt: Timestamp | null;
   recordedByUid: string | null;
   recordedByEmail: string | null;
+  lineItems: AffiliatePayoutLineItem[];
+  remittanceStoragePath: string | null;
+  remittanceFileName: string | null;
+  remittanceGeneratedAt: Timestamp | null;
+  remittanceDownloadUrl: string | null;
+}
+
+export interface AffiliatePayoutLineItem {
+  commissionId: string;
+  orderId: string;
+  orderLabel: string | null;
+  commissionNet: number;
+  commissionVat: number;
+  commissionGross: number;
+  currency: string;
+  statusApplied: AffiliateCommissionStatus | null;
+}
+
+export type AffiliateCommissionStatus = 'pending' | 'scheduled' | 'paid' | 'cancelled';
+
+export interface AffiliateCommissionDeliverableSummary {
+  projectId: string | null;
+  projectName: string | null;
+  assetIds: string[];
+}
+
+export interface AffiliateCommissionRecord {
+  id: string;
+  affiliateId: string;
+  affiliateName: string | null;
+  affiliateRefCode: string | null;
+  affiliateOwnerUid: string | null;
+  affiliateEmail: string | null;
+  orderId: string;
+  orderLabel: string | null;
+  orderTotalGross: number | null;
+  orderTotalNet: number | null;
+  orderCurrency: string | null;
+  clientId: string | null;
+  clientName: string | null;
+  commissionNet: number;
+  commissionVat: number;
+  commissionGross: number;
+  currency: string;
+  status: AffiliateCommissionStatus;
+  payoutId: string | null;
+  notes: string | null;
+  deliverables: AffiliateCommissionDeliverableSummary[];
+  createdAt: Timestamp | null;
+  updatedAt: Timestamp | null;
+  deliveredAt: Timestamp | null;
+  scheduledAt: Timestamp | null;
+  paidAt: Timestamp | null;
+}
+
+export interface AffiliateResourceRecord {
+  id: string;
+  title: string;
+  description: string | null;
+  linkUrl: string | null;
+  category: string | null;
+  pinned: boolean;
+  publishedAt: Timestamp | null;
+  updatedAt: Timestamp | null;
+  createdByName: string | null;
 }
 
 export const AFFILIATE_DEFAULT_COMMISSION_RATE = 0.5;
@@ -120,6 +205,80 @@ const normaliseStatus = (value: unknown): AffiliateStatus => {
   return 'pending';
 };
 
+const normaliseReviewAction = (
+  value: unknown,
+): AffiliateApplicationDecisionAction | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalised = value.trim().toLowerCase();
+  if (normalised === 'approve' || normalised === 'approved') {
+    return 'approve';
+  }
+  if (normalised === 'reject' || normalised === 'rejected' || normalised === 'decline' || normalised === 'declined') {
+    return 'reject';
+  }
+  if (
+    normalised === 'request_info' ||
+    normalised === 'request-info' ||
+    normalised === 'info_requested' ||
+    normalised === 'needs_info' ||
+    normalised === 'needs_more_info'
+  ) {
+    return 'request_info';
+  }
+  return null;
+};
+
+const parseReviewEntry = (value: unknown): AffiliateApplicationReviewEntry | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const data = value as Record<string, unknown>;
+  const action =
+    normaliseReviewAction(data.action) ||
+    normaliseReviewAction(data.decision) ||
+    normaliseReviewAction(data.lastAction) ||
+    normaliseReviewAction(data.statusAction);
+  if (!action) {
+    return null;
+  }
+
+  const status = stringOrNull(data.status) ?? stringOrNull(data.lastStatus);
+  const stage = stringOrNull(data.stage) ?? stringOrNull(data.lastStage);
+  const notes = stringOrNull(data.notes) ?? stringOrNull(data.note);
+  const reviewerUid = stringOrNull(data.reviewerUid) ?? stringOrNull(data.reviewedByUid);
+  const reviewerName =
+    stringOrNull(data.reviewerName) ?? stringOrNull(data.reviewerDisplayName) ?? stringOrNull(data.reviewedByName);
+  const reviewerEmail = stringOrNull(data.reviewerEmail) ?? stringOrNull(data.reviewedByEmail);
+  const decidedAt =
+    parseTimestamp(data.decidedAt) ??
+    parseTimestamp((data.timestamp as Timestamp | undefined) ?? null) ??
+    parseTimestamp((data.createdAt as Timestamp | undefined) ?? null);
+
+  return {
+    action,
+    status: status ?? null,
+    stage: stage ?? null,
+    notes: notes ?? null,
+    reviewerUid,
+    reviewerName,
+    reviewerEmail,
+    decidedAt,
+  } satisfies AffiliateApplicationReviewEntry;
+};
+
+const parseReviewState = (value: unknown, history: AffiliateApplicationReviewEntry[]): AffiliateApplicationReviewState | null => {
+  const entry = parseReviewEntry(value);
+  if (entry) {
+    return entry;
+  }
+  if (history.length === 0) {
+    return null;
+  }
+  return history[history.length - 1];
+};
+
 const normaliseCommissionRate = (value: unknown): number => {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
   if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1.5) {
@@ -146,6 +305,9 @@ const extractMetrics = (data: Record<string, any>): AffiliateMetrics => {
     pendingCommissionNet: numberOrZero(metrics.pendingCommissionNet),
     pendingCommissionVat: numberOrZero(metrics.pendingCommissionVat),
     pendingCommissionGross: numberOrZero(metrics.pendingCommissionGross),
+    scheduledCommissionNet: numberOrZero(metrics.scheduledCommissionNet),
+    scheduledCommissionVat: numberOrZero(metrics.scheduledCommissionVat),
+    scheduledCommissionGross: numberOrZero(metrics.scheduledCommissionGross),
     paidCommissionNet: numberOrZero(metrics.paidCommissionNet),
     paidCommissionVat: numberOrZero(metrics.paidCommissionVat),
     paidCommissionGross: numberOrZero(metrics.paidCommissionGross),
@@ -194,6 +356,16 @@ export function parseAffiliateApplicationDoc(
   doc: QueryDocumentSnapshot<DocumentData>
 ): AffiliateApplicationRecord {
   const data = doc.data() as Record<string, any>;
+  const reviewHistoryRaw = Array.isArray(data.reviewHistory) ? data.reviewHistory : [];
+  const reviewHistory = reviewHistoryRaw
+    .map((entry) => parseReviewEntry(entry))
+    .filter((entry): entry is AffiliateApplicationReviewEntry => Boolean(entry))
+    .sort((a, b) => {
+      const aTime = a.decidedAt?.toMillis?.() ?? 0;
+      const bTime = b.decidedAt?.toMillis?.() ?? 0;
+      return aTime - bTime;
+    });
+  const review = parseReviewState(data.review, reviewHistory);
   return {
     id: doc.id,
     fullName: stringOrNull(data.fullName) ?? stringOrNull(data.name) ?? 'Applicant',
@@ -209,6 +381,8 @@ export function parseAffiliateApplicationDoc(
     stage: stringOrNull(data.stage) ?? stringOrNull(data.processStage),
     createdAt: parseTimestamp(data.createdAt),
     updatedAt: parseTimestamp(data.updatedAt),
+    review,
+    reviewHistory,
   };
 }
 
@@ -216,6 +390,11 @@ export function parseAffiliatePayoutDoc(
   doc: QueryDocumentSnapshot<DocumentData>
 ): AffiliatePayoutRecord {
   const data = doc.data() as Record<string, any>;
+  const remittance = (data.remittance ?? {}) as Record<string, any>;
+  const remittancePath =
+    stringOrNull(remittance.storagePath) ??
+    stringOrNull(remittance.path) ??
+    stringOrNull(data.remittancePath);
   return {
     id: doc.id,
     affiliateId: stringOrNull(data.affiliateId) ?? doc.id,
@@ -231,7 +410,137 @@ export function parseAffiliatePayoutDoc(
     createdAt: parseTimestamp(data.createdAt),
     recordedByUid: stringOrNull(data.recordedByUid),
     recordedByEmail: stringOrNull(data.recordedByEmail),
+    lineItems: Array.isArray(data.lineItems)
+      ? (data.lineItems as Record<string, any>[]).map((item) => ({
+          commissionId: stringOrNull(item.commissionId) ?? '',
+          orderId: stringOrNull(item.orderId) ?? '',
+          orderLabel: stringOrNull(item.orderLabel),
+          commissionNet: numberOrZero(item.commissionNet),
+          commissionVat: numberOrZero(item.commissionVat),
+          commissionGross: numberOrZero(item.commissionGross),
+          currency: stringOrNull(item.currency) ?? 'GBP',
+          statusApplied: normaliseCommissionStatus(item.statusApplied),
+        }))
+      : [],
+    remittanceStoragePath: remittancePath,
+    remittanceFileName:
+      stringOrNull(remittance.fileName) ??
+      (remittancePath ? remittancePath.split('/').pop() ?? null : null),
+    remittanceGeneratedAt:
+      parseTimestamp(remittance.generatedAt) ?? parseTimestamp(data.remittanceGeneratedAt),
+    remittanceDownloadUrl:
+      stringOrNull(remittance.downloadUrl) ?? stringOrNull(data.remittanceDownloadUrl),
   };
+}
+
+const normaliseCommissionStatus = (value: unknown): AffiliateCommissionStatus => {
+  if (typeof value !== 'string') {
+    return 'pending';
+  }
+  const normalised = value.trim().toLowerCase();
+  if (normalised === 'scheduled' || normalised === 'pay_scheduled') {
+    return 'scheduled';
+  }
+  if (normalised === 'paid' || normalised === 'complete' || normalised === 'completed') {
+    return 'paid';
+  }
+  if (normalised === 'cancelled' || normalised === 'void') {
+    return 'cancelled';
+  }
+  return 'pending';
+};
+
+export function parseAffiliateCommissionDoc(
+  doc: QueryDocumentSnapshot<DocumentData>
+): AffiliateCommissionRecord {
+  const data = doc.data() as Record<string, any>;
+  const deliverablesRaw = Array.isArray(data.deliverables) ? data.deliverables : [];
+  const deliverables: AffiliateCommissionDeliverableSummary[] = deliverablesRaw
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+      const record = entry as Record<string, any>;
+      return {
+        projectId: stringOrNull(record.projectId),
+        projectName: stringOrNull(record.projectName),
+        assetIds: Array.isArray(record.assetIds)
+          ? record.assetIds.filter((id): id is string => typeof id === 'string')
+          : [],
+      } as AffiliateCommissionDeliverableSummary;
+    })
+    .filter((entry): entry is AffiliateCommissionDeliverableSummary => Boolean(entry));
+
+  return {
+    id: doc.id,
+    affiliateId: stringOrNull(data.affiliateId) ?? '',
+    affiliateName: stringOrNull(data.affiliateName),
+    affiliateRefCode: stringOrNull(data.affiliateRefCode),
+    affiliateOwnerUid: stringOrNull(data.affiliateOwnerUid),
+    affiliateEmail: stringOrNull(data.affiliateEmail),
+    orderId: stringOrNull(data.orderId) ?? doc.id,
+    orderLabel: stringOrNull(data.orderLabel),
+    orderTotalGross: data.orderTotalGross === null ? null : numberOrZero(data.orderTotalGross),
+    orderTotalNet: data.orderTotalNet === null ? null : numberOrZero(data.orderTotalNet),
+    orderCurrency: stringOrNull(data.orderCurrency),
+    clientId: stringOrNull(data.clientId),
+    clientName: stringOrNull(data.clientName),
+    commissionNet: numberOrZero(data.commissionNet),
+    commissionVat: numberOrZero(data.commissionVat),
+    commissionGross: numberOrZero(data.commissionGross),
+    currency: stringOrNull(data.currency) ?? 'GBP',
+    status: normaliseCommissionStatus(data.status),
+    payoutId: stringOrNull(data.payoutId),
+    notes: stringOrNull(data.notes),
+    deliverables,
+    createdAt: parseTimestamp(data.createdAt),
+    updatedAt: parseTimestamp(data.updatedAt),
+    deliveredAt: parseTimestamp(data.deliveredAt),
+    scheduledAt: parseTimestamp(data.scheduledAt),
+    paidAt: parseTimestamp(data.paidAt),
+  };
+}
+
+const escapeCsvValue = (value: string): string => {
+  if (value.includes('"') || value.includes(',') || value.includes('\n')) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+};
+
+export function buildAffiliateCommissionCsv(entries: AffiliateCommissionRecord[]): string {
+  const header = [
+    'Affiliate',
+    'Affiliate code',
+    'Order',
+    'Client',
+    'Net',
+    'VAT',
+    'Gross',
+    'Currency',
+    'Status',
+    'Delivered at',
+    'Payout ID',
+  ];
+  const rows = entries.map((entry) => {
+    const deliveredAt = entry.deliveredAt?.toDate?.();
+    return [
+      entry.affiliateName ?? entry.affiliateId,
+      entry.affiliateRefCode ?? '',
+      entry.orderLabel ?? entry.orderId,
+      entry.clientName ?? '',
+      Number(entry.commissionNet ?? 0).toFixed(2),
+      Number(entry.commissionVat ?? 0).toFixed(2),
+      Number(entry.commissionGross ?? 0).toFixed(2),
+      entry.currency ?? 'GBP',
+      entry.status,
+      deliveredAt ? deliveredAt.toISOString() : '',
+      entry.payoutId ?? '',
+    ];
+  });
+  return [header, ...rows]
+    .map((cols) => cols.map((value) => escapeCsvValue(String(value ?? ''))).join(','))
+    .join('\n');
 }
 
 export function buildAffiliateShareLink(refCode: string, origin?: string | null): string {
@@ -250,6 +559,26 @@ export function buildAffiliateShareLink(refCode: string, origin?: string | null)
   const prefix = base || host || 'https://pineappletapped.com';
   const separator = prefix.includes('?') ? '&' : '?';
   return `${prefix}${separator}affiliate=${encodeURIComponent(safeCode)}`;
+}
+
+export function parseAffiliateResourceDoc(
+  doc: QueryDocumentSnapshot<DocumentData>
+): AffiliateResourceRecord {
+  const data = doc.data() as Record<string, any>;
+  return {
+    id: doc.id,
+    title: stringOrNull(data.title) ?? 'Resource',
+    description: stringOrNull(data.description) ?? stringOrNull(data.summary),
+    linkUrl:
+      stringOrNull(data.url) ??
+      stringOrNull(data.linkUrl) ??
+      stringOrNull(data.ctaUrl),
+    category: stringOrNull(data.category) ?? stringOrNull(data.topic),
+    pinned: Boolean(data.pinned === true || data.isPinned === true),
+    publishedAt: parseTimestamp(data.publishedAt) ?? parseTimestamp(data.createdAt),
+    updatedAt: parseTimestamp(data.updatedAt),
+    createdByName: stringOrNull(data.createdByName) ?? stringOrNull(data.authorName),
+  };
 }
 
 export function formatCurrencyGBP(amount: number): string {

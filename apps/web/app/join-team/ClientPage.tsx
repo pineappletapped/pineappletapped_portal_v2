@@ -1,6 +1,6 @@
 "use client";
 import Image from 'next/image';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { db } from '@/lib/firebase';
 import {
   collection,
@@ -59,8 +59,66 @@ const haversineDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: num
   return Number.isFinite(distance) ? distance : Number.NaN;
 };
 
+interface MarketerFormState {
+  fullName: string;
+  email: string;
+  phone: string;
+  preferredChannel: string;
+  company: string;
+  vatNumber: string;
+  address: string;
+  website: string;
+  socialProfiles: string;
+  niches: string;
+  audienceSize: string;
+  experience: string;
+  notes: string;
+  bankAccountName: string;
+  bankName: string;
+  sortCode: string;
+  accountNumber: string;
+  proofUrl: string;
+}
+
+type VatStatus = 'registered' | 'not_registered' | 'unsure';
+
+interface MarketerConsentState {
+  gdpr: boolean;
+  terms: boolean;
+  marketing: boolean;
+  vatStatus: VatStatus;
+}
+
+const initialMarketerForm: MarketerFormState = {
+  fullName: '',
+  email: '',
+  phone: '',
+  preferredChannel: 'email',
+  company: '',
+  vatNumber: '',
+  address: '',
+  website: '',
+  socialProfiles: '',
+  niches: '',
+  audienceSize: '',
+  experience: '',
+  notes: '',
+  bankAccountName: '',
+  bankName: '',
+  sortCode: '',
+  accountNumber: '',
+  proofUrl: '',
+};
+
+const initialMarketerConsent: MarketerConsentState = {
+  gdpr: false,
+  terms: false,
+  marketing: false,
+  vatStatus: 'unsure',
+};
+
 export default function JoinTeamPage() {
-  const [activeTab, setActiveTab] = useState<'team' | 'franchise'>('team');
+  const [activeTab, setActiveTab] = useState<'team' | 'franchise' | 'marketer'>('team');
   const [teamSteps, setTeamSteps] = useState<Step[]>([]);
   const [franchiseSteps, setFranchiseSteps] = useState<Step[]>([]);
   const [teamCurrent, setTeamCurrent] = useState(0);
@@ -97,6 +155,11 @@ export default function JoinTeamPage() {
   >(null);
   const [territorySuggestions, setTerritorySuggestions] = useState<Array<{ id: string; distanceKm: number | null }>>([]);
   const postalCodeLocationCache = useRef(new Map<string, { lat: number; lng: number; resolved?: string }>());
+  const [marketerForm, setMarketerForm] = useState<MarketerFormState>(initialMarketerForm);
+  const [marketerConsent, setMarketerConsent] = useState<MarketerConsentState>(initialMarketerConsent);
+  const [marketerSubmitting, setMarketerSubmitting] = useState(false);
+  const [marketerSent, setMarketerSent] = useState(false);
+  const [marketerError, setMarketerError] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -228,6 +291,11 @@ export default function JoinTeamPage() {
         id: 'franchise' as const,
         label: 'Apply for Franchise',
         description: 'Begin the franchise discovery process and complete the onboarding checklist.'
+      },
+      {
+        id: 'marketer' as const,
+        label: 'Affiliate Marketer',
+        description: 'Earn 50% of HQ commission by referring new Pineapple Tapped clients.'
       }
     ],
     []
@@ -437,12 +505,15 @@ export default function JoinTeamPage() {
     territoryOptions,
   ]);
 
-  const resetAgreementForTab = (tab: 'team' | 'franchise') => {
+  const resetAgreementForTab = (tab: 'team' | 'franchise' | 'marketer') => {
     if (tab === 'team') {
       setTeamAgree(false);
-    } else {
+    } else if (tab === 'franchise') {
       setFranchiseAgree(false);
       setFranchiseValidationError(null);
+    }
+    if (tab === 'marketer') {
+      setMarketerError(null);
     }
   };
 
@@ -657,7 +728,348 @@ export default function JoinTeamPage() {
     });
   };
 
+  const handleMarketerSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (marketerSubmitting) return;
+
+    const trimmedName = marketerForm.fullName.trim();
+    const trimmedEmail = marketerForm.email.trim().toLowerCase();
+    if (!trimmedName) {
+      setMarketerError('Please provide your full name.');
+      return;
+    }
+    if (!trimmedEmail) {
+      setMarketerError('Please provide an email address so we can respond.');
+      return;
+    }
+    if (!marketerConsent.gdpr || !marketerConsent.terms) {
+      setMarketerError('Please confirm consent to GDPR processing and the affiliate agreement.');
+      return;
+    }
+
+    setMarketerSubmitting(true);
+    setMarketerError(null);
+    try {
+      await addDoc(collection(db, 'affiliateApplications'), {
+        fullName: trimmedName,
+        email: trimmedEmail,
+        phone: marketerForm.phone.trim() || null,
+        preferredChannel: marketerForm.preferredChannel,
+        company: marketerForm.company.trim() || null,
+        vatNumber: marketerForm.vatNumber.trim() || null,
+        postalAddress: marketerForm.address.trim() || null,
+        website: marketerForm.website.trim() || null,
+        socialProfiles: marketerForm.socialProfiles.trim() || null,
+        niches: marketerForm.niches.trim() || null,
+        audienceSize: marketerForm.audienceSize.trim() || null,
+        experience: marketerForm.experience.trim() || null,
+        notes: marketerForm.notes.trim() || null,
+        proofUrl: marketerForm.proofUrl.trim() || null,
+        payoutDetails: {
+          accountName: marketerForm.bankAccountName.trim() || null,
+          bankName: marketerForm.bankName.trim() || null,
+          sortCode: marketerForm.sortCode.trim() || null,
+          accountNumber: marketerForm.accountNumber.trim() || null,
+        },
+        compliance: {
+          gdprConsent: marketerConsent.gdpr,
+          agreementAccepted: marketerConsent.terms,
+          marketingConsent: marketerConsent.marketing,
+          vatStatus: marketerConsent.vatStatus,
+        },
+        locale: 'uk',
+        programme: 'affiliate',
+        status: 'pending_review',
+        stage: 'submitted',
+        source: 'join-team-marketer',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      setMarketerSent(true);
+      setMarketerForm(initialMarketerForm);
+      setMarketerConsent(initialMarketerConsent);
+    } catch (error) {
+      console.error('Failed to submit affiliate application', error);
+      setMarketerError('We were unable to submit your details. Please try again.');
+    } finally {
+      setMarketerSubmitting(false);
+    }
+  };
+
+  const renderMarketerContent = () => {
+    if (marketerSent) {
+      return (
+        <div className="grid gap-2">
+          <p className="font-semibold">Thanks for applying to join the affiliate programme!</p>
+          <p className="text-sm text-gray-600">
+            Our marketing operations team will review your application within five business days. We&apos;ll reach out via your
+            preferred contact channel with next steps and your personalised referral toolkit.
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <form className="grid gap-4" onSubmit={handleMarketerSubmit}>
+        <section className="card grid gap-3 p-4">
+          <header className="grid gap-1">
+            <h2 className="text-lg font-semibold">Tell us about you</h2>
+            <p className="text-sm text-gray-600">
+              We partner with UK-based social media managers and marketers. Share your details so we can tailor the onboarding.
+            </p>
+          </header>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input
+              className="input"
+              value={marketerForm.fullName}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, fullName: event.target.value }))}
+              placeholder="Full name *"
+              autoComplete="name"
+              required
+            />
+            <input
+              className="input"
+              value={marketerForm.email}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, email: event.target.value }))}
+              placeholder="Email *"
+              autoComplete="email"
+              type="email"
+              required
+            />
+            <input
+              className="input"
+              value={marketerForm.phone}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, phone: event.target.value }))}
+              placeholder="Phone"
+              autoComplete="tel"
+            />
+            <div className="grid gap-1">
+              <label className="text-xs font-semibold uppercase tracking-wide text-gray-600">Preferred contact</label>
+              <select
+                className="input"
+                value={marketerForm.preferredChannel}
+                onChange={(event) => setMarketerForm((prev) => ({ ...prev, preferredChannel: event.target.value }))}
+              >
+                <option value="email">Email</option>
+                <option value="phone">Phone</option>
+                <option value="whatsapp">WhatsApp</option>
+                <option value="sms">SMS</option>
+              </select>
+            </div>
+          </div>
+          <textarea
+            className="input"
+            value={marketerForm.experience}
+            onChange={(event) => setMarketerForm((prev) => ({ ...prev, experience: event.target.value }))}
+            placeholder="Tell us about your marketing experience and niche focus *"
+            rows={4}
+            required
+          />
+        </section>
+
+        <section className="card grid gap-3 p-4">
+          <header className="grid gap-1">
+            <h2 className="text-lg font-semibold">Business profile</h2>
+            <p className="text-sm text-gray-600">
+              Provide optional business and audience context so we can match you with the right campaigns.
+            </p>
+          </header>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input
+              className="input"
+              value={marketerForm.company}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, company: event.target.value }))}
+              placeholder="Business or trading name"
+              autoComplete="organization"
+            />
+            <input
+              className="input"
+              value={marketerForm.vatNumber}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, vatNumber: event.target.value }))}
+              placeholder="VAT number (if registered)"
+            />
+            <input
+              className="input"
+              value={marketerForm.website}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, website: event.target.value }))}
+              placeholder="Website"
+              autoComplete="url"
+            />
+            <input
+              className="input"
+              value={marketerForm.socialProfiles}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, socialProfiles: event.target.value }))}
+              placeholder="Key social profiles"
+            />
+          </div>
+          <textarea
+            className="input"
+            value={marketerForm.address}
+            onChange={(event) => setMarketerForm((prev) => ({ ...prev, address: event.target.value }))}
+            placeholder="Business address"
+            rows={3}
+          />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input
+              className="input"
+              value={marketerForm.niches}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, niches: event.target.value }))}
+              placeholder="Primary niches or industries"
+            />
+            <input
+              className="input"
+              value={marketerForm.audienceSize}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, audienceSize: event.target.value }))}
+              placeholder="Audience size or reach"
+            />
+          </div>
+        </section>
+
+        <section className="card grid gap-3 p-4">
+          <header className="grid gap-1">
+            <h2 className="text-lg font-semibold">Payout details</h2>
+            <p className="text-sm text-gray-600">
+              We run manual payouts monthly for balances over £50 once orders are delivered. Share where to send your remittance.
+            </p>
+          </header>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input
+              className="input"
+              value={marketerForm.bankAccountName}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, bankAccountName: event.target.value }))}
+              placeholder="Account holder name"
+            />
+            <input
+              className="input"
+              value={marketerForm.bankName}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, bankName: event.target.value }))}
+              placeholder="Bank name"
+            />
+            <input
+              className="input"
+              value={marketerForm.sortCode}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, sortCode: event.target.value }))}
+              placeholder="Sort code"
+              inputMode="numeric"
+            />
+            <input
+              className="input"
+              value={marketerForm.accountNumber}
+              onChange={(event) => setMarketerForm((prev) => ({ ...prev, accountNumber: event.target.value }))}
+              placeholder="Account number"
+              inputMode="numeric"
+            />
+          </div>
+          <input
+            className="input"
+            value={marketerForm.proofUrl}
+            onChange={(event) => setMarketerForm((prev) => ({ ...prev, proofUrl: event.target.value }))}
+            placeholder="Link to proof of identity/business registration (optional)"
+            autoComplete="url"
+          />
+        </section>
+
+        <section className="card grid gap-3 p-4">
+          <header className="grid gap-1">
+            <h2 className="text-lg font-semibold">Compliance & consent</h2>
+            <p className="text-sm text-gray-600">
+              We need a few confirmations before we can activate your affiliate dashboard.
+            </p>
+          </header>
+          <div className="grid gap-2">
+            <label className="flex items-start gap-3 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-1 h-4 w-4"
+                checked={marketerConsent.gdpr}
+                onChange={(event) => setMarketerConsent((prev) => ({ ...prev, gdpr: event.target.checked }))}
+                required
+              />
+              <span>
+                I consent to Pineapple Tapped storing my details to run the affiliate programme in line with GDPR.
+              </span>
+            </label>
+            <label className="flex items-start gap-3 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-1 h-4 w-4"
+                checked={marketerConsent.terms}
+                onChange={(event) => setMarketerConsent((prev) => ({ ...prev, terms: event.target.checked }))}
+                required
+              />
+              <span>
+                I agree to the affiliate agreement and understand commissions are paid on net HQ commission with a £50 threshold.
+              </span>
+            </label>
+            <label className="flex items-start gap-3 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                className="mt-1 h-4 w-4"
+                checked={marketerConsent.marketing}
+                onChange={(event) => setMarketerConsent((prev) => ({ ...prev, marketing: event.target.checked }))}
+              />
+              <span>
+                Keep me posted on new campaigns, creative assets, and programme updates by email.
+              </span>
+            </label>
+            <div className="grid gap-1">
+              <span className="text-xs font-semibold uppercase tracking-wide text-gray-600">
+                VAT registration status
+              </span>
+              <div className="grid gap-2 sm:grid-cols-3">
+                {[{ value: 'registered', label: 'Registered' }, { value: 'not_registered', label: 'Not registered' }, { value: 'unsure', label: 'Unsure' }].map((option) => (
+                  <label key={option.value} className="flex items-center gap-2 rounded border border-neutral-200 p-2 text-sm text-gray-700">
+                    <input
+                      type="radio"
+                      name="vat-status"
+                      value={option.value}
+                      checked={marketerConsent.vatStatus === option.value}
+                      onChange={(event) => setMarketerConsent((prev) => ({ ...prev, vatStatus: event.target.value as VatStatus }))}
+                    />
+                    {option.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="card grid gap-3 p-4">
+          <header className="grid gap-1">
+            <h2 className="text-lg font-semibold">Anything else?</h2>
+            <p className="text-sm text-gray-600">
+              Share links to standout campaigns or notes you want the review team to consider.
+            </p>
+          </header>
+          <textarea
+            className="input"
+            value={marketerForm.notes}
+            onChange={(event) => setMarketerForm((prev) => ({ ...prev, notes: event.target.value }))}
+            placeholder="Notes, campaign highlights, or expectations"
+            rows={4}
+          />
+        </section>
+
+        {marketerError ? <p className="text-sm text-red-600">{marketerError}</p> : null}
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <button type="submit" className="btn" disabled={marketerSubmitting}>
+            {marketerSubmitting ? 'Submitting…' : 'Apply as affiliate'}
+          </button>
+          <p className="text-xs text-gray-500">
+            We review applications within five business days and pay monthly once your balance reaches £50.
+          </p>
+        </div>
+      </form>
+    );
+  };
+
   const renderContent = () => {
+    if (activeTab === 'marketer') {
+      return renderMarketerContent();
+    }
+
     if (activeTab === 'team') {
       if (teamSent) {
         return <p>Thank you for your application. We&apos;ll be in touch!</p>;

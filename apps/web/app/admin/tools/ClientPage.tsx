@@ -1,11 +1,35 @@
 "use client";
 
+import { useMemo, useState } from "react";
+
 import PortalContainer from "@/components/PortalContainer";
 import ContentAssistantWorkspace from "@/components/admin/tools/ContentAssistantWorkspace";
+import SocialSchedulerWorkspace from "@/components/admin/tools/SocialSchedulerWorkspace";
 import { useRoleGate } from "@/hooks/useRoleGate";
 
+const TOOL_OPTIONS = [
+  {
+    id: "copy",
+    label: "Campaign copy assistant",
+    description:
+      "Transform transcripts into ready-to-post copy packs, link deliverables, and push approved kits straight to client portals.",
+  },
+  {
+    id: "scheduler",
+    label: "Social scheduler (pilot)",
+    description:
+      "Connect client channels, capture publishing approvals, and export campaign calendars while the automation workers roll out.",
+  },
+];
+
 export default function AdminToolsClientPage() {
-  const { allowed, loading } = useRoleGate(["admin", "marketing", "projects"]);
+  const { allowed, loading, roles } = useRoleGate(["admin", "marketing", "projects"]);
+  const [activeTool, setActiveTool] = useState<string>("copy");
+
+  const activeDescription = useMemo(() => {
+    const current = TOOL_OPTIONS.find((tool) => tool.id === activeTool);
+    return current?.description ?? "";
+  }, [activeTool]);
 
   if (loading) {
     return (
@@ -30,7 +54,34 @@ export default function AdminToolsClientPage() {
 
   return (
     <PortalContainer>
-      <ContentAssistantWorkspace />
+      <div className="grid gap-4">
+        <header className="space-y-2">
+          <h1 className="text-2xl font-semibold text-gray-900">Production tools</h1>
+          <p className="text-sm text-gray-600">{activeDescription}</p>
+          <div className="flex flex-wrap gap-2">
+            {TOOL_OPTIONS.map((tool) => (
+              <button
+                key={tool.id}
+                type="button"
+                onClick={() => setActiveTool(tool.id)}
+                className={`rounded-full px-3 py-1 text-sm font-medium transition ${
+                  activeTool === tool.id
+                    ? "bg-orange text-white shadow"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+              >
+                {tool.label}
+              </button>
+            ))}
+          </div>
+        </header>
+
+        {activeTool === "copy" ? (
+          <ContentAssistantWorkspace />
+        ) : (
+          <SocialSchedulerWorkspace allowFlagEditing={Boolean(roles?.admin)} roles={roles ?? null} emphasisePilotNote />
+        )}
+      </div>
     </PortalContainer>
   );
 }

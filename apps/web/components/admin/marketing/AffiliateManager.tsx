@@ -13,6 +13,7 @@ import {
   serverTimestamp,
   updateDoc,
   increment,
+  writeBatch,
 } from "firebase/firestore";
 
 import { ensureFirebase } from "@/lib/firebase";
@@ -21,16 +22,30 @@ import {
   AFFILIATE_DEFAULT_COMMISSION_RATE,
   AFFILIATE_MIN_WITHDRAWAL_NET,
   AffiliateApplicationRecord,
+  AffiliateApplicationDecisionAction,
+  AffiliateApplicationReviewEntry,
   AffiliateRecord,
   AffiliateStatus,
   AffiliatePayoutRecord,
+  AffiliateCommissionRecord,
+  AffiliateCommissionStatus,
+  buildAffiliateCommissionCsv,
   buildAffiliateShareLink,
   describeCommissionRate,
   formatCurrencyGBP,
   parseAffiliateApplicationDoc,
   parseAffiliateDoc,
   parseAffiliatePayoutDoc,
+  parseAffiliateCommissionDoc,
 } from "@/lib/affiliates";
+
+type ApplicationFilterKey = "all" | "pending" | "approved" | "rejected" | "info";
+
+interface ApplicationStatusDescriptor {
+  category: Exclude<ApplicationFilterKey, "all">;
+  label: string;
+  badgeClass: string;
+}
 
 interface AffiliateFormState {
   name: string;
@@ -55,6 +70,15 @@ interface PayoutFormState {
   periodStart: string;
   periodEnd: string;
   notes: string;
+  selectedCommissionIds: string[];
+  status: AffiliateCommissionStatus;
+}
+
+interface PayoutModalOptions {
+  statuses?: AffiliateCommissionStatus[];
+  preselectIds?: string[];
+  initialStatus?: AffiliateCommissionStatus;
+  payoutId?: string;
 }
 
 const STATUS_OPTIONS: { value: AffiliateStatus; label: string }[] = [
@@ -88,6 +112,22 @@ function toDateInput(timestamp: Timestamp | null): string {
   }
 }
 
+function sumCommissionTotals(entries: AffiliateCommissionRecord[]): {
+  net: number;
+  vat: number;
+  gross: number;
+} {
+  return entries.reduce(
+    (acc, entry) => {
+      acc.net += roundCurrency(entry.commissionNet);
+      acc.vat += roundCurrency(entry.commissionVat);
+      acc.gross += roundCurrency(entry.commissionGross);
+      return acc;
+    },
+    { net: 0, vat: 0, gross: 0 }
+  );
+}
+
 export default function AffiliateManager() {
   const { allowed, loading: guardLoading } = useRoleGate(["marketing", "sales", "admin"]);
   const [loading, setLoading] = useState(true);
@@ -95,6 +135,7 @@ export default function AffiliateManager() {
   const [affiliates, setAffiliates] = useState<AffiliateRecord[]>([]);
   const [applications, setApplications] = useState<AffiliateApplicationRecord[]>([]);
   const [payouts, setPayouts] = useState<AffiliatePayoutRecord[]>([]);
+  const [commissions, setCommissions] = useState<AffiliateCommissionRecord[]>([]);
   const [newAffiliate, setNewAffiliate] = useState<AffiliateFormState>(() => ({
     name: "",
     email: "",
@@ -115,8 +156,65 @@ export default function AffiliateManager() {
   const [editingForm, setEditingForm] = useState<AffiliateFormState | null>(null);
   const [payoutTarget, setPayoutTarget] = useState<AffiliateRecord | null>(null);
   const [payoutForm, setPayoutForm] = useState<PayoutFormState | null>(null);
+  const [payoutCandidateStatuses, setPayoutCandidateStatuses] = useState<
+    AffiliateCommissionStatus[]
+  >(["pending"]);
+  const [payoutCandidatePayoutId, setPayoutCandidatePayoutId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<AffiliateApplicationRecord | null>(null);
+  const [reviewAction, setReviewAction] = useState<AffiliateApplicationDecisionAction>("approve");
+  const [reviewNotes, setReviewNotes] = useState("");
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewFeedback, setReviewFeedback] = useState<string | null>(null);
+  const [applicationFilter, setApplicationFilter] = useState<ApplicationFilterKey>("pending");
+  const [commissionFilter, setCommissionFilter] = useState<
+    "all" | AffiliateCommissionStatus
+  >("pending");
+  const [exportingLedger, setExportingLedger] = useState(false);
+  const [ledgerError, setLedgerError] = useState<string | null>(null);
+
+  const applicationFilterOptions: Array<{ key: ApplicationFilterKey; label: string }> = [
+    { key: "all", label: "All" },
+    { key: "pending", label: "Pending" },
+    { key: "info", label: "Needs info" },
+    { key: "approved", label: "Approved" },
+    { key: "rejected", label: "Rejected" },
+  ];
+
+  useEffect(() => {
+    if (!reviewFeedback) {
+      return;
+    }
+    const timeout = window.setTimeout(() => setReviewFeedback(null), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [reviewFeedback]);
+
+  useEffect(() => {
+    if (!reviewTarget) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setReviewTarget(null);
+        setReviewNotes("");
+        setReviewError(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    let originalOverflow: string | undefined;
+    if (typeof document !== "undefined") {
+      originalOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    }
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      if (typeof document !== "undefined") {
+        document.body.style.overflow = originalOverflow ?? "";
+      }
+    };
+  }, [reviewTarget]);
 
   useEffect(() => {
     if (guardLoading || !allowed) {
@@ -126,6 +224,7 @@ export default function AffiliateManager() {
     let unsubscribeAffiliates: (() => void) | undefined;
     let unsubscribeApplications: (() => void) | undefined;
     let unsubscribePayouts: (() => void) | undefined;
+    let unsubscribeCommissions: (() => void) | undefined;
 
     (async () => {
       try {
@@ -169,6 +268,17 @@ export default function AffiliateManager() {
             console.error("Failed to load affiliate payouts", err);
           }
         );
+
+        unsubscribeCommissions = onSnapshot(
+          query(collection(db, "affiliateCommissions"), orderBy("createdAt", "desc"), limit(200)),
+          (snapshot) => {
+            const list = snapshot.docs.map((docSnap) => parseAffiliateCommissionDoc(docSnap));
+            setCommissions(list);
+          },
+          (err) => {
+            console.error("Failed to load affiliate commission ledger", err);
+          }
+        );
       } catch (err) {
         console.error("Failed to initialise affiliate manager", err);
         setError("Unable to connect to Firestore.");
@@ -180,8 +290,49 @@ export default function AffiliateManager() {
       unsubscribeAffiliates?.();
       unsubscribeApplications?.();
       unsubscribePayouts?.();
+      unsubscribeCommissions?.();
     };
   }, [allowed, guardLoading]);
+
+  const resolveApplicationStatus = (
+    application: AffiliateApplicationRecord
+  ): ApplicationStatusDescriptor => {
+    const statusRaw = application.status?.toLowerCase?.() ?? "";
+    const stageRaw = application.stage?.toLowerCase?.() ?? "";
+    if (statusRaw === "approved") {
+      return {
+        category: "approved" as const,
+        label: "Approved",
+        badgeClass: "bg-emerald-100 text-emerald-700",
+      };
+    }
+    if (statusRaw === "rejected") {
+      return {
+        category: "rejected" as const,
+        label: "Rejected",
+        badgeClass: "bg-rose-100 text-rose-700",
+      };
+    }
+    if (statusRaw === "info_requested" || stageRaw === "info_requested" || stageRaw === "needs_info") {
+      return {
+        category: "info" as const,
+        label: "Info requested",
+        badgeClass: "bg-amber-100 text-amber-700",
+      };
+    }
+    if (stageRaw === "under_review") {
+      return {
+        category: "pending" as const,
+        label: "Under review",
+        badgeClass: "bg-sky-100 text-sky-700",
+      };
+    }
+    return {
+      category: "pending",
+      label: "Pending review",
+      badgeClass: "bg-sky-100 text-sky-700",
+    };
+  };
 
   const sortedAffiliates = useMemo(
     () =>
@@ -192,6 +343,159 @@ export default function AffiliateManager() {
       }),
     [affiliates]
   );
+
+  const pendingCommissionTotals = useMemo(() => {
+    const map = new Map<string, { net: number; vat: number; gross: number }>();
+    commissions.forEach((entry) => {
+      if (entry.status !== "pending") {
+        return;
+      }
+      const existing = map.get(entry.affiliateId) ?? { net: 0, vat: 0, gross: 0 };
+      existing.net += roundCurrency(entry.commissionNet);
+      existing.vat += roundCurrency(entry.commissionVat);
+      existing.gross += roundCurrency(entry.commissionGross);
+      map.set(entry.affiliateId, existing);
+    });
+    return map;
+  }, [commissions]);
+
+  const scheduledCommissionTotals = useMemo(() => {
+    const map = new Map<string, { net: number; vat: number; gross: number }>();
+    commissions.forEach((entry) => {
+      if (entry.status !== "scheduled") {
+        return;
+      }
+      const existing = map.get(entry.affiliateId) ?? { net: 0, vat: 0, gross: 0 };
+      existing.net += roundCurrency(entry.commissionNet);
+      existing.vat += roundCurrency(entry.commissionVat);
+      existing.gross += roundCurrency(entry.commissionGross);
+      map.set(entry.affiliateId, existing);
+    });
+    return map;
+  }, [commissions]);
+
+  const commissionFilterOptions: Array<{ key: "all" | AffiliateCommissionStatus; label: string }> = [
+    { key: "all", label: "All" },
+    { key: "pending", label: "Pending" },
+    { key: "scheduled", label: "Scheduled" },
+    { key: "paid", label: "Paid" },
+    { key: "cancelled", label: "Cancelled" },
+  ];
+
+  const filteredCommissions = useMemo(() => {
+    if (commissionFilter === "all") {
+      return commissions;
+    }
+    return commissions.filter((entry) => entry.status === commissionFilter);
+  }, [commissions, commissionFilter]);
+
+  const commissionCounts = useMemo(() => {
+    const counts: Record<"all" | AffiliateCommissionStatus, number> = {
+      all: commissions.length,
+      pending: 0,
+      scheduled: 0,
+      paid: 0,
+      cancelled: 0,
+    };
+    commissions.forEach((entry) => {
+      counts[entry.status] += 1;
+    });
+    return counts;
+  }, [commissions]);
+
+  const payoutSelectionEntries = useMemo(() => {
+    if (!payoutForm) {
+      return [] as AffiliateCommissionRecord[];
+    }
+    return payoutForm.selectedCommissionIds
+      .map((id) => commissions.find((entry) => entry.id === id) || null)
+      .filter((entry): entry is AffiliateCommissionRecord => Boolean(entry));
+  }, [commissions, payoutForm]);
+
+  const payoutCandidateEntries = useMemo(() => {
+    if (!payoutTarget) {
+      return [] as AffiliateCommissionRecord[];
+    }
+    return commissions.filter(
+      (entry) =>
+        entry.affiliateId === payoutTarget.id &&
+        payoutCandidateStatuses.includes(entry.status as AffiliateCommissionStatus)
+        && (!payoutCandidatePayoutId || entry.payoutId === payoutCandidatePayoutId)
+    );
+  }, [
+    commissions,
+    payoutCandidatePayoutId,
+    payoutCandidateStatuses,
+    payoutTarget,
+  ]);
+
+  const payoutCandidateStatusLabel = useMemo(() => {
+    if (payoutCandidateStatuses.length === 0) {
+      return "selected";
+    }
+    const labels = payoutCandidateStatuses.map(
+      (status) => status.charAt(0).toUpperCase() + status.slice(1)
+    );
+    if (labels.length === 1) {
+      return labels[0];
+    }
+    if (labels.length === 2) {
+      return `${labels[0]} or ${labels[1]}`;
+    }
+    return `${labels.slice(0, -1).join(", ")} or ${labels[labels.length - 1]}`;
+  }, [payoutCandidateStatuses]);
+
+  const payoutCandidateStatusSummary = useMemo(() => {
+    if (payoutCandidateStatusLabel === "selected") {
+      if (payoutCandidatePayoutId) {
+        return `Showing commissions from payout ${payoutCandidatePayoutId.slice(0, 8)}`;
+      }
+      return null;
+    }
+    const base = `Showing ${payoutCandidateStatusLabel.toLowerCase()} commissions`;
+    if (payoutCandidatePayoutId) {
+      return `${base} from payout ${payoutCandidatePayoutId.slice(0, 8)}`;
+    }
+    return base;
+  }, [payoutCandidatePayoutId, payoutCandidateStatusLabel]);
+
+  const payoutCandidateEmptyMessage = useMemo(() => {
+    const payoutContext = payoutCandidatePayoutId
+      ? ` from payout ${payoutCandidatePayoutId.slice(0, 8)}`
+      : "";
+    if (payoutCandidateStatusLabel === "selected") {
+      return `No commission entries${payoutContext} are ready for payout yet.`;
+    }
+    return `No ${payoutCandidateStatusLabel.toLowerCase()} commission entries${payoutContext} are ready for payout yet.`;
+  }, [payoutCandidatePayoutId, payoutCandidateStatusLabel]);
+
+  const applicationCounts = useMemo<Record<ApplicationFilterKey, number>>(() => {
+    const counts: Record<ApplicationFilterKey, number> = {
+      all: applications.length,
+      pending: 0,
+      approved: 0,
+      rejected: 0,
+      info: 0,
+    };
+    applications.forEach((application) => {
+      const descriptor = resolveApplicationStatus(application);
+      counts[descriptor.category] += 1;
+    });
+    return counts;
+  }, [applications]);
+
+  const filteredApplications = useMemo(() => {
+    if (applicationFilter === "all") {
+      return applications;
+    }
+    return applications.filter((application) => {
+      const descriptor = resolveApplicationStatus(application);
+      if (applicationFilter === "pending") {
+        return descriptor.category === "pending";
+      }
+      return descriptor.category === applicationFilter;
+    });
+  }, [applicationFilter, applications]);
 
   const resetNewAffiliateForm = (prefill?: Partial<AffiliateFormState>) => {
     setNewAffiliate({
@@ -254,6 +558,9 @@ export default function AffiliateManager() {
           pendingCommissionNet: 0,
           pendingCommissionVat: 0,
           pendingCommissionGross: 0,
+          scheduledCommissionNet: 0,
+          scheduledCommissionVat: 0,
+          scheduledCommissionGross: 0,
           paidCommissionNet: 0,
           paidCommissionVat: 0,
           paidCommissionGross: 0,
@@ -332,19 +639,55 @@ export default function AffiliateManager() {
     }
   };
 
-  const openPayoutModal = (record: AffiliateRecord) => {
-    const net = roundCurrency(record.metrics.pendingCommissionNet);
-    const vat = roundCurrency(record.metrics.pendingCommissionVat);
-    const gross = roundCurrency(record.metrics.pendingCommissionGross || net + vat);
+  const openPayoutModal = (record: AffiliateRecord, options?: PayoutModalOptions) => {
+    const statuses = options?.statuses?.length
+      ? (Array.from(new Set(options.statuses)) as AffiliateCommissionStatus[])
+      : (["pending"] as AffiliateCommissionStatus[]);
+    const existingPayoutRecord = options?.payoutId
+      ? payouts.find((payout) => payout.id === options.payoutId) ?? null
+      : null;
+    const eligibleEntries = commissions.filter(
+      (entry) =>
+        entry.affiliateId === record.id &&
+        statuses.includes(entry.status as AffiliateCommissionStatus) &&
+        (!options?.payoutId || entry.payoutId === options.payoutId)
+    );
+    const defaultSelectedIds = options?.preselectIds?.length
+      ? eligibleEntries
+          .filter((entry) => options.preselectIds?.includes(entry.id))
+          .map((entry) => entry.id)
+      : eligibleEntries.map((entry) => entry.id);
+    const selectedEntries = eligibleEntries.filter((entry) =>
+      defaultSelectedIds.includes(entry.id)
+    );
+    const totals = sumCommissionTotals(selectedEntries);
+    setPayoutCandidateStatuses(statuses);
+    setPayoutCandidatePayoutId(options?.payoutId ?? null);
     setPayoutTarget(record);
     setPayoutForm({
-      amountNet: net ? net.toFixed(2) : "",
-      amountVat: vat ? vat.toFixed(2) : "",
-      amountGross: gross ? gross.toFixed(2) : "",
-      periodStart: "",
-      periodEnd: "",
-      notes: "",
+      amountNet: totals.net ? totals.net.toFixed(2) : "",
+      amountVat: totals.vat ? totals.vat.toFixed(2) : "",
+      amountGross: totals.gross ? totals.gross.toFixed(2) : "",
+      periodStart: existingPayoutRecord?.periodStart
+        ? toDateInput(existingPayoutRecord.periodStart)
+        : "",
+      periodEnd: existingPayoutRecord?.periodEnd
+        ? toDateInput(existingPayoutRecord.periodEnd)
+        : "",
+      notes: existingPayoutRecord?.notes ?? "",
+      selectedCommissionIds: defaultSelectedIds,
+      status:
+        options?.initialStatus ??
+        (statuses.length === 1 && statuses[0] === "scheduled" ? "paid" : "paid"),
     });
+    setActionError(null);
+  };
+
+  const resetPayoutModalState = () => {
+    setPayoutTarget(null);
+    setPayoutForm(null);
+    setPayoutCandidateStatuses(["pending"]);
+    setPayoutCandidatePayoutId(null);
     setActionError(null);
   };
 
@@ -357,20 +700,68 @@ export default function AffiliateManager() {
       const { db } = await ensureFirebase();
       if (!db) throw new Error("Firestore is unavailable.");
 
-      const net = roundCurrency(Number(payoutForm.amountNet));
-      const vat = roundCurrency(Number(payoutForm.amountVat));
-      const grossInput = payoutForm.amountGross ? Number(payoutForm.amountGross) : net + vat;
-      const gross = roundCurrency(grossInput);
-      if (net <= 0) {
-        throw new Error("Net payout must be greater than zero.");
+      const selectedEntries = payoutForm.selectedCommissionIds
+        .map((id) => commissions.find((entry) => entry.id === id) || null)
+        .filter((entry): entry is AffiliateCommissionRecord => Boolean(entry));
+      if (selectedEntries.length === 0) {
+        throw new Error("Select at least one commission ledger entry.");
       }
 
-      const pendingNet = roundCurrency(payoutTarget.metrics.pendingCommissionNet);
-      const pendingVat = roundCurrency(payoutTarget.metrics.pendingCommissionVat);
-      const pendingGross = roundCurrency(payoutTarget.metrics.pendingCommissionGross);
-      const netDelta = Math.min(net, pendingNet);
-      const vatDelta = Math.min(vat, pendingVat);
-      const grossDelta = Math.min(gross, pendingGross || net + vat);
+      const overallTotals = sumCommissionTotals(selectedEntries);
+      if (overallTotals.net <= 0) {
+        throw new Error("Selected commission total must be greater than zero.");
+      }
+
+      const pendingTotalsSelection = sumCommissionTotals(
+        selectedEntries.filter((entry) => entry.status === "pending")
+      );
+      const scheduledTotalsSelection = sumCommissionTotals(
+        selectedEntries.filter((entry) => entry.status === "scheduled")
+      );
+
+      const roundTotals = (totals: { net: number; vat: number; gross: number }) => ({
+        net: roundCurrency(totals.net),
+        vat: roundCurrency(totals.vat),
+        gross: roundCurrency(totals.gross),
+      });
+
+      const roundedOverall = roundTotals(overallTotals);
+      const roundedPendingSelection = roundTotals(pendingTotalsSelection);
+      const roundedScheduledSelection = roundTotals(scheduledTotalsSelection);
+
+      const statusToApply: AffiliateCommissionStatus =
+        payoutForm.status === "scheduled" ? "scheduled" : "paid";
+
+      const computeDelta = (total: number, snapshot?: number) => {
+        const safeTotal = roundCurrency(total);
+        if (safeTotal <= 0) {
+          return 0;
+        }
+        const safeSnapshot =
+          typeof snapshot === "number" && Number.isFinite(snapshot)
+            ? Math.max(0, roundCurrency(snapshot))
+            : safeTotal;
+        return Math.max(0, Math.min(safeTotal, safeSnapshot));
+      };
+
+      const candidatePayoutIds = new Set(
+        selectedEntries
+          .map((entry) => entry.payoutId)
+          .filter((id): id is string => Boolean(id))
+      );
+      const existingPayoutId =
+        statusToApply === "paid" &&
+        candidatePayoutIds.size === 1 &&
+        selectedEntries.every((entry) => Boolean(entry.payoutId))
+          ? Array.from(candidatePayoutIds)[0]
+          : null;
+      const reuseExistingPayout = Boolean(existingPayoutId);
+      const payoutRef = reuseExistingPayout
+        ? doc(db, "affiliatePayouts", existingPayoutId as string)
+        : doc(collection(db, "affiliatePayouts"));
+      const existingPayoutRecord = reuseExistingPayout
+        ? payouts.find((payout) => payout.id === existingPayoutId) ?? null
+        : null;
 
       const parseDate = (value: string): Timestamp | null => {
         if (!value) return null;
@@ -378,38 +769,220 @@ export default function AffiliateManager() {
         return Number.isNaN(safe.getTime()) ? null : Timestamp.fromDate(safe);
       };
 
-      await addDoc(collection(db, "affiliatePayouts"), {
+      const resolvedPeriodStart =
+        !reuseExistingPayout || payoutForm.periodStart
+          ? parseDate(payoutForm.periodStart)
+          : undefined;
+      const resolvedPeriodEnd =
+        !reuseExistingPayout || payoutForm.periodEnd
+          ? parseDate(payoutForm.periodEnd)
+          : undefined;
+      const trimmedNotes = payoutForm.notes.trim();
+      const resolvedNotes =
+        !reuseExistingPayout || trimmedNotes.length > 0
+          ? trimmedNotes || null
+          : undefined;
+
+      const buildLineItem = (entry: AffiliateCommissionRecord) => ({
+        commissionId: entry.id,
+        orderId: entry.orderId,
+        orderLabel: entry.orderLabel,
+        clientName: entry.clientName,
+        commissionNet: roundCurrency(entry.commissionNet),
+        commissionVat: roundCurrency(entry.commissionVat),
+        commissionGross: roundCurrency(entry.commissionGross),
+        currency: entry.currency,
+        deliverables: entry.deliverables,
+        orderTotalGross: entry.orderTotalGross,
+        orderTotalNet: entry.orderTotalNet,
+        statusApplied: statusToApply,
+      });
+
+      const payoutLineItems = (() => {
+        if (reuseExistingPayout && existingPayoutRecord) {
+          const map = new Map(
+            existingPayoutRecord.lineItems.map((item) => [item.commissionId, item])
+          );
+          selectedEntries.forEach((entry) => {
+            map.set(entry.id, buildLineItem(entry));
+          });
+          return Array.from(map.values());
+        }
+        return selectedEntries.map((entry) => buildLineItem(entry));
+      })();
+
+      const payoutDocTotals = payoutLineItems.reduce(
+        (acc, item) => {
+          acc.net += roundCurrency(item.commissionNet);
+          acc.vat += roundCurrency(item.commissionVat);
+          acc.gross += roundCurrency(item.commissionGross);
+          return acc;
+        },
+        { net: 0, vat: 0, gross: 0 }
+      );
+      const roundedPayoutDocTotals = roundTotals(payoutDocTotals);
+
+      const batch = writeBatch(db);
+
+      const payoutDocData: Record<string, any> = {
         affiliateId: payoutTarget.id,
         affiliateName: payoutTarget.name,
         affiliateRefCode: payoutTarget.refCode,
-        amountNet: net,
-        amountVat: vat,
-        amountGross: gross,
+        amountNet: roundedPayoutDocTotals.net,
+        amountVat: roundedPayoutDocTotals.vat,
+        amountGross: roundedPayoutDocTotals.gross,
         currency: "GBP",
-        periodStart: parseDate(payoutForm.periodStart),
-        periodEnd: parseDate(payoutForm.periodEnd),
-        notes: payoutForm.notes.trim() || null,
-        createdAt: serverTimestamp(),
-      });
-
-      await updateDoc(doc(db, "affiliates", payoutTarget.id), {
-        metrics: {
-          pendingCommissionNet: increment(-netDelta),
-          pendingCommissionVat: increment(-vatDelta),
-          pendingCommissionGross: increment(-grossDelta),
-          paidCommissionNet: increment(net),
-          paidCommissionVat: increment(vat),
-          paidCommissionGross: increment(gross),
-        },
+        lineItems: payoutLineItems,
         updatedAt: serverTimestamp(),
-        lastPayoutAt: serverTimestamp(),
+      };
+
+      if (!reuseExistingPayout) {
+        payoutDocData.createdAt = serverTimestamp();
+        payoutDocData.periodStart = resolvedPeriodStart ?? null;
+        payoutDocData.periodEnd = resolvedPeriodEnd ?? null;
+        payoutDocData.notes = resolvedNotes ?? null;
+      } else {
+        if (typeof resolvedPeriodStart !== "undefined") {
+          payoutDocData.periodStart = resolvedPeriodStart;
+        }
+        if (typeof resolvedPeriodEnd !== "undefined") {
+          payoutDocData.periodEnd = resolvedPeriodEnd;
+        }
+        if (typeof resolvedNotes !== "undefined") {
+          payoutDocData.notes = resolvedNotes;
+        }
+        if (statusToApply === "paid") {
+          payoutDocData.finalisedAt = serverTimestamp();
+        }
+      }
+
+      batch.set(payoutRef, payoutDocData, { merge: reuseExistingPayout });
+
+      const pendingSnapshot = pendingCommissionTotals.get(payoutTarget.id);
+      const scheduledSnapshot = scheduledCommissionTotals.get(payoutTarget.id);
+
+      const pendingDelta = {
+        net: computeDelta(roundedPendingSelection.net, pendingSnapshot?.net),
+        vat: computeDelta(roundedPendingSelection.vat, pendingSnapshot?.vat),
+        gross: computeDelta(roundedPendingSelection.gross, pendingSnapshot?.gross),
+      };
+
+      const scheduledDelta = {
+        net: computeDelta(roundedScheduledSelection.net, scheduledSnapshot?.net),
+        vat: computeDelta(roundedScheduledSelection.vat, scheduledSnapshot?.vat),
+        gross: computeDelta(roundedScheduledSelection.gross, scheduledSnapshot?.gross),
+      };
+      const metricsUpdate: Record<string, any> = {
+        pendingCommissionNet: increment(-pendingDelta.net),
+        pendingCommissionVat: increment(-pendingDelta.vat),
+        pendingCommissionGross: increment(-pendingDelta.gross),
+      };
+
+      if (statusToApply === "scheduled") {
+        metricsUpdate.scheduledCommissionNet = increment(roundedOverall.net);
+        metricsUpdate.scheduledCommissionVat = increment(roundedOverall.vat);
+        metricsUpdate.scheduledCommissionGross = increment(roundedOverall.gross);
+      } else {
+        metricsUpdate.paidCommissionNet = increment(roundedOverall.net);
+        metricsUpdate.paidCommissionVat = increment(roundedOverall.vat);
+        metricsUpdate.paidCommissionGross = increment(roundedOverall.gross);
+
+        if (scheduledDelta.net > 0 || scheduledDelta.vat > 0 || scheduledDelta.gross > 0) {
+          metricsUpdate.scheduledCommissionNet = increment(-scheduledDelta.net);
+          metricsUpdate.scheduledCommissionVat = increment(-scheduledDelta.vat);
+          metricsUpdate.scheduledCommissionGross = increment(-scheduledDelta.gross);
+        }
+      }
+
+      const affiliateUpdate: Record<string, any> = {
+        metrics: metricsUpdate,
+        updatedAt: serverTimestamp(),
+      };
+
+      if (statusToApply === "paid") {
+        affiliateUpdate.lastPayoutAt = serverTimestamp();
+      }
+
+      batch.set(doc(db, "affiliates", payoutTarget.id), affiliateUpdate, { merge: true });
+
+      selectedEntries.forEach((entry) => {
+        const entryRef = doc(db, "affiliateCommissions", entry.id);
+        const updates: Record<string, any> = {
+          status: statusToApply,
+          payoutId: payoutRef.id,
+          updatedAt: serverTimestamp(),
+        };
+        if (statusToApply === "scheduled") {
+          updates.scheduledAt = serverTimestamp();
+          updates.paidAt = null;
+        } else {
+          updates.scheduledAt = entry.scheduledAt ?? serverTimestamp();
+          updates.paidAt = serverTimestamp();
+        }
+        batch.set(entryRef, updates, { merge: true });
       });
 
-      setPayoutTarget(null);
-      setPayoutForm(null);
+      await batch.commit();
+
+      resetPayoutModalState();
     } catch (err: any) {
       console.error("Failed to record payout", err);
       setActionError(err?.message || "Unable to record payout");
+    }
+  };
+
+  const toggleCommissionSelection = (commissionId: string) => {
+    setPayoutForm((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      const current = new Set(prev.selectedCommissionIds);
+      if (current.has(commissionId)) {
+        current.delete(commissionId);
+      } else {
+        current.add(commissionId);
+      }
+      const nextIds = Array.from(current);
+      const nextEntries = nextIds
+        .map((id) => commissions.find((entry) => entry.id === id) || null)
+        .filter((entry): entry is AffiliateCommissionRecord => Boolean(entry));
+      const totals = sumCommissionTotals(nextEntries);
+      return {
+        ...prev,
+        selectedCommissionIds: nextIds,
+        amountNet: totals.net ? totals.net.toFixed(2) : "",
+        amountVat: totals.vat ? totals.vat.toFixed(2) : "",
+        amountGross: totals.gross ? totals.gross.toFixed(2) : "",
+      };
+    });
+  };
+
+  const handleExportLedger = () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (filteredCommissions.length === 0) {
+      setLedgerError("There are no ledger entries to export.");
+      return;
+    }
+    setLedgerError(null);
+    setExportingLedger(true);
+    try {
+      const csv = buildAffiliateCommissionCsv(filteredCommissions);
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `affiliate-commission-ledger-${Date.now()}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to export commission ledger", err);
+      setLedgerError("Unable to export ledger CSV. Please try again.");
+    } finally {
+      setExportingLedger(false);
     }
   };
 
@@ -426,6 +999,93 @@ export default function AffiliateManager() {
         setCopyMessage("Unable to copy link");
         setTimeout(() => setCopyMessage(null), 2500);
       });
+  };
+
+  const openReviewModal = (
+    application: AffiliateApplicationRecord,
+    action: AffiliateApplicationDecisionAction
+  ) => {
+    setReviewTarget(application);
+    setReviewAction(action);
+    setReviewNotes("");
+    setReviewError(null);
+  };
+
+  const handleReviewSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!reviewTarget) {
+      return;
+    }
+    const trimmedNotes = reviewNotes.trim();
+    if (reviewAction === "request_info" && !trimmedNotes) {
+      setReviewError("Please include guidance when requesting more information.");
+      return;
+    }
+    setReviewSubmitting(true);
+    setReviewError(null);
+    try {
+      const response = await fetch("/api/affiliates/applications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: reviewTarget.id,
+          action: reviewAction,
+          notes: trimmedNotes || null,
+        }),
+      });
+      if (!response.ok) {
+        let errorMessage = "Unable to update application.";
+        try {
+          const data = (await response.json()) as { error?: string };
+          if (data?.error) {
+            errorMessage = data.error;
+          }
+        } catch {
+          // Ignore JSON parse errors
+        }
+        throw new Error(errorMessage);
+      }
+      const successMessage =
+        reviewAction === "approve"
+          ? `Approved ${reviewTarget.fullName}`
+          : reviewAction === "reject"
+            ? `Rejected ${reviewTarget.fullName}`
+            : `Requested more info from ${reviewTarget.fullName}`;
+      setReviewFeedback(successMessage);
+      setReviewTarget(null);
+      setReviewNotes("");
+    } catch (err: any) {
+      console.error("Failed to review affiliate application", err);
+      setReviewError(err?.message || "Unable to update application.");
+    } finally {
+      setReviewSubmitting(false);
+    }
+  };
+
+  const renderReviewHistory = (history: AffiliateApplicationReviewEntry[]) => {
+    if (!history.length) {
+      return null;
+    }
+    return (
+      <ol className="space-y-1 text-xs text-gray-600">
+        {history.map((entry, index) => {
+          const decidedAt = entry.decidedAt?.toDate?.();
+          const key = `${entry.action}-${decidedAt?.getTime?.() ?? index}-${index}`;
+          return (
+            <li key={key} className="flex flex-wrap gap-1">
+              <span className="font-medium text-gray-700">{entry.action === "approve"
+                ? "Approved"
+                : entry.action === "reject"
+                  ? "Rejected"
+                  : "Info requested"}</span>
+              {decidedAt ? <span>· {decidedAt.toLocaleString()}</span> : null}
+              {entry.reviewerName ? <span>· {entry.reviewerName}</span> : null}
+              {entry.notes ? <span className="text-gray-500">— {entry.notes}</span> : null}
+            </li>
+          );
+        })}
+      </ol>
+    );
   };
 
   if (guardLoading) {
@@ -591,8 +1251,20 @@ export default function AffiliateManager() {
             <div className="grid gap-4 lg:grid-cols-2">
               {sortedAffiliates.map((affiliate) => {
                 const link = buildAffiliateShareLink(affiliate.refCode);
-                const pendingNet = roundCurrency(affiliate.metrics.pendingCommissionNet);
-                const eligibleForPayout = pendingNet >= AFFILIATE_MIN_WITHDRAWAL_NET;
+                const ledgerPending = pendingCommissionTotals.get(affiliate.id);
+                const ledgerScheduled = scheduledCommissionTotals.get(affiliate.id);
+                const pendingNet = roundCurrency(
+                  ledgerPending?.net ?? affiliate.metrics.pendingCommissionNet
+                );
+                const pendingGross = roundCurrency(
+                  ledgerPending?.gross ?? affiliate.metrics.pendingCommissionGross
+                );
+                const scheduledGross = roundCurrency(
+                  ledgerScheduled?.gross ?? affiliate.metrics.scheduledCommissionGross
+                );
+                const hasPendingLedgerLines = (ledgerPending?.net ?? 0) > 0;
+                const eligibleForPayout =
+                  hasPendingLedgerLines && pendingNet >= AFFILIATE_MIN_WITHDRAWAL_NET;
                 return (
                   <article
                     key={affiliate.id}
@@ -624,8 +1296,14 @@ export default function AffiliateManager() {
                       </div>
                       <div className="flex items-center justify-between">
                         <dt className="font-medium">Pending payout</dt>
-                        <dd>{formatCurrencyGBP(affiliate.metrics.pendingCommissionGross)}</dd>
+                        <dd>{formatCurrencyGBP(pendingGross)}</dd>
                       </div>
+                      {scheduledGross > 0 ? (
+                        <div className="flex items-center justify-between text-amber-700">
+                          <dt className="font-medium">Scheduled</dt>
+                          <dd>{formatCurrencyGBP(scheduledGross)}</dd>
+                        </div>
+                      ) : null}
                       <div className="flex items-center justify-between">
                         <dt className="font-medium">Total orders</dt>
                         <dd>{affiliate.metrics.totalOrders}</dd>
@@ -641,7 +1319,11 @@ export default function AffiliateManager() {
                         onClick={() => openPayoutModal(affiliate)}
                         disabled={!eligibleForPayout}
                       >
-                        {eligibleForPayout ? 'Record payout' : `Need £${AFFILIATE_MIN_WITHDRAWAL_NET.toFixed(0)}+ net`}
+                        {eligibleForPayout
+                          ? 'Record payout'
+                          : hasLedgerLines
+                            ? `Need £${AFFILIATE_MIN_WITHDRAWAL_NET.toFixed(0)}+ net`
+                            : 'Awaiting delivered orders'}
                       </button>
                     </div>
                     <div className="mt-4 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
@@ -657,11 +1339,29 @@ export default function AffiliateManager() {
       )}
 
       <section className="grid gap-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">Affiliate applications</h2>
-          <span className="text-xs text-gray-500">{applications.length} recent submissions</span>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="grid gap-1">
+            <h2 className="text-lg font-semibold text-gray-900">Affiliate applications</h2>
+            <span className="text-xs text-gray-500">{applications.length} recent submissions</span>
+            {reviewFeedback ? <span className="text-xs text-emerald-600">{reviewFeedback}</span> : null}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {applicationFilterOptions.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                className={`btn btn-xs ${applicationFilter === option.key ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => setApplicationFilter(option.key)}
+              >
+                {option.label}
+                <span className="ml-2 rounded-full bg-gray-200 px-2 text-[10px] font-medium text-gray-700">
+                  {applicationCounts[option.key]}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
-        {applications.length === 0 ? (
+        {filteredApplications.length === 0 ? (
           <p className="text-sm text-gray-600">No pending applications.</p>
         ) : (
           <div className="overflow-x-auto">
@@ -676,45 +1376,332 @@ export default function AffiliateManager() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {applications.map((application) => {
+                {filteredApplications.map((application) => {
                   const submitted = application.createdAt?.toDate?.();
+                  const descriptor = resolveApplicationStatus(application);
+                  const decision = application.review;
+                  const decidedAt = decision?.decidedAt?.toDate?.();
                   return (
-                    <tr key={application.id}>
-                      <td className="px-3 py-2 align-top">
-                        <div className="font-medium text-gray-900">{application.fullName}</div>
-                        <div className="text-xs text-gray-500">{application.email}</div>
-                        {application.phone ? (
-                          <div className="text-xs text-gray-500">{application.phone}</div>
-                        ) : null}
+                    <>
+                      <tr key={application.id}>
+                        <td className="px-3 py-2 align-top">
+                          <div className="font-medium text-gray-900">{application.fullName}</div>
+                          <div className="text-xs text-gray-500">{application.email}</div>
+                          {application.phone ? (
+                            <div className="text-xs text-gray-500">{application.phone}</div>
+                          ) : null}
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <div className="text-sm text-gray-700">{application.focus || '—'}</div>
+                          {application.notes ? (
+                            <div className="mt-1 whitespace-pre-line text-xs text-gray-500">{application.notes}</div>
+                          ) : null}
+                        </td>
+                        <td className="px-3 py-2 align-top text-sm text-gray-600">
+                          <div className="flex flex-col gap-1">
+                            <span className={`inline-flex w-fit items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${descriptor.badgeClass}`}>
+                              {descriptor.label}
+                            </span>
+                            {decision?.notes ? (
+                              <span className="text-xs text-gray-500">“{decision.notes}”</span>
+                            ) : null}
+                            {decision?.reviewerName || decidedAt ? (
+                              <span className="text-[11px] text-gray-400">
+                                {decision?.reviewerName ? `by ${decision.reviewerName}` : null}
+                                {decision?.reviewerName && decidedAt ? ' · ' : ''}
+                                {decidedAt ? decidedAt.toLocaleString() : null}
+                              </span>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 align-top text-sm text-gray-600">
+                          {submitted ? submitted.toLocaleDateString() : '—'}
+                        </td>
+                        <td className="px-3 py-2 align-top text-sm">
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              className="btn btn-xs"
+                              disabled={descriptor.category === 'approved'}
+                              onClick={() => openReviewModal(application, "approve")}
+                            >
+                              Approve
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-xs btn-warning"
+                              disabled={descriptor.category === 'info'}
+                              onClick={() => openReviewModal(application, "request_info")}
+                            >
+                              Request info
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-xs btn-error"
+                              disabled={descriptor.category === 'rejected'}
+                              onClick={() => openReviewModal(application, "reject")}
+                            >
+                              Reject
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-outline btn-xs"
+                              onClick={() =>
+                                resetNewAffiliateForm({
+                                  name: application.fullName,
+                                  email: application.email,
+                                  company: application.location ?? '',
+                                  phone: application.phone ?? '',
+                                  notes: application.notes ?? '',
+                                })
+                              }
+                            >
+                              Prefill new affiliate
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {application.reviewHistory.length > 0 ? (
+                        <tr className="bg-gray-50">
+                          <td colSpan={5} className="px-3 py-2">
+                            <div className="grid gap-1">
+                              <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                                Review history
+                              </span>
+                              {renderReviewHistory(application.reviewHistory)}
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {reviewTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <button
+            type="button"
+            aria-label="Close review dialog"
+            className="absolute inset-0"
+            onClick={() => {
+              setReviewTarget(null);
+              setReviewNotes("");
+              setReviewError(null);
+            }}
+          />
+          <div className="relative w-full max-w-xl rounded-2xl bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Review affiliate application</h3>
+                <p className="text-sm text-gray-600">
+                  {reviewTarget.fullName} · {reviewTarget.email}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => {
+                  setReviewTarget(null);
+                  setReviewNotes("");
+                  setReviewError(null);
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <form className="mt-4 grid gap-4" onSubmit={handleReviewSubmit}>
+              <div className="grid gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Decision</span>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${reviewAction === 'approve' ? 'btn-primary' : 'btn-ghost'}`}
+                    onClick={() => setReviewAction("approve")}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${reviewAction === 'request_info' ? 'btn-warning' : 'btn-ghost'}`}
+                    onClick={() => setReviewAction("request_info")}
+                  >
+                    Request info
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${reviewAction === 'reject' ? 'btn-error' : 'btn-ghost'}`}
+                    onClick={() => setReviewAction("reject")}
+                  >
+                    Reject
+                  </button>
+                </div>
+              </div>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium text-gray-700">Reviewer notes</span>
+                <textarea
+                  className="input min-h-[100px]"
+                  value={reviewNotes}
+                  onChange={(event) => setReviewNotes(event.target.value)}
+                  placeholder={
+                    reviewAction === 'request_info'
+                      ? 'Share what we need before approving…'
+                      : 'Add optional context for the applicant and audit trail'
+                  }
+                />
+                {reviewAction === 'request_info' ? (
+                  <span className="text-xs text-gray-500">Applicants will see these instructions in their follow-up email.</span>
+                ) : null}
+              </label>
+              <div className="grid gap-1 text-xs text-gray-500">
+                <span className="font-semibold uppercase tracking-wide text-gray-500">Application snapshot</span>
+                <dl className="grid gap-1 sm:grid-cols-2">
+                  <div>
+                    <dt className="font-medium text-gray-700">Focus</dt>
+                    <dd>{reviewTarget.focus || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium text-gray-700">Experience</dt>
+                    <dd>{reviewTarget.experience || '—'}</dd>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <dt className="font-medium text-gray-700">Notes</dt>
+                    <dd className="whitespace-pre-line">{reviewTarget.notes || '—'}</dd>
+                  </div>
+                </dl>
+              </div>
+              {reviewError ? <p className="text-sm text-red-600">{reviewError}</p> : null}
+              <div className="flex items-center justify-between gap-3">
+                <button type="submit" className="btn" disabled={reviewSubmitting}>
+                  {reviewSubmitting ? 'Saving…' : 'Save decision'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => {
+                    setReviewTarget(null);
+                    setReviewNotes("");
+                    setReviewError(null);
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      <section className="grid gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Commission ledger</h2>
+            <p className="text-xs text-gray-500">{commissionCounts.all} tracked entries</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {commissionFilterOptions.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                className={`btn btn-xs ${commissionFilter === option.key ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => setCommissionFilter(option.key)}
+              >
+                {option.label}
+                <span className="ml-2 rounded-full bg-gray-200 px-2 text-[10px] font-medium text-gray-700">
+                  {commissionCounts[option.key]}
+                </span>
+              </button>
+            ))}
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={handleExportLedger}
+              disabled={exportingLedger || filteredCommissions.length === 0}
+            >
+              {exportingLedger ? "Exporting…" : "Export CSV"}
+            </button>
+          </div>
+        </div>
+        {ledgerError ? <p className="text-sm text-red-600">{ledgerError}</p> : null}
+        {filteredCommissions.length === 0 ? (
+          <p className="text-sm text-gray-600">No commission entries recorded yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200 text-sm">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium text-gray-500">Affiliate</th>
+                  <th className="px-3 py-2 text-left font-medium text-gray-500">Order</th>
+                  <th className="px-3 py-2 text-right font-medium text-gray-500">Net</th>
+                  <th className="px-3 py-2 text-right font-medium text-gray-500">VAT</th>
+                  <th className="px-3 py-2 text-right font-medium text-gray-500">Gross</th>
+                  <th className="px-3 py-2 text-left font-medium text-gray-500">Status</th>
+                  <th className="px-3 py-2 text-left font-medium text-gray-500">Delivered</th>
+                  <th className="px-3 py-2 text-left font-medium text-gray-500">Payout</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200 bg-white">
+                {filteredCommissions.map((entry) => {
+                  const delivered = entry.deliveredAt?.toDate?.();
+                  const scheduled = entry.scheduledAt?.toDate?.();
+                  const paid = entry.paidAt?.toDate?.();
+                  const affiliateRecord = affiliates.find((item) => item.id === entry.affiliateId) || null;
+                  return (
+                    <tr key={entry.id} className="hover:bg-emerald-50/40">
+                      <td className="px-3 py-2">
+                        <div className="font-medium text-gray-900">{entry.affiliateName ?? entry.affiliateId}</div>
+                        <div className="text-xs text-gray-500">Code: {entry.affiliateRefCode ?? "—"}</div>
                       </td>
-                      <td className="px-3 py-2 align-top">
-                        <div className="text-sm text-gray-700">{application.focus || '—'}</div>
-                        {application.notes ? (
-                          <div className="mt-1 text-xs text-gray-500 whitespace-pre-line">{application.notes}</div>
-                        ) : null}
+                      <td className="px-3 py-2">
+                        <div className="font-medium text-gray-900">{entry.orderLabel ?? entry.orderId}</div>
+                        <div className="text-xs text-gray-500">
+                          {entry.clientName ? `${entry.clientName} · ` : ""}
+                          Ref: {entry.orderId}
+                        </div>
                       </td>
-                      <td className="px-3 py-2 align-top text-sm text-gray-600">
-                        {application.stage || application.status || 'New'}
+                      <td className="px-3 py-2 text-right font-medium text-gray-900">
+                        {formatCurrencyGBP(entry.commissionNet)}
                       </td>
-                      <td className="px-3 py-2 align-top text-sm text-gray-600">
-                        {submitted ? submitted.toLocaleDateString() : '—'}
+                      <td className="px-3 py-2 text-right text-gray-700">
+                        {formatCurrencyGBP(entry.commissionVat)}
                       </td>
-                      <td className="px-3 py-2 align-top text-sm">
-                        <button
-                          type="button"
-                          className="btn btn-outline btn-sm"
-                          onClick={() =>
-                            resetNewAffiliateForm({
-                              name: application.fullName,
-                              email: application.email,
-                              company: application.location ?? '',
-                              phone: application.phone ?? '',
-                              notes: application.notes ?? '',
-                            })
-                          }
-                        >
-                          Prefill new affiliate
-                        </button>
+                      <td className="px-3 py-2 text-right text-gray-900">
+                        {formatCurrencyGBP(entry.commissionGross)}
+                      </td>
+                      <td className="px-3 py-2 text-sm capitalize text-gray-700">
+                        {entry.status}
+                        <div className="text-xs text-gray-500">
+                          {scheduled ? `Scheduled ${scheduled.toLocaleDateString()}` : ""}
+                          {paid ? ` · Paid ${paid.toLocaleDateString()}` : ""}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-sm text-gray-700">
+                        {delivered ? delivered.toLocaleDateString() : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-sm text-gray-700">
+                        <div className="flex flex-col items-start gap-1">
+                          <span>{entry.payoutId ? entry.payoutId.slice(0, 8) : "—"}</span>
+                          {entry.status === "scheduled" && affiliateRecord ? (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-xs text-emerald-700 hover:text-emerald-900"
+                              onClick={() =>
+                                openPayoutModal(affiliateRecord, {
+                                  statuses: ["scheduled"],
+                                  preselectIds: [entry.id],
+                                  initialStatus: "paid",
+                                  payoutId: entry.payoutId ?? undefined,
+                                })
+                              }
+                            >
+                              Mark as paid
+                            </button>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -738,6 +1725,7 @@ export default function AffiliateManager() {
                   <th className="px-3 py-2 text-left font-medium text-gray-500">Net</th>
                   <th className="px-3 py-2 text-left font-medium text-gray-500">VAT</th>
                   <th className="px-3 py-2 text-left font-medium text-gray-500">Gross</th>
+                  <th className="px-3 py-2 text-left font-medium text-gray-500">Line items</th>
                   <th className="px-3 py-2 text-left font-medium text-gray-500">Period</th>
                   <th className="px-3 py-2 text-left font-medium text-gray-500">Created</th>
                 </tr>
@@ -754,6 +1742,22 @@ export default function AffiliateManager() {
                       <td className="px-3 py-2">{formatCurrencyGBP(payout.amountNet)}</td>
                       <td className="px-3 py-2">{formatCurrencyGBP(payout.amountVat)}</td>
                       <td className="px-3 py-2">{formatCurrencyGBP(payout.amountGross)}</td>
+                      <td className="px-3 py-2 text-sm text-gray-700">
+                        {payout.lineItems.length === 0 ? (
+                          <span className="text-xs text-gray-500">No ledger lines attached</span>
+                        ) : (
+                          <div className="space-y-1">
+                            {payout.lineItems.map((item) => (
+                              <div key={item.commissionId} className="rounded bg-gray-50 px-2 py-1">
+                                <div className="text-xs font-medium text-gray-800">{item.orderLabel ?? item.orderId}</div>
+                                <div className="text-[11px] text-gray-500">
+                                  Net {formatCurrencyGBP(item.commissionNet)} · VAT {formatCurrencyGBP(item.commissionVat)} · Gross {formatCurrencyGBP(item.commissionGross)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </td>
                       <td className="px-3 py-2 text-xs text-gray-600">
                         {toDateInput(payout.periodStart) || '—'} — {toDateInput(payout.periodEnd) || '—'}
                       </td>
@@ -935,45 +1939,112 @@ export default function AffiliateManager() {
           <form className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-xl" onSubmit={submitPayout}>
             <h3 className="text-lg font-semibold text-gray-900">Record payout for {payoutTarget.name}</h3>
             {actionError ? <p className="mt-2 text-sm text-red-600">{actionError}</p> : null}
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Net amount</span>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  value={payoutForm.amountNet}
-                  onChange={(event) =>
-                    setPayoutForm((prev) => prev && { ...prev, amountNet: event.target.value })
-                  }
-                  required
-                />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">VAT</span>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  value={payoutForm.amountVat}
-                  onChange={(event) =>
-                    setPayoutForm((prev) => prev && { ...prev, amountVat: event.target.value })
-                  }
-                />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Gross</span>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.01"
-                  value={payoutForm.amountGross}
-                  onChange={(event) =>
-                    setPayoutForm((prev) => prev && { ...prev, amountGross: event.target.value })
-                  }
-                />
-              </label>
+            <div className="mt-4 space-y-4">
+              <div>
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+                  <h4 className="text-sm font-semibold text-gray-900">Commission ledger lines</h4>
+                  <div className="flex flex-col items-start text-xs text-gray-500 sm:items-end">
+                    <span>
+                      {payoutSelectionEntries.length} selected of {payoutCandidateEntries.length}
+                    </span>
+                    {payoutCandidateStatusSummary ? (
+                      <span>{payoutCandidateStatusSummary}</span>
+                    ) : null}
+                  </div>
+                </div>
+                {payoutCandidateEntries.length === 0 ? (
+                  <p className="mt-2 text-sm text-gray-600">{payoutCandidateEmptyMessage}</p>
+                ) : (
+                  <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-gray-200">
+                    <table className="min-w-full divide-y divide-gray-200 text-sm">
+                      <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+                        <tr>
+                          <th className="px-3 py-2 text-left">Include</th>
+                          <th className="px-3 py-2 text-left">Order</th>
+                          <th className="px-3 py-2 text-left">Status</th>
+                          <th className="px-3 py-2 text-right">Net</th>
+                          <th className="px-3 py-2 text-right">VAT</th>
+                          <th className="px-3 py-2 text-right">Gross</th>
+                          <th className="px-3 py-2 text-right">Delivered</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 bg-white">
+                        {payoutCandidateEntries.map((entry) => {
+                          const delivered = entry.deliveredAt?.toDate?.();
+                          const checked = payoutForm.selectedCommissionIds.includes(entry.id);
+                          return (
+                            <tr key={entry.id} className={checked ? "bg-emerald-50/40" : undefined}>
+                              <td className="px-3 py-2">
+                                <input
+                                  type="checkbox"
+                                  className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                                  checked={checked}
+                                  onChange={() => toggleCommissionSelection(entry.id)}
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                <div className="font-medium text-gray-900">
+                                  {entry.orderLabel ?? entry.orderId}
+                                </div>
+                                <div className="text-xs text-gray-500">
+                                  Ref: {entry.orderId}
+                                  {entry.clientName ? ` · ${entry.clientName}` : ""}
+                                </div>
+                              </td>
+                              <td className="px-3 py-2 text-left text-xs font-medium capitalize text-gray-700">
+                                {entry.status}
+                              </td>
+                              <td className="px-3 py-2 text-right font-medium text-gray-900">
+                                {formatCurrencyGBP(entry.commissionNet)}
+                              </td>
+                              <td className="px-3 py-2 text-right text-gray-700">
+                                {formatCurrencyGBP(entry.commissionVat)}
+                              </td>
+                              <td className="px-3 py-2 text-right text-gray-900">
+                                {formatCurrencyGBP(entry.commissionGross)}
+                              </td>
+                              <td className="px-3 py-2 text-right text-xs text-gray-500">
+                                {delivered ? delivered.toLocaleDateString() : "—"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium text-gray-700">Net amount</span>
+                  <input className="input" type="number" step="0.01" value={payoutForm.amountNet} readOnly />
+                </label>
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium text-gray-700">VAT</span>
+                  <input className="input" type="number" step="0.01" value={payoutForm.amountVat} readOnly />
+                </label>
+                <label className="grid gap-1 text-sm">
+                  <span className="font-medium text-gray-700">Gross</span>
+                  <input className="input" type="number" step="0.01" value={payoutForm.amountGross} readOnly />
+                </label>
+              </div>
             </div>
+            <label className="mt-3 grid gap-1 text-sm">
+              <span className="font-medium text-gray-700">Mark selected lines as</span>
+              <select
+                className="input"
+                value={payoutForm.status}
+                onChange={(event) =>
+                  setPayoutForm((prev) =>
+                    prev ? { ...prev, status: event.target.value as AffiliateCommissionStatus } : prev
+                  )
+                }
+              >
+                <option value="paid">Paid</option>
+                <option value="scheduled">Scheduled</option>
+              </select>
+            </label>
             <div className="mt-3 grid gap-3 md:grid-cols-2">
               <label className="grid gap-1 text-sm">
                 <span className="font-medium text-gray-700">Period start</span>
@@ -1007,10 +2078,14 @@ export default function AffiliateManager() {
               />
             </label>
             <div className="mt-6 flex flex-wrap gap-3">
-              <button type="submit" className="btn">
+              <button
+                type="submit"
+                className="btn"
+                disabled={payoutSelectionEntries.length === 0}
+              >
                 Record payout
               </button>
-              <button type="button" className="btn btn-outline" onClick={() => setPayoutTarget(null)}>
+              <button type="button" className="btn btn-outline" onClick={resetPayoutModalState}>
                 Cancel
               </button>
             </div>

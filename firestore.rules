@@ -3,6 +3,116 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function userProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function isStaffUser() {
+      return isAuthenticated() && userProfile().data.isStaff == true;
+    }
+
+    function hasBackofficeRole() {
+      return isAuthenticated() && (
+        userProfile().data.roles.admin == true ||
+        userProfile().data.roles.marketing == true ||
+        userProfile().data.roles.projects == true ||
+        userProfile().data.roles.operations == true
+      );
+    }
+
+    function isServiceAccountRequest() {
+      return isAuthenticated() && request.auth.token.serviceAccount == true;
+    }
+
+    function canReadSocialAccounts() {
+      return isStaffUser() || hasBackofficeRole();
+    }
+
+    function isSocialAccountDocPath(path) {
+      return path.matches('/databases/([^/]+)/documents/socialAccounts/.*') ||
+        path.matches('/databases/([^/]+)/documents/socialAccountSecrets/.*');
+    }
+
+    function isAffiliateCommissionDocPath(path) {
+      return path.matches('/databases/([^/]+)/documents/affiliateCommissions/.*');
+    }
+
+    function isAffiliateRestrictedPath(path) {
+      return path.matches('/databases/([^/]+)/documents/affiliates/.*') ||
+        path.matches('/databases/([^/]+)/documents/affiliatePayouts/.*') ||
+        path.matches('/databases/([^/]+)/documents/affiliateResources/.*');
+    }
+
+    function currentUserAffiliateId() {
+      return isAuthenticated() && userProfile().data != null && userProfile().data.affiliate != null
+        ? userProfile().data.affiliate.id
+        : null;
+    }
+
+    function payoutProtectedFieldsUnchanged() {
+      return request.resource.data.payout.financeNotes == resource.data.payout.financeNotes &&
+        request.resource.data.payout.internalOnly == resource.data.payout.internalOnly;
+    }
+
+    function affiliateSelfUpdateAllowed(affiliateId) {
+      return isAuthenticated() &&
+        affiliateId == currentUserAffiliateId() &&
+        request.resource.data.keys().hasOnly(resource.data.keys()) &&
+        resource.data.keys().hasOnly(request.resource.data.keys()) &&
+        request.resource.data.metrics == resource.data.metrics &&
+        request.resource.data.status == resource.data.status &&
+        request.resource.data.commissionRate == resource.data.commissionRate &&
+        request.resource.data.refCode == resource.data.refCode &&
+        request.resource.data.ownerUid == resource.data.ownerUid &&
+        request.resource.data.notes == resource.data.notes &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.lastReferralAt == resource.data.lastReferralAt &&
+        payoutProtectedFieldsUnchanged();
+    }
+
+    match /socialAccountSecrets/{accountId} {
+      allow read, write: if isStaffUser() || isServiceAccountRequest();
+    }
+
+    match /socialAccounts/{accountId} {
+      allow read: if canReadSocialAccounts();
+      allow create, update, delete: if isStaffUser() || isServiceAccountRequest();
+    }
+
+    match /affiliateCommissions/{commissionId} {
+      allow read: if
+        isStaffUser() ||
+        hasBackofficeRole() ||
+        (isAuthenticated() && resource.data.affiliateId == currentUserAffiliateId());
+      allow create, update, delete: if isStaffUser() || isServiceAccountRequest();
+    }
+
+    match /affiliates/{affiliateId} {
+      allow read: if
+        isStaffUser() ||
+        hasBackofficeRole() ||
+        (isAuthenticated() && affiliateId == currentUserAffiliateId());
+      allow create, delete: if isStaffUser() || isServiceAccountRequest();
+      allow update: if isStaffUser() || isServiceAccountRequest() || affiliateSelfUpdateAllowed(affiliateId);
+    }
+
+    match /affiliatePayouts/{payoutId} {
+      allow read: if
+        isStaffUser() ||
+        hasBackofficeRole() ||
+        (isAuthenticated() && resource.data.affiliateId == currentUserAffiliateId());
+      allow create, update, delete: if isStaffUser() || isServiceAccountRequest();
+    }
+
+    match /affiliateResources/{resourceId} {
+      allow read: if isAuthenticated() || hasBackofficeRole() || isStaffUser();
+      allow create, update, delete: if isStaffUser() || hasBackofficeRole() || isServiceAccountRequest();
+    }
+
     // This rule allows anyone with your Firestore database reference to view, edit,
     // and delete all data in your Firestore database. It is useful for getting
     // started, but it is configured to expire after 30 days because it
@@ -13,7 +123,14 @@ service cloud.firestore {
     // all client requests to your Firestore database will be denied until you Update
     // your rules
     match /{document=**} {
-      allow read, write: if request.time < timestamp.date(2025, 10, 4);
+      allow read, write: if
+        request.time < timestamp.date(2025, 10, 4) &&
+        !isSocialAccountDocPath(resource.__name__) &&
+        !isAffiliateCommissionDocPath(resource.__name__) &&
+        !isAffiliateRestrictedPath(resource.__name__) &&
+        !(request.resource != null && isSocialAccountDocPath(request.resource.__name__)) &&
+        !(request.resource != null && isAffiliateCommissionDocPath(request.resource.__name__)) &&
+        !(request.resource != null && isAffiliateRestrictedPath(request.resource.__name__));
     }
   }
 }

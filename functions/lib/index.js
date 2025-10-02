@@ -169,6 +169,21 @@ function parseSplitTerms(raw) {
 const secretManagerClient = new SecretManagerServiceClient();
 const STRIPE_SECRET_KEY_RESOURCE = normaliseString(process.env.STRIPE_SECRET_KEY_SECRET_NAME);
 const STRIPE_WEBHOOK_SECRET_RESOURCE = normaliseString(process.env.STRIPE_WEBHOOK_SECRET_SECRET_NAME);
+const SOCIAL_ACCOUNT_SERVICE_KEY_RESOURCE = normaliseString(process.env.SOCIAL_ACCOUNT_SERVICE_KEY_SECRET_NAME);
+const SOCIAL_ACCOUNT_SERVICE_KEY_FALLBACK = normaliseString(process.env.SOCIAL_ACCOUNT_SERVICE_KEY ?? null);
+const SOCIAL_ACCOUNT_ENCRYPTION_KEY_RESOURCE = normaliseString(process.env.SOCIAL_ACCOUNT_ENCRYPTION_KEY_SECRET_NAME);
+const SOCIAL_ACCOUNT_ENCRYPTION_KEY_FALLBACK = normaliseString(process.env.SOCIAL_ACCOUNT_ENCRYPTION_KEY ?? null);
+let cachedSocialAccountServiceKey;
+let cachedSocialAccountEncryptionKey;
+const SUPPORTED_SOCIAL_PLATFORMS = new Set([
+    'youtube',
+    'linkedin',
+    'instagram',
+    'facebook',
+    'tiktok',
+    'twitter',
+    'vimeo',
+]);
 function parseSecretResource(resource) {
     const trimmed = resource.trim();
     if (!trimmed.startsWith('projects/')) {
@@ -203,6 +218,427 @@ async function readSecretValue(resource, fallbackEnv, label) {
         throw new Error(`Unable to read ${label} from Secret Manager: ${error.message}`);
     }
 }
+async function getSocialAccountServiceKey() {
+    if (cachedSocialAccountServiceKey !== undefined) {
+        if (!cachedSocialAccountServiceKey) {
+            throw new Error('Social account service key is not configured.');
+        }
+        return cachedSocialAccountServiceKey;
+    }
+    const secret = await readSecretValue(SOCIAL_ACCOUNT_SERVICE_KEY_RESOURCE, SOCIAL_ACCOUNT_SERVICE_KEY_FALLBACK, 'Social account service key');
+    cachedSocialAccountServiceKey = secret ?? null;
+    if (!cachedSocialAccountServiceKey) {
+        throw new Error('Social account service key is not configured.');
+    }
+    return cachedSocialAccountServiceKey;
+}
+function decodeEncryptionKey(raw) {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+        throw new Error('Encryption key is empty.');
+    }
+    const base64Candidate = (() => {
+        try {
+            return Buffer.from(trimmed, 'base64');
+        }
+        catch (error) {
+            return Buffer.alloc(0);
+        }
+    })();
+    if (base64Candidate.length === 32) {
+        return base64Candidate;
+    }
+    const hexCandidate = (() => {
+        try {
+            return Buffer.from(trimmed, 'hex');
+        }
+        catch (error) {
+            return Buffer.alloc(0);
+        }
+    })();
+    if (hexCandidate.length === 32) {
+        return hexCandidate;
+    }
+    if (trimmed.length === 32) {
+        const utf8Candidate = Buffer.from(trimmed, 'utf8');
+        if (utf8Candidate.length === 32) {
+            return utf8Candidate;
+        }
+    }
+    throw new Error('Encryption key must decode to 32 bytes for AES-256-GCM.');
+}
+async function getSocialAccountEncryptionKey() {
+    if (cachedSocialAccountEncryptionKey) {
+        return cachedSocialAccountEncryptionKey;
+    }
+    if (cachedSocialAccountEncryptionKey === null) {
+        throw new Error('Social account encryption key is not configured.');
+    }
+    const secret = await readSecretValue(SOCIAL_ACCOUNT_ENCRYPTION_KEY_RESOURCE, SOCIAL_ACCOUNT_ENCRYPTION_KEY_FALLBACK, 'Social account encryption key');
+    if (!secret) {
+        cachedSocialAccountEncryptionKey = null;
+        throw new Error('Social account encryption key is not configured.');
+    }
+    const decoded = decodeEncryptionKey(secret);
+    cachedSocialAccountEncryptionKey = decoded;
+    return decoded;
+}
+function encryptSecretValue(plain, key) {
+    const value = plain.trim();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return {
+        cipherText: encrypted.toString('base64'),
+        iv: iv.toString('base64'),
+        authTag: authTag.toString('base64'),
+        hash: crypto.createHash('sha256').update(value, 'utf8').digest('hex'),
+    };
+}
+function scrubTokenPayload(raw) {
+    if (!raw || typeof raw !== 'object') {
+        return {};
+    }
+    const copy = JSON.parse(JSON.stringify(raw));
+    const redactKeys = [
+        'access_token',
+        'refresh_token',
+        'token',
+        'accessToken',
+        'refreshToken',
+        'id_token',
+        'code',
+    ];
+    redactKeys.forEach((key) => {
+        if (key in copy) {
+            copy[key] = '[redacted]';
+        }
+    });
+    return copy;
+}
+function parseExpiresInValue(value) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+        return Math.floor(value);
+    }
+    if (typeof value === 'string') {
+        const parsed = Number.parseInt(value.trim(), 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+            return parsed;
+        }
+    }
+    return null;
+}
+function parseExpiryTimestamp(value) {
+    if (!value && value !== 0) {
+        return null;
+    }
+    if (value instanceof Date) {
+        return Number.isNaN(value.getTime()) ? null : value;
+    }
+    if (typeof value === 'number') {
+        if (!Number.isFinite(value)) {
+            return null;
+        }
+        if (value > 1_000_000_000_000) {
+            return new Date(value);
+        }
+        if (value > 0) {
+            return new Date(value * 1000);
+        }
+        return null;
+    }
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) {
+            return null;
+        }
+        const numeric = Number(trimmed);
+        if (Number.isFinite(numeric)) {
+            return parseExpiryTimestamp(numeric);
+        }
+        const parsed = new Date(trimmed);
+        if (!Number.isNaN(parsed.getTime())) {
+            return parsed;
+        }
+    }
+    return null;
+}
+function computeTokenExpiry(tokens) {
+    const directSeconds = parseExpiresInValue(tokens.expiresIn);
+    if (directSeconds) {
+        return new Date(Date.now() + directSeconds * 1000);
+    }
+    const raw = tokens.raw ?? {};
+    if (raw && typeof raw === 'object') {
+        const rawSeconds = parseExpiresInValue(raw.expires_in) ??
+            parseExpiresInValue(raw.expiresIn) ??
+            parseExpiresInValue(raw.expires);
+        if (rawSeconds) {
+            return new Date(Date.now() + rawSeconds * 1000);
+        }
+        const rawTimestamp = parseExpiryTimestamp(raw.expires_at) ??
+            parseExpiryTimestamp(raw.expiry) ??
+            parseExpiryTimestamp(raw.expiration) ??
+            parseExpiryTimestamp(raw.expiration_time) ??
+            parseExpiryTimestamp(raw.expirationTime) ??
+            parseExpiryTimestamp(raw.token_expiry) ??
+            parseExpiryTimestamp(raw.tokenExpiry);
+        if (rawTimestamp) {
+            return rawTimestamp;
+        }
+    }
+    return null;
+}
+function determineConnectionFlags(refreshToken, expiresAt) {
+    const now = Date.now();
+    const refreshAvailable = Boolean(refreshToken);
+    const expiryTime = expiresAt?.getTime() ?? null;
+    const expired = expiryTime !== null && expiryTime <= now + 30_000;
+    const requiresReauth = !refreshAvailable && (expired || expiryTime === null);
+    const reauthRecommended = requiresReauth || (expiryTime !== null && expiryTime <= now + 72 * 60 * 60 * 1000);
+    const status = requiresReauth || expired ? 'requires_reauth' : 'active';
+    return { status, refreshAvailable, requiresReauth, reauthRecommended };
+}
+function normalisePlatform(value) {
+    if (!value) {
+        return '';
+    }
+    const trimmed = value.trim().toLowerCase();
+    return trimmed;
+}
+function coerceScopes(scopes) {
+    return {
+        publish: scopes?.publish === true,
+        analytics: scopes?.analytics === true,
+    };
+}
+function buildRotationHistory(secretSnap, nowIso) {
+    const rawHistory = secretSnap.exists ? (secretSnap.data()?.rotation?.history ?? []) : [];
+    const parsedHistory = Array.isArray(rawHistory)
+        ? rawHistory
+            .map((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return null;
+            }
+            const hash = typeof entry.hash === 'string' ? entry.hash : null;
+            if (!hash) {
+                return null;
+            }
+            const rotatedAt = typeof entry.rotatedAt === 'string' ? entry.rotatedAt : null;
+            return { hash, rotatedAt };
+        })
+            .filter((entry) => entry !== null)
+        : [];
+    const existingCurrent = secretSnap.exists ? secretSnap.data()?.current : null;
+    if (existingCurrent?.accessToken?.hash && typeof existingCurrent.accessToken.hash === 'string') {
+        const rotatedAtCandidate = existingCurrent?.accessToken?.storedAt ?? existingCurrent?.storedAt ?? null;
+        const rotatedAtString = typeof rotatedAtCandidate === 'string'
+            ? rotatedAtCandidate
+            : rotatedAtCandidate instanceof admin.firestore.Timestamp
+                ? rotatedAtCandidate.toDate().toISOString()
+                : rotatedAtCandidate instanceof Date
+                    ? rotatedAtCandidate.toISOString()
+                    : nowIso;
+        parsedHistory.push({ hash: existingCurrent.accessToken.hash, rotatedAt: rotatedAtString });
+    }
+    while (parsedHistory.length > 5) {
+        parsedHistory.shift();
+    }
+    return parsedHistory;
+}
+async function storeSocialAccountCredentials(payload) {
+    if (!payload || typeof payload !== 'object') {
+        throw new Error('Request body is required.');
+    }
+    const platform = normalisePlatform(payload.platform);
+    if (!platform) {
+        throw new Error('Platform is required.');
+    }
+    if (!SUPPORTED_SOCIAL_PLATFORMS.has(platform)) {
+        throw new Error(`Unsupported platform: ${platform}`);
+    }
+    const tokens = payload.tokens;
+    if (!tokens || typeof tokens.accessToken !== 'string' || !tokens.accessToken.trim()) {
+        throw new Error('Access token is required.');
+    }
+    const encryptionKey = await getSocialAccountEncryptionKey();
+    const scopes = coerceScopes(payload.scopes);
+    const organisationId = normaliseString(payload.organisationId);
+    const organisationName = normaliseString(payload.organisationName);
+    const initiatorUid = normaliseString(payload.initiator?.uid);
+    const initiatorEmail = normaliseString(payload.initiator?.email);
+    const requestedBy = normaliseString(payload.requestedBy);
+    const stateId = normaliseString(payload.stateId);
+    const providerAccountId = normaliseString(payload.provider?.accountId);
+    const providerAccountName = normaliseString(payload.provider?.accountName);
+    const sanitizedAccessToken = tokens.accessToken.trim();
+    const sanitizedRefreshToken = typeof tokens.refreshToken === 'string' && tokens.refreshToken.trim().length > 0
+        ? tokens.refreshToken.trim()
+        : null;
+    const expiresAt = computeTokenExpiry(tokens);
+    const { status, refreshAvailable, requiresReauth, reauthRecommended } = determineConnectionFlags(sanitizedRefreshToken, expiresAt);
+    const accountRef = payload.accountId
+        ? db.collection('socialAccounts').doc(payload.accountId)
+        : db.collection('socialAccounts').doc();
+    const accountId = accountRef.id;
+    const secretRef = db.collection('socialAccountSecrets').doc(accountId);
+    const displayName = normaliseString(payload.displayName) ??
+        providerAccountName ??
+        organisationName ??
+        `${platform.charAt(0).toUpperCase()}${platform.slice(1)} account`;
+    const expiresAtTimestamp = expiresAt ? admin.firestore.Timestamp.fromDate(expiresAt) : null;
+    const nowTimestamp = admin.firestore.Timestamp.now();
+    const nowIso = nowTimestamp.toDate().toISOString();
+    const usedMockProvider = Boolean(tokens.raw?.mock === true);
+    const encryptedAccess = encryptSecretValue(sanitizedAccessToken, encryptionKey);
+    const encryptedRefresh = sanitizedRefreshToken ? encryptSecretValue(sanitizedRefreshToken, encryptionKey) : null;
+    await db.runTransaction(async (transaction) => {
+        const [accountSnap, secretSnap] = await Promise.all([transaction.get(accountRef), transaction.get(secretRef)]);
+        const statusHistoryEntry = {
+            status,
+            updatedAt: nowTimestamp,
+            expiresAt: expiresAtTimestamp,
+            refreshAvailable,
+            requiresReauth,
+            updatedBy: initiatorUid ?? requestedBy ?? null,
+        };
+        const accountData = {
+            platform,
+            organisationId: organisationId ?? null,
+            organisationName: organisationName ?? null,
+            displayName,
+            status,
+            scopes: { publish: scopes.publish, analytics: scopes.analytics },
+            provider: {
+                accountId: providerAccountId ?? null,
+                accountName: providerAccountName ?? displayName,
+            },
+            connection: {
+                status,
+                expiresAt: expiresAtTimestamp,
+                refreshAvailable,
+                requiresReauth,
+                reauthRecommended,
+                lastAuthorizedAt: nowTimestamp,
+                lastAuthorizedBy: initiatorUid ?? null,
+                lastAuthorizedByEmail: initiatorEmail ?? null,
+                requestedBy: requestedBy ?? null,
+                stateId: stateId ?? null,
+                mock: usedMockProvider,
+                updatedAt: nowTimestamp,
+            },
+            refreshAvailable,
+            expiresAt: expiresAtTimestamp,
+            updatedAt: nowTimestamp,
+            updatedBy: initiatorUid ?? null,
+            lastAuthorizedAt: nowTimestamp,
+            lastAuthorizedBy: initiatorUid ?? null,
+            lastAuthorizedByEmail: initiatorEmail ?? null,
+            requestedBy: requestedBy ?? null,
+            scopesUpdatedAt: nowTimestamp,
+            statusHistory: admin.firestore.FieldValue.arrayUnion(statusHistoryEntry),
+        };
+        if (!accountSnap.exists) {
+            accountData.createdAt = nowTimestamp;
+            accountData.createdBy = initiatorUid ?? null;
+        }
+        transaction.set(accountRef, accountData, { merge: true });
+        const rotationHistory = buildRotationHistory(secretSnap, nowIso);
+        const existingSecret = secretSnap.exists ? secretSnap.data() : null;
+        const currentScopes = { publish: scopes.publish, analytics: scopes.analytics };
+        const secretData = {
+            accountId,
+            platform,
+            organisationId: organisationId ?? null,
+            organisationName: organisationName ?? null,
+            current: {
+                accessToken: encryptedAccess,
+                refreshToken: encryptedRefresh,
+                scope: tokens.scope ?? null,
+                scopes: currentScopes,
+                tokenType: tokens.tokenType ?? null,
+                raw: scrubTokenPayload(tokens.raw ?? {}),
+                expiresAt: expiresAtTimestamp,
+                storedAt: nowTimestamp,
+            },
+            rotation: {
+                version: (existingSecret?.rotation?.version ?? 0) + 1,
+                updatedAt: nowTimestamp,
+                history: rotationHistory,
+            },
+            updatedAt: nowTimestamp,
+            updatedBy: initiatorUid ?? null,
+        };
+        if (!secretSnap.exists) {
+            secretData.createdAt = nowTimestamp;
+            secretData.createdBy = initiatorUid ?? null;
+        }
+        transaction.set(secretRef, secretData, { merge: true });
+    });
+    return {
+        accountId,
+        platform,
+        status,
+        expiresAt: expiresAt ? expiresAt.toISOString() : null,
+        displayName,
+        refreshAvailable,
+        requiresReauth,
+    };
+}
+export const socialAccountsStoreCredentials = onRequest(async (req, res) => {
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type,X-Service-Key');
+    if (req.method === 'OPTIONS') {
+        res.status(204).send('');
+        return;
+    }
+    if (req.method !== 'POST') {
+        res.status(405).json({ error: 'Method not allowed' });
+        return;
+    }
+    try {
+        const expectedKey = await getSocialAccountServiceKey();
+        const providedKey = req.get('x-service-key') ?? req.get('X-Service-Key') ?? null;
+        if (!providedKey || providedKey.trim() !== expectedKey) {
+            res.status(401).json({ error: 'Invalid service key.' });
+            return;
+        }
+        let body = req.body;
+        if (typeof body === 'string') {
+            try {
+                body = JSON.parse(body);
+            }
+            catch (error) {
+                res.status(400).json({ error: 'Invalid JSON payload.' });
+                return;
+            }
+        }
+        if (!body || (typeof body === 'object' && Object.keys(body).length === 0)) {
+            const rawBody = req.rawBody;
+            if (rawBody && rawBody.length > 0) {
+                try {
+                    body = JSON.parse(rawBody.toString('utf8'));
+                }
+                catch (error) {
+                    res.status(400).json({ error: 'Invalid JSON payload.' });
+                    return;
+                }
+            }
+        }
+        const result = await storeSocialAccountCredentials(body);
+        res.status(200).json(result);
+    }
+    catch (error) {
+        console.error('Failed to store social account credentials', error);
+        if (error instanceof Error && /not configured/i.test(error.message)) {
+            res.status(500).json({ error: error.message });
+            return;
+        }
+        res.status(400).json({ error: error?.message ?? 'Unable to store credentials.' });
+    }
+});
 async function loadStripeSettingsFromFirestore() {
     const docRef = db.collection(STRIPE_SETTINGS_COLLECTION).doc(STRIPE_SETTINGS_DOC_ID);
     const snapshot = await docRef.get();
@@ -3249,6 +3685,199 @@ async function sendEmail(to, subject, body) {
         console.error('sendEmail error', err);
     }
 }
+function normalizeAffiliateReviewAction(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const normalised = value.trim().toLowerCase();
+    if (normalised === 'approve' || normalised === 'approved') {
+        return 'approve';
+    }
+    if (normalised === 'reject' || normalised === 'rejected' || normalised === 'decline' || normalised === 'declined') {
+        return 'reject';
+    }
+    if (normalised === 'request_info' ||
+        normalised === 'request-info' ||
+        normalised === 'info_requested' ||
+        normalised === 'needs_info' ||
+        normalised === 'needs_more_info') {
+        return 'request_info';
+    }
+    return null;
+}
+function stringOrNull(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+async function loadNotificationTemplate(key) {
+    try {
+        const doc = await db.collection('notificationTemplates').doc(key).get();
+        if (!doc.exists) {
+            return null;
+        }
+        const data = doc.data() ?? {};
+        const subject = stringOrNull(data.subject);
+        const body = stringOrNull(data.body);
+        return { subject: subject ?? null, body: body ?? null };
+    }
+    catch (error) {
+        console.error('Failed to load notification template', key, error);
+        return null;
+    }
+}
+function applyTemplate(template, vars) {
+    return Object.entries(vars).reduce((acc, [key, value]) => {
+        const safeValue = value ?? '';
+        return acc.replace(new RegExp(`{{\s*${key}\s*}}`, 'g'), safeValue);
+    }, template);
+}
+export const onAffiliateApplicationReviewed = functions.firestore
+    .document('affiliateApplications/{applicationId}')
+    .onUpdate(async (change, context) => {
+    const beforeData = change.before.data();
+    const afterData = change.after.data();
+    if (!afterData) {
+        return null;
+    }
+    const statusBefore = stringOrNull(beforeData?.status);
+    const statusAfter = stringOrNull(afterData.status);
+    const stageBefore = stringOrNull(beforeData?.stage);
+    const stageAfter = stringOrNull(afterData.stage);
+    if (statusBefore === statusAfter && stageBefore === stageAfter) {
+        return null;
+    }
+    const review = (afterData.review ?? {});
+    let action = normalizeAffiliateReviewAction(review.lastAction) ||
+        normalizeAffiliateReviewAction(review.action) ||
+        normalizeAffiliateReviewAction(review.decision) ||
+        null;
+    if (!action && Array.isArray(afterData.reviewHistory) && afterData.reviewHistory.length > 0) {
+        const lastEntry = afterData.reviewHistory[afterData.reviewHistory.length - 1];
+        action =
+            normalizeAffiliateReviewAction(lastEntry?.action) ||
+                normalizeAffiliateReviewAction(lastEntry?.decision) ||
+                normalizeAffiliateReviewAction(lastEntry?.statusAction) ||
+                null;
+    }
+    if (!action) {
+        if (statusAfter === 'approved') {
+            action = 'approve';
+        }
+        else if (statusAfter === 'rejected') {
+            action = 'reject';
+        }
+        else if (statusAfter === 'info_requested') {
+            action = 'request_info';
+        }
+        else {
+            return null;
+        }
+    }
+    const applicantName = stringOrNull(afterData.fullName) ??
+        stringOrNull(afterData.name) ??
+        'Affiliate applicant';
+    const applicantEmail = stringOrNull(afterData.email);
+    const reviewerName = stringOrNull(review.reviewerName) ||
+        stringOrNull(review.reviewedByName) ||
+        (Array.isArray(afterData.reviewHistory) && afterData.reviewHistory.length > 0
+            ? stringOrNull(afterData.reviewHistory[afterData.reviewHistory.length - 1]?.reviewerName)
+            : null);
+    const reviewerEmail = stringOrNull(review.reviewerEmail) ||
+        stringOrNull(review.reviewedByEmail) ||
+        (Array.isArray(afterData.reviewHistory) && afterData.reviewHistory.length > 0
+            ? stringOrNull(afterData.reviewHistory[afterData.reviewHistory.length - 1]?.reviewerEmail)
+            : null);
+    const notes = stringOrNull(review.notes);
+    let templateKey;
+    let defaultSubject;
+    let defaultBody;
+    switch (action) {
+        case 'approve': {
+            templateKey = 'affiliate_application_approved';
+            defaultSubject = 'Welcome to the Pineapple Tapped affiliate programme';
+            defaultBody = `Hi ${applicantName},\n\nGreat news — your affiliate application has been approved. We'll follow up shortly with your onboarding pack and referral toolkit.\n\nIf you have any immediate questions, just reply to this email and the team will be happy to help.\n\nBest,\nPineapple Tapped`;
+            break;
+        }
+        case 'reject': {
+            templateKey = 'affiliate_application_rejected';
+            defaultSubject = 'Update on your Pineapple Tapped affiliate application';
+            defaultBody = `Hi ${applicantName},\n\nThanks for taking the time to apply. After reviewing your submission we’re not moving forward right now. ${notes ? `\n\nNotes from the team: ${notes}\n\n` : '\n'}We’ll keep your details on file in case anything changes.\n\nBest wishes,\nPineapple Tapped`;
+            break;
+        }
+        default: {
+            templateKey = 'affiliate_application_info_requested';
+            defaultSubject = 'We need a quick update on your affiliate application';
+            defaultBody = `Hi ${applicantName},\n\nThanks for applying to join the Pineapple Tapped affiliate programme. Before we can complete the review we just need a little more information:${notes ? `\n\n${notes}\n` : '\n\nPlease reply with the additional details at your earliest convenience.\n'}\nOnce we’ve received your update we’ll get back to you within two business days.\n\nThanks!\nPineapple Tapped`;
+            break;
+        }
+    }
+    const template = await loadNotificationTemplate(templateKey);
+    const templateContext = {
+        applicantName,
+        reviewerName,
+        reviewerEmail,
+        notes,
+        status: statusAfter ?? stageAfter ?? action,
+        action,
+    };
+    const subject = template?.subject
+        ? applyTemplate(template.subject, templateContext)
+        : defaultSubject;
+    const body = template?.body ? applyTemplate(template.body, templateContext) : defaultBody;
+    if (applicantEmail) {
+        try {
+            await sendEmail(applicantEmail, subject, body);
+        }
+        catch (err) {
+            console.error('Failed to send affiliate application decision email', context.params.applicationId, err);
+        }
+        try {
+            await db.collection('notifications').add({
+                kind: 'affiliate_application',
+                templateKey,
+                toEmail: applicantEmail,
+                toName: applicantName,
+                status: statusAfter ?? null,
+                stage: stageAfter ?? null,
+                action,
+                reviewerName: reviewerName ?? null,
+                reviewerEmail: reviewerEmail ?? null,
+                notes: notes ?? null,
+                applicationId: context.params.applicationId,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+        }
+        catch (err) {
+            console.error('Failed to record affiliate application notification', context.params.applicationId, err);
+        }
+    }
+    const slackWebhook = process.env.SLACK_AFFILIATE_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL;
+    if (slackWebhook) {
+        const statusLabel = action === 'approve' ? 'Approved' : action === 'reject' ? 'Rejected' : 'Info requested';
+        const lines = [
+            `Affiliate application ${statusLabel}: ${applicantName}`,
+            `Reviewed by: ${reviewerName ?? reviewerEmail ?? 'Unknown reviewer'}`,
+        ];
+        if (notes) {
+            lines.push(`Notes: ${notes}`);
+        }
+        lines.push(`Application ID: ${context.params.applicationId}`);
+        try {
+            await fetch(slackWebhook, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: lines.join('\n') }),
+            });
+        }
+        catch (err) {
+            console.error('Failed to send affiliate decision Slack notification', context.params.applicationId, err);
+        }
+    }
+    return null;
+});
 export const contact_send = functions.https.onCall(async (data) => {
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
     const leadSourceRaw = typeof data.leadSource === 'string' ? data.leadSource.trim() : '';
@@ -3980,6 +4609,121 @@ function isPaidOrderStatus(value) {
     const status = normaliseOrderStatus(value);
     return status === 'paid' || status === 'balance_paid';
 }
+async function ensureAffiliateCommissionLedgerEntry(options) {
+    const { orderId, orderData, releaseSummaries } = options;
+    const affiliateInfo = (orderData.affiliate ?? {});
+    const affiliateId = typeof affiliateInfo.id === 'string' ? affiliateInfo.id : null;
+    if (!affiliateId) {
+        return;
+    }
+    const commissionNetRaw = Number(affiliateInfo.commissionNet);
+    const commissionVatRaw = Number(affiliateInfo.commissionVat);
+    const commissionGrossRaw = Number(affiliateInfo.commissionGross);
+    const commissionNet = Number.isFinite(commissionNetRaw) ? Math.round(commissionNetRaw * 100) / 100 : 0;
+    const commissionVat = Number.isFinite(commissionVatRaw) ? Math.round(commissionVatRaw * 100) / 100 : 0;
+    const commissionGross = Number.isFinite(commissionGrossRaw)
+        ? Math.round(commissionGrossRaw * 100) / 100
+        : Math.round((commissionNet + commissionVat) * 100) / 100;
+    const currencyRaw = typeof affiliateInfo.currency === 'string' ? affiliateInfo.currency : null;
+    const currency = currencyRaw && currencyRaw.trim().length > 0 ? currencyRaw.trim().toUpperCase() : 'GBP';
+    const orderCurrencyRaw = typeof orderData.currency === 'string' ? orderData.currency : null;
+    const orderCurrency = orderCurrencyRaw && orderCurrencyRaw.trim().length > 0 ? orderCurrencyRaw.trim().toUpperCase() : currency;
+    const orderLabel = (typeof orderData.projectName === 'string' && orderData.projectName) ||
+        (typeof orderData.customerName === 'string' && orderData.customerName) ||
+        (typeof orderData.companyName === 'string' && orderData.companyName) ||
+        `Order ${orderId}`;
+    const orderTotalGrossRaw = Number(orderData.price ?? orderData.total ?? orderData.orderTotal);
+    const orderTotalNetRaw = Number(orderData.netTotal ?? orderData.subtotal ?? orderData.totalNet);
+    const orderTotalGross = Number.isFinite(orderTotalGrossRaw)
+        ? Math.round(orderTotalGrossRaw * 100) / 100
+        : null;
+    const orderTotalNet = Number.isFinite(orderTotalNetRaw)
+        ? Math.round(orderTotalNetRaw * 100) / 100
+        : null;
+    const clientId = typeof orderData.clientId === 'string' ? orderData.clientId : null;
+    const clientName = (typeof orderData.clientName === 'string' && orderData.clientName) ||
+        (typeof orderData.companyName === 'string' && orderData.companyName) ||
+        (typeof orderData.customerName === 'string' && orderData.customerName) ||
+        null;
+    const deliverables = releaseSummaries.map((summary) => ({
+        projectId: summary.projectId,
+        projectName: summary.projectName,
+        assetIds: summary.assetIds,
+    }));
+    const ledgerRef = db.collection('affiliateCommissions').doc(orderId);
+    const ledgerSnap = await ledgerRef.get();
+    let affiliateOwnerUid = null;
+    let affiliateEmail = typeof affiliateInfo.email === 'string' && affiliateInfo.email.trim().length > 0
+        ? affiliateInfo.email.trim()
+        : null;
+    try {
+        const affiliateSnap = await db.collection('affiliates').doc(affiliateId).get();
+        if (affiliateSnap.exists) {
+            const affiliateData = affiliateSnap.data();
+            if (!affiliateEmail && typeof affiliateData.email === 'string') {
+                const candidate = affiliateData.email.trim();
+                affiliateEmail = candidate.length > 0 ? candidate : affiliateEmail;
+            }
+            affiliateOwnerUid =
+                typeof affiliateData.ownerUid === 'string' && affiliateData.ownerUid.trim().length > 0
+                    ? affiliateData.ownerUid.trim()
+                    : null;
+        }
+    }
+    catch (err) {
+        console.error('Failed to load affiliate for commission ledger', { orderId, affiliateId }, err);
+    }
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    if (!ledgerSnap.exists) {
+        await ledgerRef.set({
+            affiliateId,
+            affiliateName: (typeof affiliateInfo.name === 'string' && affiliateInfo.name) ||
+                (typeof affiliateInfo.fullName === 'string' && affiliateInfo.fullName) ||
+                null,
+            affiliateRefCode: (typeof affiliateInfo.refCode === 'string' && affiliateInfo.refCode) ||
+                (typeof affiliateInfo.code === 'string' && affiliateInfo.code) ||
+                null,
+            affiliateOwnerUid,
+            affiliateEmail,
+            orderId,
+            orderLabel,
+            orderTotalGross,
+            orderTotalNet,
+            orderCurrency,
+            clientId,
+            clientName,
+            commissionNet,
+            commissionVat,
+            commissionGross,
+            currency,
+            status: 'pending',
+            payoutId: null,
+            notes: null,
+            deliverables,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            deliveredAt: timestamp,
+            scheduledAt: null,
+            paidAt: null,
+        });
+        return;
+    }
+    const updates = {
+        updatedAt: timestamp,
+    };
+    if (deliverables.length > 0) {
+        updates.deliverables = deliverables;
+    }
+    if (affiliateEmail && !ledgerSnap.get('affiliateEmail')) {
+        updates.affiliateEmail = affiliateEmail;
+    }
+    if (!ledgerSnap.get('deliveredAt')) {
+        updates.deliveredAt = timestamp;
+    }
+    if (Object.keys(updates).length > 1) {
+        await ledgerRef.set(updates, { merge: true });
+    }
+}
 async function syncAssetReviewTask(options) {
     const { projectId, assetId } = options;
     if (!projectId || !assetId) {
@@ -4488,6 +5232,22 @@ export const onOrderStatusUpdated = functions.firestore
             catch (notifyError) {
                 console.error('onOrderStatusUpdated notification dispatch failed', { orderId, orgId }, notifyError);
             }
+        }
+    }
+    if (releaseSummaries.length > 0) {
+        try {
+            await ensureAffiliateCommissionLedgerEntry({
+                orderId,
+                orderData: after,
+                releaseSummaries: releaseSummaries.map((summary) => ({
+                    projectId: summary.projectId,
+                    projectName: summary.projectName,
+                    assetIds: summary.assetIds,
+                })),
+            });
+        }
+        catch (ledgerError) {
+            console.error('Failed to persist affiliate commission ledger', { orderId }, ledgerError);
         }
     }
     return null;

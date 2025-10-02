@@ -106,6 +106,8 @@ interface ContentDraftRecord {
     hashtags: string[];
   }>;
   deliverableLabel: string | null;
+  deliverableProductId: string | null;
+  deliverableProductName: string | null;
   platforms: string[];
   callToAction: string | null;
   tone: string | null;
@@ -318,6 +320,8 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
             youtubeTags: Array.isArray(data.youtubeTags) ? data.youtubeTags : [],
             socialPosts,
             deliverableLabel: typeof data.deliverableLabel === 'string' ? data.deliverableLabel : null,
+            deliverableProductId: typeof data.deliverableProductId === 'string' ? data.deliverableProductId : null,
+            deliverableProductName: typeof data.deliverableProductName === 'string' ? data.deliverableProductName : null,
             platforms: Array.isArray(data.platforms) ? data.platforms : [],
             callToAction: typeof data.callToAction === 'string' ? data.callToAction : null,
             tone: typeof data.tone === 'string' ? data.tone : null,
@@ -752,6 +756,18 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
                   <div>
                     <p className="text-sm font-semibold text-gray-900">{draft.deliverableLabel || 'Content kit'}</p>
                     {draft.summary && <p className="text-sm text-gray-600">{draft.summary}</p>}
+                    {draft.deliverableProductName && (
+                      <p className="text-xs text-gray-500">
+                        Linked product:{' '}
+                        {draft.deliverableProductId ? (
+                          <Link href={`/products/${draft.deliverableProductId}`} className="text-blue-600 hover:underline">
+                            {draft.deliverableProductName}
+                          </Link>
+                        ) : (
+                          draft.deliverableProductName
+                        )}
+                      </p>
+                    )}
                   </div>
                   <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">
                     {draft.status}

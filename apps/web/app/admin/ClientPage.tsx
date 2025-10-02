@@ -60,6 +60,11 @@ export default function AdminPage() {
       href: '/admin/tools',
     },
     {
+      label: 'QR code generator',
+      description: 'Create scannable links for campaign assets.',
+      href: '/admin/tools/qr-code-generator',
+    },
+    {
       label: 'Training library',
       description: 'Create and curate onboarding content for every audience.',
       href: '/admin/training',
@@ -309,7 +314,6 @@ export default function AdminPage() {
                   links: [
                     { href: '/admin/orders', label: 'Manage Orders' },
                     { href: '/admin/projects', label: 'Project Management' },
-                    { href: '/admin/tools', label: 'Content Tools' },
                     { href: '/admin/workflows', label: 'Manage Workflows' },
                     { href: '/admin/proposals', label: 'Quotes & Proposals' },
                     { href: '/admin/availability', label: 'Manage Availability' },
@@ -328,6 +332,13 @@ export default function AdminPage() {
                   title: 'Storage',
                   links: [
                     { href: '/admin/storage', label: 'Storage Automation' },
+                  ],
+                },
+                {
+                  title: 'Tools',
+                  links: [
+                    { href: '/admin/tools', label: 'Content Assistant' },
+                    { href: '/admin/tools/qr-code-generator', label: 'QR Code Generator' },
                   ],
                 },
                 {

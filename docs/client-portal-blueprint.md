@@ -14,6 +14,7 @@ connections remain for the roadmap. Use it alongside the feature connection revi
 | Asset deliveries | Quick access to newly uploaded assets and approvals. | Firestore `assets` collection. |
 | Bookings | Upcoming shoot schedule with manage CTA. | Firestore `bookings` collection. |
 | Growth opportunities | Remarketing suggestions and campaign recommendations to drive upsells. | `remarketingSuggestions` and `recommendations` collections. |
+| Social scheduling (feature-flagged) | Hidden module for connecting social accounts, planning posts, and reviewing asset performance when enabled. | See `docs/social-scheduling-module.md` for rollout plan; data spans `socialAccounts`, `socialPosts`, analytics collections. |
 | Annual content planner | Highlight card promoting the `/dashboard/content-planner` tool. | Planner workspace within the app. |
 | Notifications | Recent messages and milestones for quick scanning. | Firestore `notifications` collection. |
 
@@ -28,6 +29,7 @@ connections remain for the roadmap. Use it alongside the feature connection revi
 | CRM light-touch view | Leads/opportunities live under `/crm` for eligible roles. | Evaluate a read-only funnel snapshot card for client admins inside the portal. |
 | Proposal follow-up | Proposals surface in CRM but not in client portal. | Design a proposal status widget that links back to `/crm/proposals`. |
 | Post-campaign retros | No dedicated UI yet. | Scope a “campaign insights” module pulling from analytics and survey responses. |
+| Social scheduling & analytics module | Planning doc drafted; UI intentionally hidden behind feature flag pending pilot. | Build account connection hub, composer, calendar UI, and export mode per `docs/social-scheduling-module.md`; ship admin/franchise toggles before exposing to clients. |
 
 ## Next steps
 
