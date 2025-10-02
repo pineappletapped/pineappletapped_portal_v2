@@ -3378,6 +3378,7 @@ export const onOrderCreated = functions.firestore
           }
           if (workflowBookingTemplates.length > 0) {
             const projectBookingCollection = projRef.collection('workflowBookingTemplates');
+            const activeBookingCollection = projRef.collection('projectBookings');
             const bookingBatch = db.batch();
             let hasBookingWrites = false;
             workflowBookingTemplates.forEach((template) => {
@@ -3396,6 +3397,110 @@ export const onOrderCreated = functions.firestore
                   ? template.agreement.acknowledgementLabel.trim()
                   : 'I agree to the terms and conditions';
               const agreementRequireSignature = template.agreement?.requireSignature === false ? false : true;
+
+              const sanitiseSlots = (): any[] => {
+                if (!Array.isArray(template.slots)) return [];
+                return template.slots
+                  .map((slot: any, index: number) => {
+                    if (!slot || typeof slot !== 'object') return null;
+                    const label = typeof slot.label === 'string' ? slot.label.trim() : '';
+                    const startAt = typeof slot.startAt === 'string' ? slot.startAt : '';
+                    const endAt = typeof slot.endAt === 'string' ? slot.endAt : '';
+                    const capacityRaw = Number(slot.capacity);
+                    const capacity = Number.isFinite(capacityRaw) && capacityRaw > 0 ? capacityRaw : 1;
+                    const priceClass = typeof slot.priceClass === 'string' ? slot.priceClass.trim() : '';
+                    const notes = typeof slot.notes === 'string' ? slot.notes : '';
+                    const id =
+                      typeof slot.id === 'string' && slot.id.trim().length > 0
+                        ? slot.id.trim()
+                        : `${templateId}-slot-${index + 1}`;
+                    return {
+                      id,
+                      label: label || `Slot ${index + 1}`,
+                      startAt: startAt || null,
+                      endAt: endAt || null,
+                      capacity,
+                      priceClass: priceClass || 'included',
+                      notes,
+                    };
+                  })
+                  .filter((slot): slot is {
+                    id: string;
+                    label: string;
+                    startAt: string | null;
+                    endAt: string | null;
+                    capacity: number;
+                    priceClass: string;
+                    notes: string;
+                  } => Boolean(slot));
+              };
+
+              const sanitiseResponseFields = (): any[] => {
+                if (!Array.isArray(template.responseFields)) return [];
+                return template.responseFields
+                  .map((field: any, index: number) => {
+                    if (!field || typeof field !== 'object') return null;
+                    const id =
+                      typeof field.id === 'string' && field.id.trim().length > 0
+                        ? field.id.trim()
+                        : `${templateId}-field-${index + 1}`;
+                    const type =
+                      typeof field.type === 'string' && field.type.trim().length > 0 ? field.type.trim() : 'text';
+                    const label = typeof field.label === 'string' ? field.label.trim() : '';
+                    const placeholder = typeof field.placeholder === 'string' ? field.placeholder : '';
+                    const required = field.required === true;
+                    return {
+                      id,
+                      type,
+                      label: label || `Response ${index + 1}`,
+                      placeholder,
+                      required,
+                    };
+                  })
+                  .filter((field): field is {
+                    id: string;
+                    type: string;
+                    label: string;
+                    placeholder: string;
+                    required: boolean;
+                  } => Boolean(field));
+              };
+
+              const sanitiseUploadRequirements = (): any[] => {
+                if (!Array.isArray(template.uploadRequirements)) return [];
+                return template.uploadRequirements
+                  .map((req: any, index: number) => {
+                    if (!req || typeof req !== 'object') return null;
+                    const id =
+                      typeof req.id === 'string' && req.id.trim().length > 0
+                        ? req.id.trim()
+                        : `${templateId}-upload-${index + 1}`;
+                    const label = typeof req.label === 'string' ? req.label.trim() : '';
+                    const description = typeof req.description === 'string' ? req.description : '';
+                    const accept = typeof req.accept === 'string' ? req.accept : '';
+                    const required = req.required === true;
+                    return {
+                      id,
+                      label: label || `Upload ${index + 1}`,
+                      description,
+                      accept,
+                      required,
+                    };
+                  })
+                  .filter((req): req is {
+                    id: string;
+                    label: string;
+                    description: string;
+                    accept: string;
+                    required: boolean;
+                  } => Boolean(req));
+              };
+
+              const slots = sanitiseSlots();
+              const responseFields = sanitiseResponseFields();
+              const uploadRequirements = sanitiseUploadRequirements();
+              const totalCapacity = slots.reduce((sum, slot) => sum + (Number.isFinite(slot.capacity) ? slot.capacity : 0), 0);
+
               const data: Record<string, any> = {
                 workflowId: prod.workflowId,
                 workflowTaskId:
@@ -3409,11 +3514,9 @@ export const onOrderCreated = functions.firestore
                   typeof template.taskDescription === 'string' ? template.taskDescription : '',
                 introduction:
                   typeof template.introduction === 'string' ? template.introduction : '',
-                slots: Array.isArray(template.slots) ? template.slots : [],
-                responseFields: Array.isArray(template.responseFields) ? template.responseFields : [],
-                uploadRequirements: Array.isArray(template.uploadRequirements)
-                  ? template.uploadRequirements
-                  : [],
+                slots,
+                responseFields,
+                uploadRequirements,
                 agreement: {
                   heading: agreementHeading,
                   body: agreementBody,
@@ -3424,7 +3527,24 @@ export const onOrderCreated = functions.firestore
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
                 updatedAt: admin.firestore.FieldValue.serverTimestamp(),
               };
+
+              const bookingStats = {
+                totalSlots: slots.length,
+                totalCapacity,
+                responses: 0,
+                confirmed: 0,
+                invitesOutstanding: 0,
+                assetsUploaded: 0,
+              };
+
               bookingBatch.set(docRef, data, { merge: true });
+              const activeDocRef = activeBookingCollection.doc(templateId);
+              bookingBatch.set(activeDocRef, {
+                ...data,
+                stats: bookingStats,
+                status: 'active',
+                source: 'workflow-template',
+              });
               hasBookingWrites = true;
             });
             if (hasBookingWrites) {
