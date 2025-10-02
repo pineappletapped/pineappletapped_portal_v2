@@ -1249,7 +1249,9 @@ export default function SocialSchedulerWorkspace({
 
     const organisationId = account?.organisationId ?? selectedClient?.id ?? null;
     const organisationName =
-      account?.organisationName ?? selectedClient?.name ?? manualClientName.trim() || null;
+      account?.organisationName ??
+      selectedClient?.name ??
+      (manualClientName.trim() || null);
 
     if (!organisationId && !organisationName) {
       setAccountError("Select a client or enter an organisation name before connecting an account.");
@@ -1336,7 +1338,8 @@ export default function SocialSchedulerWorkspace({
     event.preventDefault();
     if (!dbRef) return;
     const organisationId = selectedClient?.id ?? null;
-    const organisationName = selectedClient?.name ?? manualClientName.trim() || null;
+    const organisationName =
+      selectedClient?.name ?? (manualClientName.trim() || null);
     if (!organisationName) {
       setPostError("Select or enter a client before drafting a post.");
       return;
@@ -1410,10 +1413,12 @@ export default function SocialSchedulerWorkspace({
         organisationId,
         organisationName,
         projectId: selectedProject?.id ?? null,
-        projectName: selectedProject?.name ?? manualProjectName.trim() || null,
+        projectName:
+          selectedProject?.name ?? (manualProjectName.trim() || null),
         deliverableLabel: selectedProject?.reference ?? null,
         deliverableProductId: selectedProduct?.id ?? null,
-        deliverableProductName: selectedProduct?.name ?? selectedProductName.trim() || null,
+        deliverableProductName:
+          selectedProduct?.name ?? (selectedProductName.trim() || null),
         baseLinkUrl: baseLinkUrl.trim() || null,
         status: postForm.status,
         approvalState: postForm.approvalState,
