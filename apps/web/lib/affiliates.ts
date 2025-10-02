@@ -47,6 +47,21 @@ export interface AffiliateRecord {
   notes: string | null;
 }
 
+export type AffiliateApplicationDecisionAction = 'approve' | 'reject' | 'request_info';
+
+export interface AffiliateApplicationReviewEntry {
+  action: AffiliateApplicationDecisionAction;
+  status: string | null;
+  stage: string | null;
+  notes: string | null;
+  reviewerUid: string | null;
+  reviewerName: string | null;
+  reviewerEmail: string | null;
+  decidedAt: Timestamp | null;
+}
+
+export type AffiliateApplicationReviewState = AffiliateApplicationReviewEntry;
+
 export interface AffiliateApplicationRecord {
   id: string;
   fullName: string;
@@ -62,6 +77,8 @@ export interface AffiliateApplicationRecord {
   stage: string | null;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
+  review: AffiliateApplicationReviewState | null;
+  reviewHistory: AffiliateApplicationReviewEntry[];
 }
 
 export interface AffiliatePayoutRecord {
@@ -118,6 +135,80 @@ const normaliseStatus = (value: unknown): AffiliateStatus => {
     return value;
   }
   return 'pending';
+};
+
+const normaliseReviewAction = (
+  value: unknown,
+): AffiliateApplicationDecisionAction | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalised = value.trim().toLowerCase();
+  if (normalised === 'approve' || normalised === 'approved') {
+    return 'approve';
+  }
+  if (normalised === 'reject' || normalised === 'rejected' || normalised === 'decline' || normalised === 'declined') {
+    return 'reject';
+  }
+  if (
+    normalised === 'request_info' ||
+    normalised === 'request-info' ||
+    normalised === 'info_requested' ||
+    normalised === 'needs_info' ||
+    normalised === 'needs_more_info'
+  ) {
+    return 'request_info';
+  }
+  return null;
+};
+
+const parseReviewEntry = (value: unknown): AffiliateApplicationReviewEntry | null => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const data = value as Record<string, unknown>;
+  const action =
+    normaliseReviewAction(data.action) ||
+    normaliseReviewAction(data.decision) ||
+    normaliseReviewAction(data.lastAction) ||
+    normaliseReviewAction(data.statusAction);
+  if (!action) {
+    return null;
+  }
+
+  const status = stringOrNull(data.status) ?? stringOrNull(data.lastStatus);
+  const stage = stringOrNull(data.stage) ?? stringOrNull(data.lastStage);
+  const notes = stringOrNull(data.notes) ?? stringOrNull(data.note);
+  const reviewerUid = stringOrNull(data.reviewerUid) ?? stringOrNull(data.reviewedByUid);
+  const reviewerName =
+    stringOrNull(data.reviewerName) ?? stringOrNull(data.reviewerDisplayName) ?? stringOrNull(data.reviewedByName);
+  const reviewerEmail = stringOrNull(data.reviewerEmail) ?? stringOrNull(data.reviewedByEmail);
+  const decidedAt =
+    parseTimestamp(data.decidedAt) ??
+    parseTimestamp((data.timestamp as Timestamp | undefined) ?? null) ??
+    parseTimestamp((data.createdAt as Timestamp | undefined) ?? null);
+
+  return {
+    action,
+    status: status ?? null,
+    stage: stage ?? null,
+    notes: notes ?? null,
+    reviewerUid,
+    reviewerName,
+    reviewerEmail,
+    decidedAt,
+  } satisfies AffiliateApplicationReviewEntry;
+};
+
+const parseReviewState = (value: unknown, history: AffiliateApplicationReviewEntry[]): AffiliateApplicationReviewState | null => {
+  const entry = parseReviewEntry(value);
+  if (entry) {
+    return entry;
+  }
+  if (history.length === 0) {
+    return null;
+  }
+  return history[history.length - 1];
 };
 
 const normaliseCommissionRate = (value: unknown): number => {
@@ -194,6 +285,16 @@ export function parseAffiliateApplicationDoc(
   doc: QueryDocumentSnapshot<DocumentData>
 ): AffiliateApplicationRecord {
   const data = doc.data() as Record<string, any>;
+  const reviewHistoryRaw = Array.isArray(data.reviewHistory) ? data.reviewHistory : [];
+  const reviewHistory = reviewHistoryRaw
+    .map((entry) => parseReviewEntry(entry))
+    .filter((entry): entry is AffiliateApplicationReviewEntry => Boolean(entry))
+    .sort((a, b) => {
+      const aTime = a.decidedAt?.toMillis?.() ?? 0;
+      const bTime = b.decidedAt?.toMillis?.() ?? 0;
+      return aTime - bTime;
+    });
+  const review = parseReviewState(data.review, reviewHistory);
   return {
     id: doc.id,
     fullName: stringOrNull(data.fullName) ?? stringOrNull(data.name) ?? 'Applicant',
@@ -209,6 +310,8 @@ export function parseAffiliateApplicationDoc(
     stage: stringOrNull(data.stage) ?? stringOrNull(data.processStage),
     createdAt: parseTimestamp(data.createdAt),
     updatedAt: parseTimestamp(data.updatedAt),
+    review,
+    reviewHistory,
   };
 }
 

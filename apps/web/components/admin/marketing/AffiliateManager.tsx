@@ -21,6 +21,8 @@ import {
   AFFILIATE_DEFAULT_COMMISSION_RATE,
   AFFILIATE_MIN_WITHDRAWAL_NET,
   AffiliateApplicationRecord,
+  AffiliateApplicationDecisionAction,
+  AffiliateApplicationReviewEntry,
   AffiliateRecord,
   AffiliateStatus,
   AffiliatePayoutRecord,
@@ -31,6 +33,14 @@ import {
   parseAffiliateDoc,
   parseAffiliatePayoutDoc,
 } from "@/lib/affiliates";
+
+type ApplicationFilterKey = "all" | "pending" | "approved" | "rejected" | "info";
+
+interface ApplicationStatusDescriptor {
+  category: Exclude<ApplicationFilterKey, "all">;
+  label: string;
+  badgeClass: string;
+}
 
 interface AffiliateFormState {
   name: string;
@@ -117,6 +127,54 @@ export default function AffiliateManager() {
   const [payoutForm, setPayoutForm] = useState<PayoutFormState | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<AffiliateApplicationRecord | null>(null);
+  const [reviewAction, setReviewAction] = useState<AffiliateApplicationDecisionAction>("approve");
+  const [reviewNotes, setReviewNotes] = useState("");
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewFeedback, setReviewFeedback] = useState<string | null>(null);
+  const [applicationFilter, setApplicationFilter] = useState<ApplicationFilterKey>("pending");
+
+  const applicationFilterOptions: Array<{ key: ApplicationFilterKey; label: string }> = [
+    { key: "all", label: "All" },
+    { key: "pending", label: "Pending" },
+    { key: "info", label: "Needs info" },
+    { key: "approved", label: "Approved" },
+    { key: "rejected", label: "Rejected" },
+  ];
+
+  useEffect(() => {
+    if (!reviewFeedback) {
+      return;
+    }
+    const timeout = window.setTimeout(() => setReviewFeedback(null), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [reviewFeedback]);
+
+  useEffect(() => {
+    if (!reviewTarget) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setReviewTarget(null);
+        setReviewNotes("");
+        setReviewError(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    let originalOverflow: string | undefined;
+    if (typeof document !== "undefined") {
+      originalOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    }
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      if (typeof document !== "undefined") {
+        document.body.style.overflow = originalOverflow ?? "";
+      }
+    };
+  }, [reviewTarget]);
 
   useEffect(() => {
     if (guardLoading || !allowed) {
@@ -183,6 +241,46 @@ export default function AffiliateManager() {
     };
   }, [allowed, guardLoading]);
 
+  const resolveApplicationStatus = (
+    application: AffiliateApplicationRecord
+  ): ApplicationStatusDescriptor => {
+    const statusRaw = application.status?.toLowerCase?.() ?? "";
+    const stageRaw = application.stage?.toLowerCase?.() ?? "";
+    if (statusRaw === "approved") {
+      return {
+        category: "approved" as const,
+        label: "Approved",
+        badgeClass: "bg-emerald-100 text-emerald-700",
+      };
+    }
+    if (statusRaw === "rejected") {
+      return {
+        category: "rejected" as const,
+        label: "Rejected",
+        badgeClass: "bg-rose-100 text-rose-700",
+      };
+    }
+    if (statusRaw === "info_requested" || stageRaw === "info_requested" || stageRaw === "needs_info") {
+      return {
+        category: "info" as const,
+        label: "Info requested",
+        badgeClass: "bg-amber-100 text-amber-700",
+      };
+    }
+    if (stageRaw === "under_review") {
+      return {
+        category: "pending" as const,
+        label: "Under review",
+        badgeClass: "bg-sky-100 text-sky-700",
+      };
+    }
+    return {
+      category: "pending",
+      label: "Pending review",
+      badgeClass: "bg-sky-100 text-sky-700",
+    };
+  };
+
   const sortedAffiliates = useMemo(
     () =>
       affiliates.slice().sort((a, b) => {
@@ -192,6 +290,34 @@ export default function AffiliateManager() {
       }),
     [affiliates]
   );
+
+  const applicationCounts = useMemo<Record<ApplicationFilterKey, number>>(() => {
+    const counts: Record<ApplicationFilterKey, number> = {
+      all: applications.length,
+      pending: 0,
+      approved: 0,
+      rejected: 0,
+      info: 0,
+    };
+    applications.forEach((application) => {
+      const descriptor = resolveApplicationStatus(application);
+      counts[descriptor.category] += 1;
+    });
+    return counts;
+  }, [applications]);
+
+  const filteredApplications = useMemo(() => {
+    if (applicationFilter === "all") {
+      return applications;
+    }
+    return applications.filter((application) => {
+      const descriptor = resolveApplicationStatus(application);
+      if (applicationFilter === "pending") {
+        return descriptor.category === "pending";
+      }
+      return descriptor.category === applicationFilter;
+    });
+  }, [applicationFilter, applications]);
 
   const resetNewAffiliateForm = (prefill?: Partial<AffiliateFormState>) => {
     setNewAffiliate({
@@ -428,6 +554,93 @@ export default function AffiliateManager() {
       });
   };
 
+  const openReviewModal = (
+    application: AffiliateApplicationRecord,
+    action: AffiliateApplicationDecisionAction
+  ) => {
+    setReviewTarget(application);
+    setReviewAction(action);
+    setReviewNotes("");
+    setReviewError(null);
+  };
+
+  const handleReviewSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!reviewTarget) {
+      return;
+    }
+    const trimmedNotes = reviewNotes.trim();
+    if (reviewAction === "request_info" && !trimmedNotes) {
+      setReviewError("Please include guidance when requesting more information.");
+      return;
+    }
+    setReviewSubmitting(true);
+    setReviewError(null);
+    try {
+      const response = await fetch("/api/affiliates/applications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: reviewTarget.id,
+          action: reviewAction,
+          notes: trimmedNotes || null,
+        }),
+      });
+      if (!response.ok) {
+        let errorMessage = "Unable to update application.";
+        try {
+          const data = (await response.json()) as { error?: string };
+          if (data?.error) {
+            errorMessage = data.error;
+          }
+        } catch {
+          // Ignore JSON parse errors
+        }
+        throw new Error(errorMessage);
+      }
+      const successMessage =
+        reviewAction === "approve"
+          ? `Approved ${reviewTarget.fullName}`
+          : reviewAction === "reject"
+            ? `Rejected ${reviewTarget.fullName}`
+            : `Requested more info from ${reviewTarget.fullName}`;
+      setReviewFeedback(successMessage);
+      setReviewTarget(null);
+      setReviewNotes("");
+    } catch (err: any) {
+      console.error("Failed to review affiliate application", err);
+      setReviewError(err?.message || "Unable to update application.");
+    } finally {
+      setReviewSubmitting(false);
+    }
+  };
+
+  const renderReviewHistory = (history: AffiliateApplicationReviewEntry[]) => {
+    if (!history.length) {
+      return null;
+    }
+    return (
+      <ol className="space-y-1 text-xs text-gray-600">
+        {history.map((entry, index) => {
+          const decidedAt = entry.decidedAt?.toDate?.();
+          const key = `${entry.action}-${decidedAt?.getTime?.() ?? index}-${index}`;
+          return (
+            <li key={key} className="flex flex-wrap gap-1">
+              <span className="font-medium text-gray-700">{entry.action === "approve"
+                ? "Approved"
+                : entry.action === "reject"
+                  ? "Rejected"
+                  : "Info requested"}</span>
+              {decidedAt ? <span>· {decidedAt.toLocaleString()}</span> : null}
+              {entry.reviewerName ? <span>· {entry.reviewerName}</span> : null}
+              {entry.notes ? <span className="text-gray-500">— {entry.notes}</span> : null}
+            </li>
+          );
+        })}
+      </ol>
+    );
+  };
+
   if (guardLoading) {
     return <p className="text-sm text-gray-600">Checking permissions…</p>;
   }
@@ -657,11 +870,29 @@ export default function AffiliateManager() {
       )}
 
       <section className="grid gap-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">Affiliate applications</h2>
-          <span className="text-xs text-gray-500">{applications.length} recent submissions</span>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="grid gap-1">
+            <h2 className="text-lg font-semibold text-gray-900">Affiliate applications</h2>
+            <span className="text-xs text-gray-500">{applications.length} recent submissions</span>
+            {reviewFeedback ? <span className="text-xs text-emerald-600">{reviewFeedback}</span> : null}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {applicationFilterOptions.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                className={`btn btn-xs ${applicationFilter === option.key ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => setApplicationFilter(option.key)}
+              >
+                {option.label}
+                <span className="ml-2 rounded-full bg-gray-200 px-2 text-[10px] font-medium text-gray-700">
+                  {applicationCounts[option.key]}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
-        {applications.length === 0 ? (
+        {filteredApplications.length === 0 ? (
           <p className="text-sm text-gray-600">No pending applications.</p>
         ) : (
           <div className="overflow-x-auto">
@@ -676,47 +907,104 @@ export default function AffiliateManager() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {applications.map((application) => {
+                {filteredApplications.map((application) => {
                   const submitted = application.createdAt?.toDate?.();
+                  const descriptor = resolveApplicationStatus(application);
+                  const decision = application.review;
+                  const decidedAt = decision?.decidedAt?.toDate?.();
                   return (
-                    <tr key={application.id}>
-                      <td className="px-3 py-2 align-top">
-                        <div className="font-medium text-gray-900">{application.fullName}</div>
-                        <div className="text-xs text-gray-500">{application.email}</div>
-                        {application.phone ? (
-                          <div className="text-xs text-gray-500">{application.phone}</div>
-                        ) : null}
-                      </td>
-                      <td className="px-3 py-2 align-top">
-                        <div className="text-sm text-gray-700">{application.focus || '—'}</div>
-                        {application.notes ? (
-                          <div className="mt-1 text-xs text-gray-500 whitespace-pre-line">{application.notes}</div>
-                        ) : null}
-                      </td>
-                      <td className="px-3 py-2 align-top text-sm text-gray-600">
-                        {application.stage || application.status || 'New'}
-                      </td>
-                      <td className="px-3 py-2 align-top text-sm text-gray-600">
-                        {submitted ? submitted.toLocaleDateString() : '—'}
-                      </td>
-                      <td className="px-3 py-2 align-top text-sm">
-                        <button
-                          type="button"
-                          className="btn btn-outline btn-sm"
-                          onClick={() =>
-                            resetNewAffiliateForm({
-                              name: application.fullName,
-                              email: application.email,
-                              company: application.location ?? '',
-                              phone: application.phone ?? '',
-                              notes: application.notes ?? '',
-                            })
-                          }
-                        >
-                          Prefill new affiliate
-                        </button>
-                      </td>
-                    </tr>
+                    <>
+                      <tr key={application.id}>
+                        <td className="px-3 py-2 align-top">
+                          <div className="font-medium text-gray-900">{application.fullName}</div>
+                          <div className="text-xs text-gray-500">{application.email}</div>
+                          {application.phone ? (
+                            <div className="text-xs text-gray-500">{application.phone}</div>
+                          ) : null}
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <div className="text-sm text-gray-700">{application.focus || '—'}</div>
+                          {application.notes ? (
+                            <div className="mt-1 whitespace-pre-line text-xs text-gray-500">{application.notes}</div>
+                          ) : null}
+                        </td>
+                        <td className="px-3 py-2 align-top text-sm text-gray-600">
+                          <div className="flex flex-col gap-1">
+                            <span className={`inline-flex w-fit items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${descriptor.badgeClass}`}>
+                              {descriptor.label}
+                            </span>
+                            {decision?.notes ? (
+                              <span className="text-xs text-gray-500">“{decision.notes}”</span>
+                            ) : null}
+                            {decision?.reviewerName || decidedAt ? (
+                              <span className="text-[11px] text-gray-400">
+                                {decision?.reviewerName ? `by ${decision.reviewerName}` : null}
+                                {decision?.reviewerName && decidedAt ? ' · ' : ''}
+                                {decidedAt ? decidedAt.toLocaleString() : null}
+                              </span>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 align-top text-sm text-gray-600">
+                          {submitted ? submitted.toLocaleDateString() : '—'}
+                        </td>
+                        <td className="px-3 py-2 align-top text-sm">
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              className="btn btn-xs"
+                              disabled={descriptor.category === 'approved'}
+                              onClick={() => openReviewModal(application, "approve")}
+                            >
+                              Approve
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-xs btn-warning"
+                              disabled={descriptor.category === 'info'}
+                              onClick={() => openReviewModal(application, "request_info")}
+                            >
+                              Request info
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-xs btn-error"
+                              disabled={descriptor.category === 'rejected'}
+                              onClick={() => openReviewModal(application, "reject")}
+                            >
+                              Reject
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-outline btn-xs"
+                              onClick={() =>
+                                resetNewAffiliateForm({
+                                  name: application.fullName,
+                                  email: application.email,
+                                  company: application.location ?? '',
+                                  phone: application.phone ?? '',
+                                  notes: application.notes ?? '',
+                                })
+                              }
+                            >
+                              Prefill new affiliate
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {application.reviewHistory.length > 0 ? (
+                        <tr className="bg-gray-50">
+                          <td colSpan={5} className="px-3 py-2">
+                            <div className="grid gap-1">
+                              <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                                Review history
+                              </span>
+                              {renderReviewHistory(application.reviewHistory)}
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </>
                   );
                 })}
               </tbody>
@@ -724,6 +1012,120 @@ export default function AffiliateManager() {
           </div>
         )}
       </section>
+
+      {reviewTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <button
+            type="button"
+            aria-label="Close review dialog"
+            className="absolute inset-0"
+            onClick={() => {
+              setReviewTarget(null);
+              setReviewNotes("");
+              setReviewError(null);
+            }}
+          />
+          <div className="relative w-full max-w-xl rounded-2xl bg-white p-6 shadow-xl">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Review affiliate application</h3>
+                <p className="text-sm text-gray-600">
+                  {reviewTarget.fullName} · {reviewTarget.email}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => {
+                  setReviewTarget(null);
+                  setReviewNotes("");
+                  setReviewError(null);
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <form className="mt-4 grid gap-4" onSubmit={handleReviewSubmit}>
+              <div className="grid gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Decision</span>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${reviewAction === 'approve' ? 'btn-primary' : 'btn-ghost'}`}
+                    onClick={() => setReviewAction("approve")}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${reviewAction === 'request_info' ? 'btn-warning' : 'btn-ghost'}`}
+                    onClick={() => setReviewAction("request_info")}
+                  >
+                    Request info
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${reviewAction === 'reject' ? 'btn-error' : 'btn-ghost'}`}
+                    onClick={() => setReviewAction("reject")}
+                  >
+                    Reject
+                  </button>
+                </div>
+              </div>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium text-gray-700">Reviewer notes</span>
+                <textarea
+                  className="input min-h-[100px]"
+                  value={reviewNotes}
+                  onChange={(event) => setReviewNotes(event.target.value)}
+                  placeholder={
+                    reviewAction === 'request_info'
+                      ? 'Share what we need before approving…'
+                      : 'Add optional context for the applicant and audit trail'
+                  }
+                />
+                {reviewAction === 'request_info' ? (
+                  <span className="text-xs text-gray-500">Applicants will see these instructions in their follow-up email.</span>
+                ) : null}
+              </label>
+              <div className="grid gap-1 text-xs text-gray-500">
+                <span className="font-semibold uppercase tracking-wide text-gray-500">Application snapshot</span>
+                <dl className="grid gap-1 sm:grid-cols-2">
+                  <div>
+                    <dt className="font-medium text-gray-700">Focus</dt>
+                    <dd>{reviewTarget.focus || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium text-gray-700">Experience</dt>
+                    <dd>{reviewTarget.experience || '—'}</dd>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <dt className="font-medium text-gray-700">Notes</dt>
+                    <dd className="whitespace-pre-line">{reviewTarget.notes || '—'}</dd>
+                  </div>
+                </dl>
+              </div>
+              {reviewError ? <p className="text-sm text-red-600">{reviewError}</p> : null}
+              <div className="flex items-center justify-between gap-3">
+                <button type="submit" className="btn" disabled={reviewSubmitting}>
+                  {reviewSubmitting ? 'Saving…' : 'Save decision'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => {
+                    setReviewTarget(null);
+                    setReviewNotes("");
+                    setReviewError(null);
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
 
       <section className="grid gap-3">
         <h2 className="text-lg font-semibold text-gray-900">Recent payouts</h2>

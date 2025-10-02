@@ -3685,6 +3685,199 @@ async function sendEmail(to, subject, body) {
         console.error('sendEmail error', err);
     }
 }
+function normalizeAffiliateReviewAction(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const normalised = value.trim().toLowerCase();
+    if (normalised === 'approve' || normalised === 'approved') {
+        return 'approve';
+    }
+    if (normalised === 'reject' || normalised === 'rejected' || normalised === 'decline' || normalised === 'declined') {
+        return 'reject';
+    }
+    if (normalised === 'request_info' ||
+        normalised === 'request-info' ||
+        normalised === 'info_requested' ||
+        normalised === 'needs_info' ||
+        normalised === 'needs_more_info') {
+        return 'request_info';
+    }
+    return null;
+}
+function stringOrNull(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+async function loadNotificationTemplate(key) {
+    try {
+        const doc = await db.collection('notificationTemplates').doc(key).get();
+        if (!doc.exists) {
+            return null;
+        }
+        const data = doc.data() ?? {};
+        const subject = stringOrNull(data.subject);
+        const body = stringOrNull(data.body);
+        return { subject: subject ?? null, body: body ?? null };
+    }
+    catch (error) {
+        console.error('Failed to load notification template', key, error);
+        return null;
+    }
+}
+function applyTemplate(template, vars) {
+    return Object.entries(vars).reduce((acc, [key, value]) => {
+        const safeValue = value ?? '';
+        return acc.replace(new RegExp(`{{\s*${key}\s*}}`, 'g'), safeValue);
+    }, template);
+}
+export const onAffiliateApplicationReviewed = functions.firestore
+    .document('affiliateApplications/{applicationId}')
+    .onUpdate(async (change, context) => {
+    const beforeData = change.before.data();
+    const afterData = change.after.data();
+    if (!afterData) {
+        return null;
+    }
+    const statusBefore = stringOrNull(beforeData?.status);
+    const statusAfter = stringOrNull(afterData.status);
+    const stageBefore = stringOrNull(beforeData?.stage);
+    const stageAfter = stringOrNull(afterData.stage);
+    if (statusBefore === statusAfter && stageBefore === stageAfter) {
+        return null;
+    }
+    const review = (afterData.review ?? {});
+    let action = normalizeAffiliateReviewAction(review.lastAction) ||
+        normalizeAffiliateReviewAction(review.action) ||
+        normalizeAffiliateReviewAction(review.decision) ||
+        null;
+    if (!action && Array.isArray(afterData.reviewHistory) && afterData.reviewHistory.length > 0) {
+        const lastEntry = afterData.reviewHistory[afterData.reviewHistory.length - 1];
+        action =
+            normalizeAffiliateReviewAction(lastEntry?.action) ||
+                normalizeAffiliateReviewAction(lastEntry?.decision) ||
+                normalizeAffiliateReviewAction(lastEntry?.statusAction) ||
+                null;
+    }
+    if (!action) {
+        if (statusAfter === 'approved') {
+            action = 'approve';
+        }
+        else if (statusAfter === 'rejected') {
+            action = 'reject';
+        }
+        else if (statusAfter === 'info_requested') {
+            action = 'request_info';
+        }
+        else {
+            return null;
+        }
+    }
+    const applicantName = stringOrNull(afterData.fullName) ??
+        stringOrNull(afterData.name) ??
+        'Affiliate applicant';
+    const applicantEmail = stringOrNull(afterData.email);
+    const reviewerName = stringOrNull(review.reviewerName) ||
+        stringOrNull(review.reviewedByName) ||
+        (Array.isArray(afterData.reviewHistory) && afterData.reviewHistory.length > 0
+            ? stringOrNull(afterData.reviewHistory[afterData.reviewHistory.length - 1]?.reviewerName)
+            : null);
+    const reviewerEmail = stringOrNull(review.reviewerEmail) ||
+        stringOrNull(review.reviewedByEmail) ||
+        (Array.isArray(afterData.reviewHistory) && afterData.reviewHistory.length > 0
+            ? stringOrNull(afterData.reviewHistory[afterData.reviewHistory.length - 1]?.reviewerEmail)
+            : null);
+    const notes = stringOrNull(review.notes);
+    let templateKey;
+    let defaultSubject;
+    let defaultBody;
+    switch (action) {
+        case 'approve': {
+            templateKey = 'affiliate_application_approved';
+            defaultSubject = 'Welcome to the Pineapple Tapped affiliate programme';
+            defaultBody = `Hi ${applicantName},\n\nGreat news — your affiliate application has been approved. We'll follow up shortly with your onboarding pack and referral toolkit.\n\nIf you have any immediate questions, just reply to this email and the team will be happy to help.\n\nBest,\nPineapple Tapped`;
+            break;
+        }
+        case 'reject': {
+            templateKey = 'affiliate_application_rejected';
+            defaultSubject = 'Update on your Pineapple Tapped affiliate application';
+            defaultBody = `Hi ${applicantName},\n\nThanks for taking the time to apply. After reviewing your submission we’re not moving forward right now. ${notes ? `\n\nNotes from the team: ${notes}\n\n` : '\n'}We’ll keep your details on file in case anything changes.\n\nBest wishes,\nPineapple Tapped`;
+            break;
+        }
+        default: {
+            templateKey = 'affiliate_application_info_requested';
+            defaultSubject = 'We need a quick update on your affiliate application';
+            defaultBody = `Hi ${applicantName},\n\nThanks for applying to join the Pineapple Tapped affiliate programme. Before we can complete the review we just need a little more information:${notes ? `\n\n${notes}\n` : '\n\nPlease reply with the additional details at your earliest convenience.\n'}\nOnce we’ve received your update we’ll get back to you within two business days.\n\nThanks!\nPineapple Tapped`;
+            break;
+        }
+    }
+    const template = await loadNotificationTemplate(templateKey);
+    const templateContext = {
+        applicantName,
+        reviewerName,
+        reviewerEmail,
+        notes,
+        status: statusAfter ?? stageAfter ?? action,
+        action,
+    };
+    const subject = template?.subject
+        ? applyTemplate(template.subject, templateContext)
+        : defaultSubject;
+    const body = template?.body ? applyTemplate(template.body, templateContext) : defaultBody;
+    if (applicantEmail) {
+        try {
+            await sendEmail(applicantEmail, subject, body);
+        }
+        catch (err) {
+            console.error('Failed to send affiliate application decision email', context.params.applicationId, err);
+        }
+        try {
+            await db.collection('notifications').add({
+                kind: 'affiliate_application',
+                templateKey,
+                toEmail: applicantEmail,
+                toName: applicantName,
+                status: statusAfter ?? null,
+                stage: stageAfter ?? null,
+                action,
+                reviewerName: reviewerName ?? null,
+                reviewerEmail: reviewerEmail ?? null,
+                notes: notes ?? null,
+                applicationId: context.params.applicationId,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+        }
+        catch (err) {
+            console.error('Failed to record affiliate application notification', context.params.applicationId, err);
+        }
+    }
+    const slackWebhook = process.env.SLACK_AFFILIATE_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL;
+    if (slackWebhook) {
+        const statusLabel = action === 'approve' ? 'Approved' : action === 'reject' ? 'Rejected' : 'Info requested';
+        const lines = [
+            `Affiliate application ${statusLabel}: ${applicantName}`,
+            `Reviewed by: ${reviewerName ?? reviewerEmail ?? 'Unknown reviewer'}`,
+        ];
+        if (notes) {
+            lines.push(`Notes: ${notes}`);
+        }
+        lines.push(`Application ID: ${context.params.applicationId}`);
+        try {
+            await fetch(slackWebhook, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: lines.join('\n') }),
+            });
+        }
+        catch (err) {
+            console.error('Failed to send affiliate decision Slack notification', context.params.applicationId, err);
+        }
+    }
+    return null;
+});
 export const contact_send = functions.https.onCall(async (data) => {
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
     const leadSourceRaw = typeof data.leadSource === 'string' ? data.leadSource.trim() : '';
