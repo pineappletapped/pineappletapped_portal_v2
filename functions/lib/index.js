@@ -43,12 +43,37 @@ let cachedStripeWebhookSecret = typeof process.env.STRIPE_WEBHOOK_SECRET === 'st
     ? process.env.STRIPE_WEBHOOK_SECRET.trim()
     : undefined;
 let cachedOperationalSettings = null;
+const BOOKING_INVITE_BASE_URL = (typeof process.env.BOOKING_INVITE_BASE_URL === 'string' && process.env.BOOKING_INVITE_BASE_URL.trim().length > 0
+    ? process.env.BOOKING_INVITE_BASE_URL.trim()
+    : null) ||
+    (typeof process.env.PORTAL_BASE_URL === 'string' && process.env.PORTAL_BASE_URL.trim().length > 0
+        ? process.env.PORTAL_BASE_URL.trim()
+        : null) ||
+    (typeof process.env.NEXT_PUBLIC_SITE_URL === 'string' && process.env.NEXT_PUBLIC_SITE_URL.trim().length > 0
+        ? process.env.NEXT_PUBLIC_SITE_URL.trim()
+        : null) ||
+    'https://portal.pineappletapped.com';
 function normaliseString(value) {
     if (typeof value !== 'string') {
         return null;
     }
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;
+}
+function normaliseEmailAddress(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed) {
+        return null;
+    }
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailPattern.test(trimmed) ? trimmed : null;
+}
+function buildBookingInviteUrl(token) {
+    const base = BOOKING_INVITE_BASE_URL || 'https://portal.pineappletapped.com';
+    return `${base.replace(/\/$/, '')}/bookings/invite/${token}`;
 }
 function parseNumber(value) {
     if (typeof value === 'number' && Number.isFinite(value)) {
@@ -3064,6 +3089,542 @@ export const bookings_request = functions.https.onCall(async (data, context) => 
     };
     const ref = await db.collection('bookings').add(booking);
     return { id: ref.id };
+});
+function sanitiseBookingInvites(inputs) {
+    const invites = [];
+    const seen = new Set();
+    inputs.forEach((input) => {
+        if (!input || typeof input !== 'object') {
+            const emailOnly = normaliseEmailAddress(input);
+            if (emailOnly && !seen.has(emailOnly)) {
+                seen.add(emailOnly);
+                invites.push({ email: emailOnly, organisation: null, contactName: null });
+            }
+            return;
+        }
+        const record = input;
+        const email = normaliseEmailAddress(record.email ?? record.address ?? record.value);
+        if (!email || seen.has(email)) {
+            return;
+        }
+        seen.add(email);
+        const organisation = normaliseString(record.organisation ?? record.company ?? record.name ?? null);
+        const contactName = normaliseString(record.contactName ?? record.primaryContact ?? record.name ?? null);
+        invites.push({ email, organisation, contactName });
+    });
+    return invites;
+}
+function formatBookingSlotSummary(bookingData) {
+    const slots = Array.isArray(bookingData?.slots) ? bookingData.slots : [];
+    if (!slots.length) {
+        return '';
+    }
+    const formatted = slots
+        .slice(0, 3)
+        .map((slot) => {
+        const label = normaliseString(slot?.label);
+        const startAt = normaliseString(slot?.startAt);
+        const endAt = normaliseString(slot?.endAt);
+        if (startAt) {
+            const start = new Date(startAt);
+            const end = endAt ? new Date(endAt) : null;
+            if (!Number.isNaN(start.getTime())) {
+                const formatter = new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+                if (end && !Number.isNaN(end.getTime())) {
+                    return `${label || formatter.format(start)} (${formatter.format(start)} – ${formatter.format(end)})`;
+                }
+                return `${label || formatter.format(start)} (${formatter.format(start)})`;
+            }
+        }
+        return label || 'Session';
+    })
+        .filter((value) => value.length > 0);
+    const remaining = slots.length - formatted.length;
+    if (remaining > 0) {
+        formatted.push(`${remaining} additional slot${remaining === 1 ? '' : 's'}`);
+    }
+    return formatted.join('\n');
+}
+export const projectBookings_sendInvites = functions.https.onCall(async (data, context) => {
+    await assertStaff(context, ['admin', 'projects']);
+    const projectId = normaliseString(data?.projectId);
+    const bookingId = normaliseString(data?.bookingId);
+    if (!projectId || !bookingId) {
+        throw new functions.https.HttpsError('invalid-argument', 'projectId and bookingId are required');
+    }
+    const invitesInput = Array.isArray(data?.invites) ? data.invites : [];
+    const message = normaliseString(data?.message) ?? '';
+    const invites = sanitiseBookingInvites(invitesInput);
+    if (!invites.length) {
+        throw new functions.https.HttpsError('invalid-argument', 'At least one valid email address is required.');
+    }
+    const bookingRef = db.collection('projects').doc(projectId).collection('projectBookings').doc(bookingId);
+    const [bookingSnap, projectSnap, existingInvitesSnap] = await Promise.all([
+        bookingRef.get(),
+        db.collection('projects').doc(projectId).get(),
+        bookingRef.collection('invites').get(),
+    ]);
+    if (!bookingSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Booking session not found.');
+    }
+    const bookingData = bookingSnap.data() ?? {};
+    const projectData = projectSnap.exists ? (projectSnap.data() ?? {}) : {};
+    const bookingTitle = normaliseString(bookingData.taskTitle) || 'Booking form';
+    const projectName = normaliseString(projectData.title) ||
+        normaliseString(projectData.projectName) ||
+        normaliseString(projectData.name) ||
+        'your project';
+    const existingEmails = new Set();
+    existingInvitesSnap.docs.forEach((docSnap) => {
+        const email = normaliseEmailAddress(docSnap.data()?.email);
+        if (email)
+            existingEmails.add(email);
+    });
+    const filtered = invites.filter((invite) => !existingEmails.has(invite.email));
+    if (!filtered.length) {
+        return { created: 0, skipped: invites.length, links: [] };
+    }
+    const batch = db.batch();
+    const tokens = [];
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const stats = bookingData.stats ?? {};
+    const invitesOutstanding = typeof stats.invitesOutstanding === 'number' ? stats.invitesOutstanding : 0;
+    filtered.forEach((invite) => {
+        const token = uuidv4();
+        tokens.push(token);
+        const payload = {
+            token,
+            projectId,
+            bookingId,
+            workflowId: normaliseString(bookingData.workflowId),
+            workflowTaskId: normaliseString(bookingData.workflowTaskId),
+            workflowTemplateId: normaliseString(bookingData.workflowTemplateId),
+            email: invite.email,
+            organisation: invite.organisation || null,
+            contactName: invite.contactName || null,
+            status: 'pending',
+            createdAt: timestamp,
+            sentAt: timestamp,
+            createdBy: context.auth?.uid ?? null,
+            projectName,
+            bookingTitle,
+            message: message || null,
+        };
+        const inviteRef = db.collection('projectBookingInvites').doc(token);
+        const bookingInviteRef = bookingRef.collection('invites').doc(token);
+        batch.set(inviteRef, payload, { merge: true });
+        batch.set(bookingInviteRef, payload, { merge: true });
+    });
+    batch.set(bookingRef, {
+        stats: {
+            ...stats,
+            invitesOutstanding: invitesOutstanding + filtered.length,
+        },
+        updatedAt: timestamp,
+    }, { merge: true });
+    await batch.commit();
+    const slotSummary = formatBookingSlotSummary(bookingData);
+    const inviteLinks = [];
+    const emailTasks = [];
+    filtered.forEach((invite, index) => {
+        const token = tokens[index];
+        const inviteUrl = buildBookingInviteUrl(token);
+        inviteLinks.push({ email: invite.email, organisation: invite.organisation, url: inviteUrl, token });
+        const greeting = invite.organisation || invite.contactName || invite.email.split('@')[0];
+        const lines = [
+            `Hi ${greeting || 'there'},`,
+            '',
+            `You’ve been invited to reserve a filming session for ${projectName}.`,
+        ];
+        if (bookingTitle) {
+            lines.push(`Session: ${bookingTitle}`);
+        }
+        if (slotSummary) {
+            lines.push('', 'Available slots:', slotSummary);
+        }
+        if (normaliseString(bookingData.introduction)) {
+            lines.push('', bookingData.introduction.trim());
+        }
+        lines.push('', `Confirm your slot here: ${inviteUrl}`);
+        if (message) {
+            lines.push('', message);
+        }
+        lines.push('', 'This link is unique to you. If you need help, reply to this email.');
+        const subject = `Secure your filming slot for ${projectName}`;
+        emailTasks.push(sendEmail(invite.email, subject, lines.join('\n')).catch((err) => {
+            console.error('Failed to send project booking invite email', token, err);
+        }));
+    });
+    await Promise.allSettled(emailTasks);
+    const franchiseId = normaliseString(projectData.franchiseId);
+    const franchiseName = normaliseString(projectData.franchiseName) ||
+        normaliseString(projectData.franchiseTitle) ||
+        null;
+    const clientId = normaliseString(projectData.orgId);
+    const clientName = normaliseString(projectData.orgName) ||
+        normaliseString(projectData.organisation) ||
+        null;
+    await Promise.all(tokens.map((token, index) => db.collection('aiCommandLogs').add({
+        commandName: 'project_booking_invite',
+        promptName: bookingTitle ? `Booking invite · ${bookingTitle}` : 'Project booking invite',
+        clientId: clientId || null,
+        clientName: filtered[index]?.organisation || clientName || filtered[index]?.email,
+        franchiseId: franchiseId || null,
+        franchiseName: franchiseName || null,
+        modelId: null,
+        modelName: null,
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        cost: 0,
+        currency: 'GBP',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        requestId: token,
+        projectId,
+        bookingId,
+    })));
+    return { created: filtered.length, skipped: invites.length - filtered.length, links: inviteLinks };
+});
+function sanitiseBookingResponseAnswers(input) {
+    if (!input || typeof input !== 'object') {
+        return {};
+    }
+    const entries = input;
+    const answers = {};
+    Object.entries(entries).forEach(([key, value]) => {
+        if (typeof key !== 'string' || !key.trim()) {
+            return;
+        }
+        if (value === null ||
+            typeof value === 'string' ||
+            typeof value === 'number' ||
+            typeof value === 'boolean') {
+            answers[key.trim()] = value;
+        }
+        else if (Array.isArray(value)) {
+            answers[key.trim()] = value
+                .map((entry) => {
+                if (entry === null ||
+                    typeof entry === 'string' ||
+                    typeof entry === 'number' ||
+                    typeof entry === 'boolean') {
+                    return entry;
+                }
+                if (!entry || typeof entry !== 'object') {
+                    return null;
+                }
+                return JSON.parse(JSON.stringify(entry));
+            })
+                .filter((entry) => entry !== null);
+        }
+        else if (typeof value === 'object') {
+            answers[key.trim()] = JSON.parse(JSON.stringify(value));
+        }
+    });
+    return answers;
+}
+function sanitiseBookingUploads(input) {
+    if (!Array.isArray(input)) {
+        return [];
+    }
+    const uploads = [];
+    input.forEach((entry) => {
+        if (!entry || typeof entry !== 'object') {
+            return;
+        }
+        const record = entry;
+        const url = normaliseString(record.url || record.href);
+        if (!url) {
+            return;
+        }
+        const name = normaliseString(record.name) || 'Attachment';
+        const contentType = normaliseString(record.contentType) || null;
+        const id = normaliseString(record.id) || uuidv4();
+        uploads.push({ id, name, url, contentType });
+    });
+    return uploads;
+}
+export const projectBookings_getInvite = functions.https.onCall(async (data) => {
+    const token = normaliseString(data?.token);
+    if (!token) {
+        throw new functions.https.HttpsError('invalid-argument', 'Invite token is required.');
+    }
+    const inviteRef = db.collection('projectBookingInvites').doc(token);
+    const inviteSnap = await inviteRef.get();
+    if (!inviteSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Invite not found.');
+    }
+    const inviteData = inviteSnap.data() ?? {};
+    const projectId = normaliseString(inviteData.projectId);
+    const bookingId = normaliseString(inviteData.bookingId);
+    if (!projectId || !bookingId) {
+        throw new functions.https.HttpsError('not-found', 'Invite is missing project metadata.');
+    }
+    const projectRef = db.collection('projects').doc(projectId);
+    const bookingRef = projectRef.collection('projectBookings').doc(bookingId);
+    const [projectSnap, bookingSnap, responsesSnap, inviteSubSnap] = await Promise.all([
+        projectRef.get(),
+        bookingRef.get(),
+        bookingRef.collection('responses').get(),
+        bookingRef.collection('invites').doc(token).get(),
+    ]);
+    if (!bookingSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Booking session not found.');
+    }
+    const bookingData = bookingSnap.data() ?? {};
+    const projectData = projectSnap.exists ? (projectSnap.data() ?? {}) : {};
+    const slotsInput = Array.isArray(bookingData.slots) ? bookingData.slots : [];
+    const responseFieldsInput = Array.isArray(bookingData.responseFields) ? bookingData.responseFields : [];
+    const uploadRequirementsInput = Array.isArray(bookingData.uploadRequirements) ? bookingData.uploadRequirements : [];
+    const slotUsage = new Map();
+    responsesSnap.docs.forEach((docSnap) => {
+        const slotId = normaliseString(docSnap.data()?.slotId);
+        if (!slotId)
+            return;
+        slotUsage.set(slotId, (slotUsage.get(slotId) ?? 0) + 1);
+    });
+    const slots = slotsInput
+        .map((slot, index) => {
+        if (!slot || typeof slot !== 'object') {
+            return null;
+        }
+        const id = normaliseString(slot.id) || `${bookingId}-slot-${index + 1}`;
+        const label = normaliseString(slot.label) || `Slot ${index + 1}`;
+        const startAt = normaliseString(slot.startAt);
+        const endAt = normaliseString(slot.endAt);
+        const capacityRaw = slot.capacity;
+        let capacity = 1;
+        if (typeof capacityRaw === 'number' && Number.isFinite(capacityRaw)) {
+            capacity = Math.max(1, Math.round(capacityRaw));
+        }
+        else if (typeof capacityRaw === 'string') {
+            const parsed = Number.parseInt(capacityRaw, 10);
+            if (Number.isFinite(parsed)) {
+                capacity = Math.max(1, Math.round(parsed));
+            }
+        }
+        const notes = normaliseString(slot.notes) || '';
+        return {
+            id,
+            label,
+            startAt,
+            endAt,
+            capacity,
+            notes,
+            booked: slotUsage.get(id) ?? 0,
+        };
+    })
+        .filter((slot) => Boolean(slot));
+    const responseFields = responseFieldsInput
+        .map((field, index) => {
+        if (!field || typeof field !== 'object') {
+            return null;
+        }
+        const id = normaliseString(field.id) || `${bookingId}-field-${index + 1}`;
+        const type = normaliseString(field.type) || 'text';
+        const label = normaliseString(field.label) || `Question ${index + 1}`;
+        const placeholder = normaliseString(field.placeholder) || '';
+        const required = field.required === true;
+        return { id, type, label, placeholder, required };
+    })
+        .filter((field) => Boolean(field));
+    const uploadRequirements = uploadRequirementsInput
+        .map((req, index) => {
+        if (!req || typeof req !== 'object') {
+            return null;
+        }
+        const id = normaliseString(req.id) || `${bookingId}-upload-${index + 1}`;
+        const label = normaliseString(req.label) || `Upload ${index + 1}`;
+        const description = normaliseString(req.description) || '';
+        const accept = normaliseString(req.accept) || '';
+        const required = req.required === true;
+        return { id, label, description, accept, required };
+    })
+        .filter((req) => Boolean(req));
+    const agreementRaw = bookingData.agreement ?? {};
+    const agreement = {
+        heading: normaliseString(agreementRaw.heading) ||
+            normaliseString(bookingData.taskTitle) ||
+            'Participation agreement',
+        body: normaliseString(agreementRaw.body) || '',
+        acknowledgementLabel: normaliseString(agreementRaw.acknowledgementLabel) ||
+            'I agree to the terms and conditions',
+        requireSignature: agreementRaw.requireSignature === false ? false : true,
+    };
+    const inviteStatus = normaliseString(inviteSubSnap.data()?.status || inviteData.status) || 'pending';
+    return {
+        invite: {
+            token,
+            projectId,
+            bookingId,
+            email: normaliseEmailAddress(inviteData.email),
+            organisation: normaliseString(inviteData.organisation),
+            contactName: normaliseString(inviteData.contactName),
+            contactEmail: normaliseEmailAddress(inviteData.contactEmail),
+            status: inviteStatus,
+            respondedAt: inviteData.respondedAt ?? null,
+        },
+        project: {
+            id: projectId,
+            title: normaliseString(projectData.title) || normaliseString(projectData.projectName) || null,
+            franchiseId: normaliseString(projectData.franchiseId),
+            franchiseName: normaliseString(projectData.franchiseName) || normaliseString(projectData.franchiseTitle) || null,
+            orgId: normaliseString(projectData.orgId),
+            orgName: normaliseString(projectData.orgName) || normaliseString(projectData.organisation) || null,
+        },
+        booking: {
+            id: bookingId,
+            taskTitle: normaliseString(bookingData.taskTitle) || 'Booking form',
+            introduction: normaliseString(bookingData.introduction) || '',
+            slots,
+            responseFields,
+            uploadRequirements,
+            agreement,
+        },
+    };
+});
+export const projectBookings_acceptInvite = functions.https.onCall(async (data) => {
+    const token = normaliseString(data?.token);
+    const slotId = normaliseString(data?.slotId);
+    if (!token || !slotId) {
+        throw new functions.https.HttpsError('invalid-argument', 'Invite token and slotId are required.');
+    }
+    const organisation = normaliseString(data?.organisation);
+    const contactName = normaliseString(data?.contactName);
+    const contactEmail = normaliseEmailAddress(data?.contactEmail);
+    if (!contactEmail) {
+        throw new functions.https.HttpsError('invalid-argument', 'A valid contact email is required.');
+    }
+    const agreementAccepted = data?.agreementAccepted === true;
+    if (!agreementAccepted) {
+        throw new functions.https.HttpsError('failed-precondition', 'Agreement must be accepted.');
+    }
+    const signatureName = normaliseString(data?.signatureName);
+    const answers = sanitiseBookingResponseAnswers(data?.answers);
+    const uploads = sanitiseBookingUploads(data?.uploads);
+    const responseId = normaliseString(data?.responseId) || uuidv4();
+    const inviteRef = db.collection('projectBookingInvites').doc(token);
+    const { projectId, bookingId, bookingData } = await db.runTransaction(async (tx) => {
+        const inviteSnap = await tx.get(inviteRef);
+        if (!inviteSnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'Invite not found.');
+        }
+        const inviteRecord = inviteSnap.data() ?? {};
+        const currentStatus = normaliseString(inviteRecord.status) || 'pending';
+        if (currentStatus !== 'pending') {
+            throw new functions.https.HttpsError('failed-precondition', 'This invitation has already been used.');
+        }
+        const projectIdInner = normaliseString(inviteRecord.projectId);
+        const bookingIdInner = normaliseString(inviteRecord.bookingId);
+        if (!projectIdInner || !bookingIdInner) {
+            throw new functions.https.HttpsError('not-found', 'Invite is missing project metadata.');
+        }
+        const bookingRef = db.collection('projects').doc(projectIdInner).collection('projectBookings').doc(bookingIdInner);
+        const bookingSnap = await tx.get(bookingRef);
+        if (!bookingSnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'Booking session not found.');
+        }
+        const bookingRecord = bookingSnap.data() ?? {};
+        const slots = Array.isArray(bookingRecord.slots) ? bookingRecord.slots : [];
+        const slot = slots.find((entry) => normaliseString(entry?.id) === slotId);
+        if (!slot) {
+            throw new functions.https.HttpsError('not-found', 'Selected slot is unavailable.');
+        }
+        let capacity = 1;
+        if (typeof slot.capacity === 'number' && Number.isFinite(slot.capacity)) {
+            capacity = Math.max(1, Math.round(slot.capacity));
+        }
+        else if (typeof slot.capacity === 'string') {
+            const parsed = Number.parseInt(slot.capacity, 10);
+            if (Number.isFinite(parsed)) {
+                capacity = Math.max(1, Math.round(parsed));
+            }
+        }
+        const responsesQuery = bookingRef.collection('responses').where('slotId', '==', slotId);
+        const responsesSnap = await tx.get(responsesQuery);
+        if (responsesSnap.size >= capacity) {
+            throw new functions.https.HttpsError('failed-precondition', 'This slot is already full.');
+        }
+        const timestamp = admin.firestore.FieldValue.serverTimestamp();
+        const responseRef = bookingRef.collection('responses').doc(responseId);
+        tx.set(responseRef, {
+            inviteToken: token,
+            organisation: organisation || null,
+            contactName: contactName || null,
+            contactEmail,
+            slotId,
+            status: 'confirmed',
+            answers,
+            uploads,
+            agreementAccepted: true,
+            agreementAcceptedAt: timestamp,
+            signatureName: signatureName || null,
+            submittedAt: timestamp,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        const inviteUpdate = {
+            status: 'responded',
+            respondedAt: timestamp,
+            responseId,
+            slotId,
+            organisation: organisation || inviteRecord.organisation || null,
+            contactName: contactName || inviteRecord.contactName || null,
+            contactEmail,
+        };
+        tx.set(inviteRef, inviteUpdate, { merge: true });
+        tx.set(bookingRef.collection('invites').doc(token), inviteUpdate, { merge: true });
+        const stats = bookingRecord.stats ?? {};
+        const responses = typeof stats.responses === 'number' ? stats.responses : 0;
+        const confirmed = typeof stats.confirmed === 'number' ? stats.confirmed : responses;
+        const invitesOutstanding = typeof stats.invitesOutstanding === 'number' ? stats.invitesOutstanding : 0;
+        const assetsUploaded = typeof stats.assetsUploaded === 'number' ? stats.assetsUploaded : 0;
+        tx.set(bookingRef, {
+            stats: {
+                ...stats,
+                responses: responses + 1,
+                confirmed: confirmed + 1,
+                invitesOutstanding: Math.max(0, invitesOutstanding - 1),
+                assetsUploaded: assetsUploaded + uploads.length,
+            },
+            lastResponseAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        return { projectId: projectIdInner, bookingId: bookingIdInner, bookingData: bookingRecord };
+    });
+    const projectSnap = await db.collection('projects').doc(projectId).get();
+    const projectData = projectSnap.exists ? (projectSnap.data() ?? {}) : {};
+    const bookingTitle = normaliseString(bookingData.taskTitle) || 'Booking response';
+    const franchiseId = normaliseString(projectData.franchiseId);
+    const franchiseName = normaliseString(projectData.franchiseName) ||
+        normaliseString(projectData.franchiseTitle) ||
+        null;
+    const clientId = normaliseString(projectData.orgId);
+    const clientName = organisation ||
+        normaliseString(projectData.orgName) ||
+        normaliseString(projectData.organisation) ||
+        contactName ||
+        contactEmail;
+    await db.collection('aiCommandLogs').add({
+        commandName: 'project_booking_response',
+        promptName: bookingTitle ? `Booking response · ${bookingTitle}` : 'Project booking response',
+        clientId: clientId || null,
+        clientName: clientName || null,
+        franchiseId: franchiseId || null,
+        franchiseName: franchiseName || null,
+        modelId: null,
+        modelName: null,
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        cost: 0,
+        currency: 'GBP',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        requestId: responseId,
+        projectId,
+        bookingId,
+    });
+    return { ok: true, responseId };
 });
 // Track page view analytics from the public site
 export const analytics_track = onRequest({ region: 'us-central1', cors: ANALYTICS_ALLOWED_ORIGINS }, async (req, res) => {

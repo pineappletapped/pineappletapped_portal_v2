@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import PortalContainer from '@/components/PortalContainer';
-import { db } from '@/lib/firebase';
+import { auth, db, functions } from '@/lib/firebase';
+import { extractUserRoles, hasRole } from '@/lib/roles';
 
 interface BookingUploadFile {
   id: string;
@@ -66,6 +68,21 @@ interface ProjectBookingRecord {
   responses: ProjectBookingResponseRecord[];
   invites: ProjectBookingInviteRecord[];
   updatedAt: Date | null;
+}
+
+interface InviteLinkInfo {
+  email: string;
+  organisation: string | null;
+  url: string;
+}
+
+interface InviteFormState {
+  entries: string;
+  message: string;
+  loading: boolean;
+  error: string | null;
+  success: string | null;
+  links: InviteLinkInfo[];
 }
 
 const bookingSlotFormatter = new Intl.DateTimeFormat('en-GB', {
@@ -281,54 +298,216 @@ export default function ProjectBookingsPage({ params }: { params: { id: string }
   const [bookings, setBookings] = useState<ProjectBookingRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isStaffUser, setIsStaffUser] = useState(false);
+  const [inviteForms, setInviteForms] = useState<Record<string, InviteFormState>>({});
 
   useEffect(() => {
     let active = true;
-
     (async () => {
-      setLoading(true);
-      setError(null);
       try {
-        const bookingsSnap = await getDocs(collection(db, 'projects', params.id, 'projectBookings'));
-        const records: ProjectBookingRecord[] = [];
-        for (const bookingDoc of bookingsSnap.docs) {
-          const base = parseBookingDoc(bookingDoc);
-          let responses: ProjectBookingResponseRecord[] = [];
-          let invites: ProjectBookingInviteRecord[] = [];
-          try {
-            const responsesSnap = await getDocs(collection(bookingDoc.ref, 'responses'));
-            responses = responsesSnap.docs.map((docSnap) => parseResponseDoc(docSnap));
-          } catch (responseErr) {
-            console.warn('Failed to load booking responses', bookingDoc.id, responseErr);
+        const user = auth.currentUser;
+        if (!user) {
+          if (active) {
+            setIsStaffUser(false);
           }
-          try {
-            const invitesSnap = await getDocs(collection(bookingDoc.ref, 'invites'));
-            invites = invitesSnap.docs.map((docSnap) => parseInviteDoc(docSnap));
-          } catch (inviteErr) {
-            console.warn('Failed to load booking invites', bookingDoc.id, inviteErr);
-          }
-          records.push({ ...base, responses, invites });
+          return;
         }
+        const userSnap = await getDoc(doc(db, 'users', user.uid));
+        const roles = extractUserRoles(userSnap.data());
+        if (active) {
+          setIsStaffUser(hasRole(roles, ['admin', 'projects']));
+        }
+      } catch (err) {
+        console.warn('Failed to determine staff access for booking invites', err);
+        if (active) {
+          setIsStaffUser(false);
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const fetchBookings = useCallback(async (): Promise<ProjectBookingRecord[]> => {
+    const bookingsSnap = await getDocs(collection(db, 'projects', params.id, 'projectBookings'));
+    const records: ProjectBookingRecord[] = [];
+    for (const bookingDoc of bookingsSnap.docs) {
+      const base = parseBookingDoc(bookingDoc);
+      let responses: ProjectBookingResponseRecord[] = [];
+      let invites: ProjectBookingInviteRecord[] = [];
+      try {
+        const responsesSnap = await getDocs(collection(bookingDoc.ref, 'responses'));
+        responses = responsesSnap.docs.map((docSnap) => parseResponseDoc(docSnap));
+      } catch (responseErr) {
+        console.warn('Failed to load booking responses', bookingDoc.id, responseErr);
+      }
+      try {
+        const invitesSnap = await getDocs(collection(bookingDoc.ref, 'invites'));
+        invites = invitesSnap.docs.map((docSnap) => parseInviteDoc(docSnap));
+      } catch (inviteErr) {
+        console.warn('Failed to load booking invites', bookingDoc.id, inviteErr);
+      }
+      records.push({ ...base, responses, invites });
+    }
+    return records;
+  }, [params.id]);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError(null);
+    fetchBookings()
+      .then((records) => {
         if (active) {
           setBookings(records);
         }
-      } catch (err) {
+      })
+      .catch((err) => {
         console.error('Failed to load project bookings', err);
         if (active) {
           setError('Unable to load booking sessions.');
           setBookings([]);
         }
-      } finally {
+      })
+      .finally(() => {
         if (active) {
           setLoading(false);
         }
-      }
-    })();
-
+      });
     return () => {
       active = false;
     };
-  }, [params.id]);
+  }, [fetchBookings]);
+
+  const baseInviteForm = useMemo<InviteFormState>(
+    () => ({ entries: '', message: '', loading: false, error: null, success: null, links: [] }),
+    [],
+  );
+
+  const updateInviteForm = useCallback(
+    (bookingId: string, updates: Partial<InviteFormState>) => {
+      setInviteForms((prev) => {
+        const current = prev[bookingId] ?? baseInviteForm;
+        return {
+          ...prev,
+          [bookingId]: { ...current, ...updates },
+        };
+      });
+    },
+    [baseInviteForm],
+  );
+
+  const parseInviteEntries = useCallback((raw: string) => {
+    const invites: Array<{ email: string; organisation?: string; contactName?: string }> = [];
+    const seen = new Set<string>();
+    const pattern = /^[^@\s]+@[^@\s]+\.[^@\s]+$/i;
+    raw
+      .split(/\r?\n|;/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .forEach((line) => {
+        let email = '';
+        let organisation = '';
+        let contactName = '';
+        const angle = line.match(/<([^>]+)>/);
+        if (angle && typeof angle.index === 'number') {
+          const angleIndex = angle.index;
+          email = angle[1].trim();
+          contactName = line.slice(0, angleIndex).replace(/["']/g, '').trim();
+          const remainder = line.slice(angleIndex + angle[0].length).replace(/^,/, '').trim();
+          organisation = remainder;
+        } else if (line.includes(',')) {
+          const [first, second] = line.split(',', 2);
+          email = first.trim();
+          organisation = second.trim();
+        } else {
+          email = line;
+        }
+        if (!pattern.test(email)) {
+          return;
+        }
+        const key = email.toLowerCase();
+        if (seen.has(key)) {
+          return;
+        }
+        seen.add(key);
+        invites.push({
+          email: key,
+          organisation: organisation || undefined,
+          contactName: contactName || undefined,
+        });
+      });
+    return invites;
+  }, []);
+
+  const handleInviteEntriesChange = useCallback(
+    (bookingId: string, value: string) => {
+      updateInviteForm(bookingId, { entries: value });
+    },
+    [updateInviteForm],
+  );
+
+  const handleInviteMessageChange = useCallback(
+    (bookingId: string, value: string) => {
+      updateInviteForm(bookingId, { message: value });
+    },
+    [updateInviteForm],
+  );
+
+  const sendInvites = useCallback(
+    async (bookingId: string) => {
+      const current = inviteForms[bookingId] ?? baseInviteForm;
+      const parsed = parseInviteEntries(current.entries);
+      if (parsed.length === 0) {
+        updateInviteForm(bookingId, {
+          error: 'Add at least one valid email address before sending.',
+          success: null,
+        });
+        return;
+      }
+      updateInviteForm(bookingId, { loading: true, error: null, success: null });
+      try {
+        const callable = httpsCallable(functions, 'projectBookings_sendInvites');
+        const result = await callable({
+          projectId: params.id,
+          bookingId,
+          invites: parsed,
+          message: current.message,
+        });
+        const payload = (result?.data as Record<string, unknown>) ?? {};
+        const created = typeof payload.created === 'number' ? payload.created : parsed.length;
+        const linksRaw = Array.isArray(payload.links) ? payload.links : [];
+        const links: InviteLinkInfo[] = linksRaw
+          .map((link) => ({
+            email: typeof link?.email === 'string' ? link.email : '',
+            organisation:
+              typeof (link as any)?.organisation === 'string' ? ((link as any).organisation as string) : null,
+            url: typeof link?.url === 'string' ? link.url : '',
+          }))
+          .filter((link) => link.email && link.url);
+        updateInviteForm(bookingId, {
+          loading: false,
+          error: null,
+          success:
+            created > 0
+              ? `Sent ${created} invite${created === 1 ? '' : 's'}.`
+              : 'Everyone on your list has already been invited.',
+          entries: '',
+          links,
+        });
+        const refreshed = await fetchBookings();
+        setBookings(refreshed);
+      } catch (err) {
+        console.error('Failed to send project booking invites', err);
+        updateInviteForm(bookingId, {
+          loading: false,
+          error: err instanceof Error ? err.message : 'Failed to send invites.',
+        });
+      }
+    },
+    [baseInviteForm, fetchBookings, inviteForms, parseInviteEntries, params.id, updateInviteForm],
+  );
 
   const aggregateStats = useMemo(() => {
     const totalSlots = bookings.reduce((sum, booking) => sum + booking.slots.length, 0);
@@ -397,6 +576,7 @@ export default function ProjectBookingsPage({ params }: { params: { id: string }
                 (sum, response) => sum + response.uploads.length,
                 booking.stats.assetsUploaded
               );
+              const inviteForm = inviteForms[booking.id] ?? baseInviteForm;
 
               return (
                 <article key={booking.id} className="rounded border border-gray-200 bg-white p-4 shadow-sm">
@@ -516,12 +696,80 @@ export default function ProjectBookingsPage({ params }: { params: { id: string }
 
                   <section className="mt-4">
                     <h3 className="text-sm font-semibold text-gray-900">Invitations</h3>
+                    {isStaffUser ? (
+                      <div className="mt-2 space-y-2 rounded border border-dashed border-gray-300 bg-gray-50 p-3 text-sm text-gray-700">
+                        <label className="grid gap-1">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                            Invite recipients
+                          </span>
+                          <textarea
+                            value={inviteForm.entries}
+                            onChange={(e) => handleInviteEntriesChange(booking.id, e.target.value)}
+                            className="input min-h-[100px] w-full"
+                            placeholder="name@example.com, Business Name"
+                          />
+                          <span className="text-xs text-gray-500">
+                            Paste emails (one per line). You can add a comma followed by the organisation name or use “Name &lt;email@example.com&gt;”.
+                          </span>
+                        </label>
+                        <label className="grid gap-1">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Message</span>
+                          <textarea
+                            value={inviteForm.message}
+                            onChange={(e) => handleInviteMessageChange(booking.id, e.target.value)}
+                            className="input min-h-[60px] w-full"
+                            placeholder="Add an optional note for recipients"
+                          />
+                        </label>
+                        {inviteForm.error ? (
+                          <p className="text-xs text-red-600">{inviteForm.error}</p>
+                        ) : null}
+                        {inviteForm.success ? (
+                          <p className="text-xs text-emerald-600">{inviteForm.success}</p>
+                        ) : null}
+                        {inviteForm.links.length > 0 ? (
+                          <div className="rounded border border-gray-200 bg-white/80 p-2 text-xs text-gray-600">
+                            <p className="font-medium text-gray-700">Invite links</p>
+                            <ul className="mt-1 grid gap-1">
+                              {inviteForm.links.map((link) => (
+                                <li key={`${link.email}-${link.url}`} className="flex flex-wrap items-center gap-1">
+                                  <a
+                                    href={link.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-blue-600 hover:underline"
+                                  >
+                                    {link.email}
+                                  </a>
+                                  {link.organisation ? (
+                                    <span className="text-gray-500">· {link.organisation}</span>
+                                  ) : null}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => sendInvites(booking.id)}
+                            className="inline-flex items-center justify-center rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={inviteForm.loading}
+                          >
+                            {inviteForm.loading ? 'Sending…' : 'Send invites'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                     {booking.invites.length === 0 ? (
                       <p className="mt-2 text-sm text-gray-600">No invites sent yet.</p>
                     ) : (
                       <ul className="mt-2 grid gap-2 text-sm text-gray-700">
                         {booking.invites.map((invite) => (
-                          <li key={invite.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-dashed border-gray-200 p-2">
+                          <li
+                            key={invite.id}
+                            className="flex flex-wrap items-center justify-between gap-2 rounded border border-dashed border-gray-200 p-2"
+                          >
                             <div>
                               <p className="font-medium text-gray-900">{invite.organisation || invite.email}</p>
                               <p className="text-xs text-gray-600">{invite.email}</p>
