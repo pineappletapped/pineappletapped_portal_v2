@@ -1,17 +1,26 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Product, ProductModifierSelection } from "@/lib/products";
 import { useCart } from "@/lib/cart";
 import { db, functions } from "@/lib/firebase";
-import { doc, getDoc } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
-import ProductDatePicker from "./ProductDatePicker";
+import ProductDatePicker, {
+  type ProductAvailabilityScope,
+} from "./ProductDatePicker";
+import {
+  getPriceForTier,
+  normalisePriceTierLevel,
+  type PriceTierLevel,
+  type PriceTiers,
+} from "@/lib/pricing";
 
 interface ModifierOption {
   id: string;
   name: string;
-  price: number;
+  basePrice: number;
+  priceTiers?: PriceTiers | null;
 }
 
 interface ModifierGroup {
@@ -29,6 +38,279 @@ interface Props {
 }
 
 const DRONE_STANDARD_ID = "drone_compliance";
+
+const GBP = new Intl.NumberFormat("en-GB", {
+  style: "currency",
+  currency: "GBP",
+});
+
+interface PostalCodeEntry {
+  raw: string;
+  normalised: string;
+}
+
+interface TerritoryRecord {
+  id: string;
+  label: string | null;
+  type: "postal" | "radius";
+  franchiseId: string | null;
+  exclusive: boolean;
+  postalCodes: PostalCodeEntry[];
+  radiusKm: number | null;
+  centerLat: number | null;
+  centerLng: number | null;
+  priceTier: PriceTierLevel;
+}
+
+interface FranchiseRecord {
+  id: string;
+  name: string | null;
+  code: string | null;
+}
+
+type TerritoryMatchType = "exact" | "prefix" | "superset" | "radius";
+
+interface TerritoryMatch {
+  territoryId: string;
+  territoryLabel: string | null;
+  territoryPostalCode: string;
+  franchiseId: string | null;
+  exclusive: boolean;
+  priceTier: PriceTierLevel;
+  hqFallback: boolean;
+  matchType: TerritoryMatchType;
+}
+
+interface CoverageAssignment {
+  type: "hq" | "franchise";
+  franchiseId: string | null;
+  territoryId: string | null;
+  territoryLabel: string | null;
+  priceTier: PriceTierLevel;
+  hqFallback: boolean;
+  label: string;
+  postalCode: string | null;
+  matchType: TerritoryMatchType | "hq";
+}
+
+type CoverageStatus = "idle" | "loading" | "success" | "error";
+
+interface PostcodeLookupResult {
+  resolved: string;
+  lat: number | null;
+  lng: number | null;
+}
+
+const normalisePostalCode = (value: string): string | null => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const cleaned = trimmed.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return cleaned.length > 0 ? cleaned : null;
+};
+
+const extractPostalCodes = (input: unknown): PostalCodeEntry[] => {
+  const rawValues: string[] = [];
+  if (Array.isArray(input)) {
+    input.forEach((entry) => {
+      if (typeof entry === "string" && entry.trim().length > 0) {
+        rawValues.push(entry);
+      } else if (entry != null) {
+        rawValues.push(String(entry));
+      }
+    });
+  } else if (typeof input === "string") {
+    rawValues.push(input);
+  }
+  const expanded = rawValues.flatMap((value) =>
+    value
+      .split(/\r?\n|,/)
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0)
+  );
+  return expanded
+    .map((value) => {
+      const normalised = normalisePostalCode(value);
+      if (!normalised) return null;
+      return { raw: value, normalised };
+    })
+    .filter((value): value is PostalCodeEntry => value !== null);
+};
+
+const parsePriceTiers = (input: unknown): PriceTiers | null => {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+  const result: PriceTiers = {};
+  let hasValue = false;
+  const data = input as Record<string, unknown>;
+  ("tier1" in data ? ["tier1", "tier2", "tier3"] : Object.keys(data)).forEach((key) => {
+    if (key === "tier1" || key === "tier2" || key === "tier3") {
+      const raw = data[key];
+      const num = typeof raw === "number" ? raw : Number(raw);
+      if (Number.isFinite(num)) {
+        (result as any)[key] = num;
+        hasValue = true;
+      }
+    }
+  });
+  return hasValue ? result : null;
+};
+
+const toFiniteOrNull = (value: unknown): number | null => {
+  const num = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+const haversineDistanceKm = (
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number => {
+  const toRad = (val: number) => (val * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distance = R * c;
+  return Number.isFinite(distance) ? distance : Number.NaN;
+};
+
+const resolveTerritoryMatch = (
+  territories: TerritoryRecord[],
+  postalCode: string,
+  geocode: PostcodeLookupResult | null
+): TerritoryMatch | null => {
+  const normalisedInput = normalisePostalCode(postalCode);
+  if (!normalisedInput) {
+    return null;
+  }
+  let best: { score: number; match: TerritoryMatch } | null = null;
+  for (const territory of territories) {
+    const hasFranchise = Boolean(territory.franchiseId);
+    if (territory.type === "postal") {
+      for (const code of territory.postalCodes) {
+        let matchType: TerritoryMatchType | null = null;
+        let score = 0;
+        if (code.normalised === normalisedInput) {
+          matchType = "exact";
+          score = 2000 + code.normalised.length;
+        } else if (normalisedInput.startsWith(code.normalised)) {
+          matchType = "prefix";
+          score = 1200 + code.normalised.length;
+        } else if (code.normalised.startsWith(normalisedInput)) {
+          matchType = "superset";
+          score = 800 + normalisedInput.length;
+        }
+        if (!matchType) {
+          continue;
+        }
+        if (territory.exclusive) {
+          score += 50;
+        }
+        if (!hasFranchise) {
+          score -= 25;
+        }
+        const candidate: TerritoryMatch = {
+          territoryId: territory.id,
+          territoryLabel: territory.label,
+          territoryPostalCode: code.normalised,
+          franchiseId: territory.franchiseId,
+          exclusive: territory.exclusive,
+          priceTier: territory.priceTier,
+          hqFallback: !hasFranchise,
+          matchType,
+        };
+        if (!best || score > best.score) {
+          best = { score, match: candidate };
+        }
+      }
+      continue;
+    }
+
+    if (!geocode || geocode.lat == null || geocode.lng == null) {
+      continue;
+    }
+    if (
+      territory.radiusKm == null ||
+      territory.centerLat == null ||
+      territory.centerLng == null
+    ) {
+      continue;
+    }
+    const distanceKm = haversineDistanceKm(
+      geocode.lat,
+      geocode.lng,
+      territory.centerLat,
+      territory.centerLng
+    );
+    if (!Number.isFinite(distanceKm) || distanceKm > territory.radiusKm * 1.01) {
+      continue;
+    }
+    const coverageRatio = Math.min(
+      Math.max(1 - distanceKm / territory.radiusKm, 0),
+      1
+    );
+    let score = 1500 + Math.round(coverageRatio * 400);
+    if (territory.exclusive) {
+      score += 50;
+    }
+    if (!hasFranchise) {
+      score -= 25;
+    }
+    const candidate: TerritoryMatch = {
+      territoryId: territory.id,
+      territoryLabel: territory.label,
+      territoryPostalCode: normalisedInput,
+      franchiseId: territory.franchiseId,
+      exclusive: territory.exclusive,
+      priceTier: territory.priceTier,
+      hqFallback: !hasFranchise,
+      matchType: "radius",
+    };
+    if (!best || score > best.score) {
+      best = { score, match: candidate };
+    }
+  }
+  return best?.match ?? null;
+};
+
+const lookupPostcode = async (
+  postcode: string
+): Promise<PostcodeLookupResult | null> => {
+  const trimmed = postcode.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const response = await fetch(
+      `https://api.postcodes.io/postcodes/${encodeURIComponent(trimmed)}`
+    );
+    if (!response.ok) {
+      return null;
+    }
+    const json = await response.json();
+    if (!json || typeof json !== "object" || json.status !== 200) {
+      return null;
+    }
+    const result = json.result || {};
+    const lat = toFiniteOrNull(result.latitude);
+    const lng = toFiniteOrNull(result.longitude);
+    const resolved =
+      typeof result.postcode === "string" && result.postcode.trim().length > 0
+        ? result.postcode
+        : trimmed.toUpperCase();
+    return { resolved, lat, lng };
+  } catch (error) {
+    console.warn("Failed to look up postcode", error);
+    return null;
+  }
+};
 
 type FunctionsError = {
   code: string;
@@ -63,8 +345,38 @@ export default function AddToCartWizard({
   const [conflicts, setConflicts] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [liveMessage, setLiveMessage] = useState("Add this product to your cart");
+  const [locationInput, setLocationInput] = useState("");
+  const [postcodeInput, setPostcodeInput] = useState("");
+  const [coverage, setCoverage] = useState<CoverageAssignment | null>(null);
+  const [coverageStatus, setCoverageStatus] = useState<CoverageStatus>("idle");
+  const [coverageError, setCoverageError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const territoriesRef = useRef<TerritoryRecord[] | null>(null);
+  const franchiseMapRef = useRef<Map<string, FranchiseRecord> | null>(null);
+  const priceTier: PriceTierLevel = coverage?.priceTier ?? 1;
+  const effectiveBasePrice = useMemo(
+    () => getPriceForTier(basePrice, product.priceTiers ?? null, priceTier),
+    [basePrice, product.priceTiers, priceTier]
+  );
+  const resolveOptionPrice = useCallback(
+    (option: ModifierOption) =>
+      getPriceForTier(option.basePrice, option.priceTiers ?? null, priceTier),
+    [priceTier]
+  );
+  const availabilityScope = useMemo<ProductAvailabilityScope | null>(() => {
+    if (!coverage || coverageStatus !== "success") {
+      return null;
+    }
+    if (coverage.type === "franchise" && coverage.franchiseId) {
+      return {
+        type: "franchise",
+        franchiseId: coverage.franchiseId,
+        territoryId: coverage.territoryId ?? undefined,
+      } satisfies ProductAvailabilityScope;
+    }
+    return { type: "hq", organisationId: null } satisfies ProductAvailabilityScope;
+  }, [coverage, coverageStatus]);
   const handleDateSelect = (value: string) => {
     setDate(value);
     setConflicts([]);
@@ -88,38 +400,239 @@ export default function AddToCartWizard({
       const snaps = await Promise.all(
         groupIds.map((id) => getDoc(doc(db, "modifiers", id)))
       );
-      const groupsData: ModifierGroup[] = snaps
-        .filter((s) => s.exists())
-        .map((s) => ({ id: s.id, ...(s.data() as any) })) as any;
-      const filtered = groupsData
-        .map((g) => {
-          const opts = g.options
-            .filter((o: any) =>
-              product.modifiers?.some((m) => m.groupId === g.id && m.optionId === o.id)
+      const filtered = snaps
+        .filter((snap) => snap.exists())
+        .map((snap) => {
+          const data = snap.data() as Record<string, unknown> | undefined;
+          const optionsSource = Array.isArray(data?.options) ? data?.options : [];
+          const options: ModifierOption[] = optionsSource
+            .filter((option) =>
+              product.modifiers?.some((m) => m.groupId === snap.id && m.optionId === option?.id)
             )
-            .map((o: any) => {
+            .map((option) => {
               const override = product.modifiers?.find(
-                (m) => m.groupId === g.id && m.optionId === o.id
+                (m) => m.groupId === snap.id && m.optionId === option?.id
               );
-              return { id: o.id, name: o.name, price: override?.price ?? o.price };
-            });
-          return { ...g, options: opts } as ModifierGroup;
+              const overridePrice = override ? toFiniteOrNull((override as any).price) : null;
+              const optionPrice = toFiniteOrNull((option as any)?.price);
+              const basePriceValue = overridePrice ?? optionPrice ?? 0;
+              const overrideTiers =
+                (override?.priceTiers as PriceTiers | null | undefined) ?? null;
+              const optionTiers = parsePriceTiers((option as any)?.priceTiers);
+              const id =
+                typeof option?.id === "string"
+                  ? option.id
+                  : option?.id != null
+                    ? String(option.id)
+                    : "";
+              const name =
+                typeof option?.name === "string"
+                  ? option.name
+                  : option?.name != null
+                    ? String(option.name)
+                    : id || "Option";
+              return {
+                id,
+                name,
+                basePrice: basePriceValue,
+                priceTiers: overrideTiers ?? optionTiers ?? null,
+              } satisfies ModifierOption;
+            })
+            .filter((option) => option.id.length > 0);
+          return {
+            id: snap.id,
+            name:
+              typeof data?.name === "string" && data.name.trim().length > 0
+                ? data.name
+                : snap.id,
+            multiple: data?.multiple === true,
+            options,
+          } satisfies ModifierGroup;
         })
-        .filter((g) => g.options.length > 0);
+        .filter((group) => group.options.length > 0);
       setGroups(filtered);
     }
     load();
   }, [product]);
 
-  const totalSteps = groups.length + 1; // final step for date
-  const currentGroup = step < groups.length ? groups[step] : null;
-  const stepLabel = currentGroup
-    ? `Choose ${currentGroup.multiple ? "one or more" : "an"} option for ${currentGroup.name}`
-    : "Confirm the production date";
+  const totalSteps = groups.length + 2;
+  const locationStep = step === 0;
+  const modifierIndex = step - 1;
+  const currentGroup =
+    modifierIndex >= 0 && modifierIndex < groups.length ? groups[modifierIndex] : null;
+  const dateStep = step === totalSteps - 1;
+  const stepLabel = locationStep
+    ? "Confirm the filming location"
+    : currentGroup
+      ? `Choose ${currentGroup.multiple ? "one or more" : "an"} option for ${currentGroup.name}`
+      : "Confirm the production date";
 
   useEffect(() => {
     setLiveMessage(`Step ${step + 1} of ${totalSteps}: ${stepLabel}`);
   }, [step, totalSteps, stepLabel]);
+
+  useEffect(() => {
+    setCoverage(null);
+    setCoverageStatus("idle");
+    setCoverageError(null);
+  }, [locationInput, postcodeInput]);
+
+  const loadTerritories = useCallback(async (): Promise<TerritoryRecord[]> => {
+    if (territoriesRef.current) {
+      return territoriesRef.current;
+    }
+    try {
+      const snap = await getDocs(collection(db, "franchiseTerritories"));
+      const records: TerritoryRecord[] = snap.docs.map((docSnap) => {
+        const data = docSnap.data() as Record<string, unknown> | undefined;
+        const typeValue =
+          typeof data?.type === "string" && data.type.toLowerCase() === "radius"
+            ? "radius"
+            : "postal";
+        return {
+          id: docSnap.id,
+          label:
+            typeof data?.label === "string" && data.label.trim().length > 0
+              ? data.label
+              : null,
+          type: typeValue,
+          franchiseId:
+            typeof data?.franchiseId === "string" && data.franchiseId.trim().length > 0
+              ? data.franchiseId.trim()
+              : null,
+          exclusive: data?.exclusive !== false,
+          postalCodes: extractPostalCodes(data?.postalCodes),
+          radiusKm: toFiniteOrNull(data?.radiusKm),
+          centerLat: toFiniteOrNull(data?.centerLat),
+          centerLng: toFiniteOrNull(data?.centerLng),
+          priceTier: normalisePriceTierLevel(data?.priceTier),
+        } satisfies TerritoryRecord;
+      });
+      territoriesRef.current = records;
+      return records;
+    } catch (err) {
+      console.warn("Failed to load territory metadata", err);
+      territoriesRef.current = [];
+      return [];
+    }
+  }, []);
+
+  const loadFranchises = useCallback(async () => {
+    if (franchiseMapRef.current) {
+      return franchiseMapRef.current;
+    }
+    try {
+      const snap = await getDocs(collection(db, "franchises"));
+      const map = new Map<string, FranchiseRecord>();
+      snap.forEach((docSnap) => {
+        const data = docSnap.data() as Record<string, unknown> | undefined;
+        const name =
+          typeof data?.name === "string" && data.name.trim().length > 0
+            ? data.name.trim()
+            : typeof data?.code === "string" && data.code.trim().length > 0
+              ? data.code.trim()
+              : null;
+        const code =
+          typeof data?.code === "string" && data.code.trim().length > 0
+            ? data.code.trim()
+            : null;
+        map.set(docSnap.id, { id: docSnap.id, name, code });
+      });
+      franchiseMapRef.current = map;
+      return map;
+    } catch (err) {
+      console.warn("Failed to load franchise metadata", err);
+      franchiseMapRef.current = new Map();
+      return franchiseMapRef.current;
+    }
+  }, []);
+
+  const handleCoverageLookup = useCallback(async () => {
+    const trimmedLocation = locationInput.trim();
+    const trimmedPostcode = postcodeInput.trim();
+    if (!trimmedLocation) {
+      setCoverage(null);
+      setCoverageStatus("error");
+      const message = "Enter the filming address or venue before continuing.";
+      setCoverageError(message);
+      setError(message);
+      setLiveMessage("Filming address required");
+      return;
+    }
+    if (!trimmedPostcode) {
+      setCoverage(null);
+      setCoverageStatus("error");
+      const message = "Enter the filming postcode so we can route your booking.";
+      setCoverageError(message);
+      setError(message);
+      setLiveMessage("Filming postcode required");
+      return;
+    }
+    setCoverageStatus("loading");
+    setCoverageError(null);
+    setError(null);
+    setLiveMessage("Checking franchise coverage for the filming location");
+    try {
+      const [territories, franchiseMap, postcodeDetails] = await Promise.all([
+        loadTerritories(),
+        loadFranchises(),
+        lookupPostcode(trimmedPostcode),
+      ]);
+      const match = resolveTerritoryMatch(territories, trimmedPostcode, postcodeDetails);
+      const resolvedPostalCode =
+        postcodeDetails?.resolved ??
+        normalisePostalCode(trimmedPostcode) ??
+        trimmedPostcode.toUpperCase();
+      if (match) {
+        const label = match.franchiseId
+          ? franchiseMap?.get(match.franchiseId)?.name ||
+            franchiseMap?.get(match.franchiseId)?.code ||
+            "Franchise operations"
+          : "HQ operations";
+        const assignment: CoverageAssignment = {
+          type: match.franchiseId ? "franchise" : "hq",
+          franchiseId: match.franchiseId,
+          territoryId: match.territoryId,
+          territoryLabel: match.territoryLabel,
+          priceTier: match.priceTier,
+          hqFallback: match.hqFallback,
+          label,
+          postalCode: resolvedPostalCode,
+          matchType: match.matchType,
+        };
+        setCoverage(assignment);
+        setCoverageStatus("success");
+        setLiveMessage(
+          match.franchiseId
+            ? `Coverage confirmed via ${label}`
+            : "Coverage confirmed via HQ operations"
+        );
+      } else {
+        const assignment: CoverageAssignment = {
+          type: "hq",
+          franchiseId: null,
+          territoryId: null,
+          territoryLabel: null,
+          priceTier: 1,
+          hqFallback: true,
+          label: "HQ operations",
+          postalCode: resolvedPostalCode,
+          matchType: "hq",
+        };
+        setCoverage(assignment);
+        setCoverageStatus("success");
+        setLiveMessage("Coverage confirmed via HQ operations");
+      }
+    } catch (err) {
+      console.error("Coverage lookup failed", err);
+      setCoverage(null);
+      setCoverageStatus("error");
+      setCoverageError(
+        "We couldn't verify coverage right now. Double-check the postcode and try again."
+      );
+      setLiveMessage("Coverage lookup failed");
+    }
+  }, [locationInput, postcodeInput, loadTerritories, loadFranchises]);
 
   useEffect(() => {
     restoreFocusRef.current = document.activeElement as HTMLElement | null;
@@ -198,12 +711,18 @@ export default function AddToCartWizard({
       ids.forEach((id) => {
         const opt = g.options.find((o) => o.id === id);
         if (opt) {
-          selections.push({ groupId: g.id, optionId: id, price: opt.price });
-          adj += opt.price || 0;
+          const optionPrice = resolveOptionPrice(opt);
+          selections.push({ groupId: g.id, optionId: id, price: optionPrice });
+          adj += optionPrice || 0;
         }
       });
     });
-    const price = basePrice + adj;
+    const price = effectiveBasePrice + adj;
+    if (!coverage || coverageStatus !== "success") {
+      setError("Confirm the filming location before selecting a production date.");
+      setLiveMessage("Filming location required before booking");
+      return;
+    }
     if (!date) {
       setError("Select a production date to continue.");
       setLiveMessage("Production date required before adding to cart");
@@ -257,6 +776,12 @@ export default function AddToCartWizard({
           window.alert(message);
         }
       }
+      const locationLabel = locationInput.trim();
+      const postalCodeLabel =
+        coverage.postalCode ||
+        (postcodeInput.trim().length > 0
+          ? postcodeInput.trim().toUpperCase()
+          : null);
       add({
         id: product.id,
         name: product.name,
@@ -268,6 +793,15 @@ export default function AddToCartWizard({
         rentalTotal,
         kitStatus: reservationStatus,
         kitWarnings: warnings,
+        location: locationLabel.length > 0 ? locationLabel : null,
+        postalCode: postalCodeLabel,
+        coverage: {
+          type: coverage.type,
+          franchiseId: coverage.franchiseId,
+          territoryId: coverage.territoryId,
+          priceTier,
+          hqFallback: coverage.hqFallback,
+        },
       });
       setLiveMessage(
         reservationStatus === "pending"
@@ -306,17 +840,19 @@ export default function AddToCartWizard({
     }
   };
 
-  const dateStep = step === totalSteps - 1;
-  const canNext = currentGroup
-    ? (selected[currentGroup.id] || []).length > 0
-    : !!date;
+  const canNext = locationStep
+    ? coverageStatus === "success" && !!coverage && locationInput.trim().length > 0
+    : currentGroup
+      ? (selected[currentGroup.id] || []).length > 0
+      : !!date;
 
   const descriptionIds = useMemo(() => {
     const ids = ["wizard-description"];
     if (error) ids.push("wizard-error");
     if (conflicts.length > 0) ids.push("wizard-conflicts");
+    if (coverageStatus === "error" && coverageError) ids.push("wizard-coverage-error");
     return ids.join(" ");
-  }, [error, conflicts]);
+  }, [error, conflicts, coverageStatus, coverageError]);
 
   return (
     <div
@@ -353,7 +889,86 @@ export default function AddToCartWizard({
             Close
           </button>
         </div>
-        {currentGroup ? (
+        {locationStep ? (
+          <div className="space-y-3">
+            <div>
+              <label
+                htmlFor="wizard-location"
+                className="block text-sm font-semibold text-gray-900"
+              >
+                Filming address or venue
+              </label>
+              <input
+                id="wizard-location"
+                type="text"
+                className="input input-bordered mt-1 w-full"
+                value={locationInput}
+                onChange={(event) => setLocationInput(event.target.value)}
+                placeholder="123 Example Street, Manchester"
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+              <div>
+                <label
+                  htmlFor="wizard-postcode"
+                  className="block text-sm font-semibold text-gray-900"
+                >
+                  Postcode
+                </label>
+                <input
+                  id="wizard-postcode"
+                  type="text"
+                  className="input input-bordered mt-1 w-full uppercase"
+                  value={postcodeInput}
+                  onChange={(event) => setPostcodeInput(event.target.value)}
+                  placeholder="e.g. M1 1AA"
+                />
+              </div>
+              <div className="flex items-end">
+                <button
+                  type="button"
+                  className="btn btn-primary w-full sm:w-auto"
+                  onClick={handleCoverageLookup}
+                  disabled={
+                    coverageStatus === "loading" ||
+                    locationInput.trim().length === 0 ||
+                    postcodeInput.trim().length === 0
+                  }
+                >
+                  {coverageStatus === "loading" ? "Checking…" : "Check coverage"}
+                </button>
+              </div>
+            </div>
+            {coverageStatus === "loading" && (
+              <p className="text-sm text-gray-500">Checking franchise coverage…</p>
+            )}
+            {coverageStatus === "error" && coverageError && (
+              <p id="wizard-coverage-error" className="text-sm text-red-600">
+                {coverageError}
+              </p>
+            )}
+            {coverageStatus === "success" && coverage && (
+              <div className="rounded-md border border-green-200 bg-green-50 p-3 text-sm text-green-900">
+                <p className="font-medium">
+                  {coverage.type === "franchise"
+                    ? `Coverage provided by ${coverage.label}`
+                    : "HQ operations will coordinate this shoot"}
+                </p>
+                {coverage.territoryLabel && (
+                  <p className="mt-1">Territory: {coverage.territoryLabel}</p>
+                )}
+                <p className="mt-1">
+                  Base price for this location:{" "}
+                  <span className="font-semibold">{GBP.format(effectiveBasePrice)}</span>
+                </p>
+              </div>
+            )}
+            <p className="text-xs text-gray-500">
+              Confirming the filming location routes your booking to the right franchise or HQ
+              team before we show available production dates.
+            </p>
+          </div>
+        ) : currentGroup ? (
           <div className="space-y-2">
             <p className="font-semibold">{currentGroup.name}</p>
             {currentGroup.options.map((o) => {
@@ -372,7 +987,9 @@ export default function AddToCartWizard({
                   />
                   <span>
                     {o.name}
-                    {o.price ? ` (+£${o.price.toFixed(2)})` : ""}
+                    {resolveOptionPrice(o) > 0
+                      ? ` (+${GBP.format(resolveOptionPrice(o))})`
+                      : ""}
                   </span>
                 </label>
               );
@@ -382,11 +999,18 @@ export default function AddToCartWizard({
           <div className="space-y-2">
             <p className="font-semibold">Production Date</p>
             {product.category !== "exhibition-videography" ? (
-              <ProductDatePicker
-                productId={product.id}
-                selected={date}
-                onSelect={handleDateSelect}
-              />
+              coverageStatus === "success" && coverage ? (
+                <ProductDatePicker
+                  productId={product.id}
+                  selected={date}
+                  onSelect={handleDateSelect}
+                  scope={availabilityScope}
+                />
+              ) : (
+                <p className="text-sm text-gray-500">
+                  Confirm the filming address and postcode first to check availability.
+                </p>
+              )
             ) : product.eventDate ? (
               <p className="text-sm">
                 {new Date(product.eventDate).toLocaleDateString()}

@@ -19,6 +19,15 @@ export interface CartItem {
   date: string;
   quantity: number;
   modifiers?: ProductModifierSelection[];
+  location?: string | null;
+  postalCode?: string | null;
+  coverage?: {
+    type: "hq" | "franchise";
+    franchiseId?: string | null;
+    territoryId?: string | null;
+    priceTier?: number | null;
+    hqFallback?: boolean;
+  } | null;
   kitItems?: {
     id: string;
     name?: string | null;
@@ -38,6 +47,15 @@ interface ProductInput {
   variation?: string;
   date: string;
   modifiers?: ProductModifierSelection[];
+  location?: string | null;
+  postalCode?: string | null;
+  coverage?: {
+    type: "hq" | "franchise";
+    franchiseId?: string | null;
+    territoryId?: string | null;
+    priceTier?: number | null;
+    hqFallback?: boolean;
+  } | null;
   kitItems?: {
     id: string;
     name?: string | null;
@@ -139,6 +157,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
           i.variation === product.variation &&
           JSON.stringify(i.modifiers || []) ===
             JSON.stringify(product.modifiers || []) &&
+          (i.location || "") === (product.location || "") &&
+          (i.postalCode || "") === (product.postalCode || "") &&
+          JSON.stringify(i.coverage || null) ===
+            JSON.stringify(product.coverage || null) &&
           (i.kitStatus || "confirmed") === (product.kitStatus || "confirmed") &&
           JSON.stringify(i.kitWarnings || []) ===
             JSON.stringify(product.kitWarnings || [])
