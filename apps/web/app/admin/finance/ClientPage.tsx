@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import PortalContainer from "@/components/PortalContainer";
 import { ensureFirebase } from "@/lib/firebase";
@@ -41,6 +41,43 @@ const formatCurrency = (value: number) =>
     Number.isFinite(value) ? value : 0
   );
 
+type FranchiseOption = { id: string; name: string };
+
+function extractFranchiseId(record: FirestoreRecord | null | undefined): string {
+  if (!record || typeof record !== "object") {
+    return "";
+  }
+  const direct = typeof record.franchiseId === "string" ? record.franchiseId.trim() : "";
+  if (direct) {
+    return direct;
+  }
+  const nested = record.franchise;
+  if (nested && typeof nested === "object") {
+    const nestedId = typeof (nested as Record<string, unknown>).id === "string"
+      ? ((nested as Record<string, unknown>).id as string).trim()
+      : "";
+    if (nestedId) {
+      return nestedId;
+    }
+    const nestedFranchiseId = typeof (nested as Record<string, unknown>).franchiseId === "string"
+      ? ((nested as Record<string, unknown>).franchiseId as string).trim()
+      : "";
+    if (nestedFranchiseId) {
+      return nestedFranchiseId;
+    }
+  }
+  const assignment = record.franchiseAssignment;
+  if (assignment && typeof assignment === "object") {
+    const assignmentId = typeof (assignment as Record<string, unknown>).franchiseId === "string"
+      ? ((assignment as Record<string, unknown>).franchiseId as string).trim()
+      : "";
+    if (assignmentId) {
+      return assignmentId;
+    }
+  }
+  return "";
+}
+
 const statusTone: Record<string, string> = {
   submitted: "bg-blue-100 text-blue-800",
   approved: "bg-emerald-100 text-emerald-700",
@@ -60,6 +97,8 @@ export default function AdminFinancePage() {
   const [clientInvoices, setClientInvoices] = useState<any[]>([]);
   const [expenses, setExpenses] = useState<any[]>([]);
   const [projects, setProjects] = useState<any[]>([]);
+  const [franchises, setFranchises] = useState<FranchiseOption[]>([]);
+  const [selectedScope, setSelectedScope] = useState<string>("hq");
   const { allowed, loading: guardLoading } = useRoleGate(['admin', 'finance']);
 
   useEffect(() => {
@@ -74,7 +113,7 @@ export default function AdminFinancePage() {
         if (!db) {
           throw new Error('Firestore is unavailable');
         }
-        const [contrSnap, clientSnap, expSnap, projSnap] = await Promise.all([
+        const [contrSnap, clientSnap, expSnap, projSnap, franchiseSnap] = await Promise.all([
           getDocs(collection(db, 'invoices')),
           getDocs(collection(db, 'clientInvoices')),
           getDocs(collection(db, 'expenses')),
@@ -85,6 +124,7 @@ export default function AdminFinancePage() {
               limit(5)
             )
           ),
+          getDocs(collection(db, 'franchises')),
         ]);
         setContractorInvoices(
           contrSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
@@ -93,6 +133,18 @@ export default function AdminFinancePage() {
         const exps = expSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
         setExpenses(exps);
         setProjects(projSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        setFranchises(
+          franchiseSnap.docs
+            .map((doc) => {
+              const data = doc.data() as Record<string, unknown>;
+              const rawName = typeof data.name === 'string' ? data.name.trim() : '';
+              return {
+                id: doc.id,
+                name: rawName || doc.id,
+              } satisfies FranchiseOption;
+            })
+            .sort((a, b) => a.name.localeCompare(b.name))
+        );
       } catch (err) {
         console.error('Failed to load finance data', err);
       } finally {
@@ -117,17 +169,51 @@ export default function AdminFinancePage() {
     }
   };
 
-  const moneyIn = clientInvoices.reduce(
+  const matchesScope = useCallback(
+    (record: FirestoreRecord) => {
+      if (selectedScope === 'all') {
+        return true;
+      }
+      const franchiseId = extractFranchiseId(record).toLowerCase();
+      if (selectedScope === 'hq') {
+        return !franchiseId || franchiseId === 'hq' || franchiseId === 'head office' || franchiseId === 'head-office';
+      }
+      return franchiseId === selectedScope.toLowerCase();
+    },
+    [selectedScope]
+  );
+
+  const filteredContractorInvoices = useMemo(
+    () => contractorInvoices.filter((invoice) => matchesScope(invoice as FirestoreRecord)),
+    [contractorInvoices, matchesScope]
+  );
+
+  const filteredClientInvoices = useMemo(
+    () => clientInvoices.filter((invoice) => matchesScope(invoice as FirestoreRecord)),
+    [clientInvoices, matchesScope]
+  );
+
+  const filteredExpenses = useMemo(
+    () => expenses.filter((expense) => matchesScope(expense as FirestoreRecord)),
+    [expenses, matchesScope]
+  );
+
+  const filteredProjects = useMemo(
+    () => projects.filter((project) => matchesScope(project as FirestoreRecord)),
+    [projects, matchesScope]
+  );
+
+  const moneyIn = filteredClientInvoices.reduce(
     (sum, inv) => sum + (inv.total || inv.amount || 0),
     0
   );
-  const moneyOut = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+  const moneyOut = filteredExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
   const totalProfit = moneyIn - moneyOut;
-  const projectSummary = projects.map((p) => {
-    const revenue = clientInvoices
+  const projectSummary = filteredProjects.map((p) => {
+    const revenue = filteredClientInvoices
       .filter((ci) => ci.projectId === p.id)
       .reduce((s, ci) => s + (ci.total || ci.amount || 0), 0);
-    const cost = expenses
+    const cost = filteredExpenses
       .filter((e) => e.projectId === p.id)
       .reduce((s, e) => s + (e.amount || 0), 0);
     return { ...p, revenue, cost, profit: revenue - cost };
@@ -135,7 +221,7 @@ export default function AdminFinancePage() {
 
   type InvoiceWithDue = FirestoreRecord & { _dueDate: Date | null };
   const outstandingClientInvoices = useMemo<InvoiceWithDue[]>(() => {
-    return clientInvoices
+    return filteredClientInvoices
       .filter((invoice: FirestoreRecord) => {
         const status = `${invoice?.status || ""}`.toLowerCase();
         return status !== "paid";
@@ -150,7 +236,7 @@ export default function AdminFinancePage() {
         return right - left;
       })
       .slice(0, 6);
-  }, [clientInvoices]);
+  }, [filteredClientInvoices]);
 
   const outstandingClientTotal = outstandingClientInvoices.reduce((sum, inv: any) => {
     const value = Number(inv.total || inv.amount || 0);
@@ -159,7 +245,7 @@ export default function AdminFinancePage() {
 
   type ExpenseWithDate = FirestoreRecord & { _date: Date | null };
   const recentExpenses = useMemo<ExpenseWithDate[]>(() => {
-    return expenses
+    return filteredExpenses
       .map((expense: FirestoreRecord) => {
         const when = coerceDate(expense?.date || expense?.createdAt);
         return { ...(expense as FirestoreRecord), _date: when };
@@ -170,7 +256,18 @@ export default function AdminFinancePage() {
         return right - left;
       })
       .slice(0, 8);
-  }, [expenses]);
+  }, [filteredExpenses]);
+
+  const scopeLabel = useMemo(() => {
+    if (selectedScope === 'all') {
+      return 'All organisations';
+    }
+    if (selectedScope === 'hq') {
+      return 'Head office (HQ)';
+    }
+    const match = franchises.find((franchise) => franchise.id.toLowerCase() === selectedScope.toLowerCase());
+    return match?.name || selectedScope;
+  }, [franchises, selectedScope]);
 
   if (guardLoading || loading) {
     return (
@@ -192,7 +289,7 @@ export default function AdminFinancePage() {
   return (
     <PortalContainer>
       <div className="grid gap-6">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-1">
             <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
               Finance overview
@@ -201,17 +298,36 @@ export default function AdminFinancePage() {
             <p className="text-sm text-gray-600">
               Monitor cash flow, reconcile contractor invoices, and keep the latest project profitability in one view.
             </p>
+            <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Snapshot · {scopeLabel}</p>
           </div>
-          <div className="flex flex-wrap gap-2 sm:justify-end">
-            <Link href="/admin/finance/invoices/new" className="btn btn-sm">
-              Create invoice
-            </Link>
-            <Link href="/admin/finance/expenses/new" className="btn btn-sm">
-              Log expense
-            </Link>
-            <Link href="/admin/finance/stripe-connect" className="btn btn-xs btn-outline">
-              Stripe Connect
-            </Link>
+          <div className="flex flex-col gap-3 sm:items-end">
+            <label className="flex flex-col text-xs font-semibold uppercase tracking-wide text-gray-500">
+              View snapshot for
+              <select
+                className="input mt-1 w-full min-w-[12rem] sm:w-56"
+                value={selectedScope}
+                onChange={(event) => setSelectedScope(event.target.value)}
+              >
+                <option value="hq">Head office (HQ)</option>
+                <option value="all">All organisations</option>
+                {franchises.map((franchise) => (
+                  <option key={franchise.id} value={franchise.id}>
+                    {franchise.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="flex flex-wrap gap-2 sm:justify-end">
+              <Link href="/admin/finance/invoices/new" className="btn btn-sm">
+                Create invoice
+              </Link>
+              <Link href="/admin/finance/expenses/new" className="btn btn-sm">
+                Log expense
+              </Link>
+              <Link href="/admin/finance/stripe-connect" className="btn btn-xs btn-outline">
+                Stripe Connect
+              </Link>
+            </div>
           </div>
         </header>
 
@@ -222,8 +338,8 @@ export default function AdminFinancePage() {
                 <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Money in</p>
                 <p className="mt-2 text-2xl font-semibold text-gray-900">{formatCurrency(moneyIn)}</p>
                 <p className="mt-1 text-xs text-gray-500">
-                  {clientInvoices.length > 0
-                    ? `${clientInvoices.length} client ${clientInvoices.length === 1 ? "invoice" : "invoices"}`
+                  {filteredClientInvoices.length > 0
+                    ? `${filteredClientInvoices.length} client ${filteredClientInvoices.length === 1 ? "invoice" : "invoices"}`
                     : "No client invoices recorded"}
                 </p>
               </div>
@@ -231,8 +347,8 @@ export default function AdminFinancePage() {
                 <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Money out</p>
                 <p className="mt-2 text-2xl font-semibold text-gray-900">{formatCurrency(moneyOut)}</p>
                 <p className="mt-1 text-xs text-gray-500">
-                  {expenses.length > 0
-                    ? `${expenses.length} expense ${expenses.length === 1 ? "entry" : "entries"}`
+                  {filteredExpenses.length > 0
+                    ? `${filteredExpenses.length} expense ${filteredExpenses.length === 1 ? "entry" : "entries"}`
                     : "No expenses logged"}
                 </p>
               </div>
@@ -289,11 +405,11 @@ export default function AdminFinancePage() {
                   Approve or mark payouts once the deliverables have been checked and reconciled.
                 </p>
               </div>
-              {contractorInvoices.length === 0 ? (
+              {filteredContractorInvoices.length === 0 ? (
                 <p className="px-6 py-8 text-sm text-gray-500">No contractor invoices awaiting action.</p>
               ) : (
                 <ul className="divide-y divide-gray-100">
-                  {contractorInvoices.map((invoice) => {
+                  {filteredContractorInvoices.map((invoice) => {
                     const amountValue = Number(invoice?.amount || 0);
                     const amountLabel = Number.isFinite(amountValue)
                       ? formatCurrency(amountValue)
