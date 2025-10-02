@@ -44,14 +44,14 @@ interface AuthStateDoc {
   displayName: string | null;
   redirectUri: string;
   scopes?: RequestedScopes;
-  createdAt?: Timestamp | Date | null;
+  createdAt?: Timestamp | Date | FieldValue | null;
   createdBy?: string | null;
   accountId?: string | null;
   status?: 'pending' | 'completed' | 'error';
   errorCode?: string | null;
   errorMessage?: string | null;
   expiresAt?: Timestamp | Date | null;
-  completedAt?: Timestamp | Date | null;
+  completedAt?: Timestamp | Date | FieldValue | null;
 }
 
 interface StoreCredentialPayload {

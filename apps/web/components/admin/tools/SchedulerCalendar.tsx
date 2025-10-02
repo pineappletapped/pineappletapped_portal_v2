@@ -129,7 +129,7 @@ export default function SchedulerCalendar({ posts, loading = false, onReschedule
     });
   }
 
-  function handleDrop(day: Date, event: DragEvent<HTMLDivElement>) {
+  function handleDrop(day: Date, event: DragEvent<HTMLElement>) {
     event.preventDefault();
     const postId = event.dataTransfer.getData("text/plain");
     if (!postId) return;
@@ -143,12 +143,12 @@ export default function SchedulerCalendar({ posts, loading = false, onReschedule
     onReschedule?.(postId, base);
   }
 
-  function handleDragStart(postId: string, event: DragEvent<HTMLDivElement>) {
+  function handleDragStart(postId: string, event: DragEvent<HTMLElement>) {
     event.dataTransfer.setData("text/plain", postId);
     event.dataTransfer.effectAllowed = "move";
   }
 
-  function handleDropUnscheduled(event: DragEvent<HTMLDivElement>) {
+  function handleDropUnscheduled(event: DragEvent<HTMLElement>) {
     event.preventDefault();
     const postId = event.dataTransfer.getData("text/plain");
     if (!postId) return;

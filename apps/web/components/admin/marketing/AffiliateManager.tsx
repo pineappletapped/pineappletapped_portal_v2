@@ -1321,7 +1321,7 @@ export default function AffiliateManager() {
                       >
                         {eligibleForPayout
                           ? 'Record payout'
-                          : hasLedgerLines
+                          : hasPendingLedgerLines
                             ? `Need £${AFFILIATE_MIN_WITHDRAWAL_NET.toFixed(0)}+ net`
                             : 'Awaiting delivered orders'}
                       </button>
