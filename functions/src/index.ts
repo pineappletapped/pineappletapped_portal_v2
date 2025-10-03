@@ -4472,9 +4472,28 @@ export const reserveKit = functions.https.onCall(async (data) => {
   if (!productId || !date) {
     throw new functions.https.HttpsError('invalid-argument', 'productId and date required');
   }
-  const start = new Date(date);
-  if (Number.isNaN(start.getTime())) {
+  const baseStart = new Date(date);
+  if (Number.isNaN(baseStart.getTime())) {
     throw new functions.https.HttpsError("invalid-argument", "Invalid reservation date");
+  }
+  let start = baseStart;
+  let end: Date | null = null;
+  const rawWindow = data?.timeWindow;
+  if (rawWindow && typeof rawWindow === 'object') {
+    const windowStartRaw = (rawWindow as any).start;
+    const windowEndRaw = (rawWindow as any).end;
+    if (typeof windowStartRaw === 'string' && typeof windowEndRaw === 'string') {
+      const windowStart = new Date(windowStartRaw);
+      const windowEnd = new Date(windowEndRaw);
+      if (
+        !Number.isNaN(windowStart.getTime()) &&
+        !Number.isNaN(windowEnd.getTime()) &&
+        windowEnd.getTime() > windowStart.getTime()
+      ) {
+        start = windowStart;
+        end = windowEnd;
+      }
+    }
   }
   const prodSnap = await db.collection('products').doc(productId).get();
   if (!prodSnap.exists) {
@@ -4507,7 +4526,18 @@ export const reserveKit = functions.https.onCall(async (data) => {
     1,
     Math.ceil(spanOverride !== null ? spanOverride : onsiteDaysValue),
   );
-  const end = new Date(start.getTime() + onsiteDayBlocks * 24 * 60 * 60 * 1000);
+  if (onsiteDayBlocks > 1) {
+    if (baseStart.getTime() < start.getTime()) {
+      start = baseStart;
+    }
+    const blockEnd = new Date(baseStart.getTime() + onsiteDayBlocks * 24 * 60 * 60 * 1000);
+    if (!end || blockEnd.getTime() > end.getTime()) {
+      end = blockEnd;
+    }
+  }
+  if (!end) {
+    end = new Date(start.getTime() + onsiteDayBlocks * 24 * 60 * 60 * 1000);
+  }
   const requiredKitRaw = Array.isArray(productData?.requiredKit)
     ? productData.requiredKit
     : [];
@@ -8181,6 +8211,52 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             return { showDate, setupDate, setupIncluded };
           })()
         : null;
+    const rawTimeSlot = items[idx]?.timeSlot;
+    const timeSlotDetails =
+      rawTimeSlot && typeof rawTimeSlot === 'object'
+        ? (() => {
+            const slotStart =
+              typeof rawTimeSlot.start === 'string' && rawTimeSlot.start.trim().length > 0
+                ? rawTimeSlot.start.trim()
+                : null;
+            const slotEnd =
+              typeof rawTimeSlot.end === 'string' && rawTimeSlot.end.trim().length > 0
+                ? rawTimeSlot.end.trim()
+                : null;
+            if (!slotStart || !slotEnd) {
+              return null;
+            }
+            const slotLabel =
+              typeof rawTimeSlot.label === 'string' && rawTimeSlot.label.trim().length > 0
+                ? rawTimeSlot.label.trim()
+                : null;
+            const totalMinutes =
+              typeof rawTimeSlot.totalMinutes === 'number' && Number.isFinite(rawTimeSlot.totalMinutes)
+                ? rawTimeSlot.totalMinutes
+                : null;
+            const setupMinutes =
+              typeof rawTimeSlot.setupMinutes === 'number' && Number.isFinite(rawTimeSlot.setupMinutes)
+                ? rawTimeSlot.setupMinutes
+                : null;
+            const shootMinutes =
+              typeof rawTimeSlot.shootMinutes === 'number' && Number.isFinite(rawTimeSlot.shootMinutes)
+                ? rawTimeSlot.shootMinutes
+                : null;
+            const breakdownMinutes =
+              typeof rawTimeSlot.breakdownMinutes === 'number' && Number.isFinite(rawTimeSlot.breakdownMinutes)
+                ? rawTimeSlot.breakdownMinutes
+                : null;
+            return {
+              start: slotStart,
+              end: slotEnd,
+              label: slotLabel,
+              totalMinutes,
+              setupMinutes,
+              shootMinutes,
+              breakdownMinutes,
+            };
+          })()
+        : null;
     const budget = (prod as any).budget || {};
     const labourFilming = parseOptional(budget.labourFilming);
     const labourEditing = parseOptional(budget.labourEditing);
@@ -8226,6 +8302,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       postalCode: itemPostalCode,
       exhibition: exhibitionDetails,
       coverage: coveragePayload,
+      timeSlot: timeSlotDetails,
       campaignBooking,
       budget: {
         perUnit: {

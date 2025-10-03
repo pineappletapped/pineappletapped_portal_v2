@@ -734,6 +734,11 @@ export default function EditProductPage() {
     { tone: "success" | "error"; text: string } | null
   >(null);
   const [onsiteDays, setOnsiteDays] = useState("");
+  const [onsiteSetupMinutes, setOnsiteSetupMinutes] = useState("");
+  const [onsiteShootMinutes, setOnsiteShootMinutes] = useState("");
+  const [onsiteBreakdownMinutes, setOnsiteBreakdownMinutes] = useState("");
+  const [onsiteWindowStart, setOnsiteWindowStart] = useState("");
+  const [onsiteWindowEnd, setOnsiteWindowEnd] = useState("");
   const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
   const [manualKitCost, setManualKitCost] = useState("0");
   const [travelMiles, setTravelMiles] = useState("100");
@@ -756,6 +761,32 @@ export default function EditProductPage() {
     if (!value || value.trim().length === 0) return null;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
+  };
+  const parseOptionalMinutes = (value: string): number | null => {
+    if (!value || value.trim().length === 0) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+  const normaliseTimeOfDay = (value: string): string | null => {
+    if (!value) return null;
+    const trimmed = value.trim();
+    if (!/^\d{1,2}:\d{2}$/.test(trimmed)) {
+      return null;
+    }
+    const [hoursStr, minutesStr] = trimmed.split(":");
+    const hours = Number.parseInt(hoursStr, 10);
+    const minutes = Number.parseInt(minutesStr, 10);
+    if (
+      !Number.isFinite(hours) ||
+      !Number.isFinite(minutes) ||
+      hours < 0 ||
+      hours > 23 ||
+      minutes < 0 ||
+      minutes > 59
+    ) {
+      return null;
+    }
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
   };
   const buildPriceTierPayload = (
     tier1: number | null,
@@ -1158,6 +1189,37 @@ export default function EditProductPage() {
               : typeof (p as any).onsiteDays === "string"
                 ? (p as any).onsiteDays
                 : ""
+          );
+          setOnsiteSetupMinutes(
+            typeof (p as any).onsiteSetupMinutes === "number"
+              ? String((p as any).onsiteSetupMinutes)
+              : typeof (p as any).onsiteSetupMinutes === "string"
+                ? (p as any).onsiteSetupMinutes
+                : ""
+          );
+          setOnsiteShootMinutes(
+            typeof (p as any).onsiteShootMinutes === "number"
+              ? String((p as any).onsiteShootMinutes)
+              : typeof (p as any).onsiteShootMinutes === "string"
+                ? (p as any).onsiteShootMinutes
+                : ""
+          );
+          setOnsiteBreakdownMinutes(
+            typeof (p as any).onsiteBreakdownMinutes === "number"
+              ? String((p as any).onsiteBreakdownMinutes)
+              : typeof (p as any).onsiteBreakdownMinutes === "string"
+                ? (p as any).onsiteBreakdownMinutes
+                : ""
+          );
+          setOnsiteWindowStart(
+            typeof (p as any).onsiteTimeWindowStart === "string"
+              ? (p as any).onsiteTimeWindowStart
+              : ""
+          );
+          setOnsiteWindowEnd(
+            typeof (p as any).onsiteTimeWindowEnd === "string"
+              ? (p as any).onsiteTimeWindowEnd
+              : ""
           );
           const requiredKit = Array.isArray((p as any).requiredKit)
             ? (p as any).requiredKit
@@ -1642,6 +1704,11 @@ export default function EditProductPage() {
       onsiteDays.trim().length > 0 && Number.isFinite(onsiteDaysValueRaw) && onsiteDaysValueRaw > 0
         ? onsiteDaysValueRaw
         : null;
+    const onsiteSetupValue = parseOptionalMinutes(onsiteSetupMinutes);
+    const onsiteShootValue = parseOptionalMinutes(onsiteShootMinutes);
+    const onsiteBreakdownValue = parseOptionalMinutes(onsiteBreakdownMinutes);
+    const onsiteWindowStartValue = normaliseTimeOfDay(onsiteWindowStart);
+    const onsiteWindowEndValue = normaliseTimeOfDay(onsiteWindowEnd);
     await updateDoc(doc(db, "products", id), {
       name,
       description,
@@ -1681,6 +1748,11 @@ export default function EditProductPage() {
       venue: venueLabel,
       venueId: venueId || null,
       onsiteDays: onsiteDaysValue,
+      onsiteSetupMinutes: onsiteSetupValue,
+      onsiteShootMinutes: onsiteShootValue,
+      onsiteBreakdownMinutes: onsiteBreakdownValue,
+      onsiteTimeWindowStart: onsiteWindowStartValue,
+      onsiteTimeWindowEnd: onsiteWindowEndValue,
       hidden,
       driveTemplateFolderId:
         driveTemplateFolderId.trim().length > 0 ? driveTemplateFolderId.trim() : null,
@@ -2532,6 +2604,81 @@ export default function EditProductPage() {
           <p className="text-xs text-gray-500 -mt-1">
             Used to block calendar availability for multi-day shoots.
           </p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-1">
+              <label className="text-sm font-medium">Setup minutes</label>
+              <input
+                type="number"
+                min="0"
+                step="15"
+                className="input"
+                value={onsiteSetupMinutes}
+                onChange={(e) => setOnsiteSetupMinutes(e.target.value)}
+                placeholder="60"
+              />
+              <p className="text-xs text-gray-500">
+                Optional. Time your crew needs on site before filming begins.
+              </p>
+            </div>
+            <div className="grid gap-1">
+              <label className="text-sm font-medium">Filming minutes</label>
+              <input
+                type="number"
+                min="0"
+                step="15"
+                className="input"
+                value={onsiteShootMinutes}
+                onChange={(e) => setOnsiteShootMinutes(e.target.value)}
+                placeholder="45"
+              />
+              <p className="text-xs text-gray-500">
+                Optional. Core filming window customers should reserve.
+              </p>
+            </div>
+            <div className="grid gap-1">
+              <label className="text-sm font-medium">Breakdown minutes</label>
+              <input
+                type="number"
+                min="0"
+                step="15"
+                className="input"
+                value={onsiteBreakdownMinutes}
+                onChange={(e) => setOnsiteBreakdownMinutes(e.target.value)}
+                placeholder="15"
+              />
+              <p className="text-xs text-gray-500">
+                Optional. Packing and wrap-up time after filming.
+              </p>
+            </div>
+            <div className="grid gap-1">
+              <label className="text-sm font-medium">Earliest arrival</label>
+              <input
+                type="time"
+                className="input"
+                value={onsiteWindowStart}
+                onChange={(e) => setOnsiteWindowStart(e.target.value)}
+                step={900}
+                placeholder="08:00"
+              />
+              <p className="text-xs text-gray-500">
+                Leave blank to default to 08:00.
+              </p>
+            </div>
+            <div className="grid gap-1">
+              <label className="text-sm font-medium">Latest finish</label>
+              <input
+                type="time"
+                className="input"
+                value={onsiteWindowEnd}
+                onChange={(e) => setOnsiteWindowEnd(e.target.value)}
+                step={900}
+                placeholder="18:00"
+              />
+              <p className="text-xs text-gray-500">
+                Leave blank to default to 18:00 or extend to fit the shoot.
+              </p>
+            </div>
+          </div>
           <label className="text-sm font-medium">Our Operations</label>
           <textarea
             className="input"

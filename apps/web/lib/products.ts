@@ -277,9 +277,28 @@ export interface Product {
   defaultKitCost?: number;
   /** Number of days the crew is expected to be on-site. */
   onsiteDays?: number | null;
+  /** Minutes spent setting up on site before filming begins. */
+  onsiteSetupMinutes?: number | null;
+  /** Minutes allocated to the primary filming window. */
+  onsiteShootMinutes?: number | null;
+  /** Minutes required to wrap down and break down kit on site. */
+  onsiteBreakdownMinutes?: number | null;
+  /** Earliest customer bookable arrival time in HH:mm (24h). */
+  onsiteTimeWindowStart?: string | null;
+  /** Latest customer bookable finish time in HH:mm (24h). */
+  onsiteTimeWindowEnd?: string | null;
   budget?: ProductBudget;
   productSpec?: ProductSpec;
   crewRoles?: ProductCrewRole[];
+}
+
+export interface ProductOnsiteTiming {
+  setupMinutes: number;
+  shootMinutes: number;
+  breakdownMinutes: number;
+  totalMinutes: number;
+  windowStartMinutes: number;
+  windowEndMinutes: number;
 }
 
 export const DAY_IN_MS = 24 * 60 * 60 * 1000;
@@ -392,13 +411,156 @@ export const resolveProductOnsiteDays = (
     const parsed = Number(raw);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   }
+  const timing = resolveProductOnsiteTiming(product);
+  if (timing) {
+    const days = timing.totalMinutes / (24 * 60);
+    return days > 0 ? days : null;
+  }
   return null;
+};
+
+const parseMinutes = (value: unknown): number => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Number(value));
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return 0;
+    }
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) {
+      return Math.max(0, parsed);
+    }
+  }
+  return 0;
+};
+
+const parseWindowTime = (value: unknown): number | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!/^\d{2}:\d{2}$/.test(trimmed)) {
+    return null;
+  }
+  const [hoursStr, minutesStr] = trimmed.split(":");
+  const hours = Number.parseInt(hoursStr, 10);
+  const minutes = Number.parseInt(minutesStr, 10);
+  if (
+    !Number.isFinite(hours) ||
+    !Number.isFinite(minutes) ||
+    hours < 0 ||
+    hours > 23 ||
+    minutes < 0 ||
+    minutes > 59
+  ) {
+    return null;
+  }
+  return hours * 60 + minutes;
+};
+
+export const resolveProductOnsiteTiming = (
+  product: Product
+): ProductOnsiteTiming | null => {
+  const setup = parseMinutes((product as any)?.onsiteSetupMinutes);
+  const shoot = parseMinutes((product as any)?.onsiteShootMinutes);
+  const breakdown = parseMinutes((product as any)?.onsiteBreakdownMinutes);
+  const total = setup + shoot + breakdown;
+  if (total <= 0) {
+    return null;
+  }
+  const defaultStart = 8 * 60;
+  const defaultEnd = 18 * 60;
+  const startMinutes =
+    parseWindowTime((product as any)?.onsiteTimeWindowStart) ?? defaultStart;
+  let endMinutes =
+    parseWindowTime((product as any)?.onsiteTimeWindowEnd) ?? defaultEnd;
+  if (endMinutes <= startMinutes) {
+    endMinutes = startMinutes + total;
+  }
+  if (endMinutes - startMinutes < total) {
+    endMinutes = startMinutes + total;
+  }
+  return {
+    setupMinutes: setup,
+    shootMinutes: shoot,
+    breakdownMinutes: breakdown,
+    totalMinutes: total,
+    windowStartMinutes: startMinutes,
+    windowEndMinutes: endMinutes,
+  };
+};
+
+const formatMinutesSummary = (minutes: number, locale?: string): string => {
+  if (minutes <= 0) {
+    return "0 mins";
+  }
+  let hours = Math.floor(minutes / 60);
+  let remainder = Math.round(minutes - hours * 60);
+  if (remainder >= 60) {
+    hours += Math.floor(remainder / 60);
+    remainder %= 60;
+  }
+  if (remainder === 0 && hours > 0) {
+    const formatter = new Intl.NumberFormat(locale, {
+      maximumFractionDigits: 1,
+      minimumFractionDigits: 0,
+    });
+    const label = formatter.format(hours);
+    return `${label} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  if (hours > 0) {
+    return `${hours} hour${hours === 1 ? "" : "s"} ${remainder} min${
+      remainder === 1 ? "" : "s"
+    }`;
+  }
+  return `${remainder} min${remainder === 1 ? "" : "s"}`;
+};
+
+const formatCompactMinutes = (minutes: number): string => {
+  if (minutes <= 0) {
+    return "0m";
+  }
+  let hours = Math.floor(minutes / 60);
+  let remainder = Math.round(minutes - hours * 60);
+  if (remainder >= 60) {
+    hours += Math.floor(remainder / 60);
+    remainder %= 60;
+  }
+  const parts: string[] = [];
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+  if (remainder > 0 || parts.length === 0) {
+    parts.push(`${remainder}m`);
+  }
+  return parts.join(" ");
 };
 
 export const formatProductOnsiteDuration = (
   product: Product,
   locale?: string
 ): string | null => {
+  const timing = resolveProductOnsiteTiming(product);
+  if (timing) {
+    const totalLabel = formatMinutesSummary(timing.totalMinutes, locale);
+    const breakdownParts: string[] = [];
+    if (timing.setupMinutes > 0) {
+      breakdownParts.push(`Setup ${formatCompactMinutes(timing.setupMinutes)}`);
+    }
+    if (timing.shootMinutes > 0) {
+      breakdownParts.push(`Shoot ${formatCompactMinutes(timing.shootMinutes)}`);
+    }
+    if (timing.breakdownMinutes > 0) {
+      breakdownParts.push(
+        `Breakdown ${formatCompactMinutes(timing.breakdownMinutes)}`
+      );
+    }
+    const breakdown =
+      breakdownParts.length > 0 ? ` (${breakdownParts.join(" · ")})` : "";
+    return `${totalLabel} on site${breakdown}`;
+  }
   const days = resolveProductOnsiteDays(product);
   if (!days) {
     return null;

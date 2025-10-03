@@ -22,6 +22,16 @@ export interface CartCampaignBooking {
   priceAdjustment?: number;
 }
 
+export interface CartTimeSlot {
+  start: string;
+  end: string;
+  label?: string | null;
+  totalMinutes?: number | null;
+  setupMinutes?: number | null;
+  shootMinutes?: number | null;
+  breakdownMinutes?: number | null;
+}
+
 export interface CartItem {
   id: string;
   name: string;
@@ -37,6 +47,7 @@ export interface CartItem {
     setupDate?: string | null;
     setupIncluded?: boolean;
   } | null;
+  timeSlot?: CartTimeSlot | null;
   coverage?: {
     type: "hq" | "franchise";
     franchiseId?: string | null;
@@ -71,6 +82,7 @@ interface ProductInput {
     setupDate?: string | null;
     setupIncluded?: boolean;
   } | null;
+  timeSlot?: CartTimeSlot | null;
   coverage?: {
     type: "hq" | "franchise";
     franchiseId?: string | null;
@@ -184,6 +196,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
           (i.postalCode || "") === (product.postalCode || "") &&
           JSON.stringify(i.exhibition || null) ===
             JSON.stringify(product.exhibition || null) &&
+          JSON.stringify(i.timeSlot || null) ===
+            JSON.stringify(product.timeSlot || null) &&
           JSON.stringify(i.coverage || null) ===
             JSON.stringify(product.coverage || null) &&
           JSON.stringify(i.campaignBooking || null) ===

@@ -34,24 +34,24 @@ export default function CartPage() {
                 ? `Remove ${item.name} from cart`
                 : `Decrease quantity of ${item.name}`;
             const slot = item.campaignBooking;
+            const parseDateTime = (value: string | null | undefined) => {
+              if (!value) return null;
+              const normalised =
+                /^\d{4}-\d{2}-\d{2}$/.test(value)
+                  ? `${value}T00:00:00`
+                  : value;
+              const parsed = new Date(normalised);
+              return Number.isNaN(parsed.getTime()) ? null : parsed;
+            };
             const exhibitionDetails = (() => {
               const selection = item.exhibition;
               if (!selection) {
                 return null;
               }
-              const safeDate = (value: string | null | undefined) => {
-                if (!value) return null;
-                const normalised =
-                  /^\d{4}-\d{2}-\d{2}$/.test(value)
-                    ? `${value}T00:00:00`
-                    : value;
-                const parsed = new Date(normalised);
-                return Number.isNaN(parsed.getTime()) ? null : parsed;
-              };
-              const show = safeDate(selection.showDate ?? null);
+              const show = parseDateTime(selection.showDate ?? null);
               const setup =
                 selection.setupIncluded && selection.setupDate
-                  ? safeDate(selection.setupDate)
+                  ? parseDateTime(selection.setupDate)
                   : null;
               return {
                 showLabel: show ? show.toLocaleDateString() : null,
@@ -60,18 +60,9 @@ export default function CartPage() {
               };
             })();
             const dateLabel = (() => {
-              const safeDate = (value: string | null | undefined) => {
-                if (!value) return null;
-                const normalised =
-                  /^\d{4}-\d{2}-\d{2}$/.test(value)
-                    ? `${value}T00:00:00`
-                    : value;
-                const parsed = new Date(normalised);
-                return Number.isNaN(parsed.getTime()) ? null : parsed;
-              };
               if (slot) {
-                const start = safeDate(slot.slotStartAt);
-                const end = safeDate(slot.slotEndAt);
+                const start = parseDateTime(slot.slotStartAt);
+                const end = parseDateTime(slot.slotEndAt);
                 if (start && end) {
                   return `${start.toLocaleString("en-GB", {
                     dateStyle: "medium",
@@ -103,8 +94,8 @@ export default function CartPage() {
                 }
                 const parsed = item.kitItems
                   .map((entry) => ({
-                    start: safeDate(entry.start),
-                    end: safeDate(entry.end),
+                    start: parseDateTime(entry.start),
+                    end: parseDateTime(entry.end),
                   }))
                   .filter(
                     (entry): entry is { start: Date; end: Date } =>
@@ -128,11 +119,38 @@ export default function CartPage() {
                   ? startLabel
                   : `${startLabel} – ${endLabel}`;
               }
-              const fallback = safeDate(item.date);
+              const fallback = parseDateTime(item.date);
               if (fallback) {
                 return fallback.toLocaleDateString();
               }
               return "To be scheduled";
+            })();
+            const timeSlotDetails = (() => {
+              const slotSelection = item.timeSlot;
+              if (!slotSelection) {
+                return null;
+              }
+              if (slotSelection.label) {
+                return `Time: ${slotSelection.label}`;
+              }
+              const start = parseDateTime(slotSelection.start);
+              const end = parseDateTime(slotSelection.end);
+              if (start && end) {
+                const startLabel = start.toLocaleTimeString("en-GB", {
+                  timeStyle: "short",
+                });
+                const endLabel = end.toLocaleTimeString("en-GB", {
+                  timeStyle: "short",
+                });
+                return `Time: ${startLabel} – ${endLabel}`;
+              }
+              if (start) {
+                const startLabel = start.toLocaleTimeString("en-GB", {
+                  timeStyle: "short",
+                });
+                return `Time: ${startLabel}`;
+              }
+              return null;
             })();
 
             return (
@@ -152,6 +170,9 @@ export default function CartPage() {
                     <p className="text-xs text-gray-500">
                       Slot: {slot.slotLabel}
                     </p>
+                  )}
+                  {timeSlotDetails && (
+                    <p className="text-xs text-gray-500">{timeSlotDetails}</p>
                   )}
                   {item.variation && (
                     <p className="text-sm text-gray-600">{item.variation}</p>

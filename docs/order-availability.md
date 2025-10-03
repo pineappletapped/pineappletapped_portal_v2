@@ -45,3 +45,9 @@ If no stage can supply the kit, the response lists the conflicts and missing sta
 - Exhibition bookings can optionally extend the reservation by a setup day; the storefront passes an explicit span override so the reservation API locks both the setup and filming dates in one request.
 
 These steps ensure customers see the correct availability before checkout while operations receive clear visibility of which team needs to confirm the booking.
+
+## 5. Time windows for short sessions
+
+- Products can now capture on-site setup, filming, and breakdown minutes along with an optional booking window. When a product supplies any of these timings, the add-to-cart wizard presents a list of time slots after the customer picks a production date.
+- The selected slot is stored on the cart item and surfaced at checkout so operations know exactly when the crew is expected. Customers still see the day-level availability state, but the calendar requires a slot before the product can be added to the cart.
+- The `reserveKit` callable receives the time window alongside the usual start date. For single-day sessions it evaluates kit conflicts using the precise start/end times so multiple bookings can coexist on the same day. Multi-day reservations continue to block full days to cover setup and filming.

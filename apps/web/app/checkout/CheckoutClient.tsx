@@ -107,6 +107,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         location: item.location ?? null,
         postalCode: item.postalCode ?? null,
         exhibition: item.exhibition ?? null,
+        timeSlot: item.timeSlot ?? null,
         coverage: item.coverage ?? null,
         campaignBooking,
       };
@@ -174,6 +175,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           location: item.location,
           postalCode: item.postalCode,
           coverage: item.coverage,
+          timeSlot: item.timeSlot ?? null,
           exhibition: item.exhibition ?? null,
           campaignBooking: item.campaignBooking,
         })),
@@ -605,6 +607,44 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 </span>
                 <span>£{(item.price * item.quantity).toFixed(2)}</span>
               </div>
+              {(() => {
+                const parseDateTime = (value: string | null | undefined) => {
+                  if (!value) return null;
+                  const normalised =
+                    /^\d{4}-\d{2}-\d{2}$/.test(value)
+                      ? `${value}T00:00:00`
+                      : value;
+                  const parsed = new Date(normalised);
+                  return Number.isNaN(parsed.getTime()) ? null : parsed;
+                };
+                const slot = item.timeSlot;
+                if (!slot) {
+                  return null;
+                }
+                if (slot.label) {
+                  return (
+                    <div className="text-xs text-gray-500">Time: {slot.label}</div>
+                  );
+                }
+                const start = parseDateTime(slot.start);
+                const end = parseDateTime(slot.end);
+                if (start && end) {
+                  return (
+                    <div className="text-xs text-gray-500">
+                      Time: {start.toLocaleTimeString("en-GB", { timeStyle: "short" })} – {" "}
+                      {end.toLocaleTimeString("en-GB", { timeStyle: "short" })}
+                    </div>
+                  );
+                }
+                if (start) {
+                  return (
+                    <div className="text-xs text-gray-500">
+                      Time: {start.toLocaleTimeString("en-GB", { timeStyle: "short" })}
+                    </div>
+                  );
+                }
+                return null;
+              })()}
               {item.rentalTotal ? (
                 <div className="flex justify-between text-xs text-gray-600">
                   <span>Rental</span>

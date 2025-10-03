@@ -9,6 +9,8 @@ import {
   formatProductOnsiteDuration,
   getProductEventRangeLabel,
   getProductEventMonthKeys,
+  resolveProductOnsiteTiming,
+  type ProductOnsiteTiming,
 } from "@/lib/products";
 import { useCart } from "@/lib/cart";
 import { db, functions } from "@/lib/firebase";
@@ -342,6 +344,64 @@ const slotDateFormatter = new Intl.DateTimeFormat("en-GB", {
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
+interface WizardTimeSlot {
+  id: string;
+  startMinutes: number;
+  endMinutes: number;
+  label: string;
+}
+
+const formatTimeOfDay = (minutes: number): string => {
+  const hours = Math.floor(minutes / 60) % 24;
+  const mins = Math.round(minutes % 60);
+  return `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}`;
+};
+
+const buildTimeSlots = (
+  timing: ProductOnsiteTiming | null
+): WizardTimeSlot[] => {
+  if (!timing) {
+    return [];
+  }
+  const slots: WizardTimeSlot[] = [];
+  const span = Math.max(0, timing.totalMinutes);
+  if (span <= 0) {
+    return slots;
+  }
+  const start = timing.windowStartMinutes;
+  const end = Math.max(start + span, timing.windowEndMinutes);
+  const windowEnd = timing.windowEndMinutes <= start ? end : timing.windowEndMinutes;
+  const step = span <= 60 ? 15 : span <= 180 ? 30 : 60;
+  for (
+    let cursor = start;
+    cursor + span <= windowEnd + 0.01;
+    cursor += Math.max(step, 15)
+  ) {
+    const slotEnd = cursor + span;
+    if (slotEnd > windowEnd + 0.01) {
+      break;
+    }
+    const label = `${formatTimeOfDay(cursor)} – ${formatTimeOfDay(slotEnd)}`;
+    slots.push({
+      id: `${cursor}-${slotEnd}`,
+      startMinutes: cursor,
+      endMinutes: slotEnd,
+      label,
+    });
+  }
+  if (slots.length === 0) {
+    const slotEnd = start + span;
+    const label = `${formatTimeOfDay(start)} – ${formatTimeOfDay(slotEnd)}`;
+    slots.push({
+      id: `${start}-${slotEnd}`,
+      startMinutes: start,
+      endMinutes: slotEnd,
+      label,
+    });
+  }
+  return slots;
+};
+
 const toDateKeyFromDate = (date: Date): string => {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
@@ -461,6 +521,14 @@ export default function AddToCartWizard({
   const onsiteBlockingDays = useMemo(
     () => Math.max(1, Math.ceil(onsiteDaysConfigured)),
     [onsiteDaysConfigured]
+  );
+  const onsiteTiming = useMemo(
+    () => resolveProductOnsiteTiming(product),
+    [product]
+  );
+  const timeSlotRequired = useMemo(
+    () => onsiteTiming !== null && onsiteBlockingDays <= 1,
+    [onsiteTiming, onsiteBlockingDays]
   );
   const onsiteSummary = useMemo(
     () => formatProductOnsiteDuration(product),
@@ -646,6 +714,16 @@ export default function AddToCartWizard({
     }
     return date;
   }, [date, exhibitionSetupOption, includeSetupDay, product.category]);
+  const slotDateKey = useMemo(() => {
+    if (product.category === "exhibition-videography") {
+      return normaliseDateKey(date);
+    }
+    return normaliseDateKey(reservationStartKey);
+  }, [date, product.category, reservationStartKey]);
+  const timeSlots = useMemo(
+    () => buildTimeSlots(timeSlotRequired ? onsiteTiming : null),
+    [onsiteTiming, timeSlotRequired]
+  );
   const selectedDateRange = useMemo(() => {
     if (!reservationStartKey) {
       return null;
@@ -659,6 +737,23 @@ export default function AddToCartWizard({
     const end = new Date(base.getTime() + (bookingSpan - 1) * DAY_IN_MS);
     return { start: base, end };
   }, [bookingSpan, reservationStartKey]);
+  const selectedTimeSlotRange = useMemo(() => {
+    if (!selectedTimeSlot || !slotDateKey) {
+      return null;
+    }
+    const base =
+      parseDateKey(slotDateKey) ?? new Date(`${slotDateKey}T00:00:00.000Z`);
+    if (Number.isNaN(base.getTime())) {
+      return null;
+    }
+    const start = new Date(
+      base.getTime() + selectedTimeSlot.startMinutes * 60 * 1000
+    );
+    const end = new Date(
+      base.getTime() + selectedTimeSlot.endMinutes * 60 * 1000
+    );
+    return { start, end };
+  }, [selectedTimeSlot, slotDateKey]);
   const [error, setError] = useState<string | null>(null);
   const [conflicts, setConflicts] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -673,6 +768,8 @@ export default function AddToCartWizard({
     useState<CampaignSlotStatus>("idle");
   const [campaignSlotError, setCampaignSlotError] = useState<string | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const [selectedTimeSlot, setSelectedTimeSlot] =
+    useState<WizardTimeSlot | null>(null);
   const [availabilityOverrides, setAvailabilityOverrides] = useState<
     Record<string, ProductAvailabilityStatus>
   >({});
@@ -763,6 +860,7 @@ export default function AddToCartWizard({
     setDate(value);
     setConflicts([]);
     setError(null);
+    setSelectedTimeSlot(null);
     const startKey =
       product.category === "exhibition-videography" &&
       includeSetupDay &&
@@ -783,6 +881,25 @@ export default function AddToCartWizard({
     }
     announceSelection(reservationStartKey, bookingSpan);
   }, [announceSelection, bookingSpan, date, reservationStartKey]);
+
+  const handleTimeSlotSelect = useCallback(
+    (slot: WizardTimeSlot) => {
+      setSelectedTimeSlot(slot);
+      setError(null);
+      setLiveMessage(`Selected ${slot.label} filming window`);
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!timeSlotRequired) {
+      setSelectedTimeSlot(null);
+    }
+  }, [timeSlotRequired]);
+
+  useEffect(() => {
+    setSelectedTimeSlot(null);
+  }, [slotDateKey]);
 
   useEffect(() => {
     async function load() {
@@ -1313,7 +1430,11 @@ export default function AddToCartWizard({
       product.category === "exhibition-videography"
         ? normaliseDateKey(reservationStartKey)
         : showDateKey;
+    if (!startDateKey) {
+      startDateKey = showDateKey;
+    }
     let requestDateIso: string | null = null;
+    let timeWindow: { start: string; end: string } | null = null;
     if (isCampaignProduct) {
       if (!slotSelection) {
         setError("Select an available slot to continue.");
@@ -1344,11 +1465,22 @@ export default function AddToCartWizard({
       if (!startDateKey) {
         startDateKey = showDateKey;
       }
-    } else if (!date || !startDateKey) {
-      setError("Select a production date to continue.");
-      setLiveMessage("Production date required before adding to cart");
-      return;
     } else {
+      if (!date || !startDateKey) {
+        setError("Select a production date to continue.");
+        setLiveMessage("Production date required before adding to cart");
+        return;
+      }
+      if (timeSlotRequired) {
+        if (!selectedTimeSlotRange) {
+          setError("Select a production time to continue.");
+          setLiveMessage("Production time required before adding to cart");
+          return;
+        }
+        const startIso = selectedTimeSlotRange.start.toISOString();
+        const endIso = selectedTimeSlotRange.end.toISOString();
+        timeWindow = { start: startIso, end: endIso };
+      }
       requestDateIso = `${startDateKey}T00:00:00.000Z`;
     }
     const affectedCalendarKeys =
@@ -1380,6 +1512,7 @@ export default function AddToCartWizard({
         productId: product.id,
         date: requestDateIso,
         spanOverride: bookingSpan,
+        timeWindow,
         coverage: coverage
           ? {
               type: coverage.type,
@@ -1498,6 +1631,18 @@ export default function AddToCartWizard({
         exhibition: exhibitionSelection,
         location: locationLabel.length > 0 ? locationLabel : null,
         postalCode: postalCodeLabel,
+        timeSlot:
+          timeSlotRequired && selectedTimeSlotRange
+            ? {
+                start: selectedTimeSlotRange.start.toISOString(),
+                end: selectedTimeSlotRange.end.toISOString(),
+                label: selectedTimeSlot?.label ?? null,
+                totalMinutes: onsiteTiming?.totalMinutes ?? null,
+                setupMinutes: onsiteTiming?.setupMinutes ?? null,
+                shootMinutes: onsiteTiming?.shootMinutes ?? null,
+                breakdownMinutes: onsiteTiming?.breakdownMinutes ?? null,
+              }
+            : null,
         coverage: {
           type: coverage.type,
           franchiseId: coverage.franchiseId,
@@ -1825,6 +1970,54 @@ export default function AddToCartWizard({
                   }
                   initialMonth={calendarInitialMonth}
                 />
+                {timeSlotRequired && (
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium">Select a filming window</p>
+                    {slotDateKey ? (
+                      timeSlots.length > 0 ? (
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {timeSlots.map((slot) => {
+                            const checked = selectedTimeSlot?.id === slot.id;
+                            return (
+                              <label
+                                key={slot.id}
+                                className={`flex items-center justify-between gap-3 rounded-md border p-3 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
+                                  checked
+                                    ? "border-orange-400 bg-orange-50"
+                                    : "border-gray-200 bg-white hover:border-orange/60"
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <input
+                                    type="radio"
+                                    name="onsite-slot"
+                                    className="mt-0.5"
+                                    checked={checked}
+                                    onChange={() => handleTimeSlotSelect(slot)}
+                                  />
+                                  <div className="flex flex-col">
+                                    <span className="font-medium">{slot.label}</span>
+                                  </div>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-500">
+                          This product doesn’t have any bookable windows yet.
+                        </p>
+                      )
+                    ) : (
+                      <p className="text-xs text-gray-500">
+                        Choose a production date to see available times.
+                      </p>
+                    )}
+                    <p className="text-xs text-gray-500">
+                      Times shown in UK local time.
+                    </p>
+                  </div>
+                )}
                 {product.category === "exhibition-videography" && exhibitionSetupOption && (
                   <label
                     className={`flex items-start gap-3 rounded-md border px-3 py-2 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
@@ -1872,6 +2065,9 @@ export default function AddToCartWizard({
             {(onsiteSummary || (selectedDateRange && bookingSpan > 1)) && (
               <div className="space-y-1 text-xs text-gray-600">
                 {onsiteSummary && <p>{onsiteSummary}</p>}
+                {timeSlotRequired && selectedTimeSlot && (
+                  <p>Preferred time: {selectedTimeSlot.label}</p>
+                )}
                 {selectedDateRange && bookingSpan > 1 && (
                   <p>
                     Crew reserved {" "}
@@ -1919,7 +2115,9 @@ export default function AddToCartWizard({
           {dateStep ? (
             <button
               className="btn btn-sm"
-              disabled={!date || submitting}
+              disabled={
+                !date || submitting || (timeSlotRequired && !selectedTimeSlotRange)
+              }
               onClick={handleFinish}
             >
               {submitting ? "Adding…" : "Add to Cart"}
