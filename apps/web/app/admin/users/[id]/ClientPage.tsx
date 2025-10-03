@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { httpsCallable } from 'firebase/functions';
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -31,7 +32,16 @@ interface CRMUserRecord {
   crmStatus?: string | null;
   discount?: number | null;
   aiBio?: string | null;
+  linkedinBio?: string | null;
   [key: string]: any;
+}
+
+interface ContactDraft {
+  fullName: string;
+  email: string;
+  phone: string;
+  organisation: string;
+  linkedinBio: string;
 }
 
 interface OrderRecord {
@@ -172,6 +182,7 @@ function resolveProposalLabel(proposal: ProposalRecord): string {
 export default function AdminUserDetailPage() {
   const params = useParams<{ id: string }>();
   const userId = params?.id;
+  const router = useRouter();
   const { allowed, loading: guardLoading } = useRoleGate(['sales']);
 
   const [loading, setLoading] = useState(true);
@@ -189,6 +200,16 @@ export default function AdminUserDetailPage() {
   const [discountDraft, setDiscountDraft] = useState<number>(0);
   const [discountSaving, setDiscountSaving] = useState(false);
   const [mergeLoading, setMergeLoading] = useState(false);
+  const [editingContact, setEditingContact] = useState(false);
+  const [contactSaving, setContactSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [contactDraft, setContactDraft] = useState<ContactDraft>({
+    fullName: '',
+    email: '',
+    phone: '',
+    organisation: '',
+    linkedinBio: '',
+  });
 
   useEffect(() => {
     let active = true;
@@ -230,6 +251,15 @@ export default function AdminUserDetailPage() {
             ? payload.discount
             : 0
         );
+        setContactDraft({
+          fullName: typeof payload.fullName === 'string' ? payload.fullName : '',
+          email: typeof payload.email === 'string' ? payload.email : '',
+          phone: typeof payload.phone === 'string' ? payload.phone : '',
+          organisation:
+            typeof payload.organisation === 'string' ? payload.organisation : '',
+          linkedinBio:
+            typeof payload.linkedinBio === 'string' ? payload.linkedinBio : '',
+        });
 
         const email = typeof payload.email === 'string' ? payload.email : null;
 
@@ -441,6 +471,100 @@ export default function AdminUserDetailPage() {
     }
   };
 
+  useEffect(() => {
+    if (!user || editingContact) {
+      return;
+    }
+    setContactDraft({
+      fullName: typeof user.fullName === 'string' ? user.fullName : '',
+      email: typeof user.email === 'string' ? user.email : '',
+      phone: typeof user.phone === 'string' ? user.phone : '',
+      organisation: typeof user.organisation === 'string' ? user.organisation : '',
+      linkedinBio: typeof user.linkedinBio === 'string' ? user.linkedinBio : '',
+    });
+  }, [user, editingContact]);
+
+  const startEditingContact = () => {
+    if (!user) return;
+    setContactDraft({
+      fullName: typeof user.fullName === 'string' ? user.fullName : '',
+      email: typeof user.email === 'string' ? user.email : '',
+      phone: typeof user.phone === 'string' ? user.phone : '',
+      organisation: typeof user.organisation === 'string' ? user.organisation : '',
+      linkedinBio: typeof user.linkedinBio === 'string' ? user.linkedinBio : '',
+    });
+    setEditingContact(true);
+  };
+
+  const cancelEditingContact = () => {
+    if (!user) return;
+    setContactDraft({
+      fullName: typeof user.fullName === 'string' ? user.fullName : '',
+      email: typeof user.email === 'string' ? user.email : '',
+      phone: typeof user.phone === 'string' ? user.phone : '',
+      organisation: typeof user.organisation === 'string' ? user.organisation : '',
+      linkedinBio: typeof user.linkedinBio === 'string' ? user.linkedinBio : '',
+    });
+    setEditingContact(false);
+  };
+
+  const handleContactDraftChange = (
+    event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => {
+    const { name, value } = event.target;
+    setContactDraft((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleContactSave = async () => {
+    if (!user) return;
+    const email = contactDraft.email.trim();
+    if (!email) {
+      alert('Email is required.');
+      return;
+    }
+    setContactSaving(true);
+    try {
+      const updates = {
+        fullName: contactDraft.fullName.trim() || null,
+        email,
+        phone: contactDraft.phone.trim() || null,
+        organisation: contactDraft.organisation.trim() || null,
+        linkedinBio: contactDraft.linkedinBio.trim() || null,
+      };
+      await adminUpdateUser({ userId, updates });
+      setUser((prev) => (prev ? { ...prev, ...updates } : prev));
+      setEditingContact(false);
+    } catch (err: any) {
+      console.error('Failed to update contact details', err);
+      alert(err?.message || 'Failed to update contact details');
+    } finally {
+      setContactSaving(false);
+    }
+  };
+
+  const handleDeleteRecord = async () => {
+    if (!userId || !user) return;
+    const name = user.fullName || user.organisation || user.email || 'this record';
+    const confirmed = window.confirm(
+      `Delete ${name}? This action cannot be undone and will remove the CRM record.`,
+    );
+    if (!confirmed) return;
+    setDeleting(true);
+    try {
+      const { db } = await ensureFirebase();
+      if (!db) {
+        throw new Error('Firestore is unavailable.');
+      }
+      await deleteDoc(doc(db, 'users', userId));
+      router.push('/admin/users');
+    } catch (err: any) {
+      console.error('Failed to delete CRM record', err);
+      alert(err?.message || 'Failed to delete CRM record');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   if (guardLoading || loading) {
     return <p>Loading…</p>;
   }
@@ -493,9 +617,27 @@ export default function AdminUserDetailPage() {
             ) : null}
           </div>
         </div>
-        <Link className="btn-outline" href="/admin/users">
-          Back to CRM
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="btn-outline disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={contactSaving || deleting}
+            onClick={() => (editingContact ? cancelEditingContact() : startEditingContact())}
+            type="button"
+          >
+            {editingContact ? 'Cancel edit' : 'Edit contact details'}
+          </button>
+          <button
+            className="btn-outline border-red-200 text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={deleting || contactSaving}
+            onClick={handleDeleteRecord}
+            type="button"
+          >
+            {deleting ? 'Deleting…' : 'Delete record'}
+          </button>
+          <Link className="btn-outline" href="/admin/users">
+            Back to CRM
+          </Link>
+        </div>
       </div>
 
       {error ? (
@@ -503,6 +645,112 @@ export default function AdminUserDetailPage() {
           {error}
         </div>
       ) : null}
+
+      <section className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-lg font-semibold">Contact details</h2>
+        </div>
+        {editingContact ? (
+          <form
+            className="mt-4 grid gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleContactSave();
+            }}
+          >
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="grid gap-1 text-sm font-medium text-gray-700">
+                Full name
+                <input
+                  className="border p-2"
+                  name="fullName"
+                  onChange={handleContactDraftChange}
+                  type="text"
+                  value={contactDraft.fullName}
+                />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-gray-700">
+                Organisation
+                <input
+                  className="border p-2"
+                  name="organisation"
+                  onChange={handleContactDraftChange}
+                  type="text"
+                  value={contactDraft.organisation}
+                />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-gray-700">
+                Email
+                <input
+                  className="border p-2"
+                  name="email"
+                  onChange={handleContactDraftChange}
+                  type="email"
+                  value={contactDraft.email}
+                />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-gray-700">
+                Phone
+                <input
+                  className="border p-2"
+                  name="phone"
+                  onChange={handleContactDraftChange}
+                  type="tel"
+                  value={contactDraft.phone}
+                />
+              </label>
+            </div>
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              LinkedIn bio
+              <textarea
+                className="border p-2"
+                name="linkedinBio"
+                onChange={handleContactDraftChange}
+                rows={4}
+                value={contactDraft.linkedinBio}
+              />
+            </label>
+            <div className="flex justify-end gap-2">
+              <button className="btn-sm" disabled={contactSaving} type="submit">
+                {contactSaving ? 'Saving…' : 'Save changes'}
+              </button>
+              <button
+                className="btn-sm btn-outline"
+                disabled={contactSaving}
+                onClick={cancelEditingContact}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : (
+          <dl className="mt-4 grid gap-4 text-sm text-gray-700 sm:grid-cols-2">
+            <div>
+              <dt className="text-xs font-semibold uppercase text-gray-500">Email</dt>
+              <dd className="mt-1 text-gray-900">{user.email || '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-semibold uppercase text-gray-500">Phone</dt>
+              <dd className="mt-1 text-gray-900">{user.phone || '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-semibold uppercase text-gray-500">Full name</dt>
+              <dd className="mt-1 text-gray-900">{user.fullName || '—'}</dd>
+            </div>
+            <div>
+              <dt className="text-xs font-semibold uppercase text-gray-500">Organisation</dt>
+              <dd className="mt-1 text-gray-900">{user.organisation || '—'}</dd>
+            </div>
+            <div className="sm:col-span-2">
+              <dt className="text-xs font-semibold uppercase text-gray-500">LinkedIn bio</dt>
+              <dd className="mt-1 whitespace-pre-line text-gray-900">
+                {user.linkedinBio ? user.linkedinBio : '—'}
+              </dd>
+            </div>
+          </dl>
+        )}
+      </section>
 
       <section className="grid gap-4">
         <h2 className="text-lg font-semibold">Account snapshot</h2>

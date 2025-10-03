@@ -126,6 +126,13 @@ export default function CRMRecordForm({ status, onSave, onClose, products = [] }
               value={form.phone || ''}
               onChange={handleChange}
             />
+            <textarea
+              name="linkedinBio"
+              placeholder="LinkedIn bio"
+              className="border p-2"
+              value={form.linkedinBio || ''}
+              onChange={handleChange}
+            />
           </div>
 
           <div className={tab === 'branding' ? 'grid gap-2' : 'hidden'}>
@@ -198,6 +205,13 @@ export default function CRMRecordForm({ status, onSave, onClose, products = [] }
           </div>
 
           <div className={tab === 'log' ? 'grid gap-2' : 'hidden'}>
+            <input
+              name="origin"
+              placeholder="Origin (e.g. BARK)"
+              className="border p-2"
+              value={form.origin || ''}
+              onChange={handleChange}
+            />
             <textarea
               name="notes"
               placeholder="Contact notes"
