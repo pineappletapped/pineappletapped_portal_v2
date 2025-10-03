@@ -43,12 +43,37 @@ let cachedStripeWebhookSecret = typeof process.env.STRIPE_WEBHOOK_SECRET === 'st
     ? process.env.STRIPE_WEBHOOK_SECRET.trim()
     : undefined;
 let cachedOperationalSettings = null;
+const BOOKING_INVITE_BASE_URL = (typeof process.env.BOOKING_INVITE_BASE_URL === 'string' && process.env.BOOKING_INVITE_BASE_URL.trim().length > 0
+    ? process.env.BOOKING_INVITE_BASE_URL.trim()
+    : null) ||
+    (typeof process.env.PORTAL_BASE_URL === 'string' && process.env.PORTAL_BASE_URL.trim().length > 0
+        ? process.env.PORTAL_BASE_URL.trim()
+        : null) ||
+    (typeof process.env.NEXT_PUBLIC_SITE_URL === 'string' && process.env.NEXT_PUBLIC_SITE_URL.trim().length > 0
+        ? process.env.NEXT_PUBLIC_SITE_URL.trim()
+        : null) ||
+    'https://portal.pineappletapped.com';
 function normaliseString(value) {
     if (typeof value !== 'string') {
         return null;
     }
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;
+}
+function normaliseEmailAddress(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed) {
+        return null;
+    }
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailPattern.test(trimmed) ? trimmed : null;
+}
+function buildBookingInviteUrl(token) {
+    const base = BOOKING_INVITE_BASE_URL || 'https://portal.pineappletapped.com';
+    return `${base.replace(/\/$/, '')}/bookings/invite/${token}`;
 }
 function parseNumber(value) {
     if (typeof value === 'number' && Number.isFinite(value)) {
@@ -2664,6 +2689,14 @@ export const onOrderCreated = functions.firestore
             if (prod?.workflowId) {
                 const wfDoc = await db.collection('workflows').doc(prod.workflowId).get();
                 const wf = wfDoc.data();
+                let workflowBookingTemplates = [];
+                try {
+                    const bookingSnap = await wfDoc.ref.collection('workflowBookingTemplates').get();
+                    workflowBookingTemplates = bookingSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+                }
+                catch (bookingErr) {
+                    console.error('Failed to load workflow booking templates', prod.workflowId, bookingErr);
+                }
                 if (Array.isArray(wf?.tasks)) {
                     for (const t of wf.tasks) {
                         const dueDays = parseInt(t.dueDays, 10);
@@ -2674,11 +2707,10 @@ export const onOrderCreated = functions.firestore
                             ? t.fieldType.trim()
                             : null;
                         const fieldType = rawFieldType && rawFieldType !== 'none' ? rawFieldType : null;
+                        const workflowTitle = typeof t.title === 'string' ? t.title.trim() : '';
                         const fieldLabel = typeof t.fieldLabel === 'string' && t.fieldLabel.trim().length > 0
                             ? t.fieldLabel.trim()
-                            : typeof t.title === 'string'
-                                ? t.title
-                                : '';
+                            : workflowTitle;
                         const fieldPlaceholder = typeof t.fieldPlaceholder === 'string' ? t.fieldPlaceholder : '';
                         const fieldHelpText = typeof t.fieldHelpText === 'string' ? t.fieldHelpText : '';
                         const fieldAccept = typeof t.fieldAccept === 'string' ? t.fieldAccept : '';
@@ -2711,16 +2743,25 @@ export const onOrderCreated = functions.firestore
                         const templateKey = typeof t.fieldTemplateKey === 'string' && t.fieldTemplateKey.trim().length > 0
                             ? t.fieldTemplateKey.trim()
                             : null;
+                        const bookingTemplateId = fieldType === 'booking-form' && typeof t.bookingTemplateId === 'string'
+                            ? t.bookingTemplateId.trim()
+                            : null;
+                        const effectiveFieldLabel = fieldType === 'booking-form'
+                            ? fieldLabel || workflowTitle || 'Booking form'
+                            : fieldLabel;
+                        const effectiveFieldHelpText = fieldType === 'booking-form'
+                            ? fieldHelpText || 'Participants will choose a slot and provide their details to confirm.'
+                            : fieldHelpText;
                         taskDocs.push({
-                            title: typeof t.title === 'string' ? t.title : 'Untitled task',
+                            title: workflowTitle || 'Untitled task',
                             description: typeof t.description === 'string' ? t.description : '',
                             fieldType,
                             fieldTemplateKey: templateKey,
                             fieldKey,
-                            fieldLabel,
+                            fieldLabel: effectiveFieldLabel,
                             fieldPlaceholder,
-                            fieldHelpText,
-                            fieldRequired,
+                            fieldHelpText: effectiveFieldHelpText,
+                            fieldRequired: fieldType === 'booking-form' ? true : fieldRequired,
                             fieldAccept: fieldType === 'file' ? fieldAccept : '',
                             fieldOptions,
                             dependsOn,
@@ -2734,7 +2775,152 @@ export const onOrderCreated = functions.firestore
                             assigneeName: null,
                             assignmentScope,
                             shareAssigneeContact,
+                            bookingTemplateId,
                         });
+                    }
+                }
+                if (workflowBookingTemplates.length > 0) {
+                    const projectBookingCollection = projRef.collection('workflowBookingTemplates');
+                    const activeBookingCollection = projRef.collection('projectBookings');
+                    const bookingBatch = db.batch();
+                    let hasBookingWrites = false;
+                    workflowBookingTemplates.forEach((template) => {
+                        if (!template || typeof template !== 'object')
+                            return;
+                        const templateId = typeof template.id === 'string' && template.id ? template.id : uuidv4();
+                        const docRef = projectBookingCollection.doc(templateId);
+                        const agreementHeading = typeof template.agreement?.heading === 'string' && template.agreement.heading.trim().length > 0
+                            ? template.agreement.heading.trim()
+                            : 'Participation agreement';
+                        const agreementBody = typeof template.agreement?.body === 'string' ? template.agreement.body.trim() : '';
+                        const agreementAcknowledgement = typeof template.agreement?.acknowledgementLabel === 'string' &&
+                            template.agreement.acknowledgementLabel.trim().length > 0
+                            ? template.agreement.acknowledgementLabel.trim()
+                            : 'I agree to the terms and conditions';
+                        const agreementRequireSignature = template.agreement?.requireSignature === false ? false : true;
+                        const sanitiseSlots = () => {
+                            if (!Array.isArray(template.slots))
+                                return [];
+                            return template.slots
+                                .map((slot, index) => {
+                                if (!slot || typeof slot !== 'object')
+                                    return null;
+                                const label = typeof slot.label === 'string' ? slot.label.trim() : '';
+                                const startAt = typeof slot.startAt === 'string' ? slot.startAt : '';
+                                const endAt = typeof slot.endAt === 'string' ? slot.endAt : '';
+                                const capacityRaw = Number(slot.capacity);
+                                const capacity = Number.isFinite(capacityRaw) && capacityRaw > 0 ? capacityRaw : 1;
+                                const priceClass = typeof slot.priceClass === 'string' ? slot.priceClass.trim() : '';
+                                const notes = typeof slot.notes === 'string' ? slot.notes : '';
+                                const id = typeof slot.id === 'string' && slot.id.trim().length > 0
+                                    ? slot.id.trim()
+                                    : `${templateId}-slot-${index + 1}`;
+                                return {
+                                    id,
+                                    label: label || `Slot ${index + 1}`,
+                                    startAt: startAt || null,
+                                    endAt: endAt || null,
+                                    capacity,
+                                    priceClass: priceClass || 'included',
+                                    notes,
+                                };
+                            })
+                                .filter((slot) => Boolean(slot));
+                        };
+                        const sanitiseResponseFields = () => {
+                            if (!Array.isArray(template.responseFields))
+                                return [];
+                            return template.responseFields
+                                .map((field, index) => {
+                                if (!field || typeof field !== 'object')
+                                    return null;
+                                const id = typeof field.id === 'string' && field.id.trim().length > 0
+                                    ? field.id.trim()
+                                    : `${templateId}-field-${index + 1}`;
+                                const type = typeof field.type === 'string' && field.type.trim().length > 0 ? field.type.trim() : 'text';
+                                const label = typeof field.label === 'string' ? field.label.trim() : '';
+                                const placeholder = typeof field.placeholder === 'string' ? field.placeholder : '';
+                                const required = field.required === true;
+                                return {
+                                    id,
+                                    type,
+                                    label: label || `Response ${index + 1}`,
+                                    placeholder,
+                                    required,
+                                };
+                            })
+                                .filter((field) => Boolean(field));
+                        };
+                        const sanitiseUploadRequirements = () => {
+                            if (!Array.isArray(template.uploadRequirements))
+                                return [];
+                            return template.uploadRequirements
+                                .map((req, index) => {
+                                if (!req || typeof req !== 'object')
+                                    return null;
+                                const id = typeof req.id === 'string' && req.id.trim().length > 0
+                                    ? req.id.trim()
+                                    : `${templateId}-upload-${index + 1}`;
+                                const label = typeof req.label === 'string' ? req.label.trim() : '';
+                                const description = typeof req.description === 'string' ? req.description : '';
+                                const accept = typeof req.accept === 'string' ? req.accept : '';
+                                const required = req.required === true;
+                                return {
+                                    id,
+                                    label: label || `Upload ${index + 1}`,
+                                    description,
+                                    accept,
+                                    required,
+                                };
+                            })
+                                .filter((req) => Boolean(req));
+                        };
+                        const slots = sanitiseSlots();
+                        const responseFields = sanitiseResponseFields();
+                        const uploadRequirements = sanitiseUploadRequirements();
+                        const totalCapacity = slots.reduce((sum, slot) => sum + (Number.isFinite(slot.capacity) ? slot.capacity : 0), 0);
+                        const data = {
+                            workflowId: prod.workflowId,
+                            workflowTaskId: typeof template.workflowTaskId === 'string' && template.workflowTaskId.trim().length > 0
+                                ? template.workflowTaskId.trim()
+                                : null,
+                            workflowTemplateId: templateId,
+                            taskTitle: typeof template.taskTitle === 'string' ? template.taskTitle : 'Booking form',
+                            taskDescription: typeof template.taskDescription === 'string' ? template.taskDescription : '',
+                            introduction: typeof template.introduction === 'string' ? template.introduction : '',
+                            slots,
+                            responseFields,
+                            uploadRequirements,
+                            agreement: {
+                                heading: agreementHeading,
+                                body: agreementBody,
+                                acknowledgementLabel: agreementAcknowledgement,
+                                requireSignature: agreementRequireSignature,
+                            },
+                            projectId: projRef.id,
+                            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        };
+                        const bookingStats = {
+                            totalSlots: slots.length,
+                            totalCapacity,
+                            responses: 0,
+                            confirmed: 0,
+                            invitesOutstanding: 0,
+                            assetsUploaded: 0,
+                        };
+                        bookingBatch.set(docRef, data, { merge: true });
+                        const activeDocRef = activeBookingCollection.doc(templateId);
+                        bookingBatch.set(activeDocRef, {
+                            ...data,
+                            stats: bookingStats,
+                            status: 'active',
+                            source: 'workflow-template',
+                        });
+                        hasBookingWrites = true;
+                    });
+                    if (hasBookingWrites) {
+                        await bookingBatch.commit();
                     }
                 }
             }
@@ -2903,6 +3089,542 @@ export const bookings_request = functions.https.onCall(async (data, context) => 
     };
     const ref = await db.collection('bookings').add(booking);
     return { id: ref.id };
+});
+function sanitiseBookingInvites(inputs) {
+    const invites = [];
+    const seen = new Set();
+    inputs.forEach((input) => {
+        if (!input || typeof input !== 'object') {
+            const emailOnly = normaliseEmailAddress(input);
+            if (emailOnly && !seen.has(emailOnly)) {
+                seen.add(emailOnly);
+                invites.push({ email: emailOnly, organisation: null, contactName: null });
+            }
+            return;
+        }
+        const record = input;
+        const email = normaliseEmailAddress(record.email ?? record.address ?? record.value);
+        if (!email || seen.has(email)) {
+            return;
+        }
+        seen.add(email);
+        const organisation = normaliseString(record.organisation ?? record.company ?? record.name ?? null);
+        const contactName = normaliseString(record.contactName ?? record.primaryContact ?? record.name ?? null);
+        invites.push({ email, organisation, contactName });
+    });
+    return invites;
+}
+function formatBookingSlotSummary(bookingData) {
+    const slots = Array.isArray(bookingData?.slots) ? bookingData.slots : [];
+    if (!slots.length) {
+        return '';
+    }
+    const formatted = slots
+        .slice(0, 3)
+        .map((slot) => {
+        const label = normaliseString(slot?.label);
+        const startAt = normaliseString(slot?.startAt);
+        const endAt = normaliseString(slot?.endAt);
+        if (startAt) {
+            const start = new Date(startAt);
+            const end = endAt ? new Date(endAt) : null;
+            if (!Number.isNaN(start.getTime())) {
+                const formatter = new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+                if (end && !Number.isNaN(end.getTime())) {
+                    return `${label || formatter.format(start)} (${formatter.format(start)} – ${formatter.format(end)})`;
+                }
+                return `${label || formatter.format(start)} (${formatter.format(start)})`;
+            }
+        }
+        return label || 'Session';
+    })
+        .filter((value) => value.length > 0);
+    const remaining = slots.length - formatted.length;
+    if (remaining > 0) {
+        formatted.push(`${remaining} additional slot${remaining === 1 ? '' : 's'}`);
+    }
+    return formatted.join('\n');
+}
+export const projectBookings_sendInvites = functions.https.onCall(async (data, context) => {
+    await assertStaff(context, ['admin', 'projects']);
+    const projectId = normaliseString(data?.projectId);
+    const bookingId = normaliseString(data?.bookingId);
+    if (!projectId || !bookingId) {
+        throw new functions.https.HttpsError('invalid-argument', 'projectId and bookingId are required');
+    }
+    const invitesInput = Array.isArray(data?.invites) ? data.invites : [];
+    const message = normaliseString(data?.message) ?? '';
+    const invites = sanitiseBookingInvites(invitesInput);
+    if (!invites.length) {
+        throw new functions.https.HttpsError('invalid-argument', 'At least one valid email address is required.');
+    }
+    const bookingRef = db.collection('projects').doc(projectId).collection('projectBookings').doc(bookingId);
+    const [bookingSnap, projectSnap, existingInvitesSnap] = await Promise.all([
+        bookingRef.get(),
+        db.collection('projects').doc(projectId).get(),
+        bookingRef.collection('invites').get(),
+    ]);
+    if (!bookingSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Booking session not found.');
+    }
+    const bookingData = bookingSnap.data() ?? {};
+    const projectData = projectSnap.exists ? (projectSnap.data() ?? {}) : {};
+    const bookingTitle = normaliseString(bookingData.taskTitle) || 'Booking form';
+    const projectName = normaliseString(projectData.title) ||
+        normaliseString(projectData.projectName) ||
+        normaliseString(projectData.name) ||
+        'your project';
+    const existingEmails = new Set();
+    existingInvitesSnap.docs.forEach((docSnap) => {
+        const email = normaliseEmailAddress(docSnap.data()?.email);
+        if (email)
+            existingEmails.add(email);
+    });
+    const filtered = invites.filter((invite) => !existingEmails.has(invite.email));
+    if (!filtered.length) {
+        return { created: 0, skipped: invites.length, links: [] };
+    }
+    const batch = db.batch();
+    const tokens = [];
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const stats = bookingData.stats ?? {};
+    const invitesOutstanding = typeof stats.invitesOutstanding === 'number' ? stats.invitesOutstanding : 0;
+    filtered.forEach((invite) => {
+        const token = uuidv4();
+        tokens.push(token);
+        const payload = {
+            token,
+            projectId,
+            bookingId,
+            workflowId: normaliseString(bookingData.workflowId),
+            workflowTaskId: normaliseString(bookingData.workflowTaskId),
+            workflowTemplateId: normaliseString(bookingData.workflowTemplateId),
+            email: invite.email,
+            organisation: invite.organisation || null,
+            contactName: invite.contactName || null,
+            status: 'pending',
+            createdAt: timestamp,
+            sentAt: timestamp,
+            createdBy: context.auth?.uid ?? null,
+            projectName,
+            bookingTitle,
+            message: message || null,
+        };
+        const inviteRef = db.collection('projectBookingInvites').doc(token);
+        const bookingInviteRef = bookingRef.collection('invites').doc(token);
+        batch.set(inviteRef, payload, { merge: true });
+        batch.set(bookingInviteRef, payload, { merge: true });
+    });
+    batch.set(bookingRef, {
+        stats: {
+            ...stats,
+            invitesOutstanding: invitesOutstanding + filtered.length,
+        },
+        updatedAt: timestamp,
+    }, { merge: true });
+    await batch.commit();
+    const slotSummary = formatBookingSlotSummary(bookingData);
+    const inviteLinks = [];
+    const emailTasks = [];
+    filtered.forEach((invite, index) => {
+        const token = tokens[index];
+        const inviteUrl = buildBookingInviteUrl(token);
+        inviteLinks.push({ email: invite.email, organisation: invite.organisation, url: inviteUrl, token });
+        const greeting = invite.organisation || invite.contactName || invite.email.split('@')[0];
+        const lines = [
+            `Hi ${greeting || 'there'},`,
+            '',
+            `You’ve been invited to reserve a filming session for ${projectName}.`,
+        ];
+        if (bookingTitle) {
+            lines.push(`Session: ${bookingTitle}`);
+        }
+        if (slotSummary) {
+            lines.push('', 'Available slots:', slotSummary);
+        }
+        if (normaliseString(bookingData.introduction)) {
+            lines.push('', bookingData.introduction.trim());
+        }
+        lines.push('', `Confirm your slot here: ${inviteUrl}`);
+        if (message) {
+            lines.push('', message);
+        }
+        lines.push('', 'This link is unique to you. If you need help, reply to this email.');
+        const subject = `Secure your filming slot for ${projectName}`;
+        emailTasks.push(sendEmail(invite.email, subject, lines.join('\n')).catch((err) => {
+            console.error('Failed to send project booking invite email', token, err);
+        }));
+    });
+    await Promise.allSettled(emailTasks);
+    const franchiseId = normaliseString(projectData.franchiseId);
+    const franchiseName = normaliseString(projectData.franchiseName) ||
+        normaliseString(projectData.franchiseTitle) ||
+        null;
+    const clientId = normaliseString(projectData.orgId);
+    const clientName = normaliseString(projectData.orgName) ||
+        normaliseString(projectData.organisation) ||
+        null;
+    await Promise.all(tokens.map((token, index) => db.collection('aiCommandLogs').add({
+        commandName: 'project_booking_invite',
+        promptName: bookingTitle ? `Booking invite · ${bookingTitle}` : 'Project booking invite',
+        clientId: clientId || null,
+        clientName: filtered[index]?.organisation || clientName || filtered[index]?.email,
+        franchiseId: franchiseId || null,
+        franchiseName: franchiseName || null,
+        modelId: null,
+        modelName: null,
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        cost: 0,
+        currency: 'GBP',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        requestId: token,
+        projectId,
+        bookingId,
+    })));
+    return { created: filtered.length, skipped: invites.length - filtered.length, links: inviteLinks };
+});
+function sanitiseBookingResponseAnswers(input) {
+    if (!input || typeof input !== 'object') {
+        return {};
+    }
+    const entries = input;
+    const answers = {};
+    Object.entries(entries).forEach(([key, value]) => {
+        if (typeof key !== 'string' || !key.trim()) {
+            return;
+        }
+        if (value === null ||
+            typeof value === 'string' ||
+            typeof value === 'number' ||
+            typeof value === 'boolean') {
+            answers[key.trim()] = value;
+        }
+        else if (Array.isArray(value)) {
+            answers[key.trim()] = value
+                .map((entry) => {
+                if (entry === null ||
+                    typeof entry === 'string' ||
+                    typeof entry === 'number' ||
+                    typeof entry === 'boolean') {
+                    return entry;
+                }
+                if (!entry || typeof entry !== 'object') {
+                    return null;
+                }
+                return JSON.parse(JSON.stringify(entry));
+            })
+                .filter((entry) => entry !== null);
+        }
+        else if (typeof value === 'object') {
+            answers[key.trim()] = JSON.parse(JSON.stringify(value));
+        }
+    });
+    return answers;
+}
+function sanitiseBookingUploads(input) {
+    if (!Array.isArray(input)) {
+        return [];
+    }
+    const uploads = [];
+    input.forEach((entry) => {
+        if (!entry || typeof entry !== 'object') {
+            return;
+        }
+        const record = entry;
+        const url = normaliseString(record.url || record.href);
+        if (!url) {
+            return;
+        }
+        const name = normaliseString(record.name) || 'Attachment';
+        const contentType = normaliseString(record.contentType) || null;
+        const id = normaliseString(record.id) || uuidv4();
+        uploads.push({ id, name, url, contentType });
+    });
+    return uploads;
+}
+export const projectBookings_getInvite = functions.https.onCall(async (data) => {
+    const token = normaliseString(data?.token);
+    if (!token) {
+        throw new functions.https.HttpsError('invalid-argument', 'Invite token is required.');
+    }
+    const inviteRef = db.collection('projectBookingInvites').doc(token);
+    const inviteSnap = await inviteRef.get();
+    if (!inviteSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Invite not found.');
+    }
+    const inviteData = inviteSnap.data() ?? {};
+    const projectId = normaliseString(inviteData.projectId);
+    const bookingId = normaliseString(inviteData.bookingId);
+    if (!projectId || !bookingId) {
+        throw new functions.https.HttpsError('not-found', 'Invite is missing project metadata.');
+    }
+    const projectRef = db.collection('projects').doc(projectId);
+    const bookingRef = projectRef.collection('projectBookings').doc(bookingId);
+    const [projectSnap, bookingSnap, responsesSnap, inviteSubSnap] = await Promise.all([
+        projectRef.get(),
+        bookingRef.get(),
+        bookingRef.collection('responses').get(),
+        bookingRef.collection('invites').doc(token).get(),
+    ]);
+    if (!bookingSnap.exists) {
+        throw new functions.https.HttpsError('not-found', 'Booking session not found.');
+    }
+    const bookingData = bookingSnap.data() ?? {};
+    const projectData = projectSnap.exists ? (projectSnap.data() ?? {}) : {};
+    const slotsInput = Array.isArray(bookingData.slots) ? bookingData.slots : [];
+    const responseFieldsInput = Array.isArray(bookingData.responseFields) ? bookingData.responseFields : [];
+    const uploadRequirementsInput = Array.isArray(bookingData.uploadRequirements) ? bookingData.uploadRequirements : [];
+    const slotUsage = new Map();
+    responsesSnap.docs.forEach((docSnap) => {
+        const slotId = normaliseString(docSnap.data()?.slotId);
+        if (!slotId)
+            return;
+        slotUsage.set(slotId, (slotUsage.get(slotId) ?? 0) + 1);
+    });
+    const slots = slotsInput
+        .map((slot, index) => {
+        if (!slot || typeof slot !== 'object') {
+            return null;
+        }
+        const id = normaliseString(slot.id) || `${bookingId}-slot-${index + 1}`;
+        const label = normaliseString(slot.label) || `Slot ${index + 1}`;
+        const startAt = normaliseString(slot.startAt);
+        const endAt = normaliseString(slot.endAt);
+        const capacityRaw = slot.capacity;
+        let capacity = 1;
+        if (typeof capacityRaw === 'number' && Number.isFinite(capacityRaw)) {
+            capacity = Math.max(1, Math.round(capacityRaw));
+        }
+        else if (typeof capacityRaw === 'string') {
+            const parsed = Number.parseInt(capacityRaw, 10);
+            if (Number.isFinite(parsed)) {
+                capacity = Math.max(1, Math.round(parsed));
+            }
+        }
+        const notes = normaliseString(slot.notes) || '';
+        return {
+            id,
+            label,
+            startAt,
+            endAt,
+            capacity,
+            notes,
+            booked: slotUsage.get(id) ?? 0,
+        };
+    })
+        .filter((slot) => Boolean(slot));
+    const responseFields = responseFieldsInput
+        .map((field, index) => {
+        if (!field || typeof field !== 'object') {
+            return null;
+        }
+        const id = normaliseString(field.id) || `${bookingId}-field-${index + 1}`;
+        const type = normaliseString(field.type) || 'text';
+        const label = normaliseString(field.label) || `Question ${index + 1}`;
+        const placeholder = normaliseString(field.placeholder) || '';
+        const required = field.required === true;
+        return { id, type, label, placeholder, required };
+    })
+        .filter((field) => Boolean(field));
+    const uploadRequirements = uploadRequirementsInput
+        .map((req, index) => {
+        if (!req || typeof req !== 'object') {
+            return null;
+        }
+        const id = normaliseString(req.id) || `${bookingId}-upload-${index + 1}`;
+        const label = normaliseString(req.label) || `Upload ${index + 1}`;
+        const description = normaliseString(req.description) || '';
+        const accept = normaliseString(req.accept) || '';
+        const required = req.required === true;
+        return { id, label, description, accept, required };
+    })
+        .filter((req) => Boolean(req));
+    const agreementRaw = bookingData.agreement ?? {};
+    const agreement = {
+        heading: normaliseString(agreementRaw.heading) ||
+            normaliseString(bookingData.taskTitle) ||
+            'Participation agreement',
+        body: normaliseString(agreementRaw.body) || '',
+        acknowledgementLabel: normaliseString(agreementRaw.acknowledgementLabel) ||
+            'I agree to the terms and conditions',
+        requireSignature: agreementRaw.requireSignature === false ? false : true,
+    };
+    const inviteStatus = normaliseString(inviteSubSnap.data()?.status || inviteData.status) || 'pending';
+    return {
+        invite: {
+            token,
+            projectId,
+            bookingId,
+            email: normaliseEmailAddress(inviteData.email),
+            organisation: normaliseString(inviteData.organisation),
+            contactName: normaliseString(inviteData.contactName),
+            contactEmail: normaliseEmailAddress(inviteData.contactEmail),
+            status: inviteStatus,
+            respondedAt: inviteData.respondedAt ?? null,
+        },
+        project: {
+            id: projectId,
+            title: normaliseString(projectData.title) || normaliseString(projectData.projectName) || null,
+            franchiseId: normaliseString(projectData.franchiseId),
+            franchiseName: normaliseString(projectData.franchiseName) || normaliseString(projectData.franchiseTitle) || null,
+            orgId: normaliseString(projectData.orgId),
+            orgName: normaliseString(projectData.orgName) || normaliseString(projectData.organisation) || null,
+        },
+        booking: {
+            id: bookingId,
+            taskTitle: normaliseString(bookingData.taskTitle) || 'Booking form',
+            introduction: normaliseString(bookingData.introduction) || '',
+            slots,
+            responseFields,
+            uploadRequirements,
+            agreement,
+        },
+    };
+});
+export const projectBookings_acceptInvite = functions.https.onCall(async (data) => {
+    const token = normaliseString(data?.token);
+    const slotId = normaliseString(data?.slotId);
+    if (!token || !slotId) {
+        throw new functions.https.HttpsError('invalid-argument', 'Invite token and slotId are required.');
+    }
+    const organisation = normaliseString(data?.organisation);
+    const contactName = normaliseString(data?.contactName);
+    const contactEmail = normaliseEmailAddress(data?.contactEmail);
+    if (!contactEmail) {
+        throw new functions.https.HttpsError('invalid-argument', 'A valid contact email is required.');
+    }
+    const agreementAccepted = data?.agreementAccepted === true;
+    if (!agreementAccepted) {
+        throw new functions.https.HttpsError('failed-precondition', 'Agreement must be accepted.');
+    }
+    const signatureName = normaliseString(data?.signatureName);
+    const answers = sanitiseBookingResponseAnswers(data?.answers);
+    const uploads = sanitiseBookingUploads(data?.uploads);
+    const responseId = normaliseString(data?.responseId) || uuidv4();
+    const inviteRef = db.collection('projectBookingInvites').doc(token);
+    const { projectId, bookingId, bookingData } = await db.runTransaction(async (tx) => {
+        const inviteSnap = await tx.get(inviteRef);
+        if (!inviteSnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'Invite not found.');
+        }
+        const inviteRecord = inviteSnap.data() ?? {};
+        const currentStatus = normaliseString(inviteRecord.status) || 'pending';
+        if (currentStatus !== 'pending') {
+            throw new functions.https.HttpsError('failed-precondition', 'This invitation has already been used.');
+        }
+        const projectIdInner = normaliseString(inviteRecord.projectId);
+        const bookingIdInner = normaliseString(inviteRecord.bookingId);
+        if (!projectIdInner || !bookingIdInner) {
+            throw new functions.https.HttpsError('not-found', 'Invite is missing project metadata.');
+        }
+        const bookingRef = db.collection('projects').doc(projectIdInner).collection('projectBookings').doc(bookingIdInner);
+        const bookingSnap = await tx.get(bookingRef);
+        if (!bookingSnap.exists) {
+            throw new functions.https.HttpsError('not-found', 'Booking session not found.');
+        }
+        const bookingRecord = bookingSnap.data() ?? {};
+        const slots = Array.isArray(bookingRecord.slots) ? bookingRecord.slots : [];
+        const slot = slots.find((entry) => normaliseString(entry?.id) === slotId);
+        if (!slot) {
+            throw new functions.https.HttpsError('not-found', 'Selected slot is unavailable.');
+        }
+        let capacity = 1;
+        if (typeof slot.capacity === 'number' && Number.isFinite(slot.capacity)) {
+            capacity = Math.max(1, Math.round(slot.capacity));
+        }
+        else if (typeof slot.capacity === 'string') {
+            const parsed = Number.parseInt(slot.capacity, 10);
+            if (Number.isFinite(parsed)) {
+                capacity = Math.max(1, Math.round(parsed));
+            }
+        }
+        const responsesQuery = bookingRef.collection('responses').where('slotId', '==', slotId);
+        const responsesSnap = await tx.get(responsesQuery);
+        if (responsesSnap.size >= capacity) {
+            throw new functions.https.HttpsError('failed-precondition', 'This slot is already full.');
+        }
+        const timestamp = admin.firestore.FieldValue.serverTimestamp();
+        const responseRef = bookingRef.collection('responses').doc(responseId);
+        tx.set(responseRef, {
+            inviteToken: token,
+            organisation: organisation || null,
+            contactName: contactName || null,
+            contactEmail,
+            slotId,
+            status: 'confirmed',
+            answers,
+            uploads,
+            agreementAccepted: true,
+            agreementAcceptedAt: timestamp,
+            signatureName: signatureName || null,
+            submittedAt: timestamp,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        const inviteUpdate = {
+            status: 'responded',
+            respondedAt: timestamp,
+            responseId,
+            slotId,
+            organisation: organisation || inviteRecord.organisation || null,
+            contactName: contactName || inviteRecord.contactName || null,
+            contactEmail,
+        };
+        tx.set(inviteRef, inviteUpdate, { merge: true });
+        tx.set(bookingRef.collection('invites').doc(token), inviteUpdate, { merge: true });
+        const stats = bookingRecord.stats ?? {};
+        const responses = typeof stats.responses === 'number' ? stats.responses : 0;
+        const confirmed = typeof stats.confirmed === 'number' ? stats.confirmed : responses;
+        const invitesOutstanding = typeof stats.invitesOutstanding === 'number' ? stats.invitesOutstanding : 0;
+        const assetsUploaded = typeof stats.assetsUploaded === 'number' ? stats.assetsUploaded : 0;
+        tx.set(bookingRef, {
+            stats: {
+                ...stats,
+                responses: responses + 1,
+                confirmed: confirmed + 1,
+                invitesOutstanding: Math.max(0, invitesOutstanding - 1),
+                assetsUploaded: assetsUploaded + uploads.length,
+            },
+            lastResponseAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        return { projectId: projectIdInner, bookingId: bookingIdInner, bookingData: bookingRecord };
+    });
+    const projectSnap = await db.collection('projects').doc(projectId).get();
+    const projectData = projectSnap.exists ? (projectSnap.data() ?? {}) : {};
+    const bookingTitle = normaliseString(bookingData.taskTitle) || 'Booking response';
+    const franchiseId = normaliseString(projectData.franchiseId);
+    const franchiseName = normaliseString(projectData.franchiseName) ||
+        normaliseString(projectData.franchiseTitle) ||
+        null;
+    const clientId = normaliseString(projectData.orgId);
+    const clientName = organisation ||
+        normaliseString(projectData.orgName) ||
+        normaliseString(projectData.organisation) ||
+        contactName ||
+        contactEmail;
+    await db.collection('aiCommandLogs').add({
+        commandName: 'project_booking_response',
+        promptName: bookingTitle ? `Booking response · ${bookingTitle}` : 'Project booking response',
+        clientId: clientId || null,
+        clientName: clientName || null,
+        franchiseId: franchiseId || null,
+        franchiseName: franchiseName || null,
+        modelId: null,
+        modelName: null,
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        cost: 0,
+        currency: 'GBP',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        requestId: responseId,
+        projectId,
+        bookingId,
+    });
+    return { ok: true, responseId };
 });
 // Track page view analytics from the public site
 export const analytics_track = onRequest({ region: 'us-central1', cors: ANALYTICS_ALLOWED_ORIGINS }, async (req, res) => {
@@ -5826,6 +6548,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     }
     const productSnaps = await db.getAll(...productRefs);
     const orderItems = [];
+    const campaignSelections = [];
     let aggregatedKitReservationStatus = kitReservationStatusInitial;
     const aggregatedKitWarnings = new Set(kitReservationWarningsInitial);
     const driveProducts = [];
@@ -5895,7 +6618,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             }
             resolvedModifiers.push(payload);
         });
-        const price = unitPrice + modifiersTotal;
+        let price = unitPrice + modifiersTotal;
         const rawItemKitStatus = items[idx] && typeof items[idx].kitStatus === 'string'
             ? items[idx].kitStatus
             : null;
@@ -5913,6 +6636,79 @@ export const createOrder = functions.https.onCall(async (data, context) => {
                 aggregatedKitWarnings.add(warning);
             }
         });
+        const itemDate = items[idx] && typeof items[idx].date === 'string' && items[idx].date.trim().length > 0
+            ? items[idx].date
+            : null;
+        const itemLocation = items[idx] && typeof items[idx].location === 'string' && items[idx].location.trim().length > 0
+            ? items[idx].location.trim()
+            : null;
+        const itemPostalCode = items[idx] && typeof items[idx].postalCode === 'string' && items[idx].postalCode.trim().length > 0
+            ? items[idx].postalCode.trim()
+            : null;
+        const rawCoverage = items[idx]?.coverage;
+        const coveragePayload = rawCoverage && typeof rawCoverage === 'object'
+            ? {
+                type: rawCoverage.type === 'franchise'
+                    ? 'franchise'
+                    : rawCoverage.type === 'hq'
+                        ? 'hq'
+                        : 'hq',
+                franchiseId: typeof rawCoverage.franchiseId === 'string' && rawCoverage.franchiseId.trim().length > 0
+                    ? rawCoverage.franchiseId.trim()
+                    : null,
+                territoryId: typeof rawCoverage.territoryId === 'string' && rawCoverage.territoryId.trim().length > 0
+                    ? rawCoverage.territoryId.trim()
+                    : null,
+                priceTier: typeof rawCoverage.priceTier === 'number' && Number.isFinite(rawCoverage.priceTier)
+                    ? rawCoverage.priceTier
+                    : null,
+                hqFallback: rawCoverage.hqFallback === true,
+            }
+            : null;
+        const rawCampaignBooking = items[idx]?.campaignBooking;
+        const campaignBooking = rawCampaignBooking && typeof rawCampaignBooking === 'object'
+            ? (() => {
+                const projectId = typeof rawCampaignBooking.projectId === 'string' && rawCampaignBooking.projectId.trim().length > 0
+                    ? rawCampaignBooking.projectId.trim()
+                    : null;
+                const bookingId = typeof rawCampaignBooking.bookingId === 'string' && rawCampaignBooking.bookingId.trim().length > 0
+                    ? rawCampaignBooking.bookingId.trim()
+                    : null;
+                const slotId = typeof rawCampaignBooking.slotId === 'string' && rawCampaignBooking.slotId.trim().length > 0
+                    ? rawCampaignBooking.slotId.trim()
+                    : null;
+                if (!projectId || !bookingId || !slotId) {
+                    return null;
+                }
+                const slotLabel = typeof rawCampaignBooking.slotLabel === 'string' && rawCampaignBooking.slotLabel.trim().length > 0
+                    ? rawCampaignBooking.slotLabel.trim()
+                    : slotId;
+                const priceAdjustmentValue = typeof rawCampaignBooking.priceAdjustment === 'number'
+                    ? rawCampaignBooking.priceAdjustment
+                    : Number(rawCampaignBooking.priceAdjustment ?? 0);
+                const selectionKey = uuidv4();
+                return {
+                    projectId,
+                    bookingId,
+                    slotId,
+                    slotLabel,
+                    slotStartAt: typeof rawCampaignBooking.slotStartAt === 'string'
+                        ? rawCampaignBooking.slotStartAt
+                        : null,
+                    slotEndAt: typeof rawCampaignBooking.slotEndAt === 'string'
+                        ? rawCampaignBooking.slotEndAt
+                        : null,
+                    priceClass: typeof rawCampaignBooking.priceClass === 'string'
+                        ? rawCampaignBooking.priceClass
+                        : null,
+                    priceAdjustment: Number.isFinite(priceAdjustmentValue) ? priceAdjustmentValue : 0,
+                    selectionKey,
+                };
+            })()
+            : null;
+        if (campaignBooking && typeof campaignBooking.priceAdjustment === 'number') {
+            price += campaignBooking.priceAdjustment;
+        }
         const budget = prod.budget || {};
         const labourFilming = parseOptional(budget.labourFilming);
         const labourEditing = parseOptional(budget.labourEditing);
@@ -5947,6 +6743,12 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             modifiers: resolvedModifiers,
             kitReservationStatus: itemKitStatus,
             kitWarnings: itemKitWarnings,
+            variation: variationId,
+            date: itemDate,
+            location: itemLocation,
+            postalCode: itemPostalCode,
+            coverage: coveragePayload,
+            campaignBooking,
             budget: {
                 perUnit: {
                     labour,
@@ -5966,6 +6768,21 @@ export const createOrder = functions.https.onCall(async (data, context) => {
                 },
             },
         });
+        if (campaignBooking) {
+            campaignSelections.push({
+                ...campaignBooking,
+                productId: snap.id,
+                productName: typeof prod.name === 'string' && prod.name.trim().length > 0
+                    ? prod.name
+                    : snap.id,
+                quantity: qty,
+                unitPrice: price,
+                location: itemLocation,
+                postalCode: itemPostalCode,
+                date: itemDate,
+                selectionKey: campaignBooking.selectionKey,
+            });
+        }
         const templateFolderIdRaw = typeof prod.driveTemplateFolderId === 'string'
             ? prod.driveTemplateFolderId
             : '';
@@ -6161,6 +6978,9 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
         priceTierLevel: territoryPriceTier,
     };
+    if (campaignSelections.length > 0) {
+        orderData.campaignBookings = campaignSelections;
+    }
     if (affiliateSnapshot) {
         orderData.affiliate = {
             ...affiliateSnapshot,
@@ -7158,6 +7978,139 @@ export const stripe_createPaymentIntent = functions.https.onCall(async (data, co
     });
     return { clientSecret: paymentIntent.client_secret };
 });
+async function fulfilCampaignBookingPurchase(options) {
+    const selection = options.selection || {};
+    const orderId = options.orderId;
+    const orderData = options.orderData || {};
+    const payment = options.payment;
+    const projectId = normaliseString(selection.projectId);
+    const bookingId = normaliseString(selection.bookingId);
+    const slotId = normaliseString(selection.slotId);
+    const selectionKey = normaliseString(selection.selectionKey) || `${orderId}-${slotId || 'slot'}`;
+    if (!projectId || !bookingId || !slotId) {
+        return;
+    }
+    const quantityRaw = Number(selection.quantity);
+    const requestedQuantity = Number.isFinite(quantityRaw) ? Math.max(1, Math.round(quantityRaw)) : 1;
+    if (requestedQuantity <= 0) {
+        return;
+    }
+    const projectRef = db.collection('projects').doc(projectId);
+    const bookingRef = projectRef.collection('projectBookings').doc(bookingId);
+    const transactionResult = await db.runTransaction(async (tx) => {
+        const bookingSnap = await tx.get(bookingRef);
+        if (!bookingSnap.exists) {
+            return { created: 0, bookingData: null };
+        }
+        const bookingRecord = bookingSnap.data() ?? {};
+        const existingSelectionSnap = await tx.get(bookingRef.collection('responses').where('orderSelectionKey', '==', selectionKey).limit(1));
+        if (!existingSelectionSnap.empty) {
+            return { created: 0, bookingData: bookingRecord };
+        }
+        const slots = Array.isArray(bookingRecord.slots) ? bookingRecord.slots : [];
+        const slotEntry = slots.find((entry) => normaliseString(entry?.id) === slotId);
+        if (!slotEntry) {
+            return { created: 0, bookingData: bookingRecord };
+        }
+        let capacity = 1;
+        if (typeof slotEntry.capacity === 'number' && Number.isFinite(slotEntry.capacity)) {
+            capacity = Math.max(1, Math.round(slotEntry.capacity));
+        }
+        else if (typeof slotEntry.capacity === 'string') {
+            const parsedCapacity = Number.parseInt(slotEntry.capacity, 10);
+            if (Number.isFinite(parsedCapacity)) {
+                capacity = Math.max(1, Math.round(parsedCapacity));
+            }
+        }
+        const responsesSnap = await tx.get(bookingRef.collection('responses').where('slotId', '==', slotId));
+        const activeCount = responsesSnap.docs.filter((docSnap) => {
+            const status = normaliseString(docSnap.data()?.status) || 'pending';
+            return status !== 'cancelled' && status !== 'declined';
+        }).length;
+        const capacityRemaining = Math.max(capacity - activeCount, 0);
+        if (capacityRemaining <= 0) {
+            return { created: 0, bookingData: bookingRecord };
+        }
+        const responsesToCreate = Math.min(requestedQuantity, capacityRemaining);
+        const timestamp = admin.firestore.FieldValue.serverTimestamp();
+        for (let i = 0; i < responsesToCreate; i += 1) {
+            const responseRef = bookingRef.collection('responses').doc();
+            tx.set(responseRef, {
+                orderId,
+                orderSelectionKey: selectionKey,
+                organisation: orderData.companyName || orderData.customerName || null,
+                contactName: orderData.customerName || null,
+                contactEmail: orderData.userEmail || null,
+                slotId,
+                slotLabel: normaliseString(selection.slotLabel) || normaliseString(slotEntry.label) || `Slot ${slotId}`,
+                status: 'paid',
+                agreementAccepted: true,
+                agreementAcceptedAt: timestamp,
+                answers: {},
+                uploads: [],
+                location: selection.location || orderData.location || null,
+                postalCode: selection.postalCode || orderData.clientPostalCode || null,
+                unitPrice: Number(selection.unitPrice) || null,
+                quantity: 1,
+                paymentAmount: payment.amount,
+                paymentCurrency: payment.currency,
+                paymentIntentId: payment.intentId,
+                paidAt: payment.receivedAt,
+                source: 'storefront-checkout',
+                createdAt: timestamp,
+                updatedAt: timestamp,
+            });
+        }
+        const stats = bookingRecord.stats ?? {};
+        const responsesCount = typeof stats.responses === 'number' ? stats.responses : 0;
+        const confirmedCount = typeof stats.confirmed === 'number' ? stats.confirmed : responsesCount;
+        const invitesOutstanding = typeof stats.invitesOutstanding === 'number' ? stats.invitesOutstanding : 0;
+        tx.set(bookingRef, {
+            stats: {
+                ...stats,
+                responses: responsesCount + responsesToCreate,
+                confirmed: confirmedCount + responsesToCreate,
+                invitesOutstanding: Math.max(0, invitesOutstanding),
+            },
+            lastResponseAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        return { created: responsesToCreate, bookingData: bookingRecord };
+    });
+    if (!transactionResult || transactionResult.created <= 0) {
+        return;
+    }
+    const projectSnap = await projectRef.get();
+    const projectData = projectSnap.exists ? (projectSnap.data() ?? {}) : {};
+    const bookingData = transactionResult.bookingData || {};
+    const bookingTitle = normaliseString(bookingData.taskTitle) || normaliseString(bookingData.introduction) || 'Booking purchase';
+    const franchiseId = normaliseString(projectData.franchiseId);
+    const franchiseName = normaliseString(projectData.franchiseName) || normaliseString(projectData.franchiseTitle) || null;
+    const clientId = normaliseString(projectData.orgId);
+    const clientName = normaliseString(orderData.companyName) ||
+        normaliseString(orderData.customerName) ||
+        normaliseString(projectData.orgName) ||
+        null;
+    await db.collection('aiCommandLogs').add({
+        commandName: 'project_booking_purchase',
+        promptName: bookingTitle ? `Booking purchase · ${bookingTitle}` : 'Project booking purchase',
+        clientId: clientId || null,
+        clientName: clientName || null,
+        franchiseId: franchiseId || null,
+        franchiseName: franchiseName || null,
+        modelId: null,
+        modelName: null,
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        cost: 0,
+        currency: 'GBP',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        requestId: `${orderId}-${selectionKey}`,
+        projectId,
+        bookingId,
+    });
+}
 // Stripe webhook (deposit/balance) — skeleton
 export const stripe_webhook = functions.https.onRequest(async (req, res) => {
     const sig = req.headers['stripe-signature'];
@@ -7220,6 +8173,39 @@ export const stripe_webhook = functions.https.onRequest(async (req, res) => {
                             createdAt: admin.firestore.FieldValue.serverTimestamp()
                         });
                         await orderRef.set({ projectId: projRef.id }, { merge: true });
+                    }
+                    if (payType === 'deposit') {
+                        const campaignBookingsRaw = Array.isArray(orderData.campaignBookings)
+                            ? orderData.campaignBookings
+                            : [];
+                        if (campaignBookingsRaw.length > 0) {
+                            const amountCents = typeof pi.amount_received === 'number'
+                                ? pi.amount_received
+                                : typeof pi.amount === 'number'
+                                    ? pi.amount
+                                    : 0;
+                            const paymentRecord = {
+                                amount: fromCurrencyCents(amountCents),
+                                currency: typeof pi.currency === 'string' && pi.currency.trim().length > 0
+                                    ? pi.currency.toUpperCase()
+                                    : 'GBP',
+                                intentId: typeof pi.id === 'string' ? pi.id : null,
+                                receivedAt: admin.firestore.Timestamp.fromMillis(typeof pi.created === 'number' ? Math.floor(pi.created * 1000) : Date.now()),
+                            };
+                            for (const selection of campaignBookingsRaw) {
+                                try {
+                                    await fulfilCampaignBookingPurchase({
+                                        selection,
+                                        orderId,
+                                        orderData,
+                                        payment: paymentRecord,
+                                    });
+                                }
+                                catch (campaignErr) {
+                                    console.error('Failed to fulfil campaign booking purchase', selection, campaignErr);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -8393,23 +9379,154 @@ export const admin_deleteProduct = functions.https.onCall(async (data, context) 
     }
     return { ok: true };
 });
-function sanitizeWorkflowTasks(raw) {
-    if (!Array.isArray(raw))
-        return [];
-    const seenIds = new Set();
-    const usedFieldKeys = new Set();
-    const provisional = raw.map((task, index) => {
-        const input = task || {};
-        const preferredId = typeof input.id === 'string' && input.id.trim().length > 0
-            ? input.id.trim()
-            : uuidv4();
-        let id = preferredId;
-        let idSuffix = 2;
-        while (seenIds.has(id)) {
-            id = `${preferredId}-${idSuffix}`;
-            idSuffix += 1;
+const ALLOWED_BOOKING_FIELD_TYPES = new Set(['text', 'textarea', 'email', 'phone', 'website']);
+function normalizeBookingTemplateId(preferredId, fallbackId, used) {
+    const base = (preferredId || '').trim() || fallbackId;
+    let candidate = base;
+    let suffix = 2;
+    while (used.has(candidate)) {
+        candidate = `${base}-${suffix}`;
+        suffix += 1;
+    }
+    used.add(candidate);
+    return candidate;
+}
+function coerceCapacity(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return Math.max(1, Math.round(value));
+    }
+    if (typeof value === 'string') {
+        const parsed = parseInt(value, 10);
+        if (!Number.isNaN(parsed)) {
+            return Math.max(1, Math.round(parsed));
         }
-        seenIds.add(id);
+    }
+    return 1;
+}
+function sanitizeWorkflowBookingTemplate(templateId, taskMeta, rawTemplate) {
+    const slotsInput = Array.isArray(rawTemplate?.slots) ? rawTemplate.slots : [];
+    const slots = slotsInput
+        .map((slot, index) => {
+        const label = typeof slot?.label === 'string' ? slot.label.trim() : '';
+        const startAt = typeof slot?.startAt === 'string' ? slot.startAt.trim() : '';
+        const endAt = typeof slot?.endAt === 'string' ? slot.endAt.trim() : '';
+        if (!label || !startAt || !endAt)
+            return null;
+        const capacity = coerceCapacity(slot?.capacity);
+        const priceClass = typeof slot?.priceClass === 'string' && slot.priceClass.trim().length > 0
+            ? slot.priceClass.trim()
+            : 'included';
+        const notes = typeof slot?.notes === 'string' ? slot.notes.trim() : '';
+        const slotId = typeof slot?.id === 'string' && slot.id.trim().length > 0
+            ? slot.id.trim()
+            : `${templateId}-slot-${index + 1}`;
+        return {
+            id: slotId,
+            label,
+            startAt,
+            endAt,
+            capacity,
+            priceClass,
+            notes,
+        };
+    })
+        .filter((slot) => Boolean(slot));
+    if (slots.length === 0) {
+        throw new functions.https.HttpsError('invalid-argument', `Booking task "${taskMeta.taskTitle || 'Untitled task'}" must include at least one slot.`);
+    }
+    const responseInputs = Array.isArray(rawTemplate?.responseFields)
+        ? rawTemplate.responseFields
+        : [];
+    const responseFields = responseInputs
+        .map((field, index) => {
+        const label = typeof field?.label === 'string' ? field.label.trim() : '';
+        if (!label)
+            return null;
+        const type = typeof field?.type === 'string' && ALLOWED_BOOKING_FIELD_TYPES.has(field.type)
+            ? field.type
+            : 'text';
+        const placeholder = typeof field?.placeholder === 'string' ? field.placeholder.trim() : '';
+        const required = field?.required === true;
+        const fieldId = typeof field?.id === 'string' && field.id.trim().length > 0
+            ? field.id.trim()
+            : `${templateId}-question-${index + 1}`;
+        return {
+            id: fieldId,
+            type,
+            label,
+            placeholder,
+            required,
+        };
+    })
+        .filter((field) => Boolean(field));
+    if (responseFields.length === 0) {
+        throw new functions.https.HttpsError('invalid-argument', `Booking task "${taskMeta.taskTitle || 'Untitled task'}" must collect at least one response field.`);
+    }
+    const uploadInputs = Array.isArray(rawTemplate?.uploadRequirements)
+        ? rawTemplate.uploadRequirements
+        : [];
+    const uploadRequirements = uploadInputs
+        .map((upload, index) => {
+        const label = typeof upload?.label === 'string' ? upload.label.trim() : '';
+        const description = typeof upload?.description === 'string' ? upload.description.trim() : '';
+        const accept = typeof upload?.accept === 'string' ? upload.accept.trim() : '';
+        if (!label && !description && !accept)
+            return null;
+        const uploadId = typeof upload?.id === 'string' && upload.id.trim().length > 0
+            ? upload.id.trim()
+            : `${templateId}-upload-${index + 1}`;
+        return {
+            id: uploadId,
+            label: label || 'Supporting asset',
+            description,
+            accept,
+            required: upload?.required === true,
+        };
+    })
+        .filter((upload) => Boolean(upload));
+    const introduction = typeof rawTemplate?.introduction === 'string' ? rawTemplate.introduction.trim() : '';
+    const agreementHeading = typeof rawTemplate?.agreement?.heading === 'string' && rawTemplate.agreement.heading.trim().length > 0
+        ? rawTemplate.agreement.heading.trim()
+        : 'Participation agreement';
+    const agreementBody = typeof rawTemplate?.agreement?.body === 'string' ? rawTemplate.agreement.body.trim() : '';
+    const acknowledgement = typeof rawTemplate?.agreement?.acknowledgementLabel === 'string' &&
+        rawTemplate.agreement.acknowledgementLabel.trim().length > 0
+        ? rawTemplate.agreement.acknowledgementLabel.trim()
+        : 'I agree to the terms and conditions';
+    const requireSignature = rawTemplate?.agreement?.requireSignature === false ? false : true;
+    return {
+        id: templateId,
+        workflowTaskId: taskMeta.workflowTaskId,
+        taskTitle: taskMeta.taskTitle,
+        taskDescription: taskMeta.taskDescription,
+        introduction,
+        slots,
+        responseFields,
+        uploadRequirements,
+        agreement: {
+            heading: agreementHeading,
+            body: agreementBody,
+            acknowledgementLabel: acknowledgement,
+            requireSignature,
+        },
+    };
+}
+function sanitizeWorkflowTasks(raw, rawBookingTemplates) {
+    const inputs = Array.isArray(raw) ? raw : [];
+    const seenTaskIds = new Set();
+    const usedFieldKeys = new Set();
+    const usedBookingTemplateIds = new Set();
+    const bookingTaskMeta = new Map();
+    const provisional = inputs.map((task) => {
+        const input = task || {};
+        const preferredId = typeof input.id === 'string' && input.id.trim().length > 0 ? input.id.trim() : uuidv4();
+        let id = preferredId;
+        let suffix = 2;
+        while (seenTaskIds.has(id)) {
+            id = `${preferredId}-${suffix}`;
+            suffix += 1;
+        }
+        seenTaskIds.add(id);
         const title = typeof input.title === 'string' ? input.title.trim() : '';
         const description = typeof input.description === 'string' ? input.description.trim() : '';
         const dueDaysValue = input.dueDays;
@@ -8422,14 +9539,17 @@ function sanitizeWorkflowTasks(raw) {
             ? input.fieldType.trim()
             : null;
         const fieldType = rawFieldType && rawFieldType !== 'none' ? rawFieldType : null;
-        const forCustomer = input.forCustomer === true;
+        const isBookingTask = fieldType === 'booking-form';
+        const forCustomer = isBookingTask ? true : input.forCustomer === true;
         const fieldLabel = typeof input.fieldLabel === 'string' ? input.fieldLabel.trim() : '';
-        const fieldPlaceholder = typeof input.fieldPlaceholder === 'string'
-            ? input.fieldPlaceholder.trim()
-            : '';
+        const fieldPlaceholder = typeof input.fieldPlaceholder === 'string' ? input.fieldPlaceholder.trim() : '';
         const fieldHelpText = typeof input.fieldHelpText === 'string' ? input.fieldHelpText.trim() : '';
         const fieldAccept = typeof input.fieldAccept === 'string' ? input.fieldAccept.trim() : '';
-        const fieldRequired = fieldType ? input.fieldRequired === true : false;
+        const fieldRequired = isBookingTask
+            ? true
+            : fieldType
+                ? input.fieldRequired === true
+                : false;
         const templateKey = typeof input.fieldTemplateKey === 'string' && input.fieldTemplateKey.trim().length > 0
             ? input.fieldTemplateKey.trim()
             : null;
@@ -8465,6 +9585,20 @@ function sanitizeWorkflowTasks(raw) {
             })
                 .filter((opt) => Boolean(opt))
             : [];
+        let bookingTemplateId = null;
+        if (isBookingTask) {
+            const preferredTemplateId = typeof input.bookingTemplateId === 'string' && input.bookingTemplateId.trim().length > 0
+                ? input.bookingTemplateId.trim()
+                : null;
+            bookingTemplateId = normalizeBookingTemplateId(preferredTemplateId, `booking-${id.slice(0, 8)}`, usedBookingTemplateIds);
+            const fallbackConfig = typeof input.bookingConfig === 'object' ? input.bookingConfig : null;
+            bookingTaskMeta.set(bookingTemplateId, {
+                workflowTaskId: id,
+                taskTitle: title || 'Untitled task',
+                taskDescription: description,
+                fallbackConfig,
+            });
+        }
         return {
             id,
             title,
@@ -8474,22 +9608,83 @@ function sanitizeWorkflowTasks(raw) {
             fieldType,
             fieldTemplateKey: templateKey,
             fieldKey,
-            fieldLabel: fieldLabel || (fieldType ? title : ''),
-            fieldPlaceholder,
-            fieldHelpText,
+            fieldLabel: isBookingTask
+                ? fieldLabel || title || 'Booking form'
+                : fieldLabel || (fieldType ? title : ''),
+            fieldPlaceholder: isBookingTask ? '' : fieldPlaceholder,
+            fieldHelpText: isBookingTask
+                ? fieldHelpText || 'Participants will choose a slot and provide their details to confirm.'
+                : fieldHelpText,
             fieldRequired,
             fieldAccept: fieldType === 'file' ? fieldAccept : '',
             fieldOptions,
             dependsOn,
             shareAssigneeContact,
             assignmentScope,
+            bookingTemplateId,
         };
     });
     const validIds = new Set(provisional.map((task) => task.id));
-    return provisional.map((task) => ({
+    const tasks = provisional.map((task) => ({
         ...task,
         dependsOn: task.dependsOn.filter((depId) => validIds.has(depId)),
     }));
+    const templateInputs = Array.isArray(rawBookingTemplates) ? rawBookingTemplates : [];
+    const templateInputMap = new Map();
+    templateInputs.forEach((tpl) => {
+        const templateId = typeof tpl?.id === 'string' && tpl.id.trim().length > 0
+            ? tpl.id.trim()
+            : typeof tpl?.templateId === 'string' && tpl.templateId.trim().length > 0
+                ? tpl.templateId.trim()
+                : null;
+        if (templateId) {
+            templateInputMap.set(templateId, tpl);
+        }
+    });
+    const bookingTemplates = [];
+    bookingTaskMeta.forEach((meta, templateId) => {
+        const rawTemplate = templateInputMap.get(templateId) ?? meta.fallbackConfig ?? {};
+        const sanitizedTemplate = sanitizeWorkflowBookingTemplate(templateId, meta, rawTemplate);
+        bookingTemplates.push(sanitizedTemplate);
+    });
+    return { tasks, bookingTemplates };
+}
+async function replaceWorkflowBookingTemplates(workflowRef, templates) {
+    const collectionRef = workflowRef.collection('workflowBookingTemplates');
+    const existingSnap = await collectionRef.get();
+    const existingIds = new Set(existingSnap.docs.map((doc) => doc.id));
+    const templateIds = new Set(templates.map((template) => template.id));
+    const batch = db.batch();
+    let hasChanges = false;
+    existingSnap.docs.forEach((doc) => {
+        if (!templateIds.has(doc.id)) {
+            batch.delete(doc.ref);
+            hasChanges = true;
+        }
+    });
+    templates.forEach((template) => {
+        const docRef = collectionRef.doc(template.id);
+        const data = {
+            workflowId: workflowRef.id,
+            workflowTaskId: template.workflowTaskId,
+            taskTitle: template.taskTitle,
+            taskDescription: template.taskDescription,
+            introduction: template.introduction,
+            slots: template.slots,
+            responseFields: template.responseFields,
+            uploadRequirements: template.uploadRequirements,
+            agreement: template.agreement,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        if (!existingIds.has(template.id)) {
+            data.createdAt = admin.firestore.FieldValue.serverTimestamp();
+        }
+        batch.set(docRef, data, { merge: true });
+        hasChanges = true;
+    });
+    if (hasChanges) {
+        await batch.commit();
+    }
 }
 /**
  * Create a new workflow. Expects { name, description, tasks } where tasks include metadata for
@@ -8497,10 +9692,10 @@ function sanitizeWorkflowTasks(raw) {
  */
 export const admin_createWorkflow = functions.https.onCall(async (data, context) => {
     await assertStaff(context, ['admin', 'operations']);
-    const { name, description, tasks } = data;
+    const { name, description, tasks, bookingTemplates: rawBookingTemplates } = data;
     if (!name)
         throw new functions.https.HttpsError('invalid-argument', 'Name required');
-    const safeTasks = sanitizeWorkflowTasks(tasks);
+    const { tasks: safeTasks, bookingTemplates } = sanitizeWorkflowTasks(tasks, rawBookingTemplates);
     const workflow = {
         name,
         description: description || '',
@@ -8508,6 +9703,7 @@ export const admin_createWorkflow = functions.https.onCall(async (data, context)
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
     const ref = await db.collection('workflows').add(workflow);
+    await replaceWorkflowBookingTemplates(ref, bookingTemplates);
     if (context.auth?.uid) {
         await writeAuditLog({
             actorUid: context.auth.uid,
@@ -8528,12 +9724,21 @@ export const admin_updateWorkflow = functions.https.onCall(async (data, context)
     if (!workflowId || !updates)
         throw new functions.https.HttpsError('invalid-argument', 'workflowId and updates required');
     const workflowRef = db.collection('workflows').doc(workflowId);
+    let sanitizedBookingTemplates = null;
     if (Array.isArray(updates?.tasks)) {
-        updates.tasks = sanitizeWorkflowTasks(updates.tasks);
+        const result = sanitizeWorkflowTasks(updates.tasks, updates.bookingTemplates);
+        updates.tasks = result.tasks;
+        sanitizedBookingTemplates = result.bookingTemplates;
+        if (Array.isArray(updates.bookingTemplates)) {
+            delete updates.bookingTemplates;
+        }
     }
     const beforeSnap = await workflowRef.get();
     const beforeData = beforeSnap.exists ? beforeSnap.data() : undefined;
     await workflowRef.set(updates, { merge: true });
+    if (sanitizedBookingTemplates) {
+        await replaceWorkflowBookingTemplates(workflowRef, sanitizedBookingTemplates);
+    }
     if (context.auth?.uid) {
         const changes = buildChangesFromUpdates(beforeData, updates);
         await writeAuditLog({

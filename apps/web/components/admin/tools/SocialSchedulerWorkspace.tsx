@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   Timestamp,
   addDoc,
@@ -2630,7 +2630,7 @@ export default function SocialSchedulerWorkspace({
                                 <span>Source</span>
                                 <input
                                   type="text"
-                                  value={draft.utm.source}
+                                  value={draft.utm.source ?? ""}
                                   onChange={(event) =>
                                     updateVariantDraft(platform, {
                                       utm: { ...draft.utm, source: event.target.value },
@@ -2643,7 +2643,7 @@ export default function SocialSchedulerWorkspace({
                                 <span>Medium</span>
                                 <input
                                   type="text"
-                                  value={draft.utm.medium}
+                                  value={draft.utm.medium ?? ""}
                                   onChange={(event) =>
                                     updateVariantDraft(platform, {
                                       utm: { ...draft.utm, medium: event.target.value },
@@ -2656,7 +2656,7 @@ export default function SocialSchedulerWorkspace({
                                 <span>Campaign</span>
                                 <input
                                   type="text"
-                                  value={draft.utm.campaign}
+                                  value={draft.utm.campaign ?? ""}
                                   onChange={(event) =>
                                     updateVariantDraft(platform, {
                                       utm: { ...draft.utm, campaign: event.target.value },
@@ -2669,7 +2669,7 @@ export default function SocialSchedulerWorkspace({
                                 <span>Content</span>
                                 <input
                                   type="text"
-                                  value={draft.utm.content}
+                                  value={draft.utm.content ?? ""}
                                   onChange={(event) =>
                                     updateVariantDraft(platform, {
                                       utm: { ...draft.utm, content: event.target.value },
@@ -2682,7 +2682,7 @@ export default function SocialSchedulerWorkspace({
                                 <span>Term</span>
                                 <input
                                   type="text"
-                                  value={draft.utm.term}
+                                  value={draft.utm.term ?? ""}
                                   onChange={(event) =>
                                     updateVariantDraft(platform, {
                                       utm: { ...draft.utm, term: event.target.value },

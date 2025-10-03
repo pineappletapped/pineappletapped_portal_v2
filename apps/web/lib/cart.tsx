@@ -11,6 +11,17 @@ import {
 } from "react";
 import { ProductModifierSelection } from "@/lib/products";
 
+export interface CartCampaignBooking {
+  projectId: string;
+  bookingId: string;
+  slotId: string;
+  slotLabel: string;
+  slotStartAt: string | null;
+  slotEndAt: string | null;
+  priceClass?: string | null;
+  priceAdjustment?: number;
+}
+
 export interface CartItem {
   id: string;
   name: string;
@@ -19,6 +30,15 @@ export interface CartItem {
   date: string;
   quantity: number;
   modifiers?: ProductModifierSelection[];
+  location?: string | null;
+  postalCode?: string | null;
+  coverage?: {
+    type: "hq" | "franchise";
+    franchiseId?: string | null;
+    territoryId?: string | null;
+    priceTier?: number | null;
+    hqFallback?: boolean;
+  } | null;
   kitItems?: {
     id: string;
     name?: string | null;
@@ -29,6 +49,7 @@ export interface CartItem {
   rentalTotal?: number;
   kitStatus?: "confirmed" | "pending";
   kitWarnings?: string[];
+  campaignBooking?: CartCampaignBooking | null;
 }
 
 interface ProductInput {
@@ -38,6 +59,15 @@ interface ProductInput {
   variation?: string;
   date: string;
   modifiers?: ProductModifierSelection[];
+  location?: string | null;
+  postalCode?: string | null;
+  coverage?: {
+    type: "hq" | "franchise";
+    franchiseId?: string | null;
+    territoryId?: string | null;
+    priceTier?: number | null;
+    hqFallback?: boolean;
+  } | null;
   kitItems?: {
     id: string;
     name?: string | null;
@@ -48,6 +78,7 @@ interface ProductInput {
   rentalTotal?: number;
   kitStatus?: "confirmed" | "pending";
   kitWarnings?: string[];
+  campaignBooking?: CartCampaignBooking | null;
 }
 
 interface CartContextProps {
@@ -139,6 +170,12 @@ export function CartProvider({ children }: { children: ReactNode }) {
           i.variation === product.variation &&
           JSON.stringify(i.modifiers || []) ===
             JSON.stringify(product.modifiers || []) &&
+          (i.location || "") === (product.location || "") &&
+          (i.postalCode || "") === (product.postalCode || "") &&
+          JSON.stringify(i.coverage || null) ===
+            JSON.stringify(product.coverage || null) &&
+          JSON.stringify(i.campaignBooking || null) ===
+            JSON.stringify(product.campaignBooking || null) &&
           (i.kitStatus || "confirmed") === (product.kitStatus || "confirmed") &&
           JSON.stringify(i.kitWarnings || []) ===
             JSON.stringify(product.kitWarnings || [])

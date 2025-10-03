@@ -12,7 +12,7 @@ interface SchedulerFlagDoc {
   analyticsEnabled?: boolean;
   notes?: string | null;
   updatedBy?: string | null;
-  updatedAt?: AdminTimestamp | Date | null;
+  updatedAt?: AdminTimestamp | Date | FieldValue | null;
 }
 
 interface StaffContext {
@@ -26,7 +26,7 @@ interface SchedulerScopeDoc {
   analyticsEnabled?: boolean;
   notes?: string | null;
   updatedBy?: string | null;
-  updatedAt?: AdminTimestamp | Date | null;
+  updatedAt?: AdminTimestamp | Date | FieldValue | null;
 }
 
 interface SchedulerScopeResponse {

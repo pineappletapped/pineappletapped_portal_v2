@@ -33,6 +33,44 @@ export default function CartPage() {
               item.quantity === 1
                 ? `Remove ${item.name} from cart`
                 : `Decrease quantity of ${item.name}`;
+            const slot = item.campaignBooking;
+            const dateLabel = (() => {
+              const safeDate = (value: string | null | undefined) => {
+                if (!value) return null;
+                const parsed = new Date(value);
+                return Number.isNaN(parsed.getTime()) ? null : parsed;
+              };
+              if (slot) {
+                const start = safeDate(slot.slotStartAt);
+                const end = safeDate(slot.slotEndAt);
+                if (start && end) {
+                  return `${start.toLocaleString("en-GB", {
+                    dateStyle: "medium",
+                    timeStyle: "short",
+                  })} – ${end.toLocaleString("en-GB", {
+                    dateStyle: "medium",
+                    timeStyle: "short",
+                  })}`;
+                }
+                if (start) {
+                  return start.toLocaleString("en-GB", {
+                    dateStyle: "medium",
+                    timeStyle: "short",
+                  });
+                }
+                if (end) {
+                  return `Ends ${end.toLocaleString("en-GB", {
+                    dateStyle: "medium",
+                    timeStyle: "short",
+                  })}`;
+                }
+              }
+              const fallback = safeDate(item.date);
+              if (fallback) {
+                return fallback.toLocaleDateString();
+              }
+              return "To be scheduled";
+            })();
 
             return (
               <div
@@ -41,9 +79,12 @@ export default function CartPage() {
               >
                 <div className="min-w-[12rem] flex-1">
                   <p className="font-medium">{item.name}</p>
-                  <p className="text-sm text-gray-600">
-                    {new Date(item.date).toLocaleDateString()}
-                  </p>
+                  <p className="text-sm text-gray-600">{dateLabel}</p>
+                  {slot && (
+                    <p className="text-xs text-gray-500">
+                      Slot: {slot.slotLabel}
+                    </p>
+                  )}
                   {item.variation && (
                     <p className="text-sm text-gray-600">{item.variation}</p>
                   )}

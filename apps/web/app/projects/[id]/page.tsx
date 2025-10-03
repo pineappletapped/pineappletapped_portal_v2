@@ -55,6 +55,195 @@ const formatKitWindow = (start: string | null, end: string | null): string | nul
   return null;
 };
 
+const bookingSlotFormatter = new Intl.DateTimeFormat('en-GB', {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+});
+
+const coerceNumber = (value: any, fallback = 0) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+};
+
+const parseIsoString = (value: unknown): Date | null => {
+  if (typeof value !== 'string') return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const formatBookingSlotWindow = (slot: ProjectBookingSlotRecord): string => {
+  const start = parseIsoString(slot.startAt);
+  const end = parseIsoString(slot.endAt);
+  if (start && end) {
+    return `${bookingSlotFormatter.format(start)} – ${bookingSlotFormatter.format(end)}`;
+  }
+  if (start) {
+    return `${bookingSlotFormatter.format(start)} onwards`;
+  }
+  if (end) {
+    return `Ends ${bookingSlotFormatter.format(end)}`;
+  }
+  return slot.label;
+};
+
+const normaliseUploads = (raw: unknown): BookingUploadFile[] => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const record = item as Record<string, any>;
+      const name = typeof record.name === 'string' && record.name.trim().length > 0 ? record.name.trim() : 'Attachment';
+      const url = typeof record.url === 'string' ? record.url : null;
+      if (!url) return null;
+      return {
+        id:
+          typeof record.id === 'string' && record.id.trim().length > 0
+            ? record.id.trim()
+            : `${name}-${Math.random().toString(36).slice(2, 8)}`,
+        name,
+        url,
+        contentType: typeof record.contentType === 'string' ? record.contentType : null,
+      } satisfies BookingUploadFile;
+    })
+    .filter((item): item is BookingUploadFile => Boolean(item));
+};
+
+const normaliseAnswers = (raw: unknown): Record<string, any> => {
+  if (!raw) return {};
+  if (Array.isArray(raw)) {
+    return raw.reduce<Record<string, any>>((acc, entry, index) => {
+      acc[`field_${index + 1}`] = entry;
+      return acc;
+    }, {});
+  }
+  if (typeof raw === 'object') {
+    return { ...(raw as Record<string, any>) };
+  }
+  return { value: raw };
+};
+
+const parseProjectBookingBase = (doc: { id: string; data: () => any }): ProjectBookingRecord => {
+  const raw = (doc.data() as Record<string, any>) ?? {};
+  const slots: ProjectBookingSlotRecord[] = Array.isArray(raw.slots)
+    ? raw.slots
+        .map((slot: any, index: number) => {
+          if (!slot || typeof slot !== 'object') return null;
+          const id =
+            typeof slot.id === 'string' && slot.id.trim().length > 0
+              ? slot.id.trim()
+              : `${doc.id}-slot-${index + 1}`;
+          const label = typeof slot.label === 'string' && slot.label.trim().length > 0 ? slot.label.trim() : `Slot ${
+            index + 1
+          }`;
+          const startAt = typeof slot.startAt === 'string' ? slot.startAt : null;
+          const endAt = typeof slot.endAt === 'string' ? slot.endAt : null;
+          const capacity = coerceNumber(slot.capacity, 1);
+          const priceClass = typeof slot.priceClass === 'string' ? slot.priceClass : 'included';
+          const notes = typeof slot.notes === 'string' ? slot.notes : '';
+          return { id, label, startAt, endAt, capacity, priceClass, notes } satisfies ProjectBookingSlotRecord;
+        })
+        .filter((slot): slot is ProjectBookingSlotRecord => Boolean(slot))
+    : [];
+
+  const statsRaw = raw.stats ?? {};
+  const totalCapacityFallback = slots.reduce((sum, slot) => sum + coerceNumber(slot.capacity, 0), 0);
+  const stats: ProjectBookingStatsRecord = {
+    totalSlots: coerceNumber(statsRaw.totalSlots, slots.length),
+    totalCapacity: coerceNumber(statsRaw.totalCapacity, totalCapacityFallback),
+    responses: coerceNumber(statsRaw.responses, 0),
+    confirmed: coerceNumber(statsRaw.confirmed, coerceNumber(statsRaw.responses, 0)),
+    invitesOutstanding: coerceNumber(statsRaw.invitesOutstanding, 0),
+    assetsUploaded: coerceNumber(statsRaw.assetsUploaded, 0),
+  };
+
+  const agreementRaw = raw.agreement ?? {};
+  const agreement = {
+    heading:
+      typeof agreementRaw.heading === 'string' && agreementRaw.heading.trim().length > 0
+        ? agreementRaw.heading.trim()
+        : 'Participation agreement',
+    body: typeof agreementRaw.body === 'string' ? agreementRaw.body : '',
+    acknowledgementLabel:
+      typeof agreementRaw.acknowledgementLabel === 'string' && agreementRaw.acknowledgementLabel.trim().length > 0
+        ? agreementRaw.acknowledgementLabel.trim()
+        : 'I agree to the terms and conditions',
+    requireSignature: agreementRaw.requireSignature === false ? false : true,
+  };
+
+  return {
+    id: doc.id,
+    taskTitle:
+      typeof raw.taskTitle === 'string' && raw.taskTitle.trim().length > 0 ? raw.taskTitle.trim() : 'Booking form',
+    taskDescription: typeof raw.taskDescription === 'string' ? raw.taskDescription : '',
+    introduction: typeof raw.introduction === 'string' ? raw.introduction : '',
+    slots,
+    responseFields: Array.isArray(raw.responseFields) ? raw.responseFields : [],
+    uploadRequirements: Array.isArray(raw.uploadRequirements) ? raw.uploadRequirements : [],
+    agreement,
+    stats,
+    updatedAt: parseTimestamp(raw.updatedAt) || parseTimestamp(raw.createdAt),
+    responses: [],
+    invites: [],
+  };
+};
+
+const parseBookingResponseDoc = (doc: { id: string; data: () => any }): ProjectBookingResponseRecord => {
+  const raw = (doc.data() as Record<string, any>) ?? {};
+  const uploads = normaliseUploads(raw.uploads ?? raw.attachments);
+  const organisation =
+    typeof raw.organisation === 'string'
+      ? raw.organisation
+      : typeof raw.businessName === 'string'
+        ? raw.businessName
+        : typeof raw.company === 'string'
+          ? raw.company
+          : 'Participant';
+  const contactName =
+    typeof raw.contactName === 'string'
+      ? raw.contactName
+      : typeof raw.fullName === 'string'
+        ? raw.fullName
+        : typeof raw.name === 'string'
+          ? raw.name
+          : '';
+  const contactEmail =
+    typeof raw.contactEmail === 'string'
+      ? raw.contactEmail
+      : typeof raw.email === 'string'
+        ? raw.email
+        : '';
+
+  return {
+    id: doc.id,
+    slotId: typeof raw.slotId === 'string' ? raw.slotId : null,
+    status: typeof raw.status === 'string' ? raw.status : 'pending',
+    organisation,
+    contactName,
+    contactEmail,
+    submittedAt: parseTimestamp(raw.submittedAt ?? raw.createdAt ?? raw.updatedAt),
+    agreementAcceptedAt: parseTimestamp(raw.agreementAcceptedAt ?? raw.signatureCompletedAt),
+    uploads,
+    answers: normaliseAnswers(raw.answers ?? raw.responses ?? raw.fields),
+  };
+};
+
+const parseBookingInviteDoc = (doc: { id: string; data: () => any }): ProjectBookingInviteRecord => {
+  const raw = (doc.data() as Record<string, any>) ?? {};
+  return {
+    id: doc.id,
+    email: typeof raw.email === 'string' ? raw.email : '',
+    organisation:
+      typeof raw.organisation === 'string'
+        ? raw.organisation
+        : typeof raw.company === 'string'
+          ? raw.company
+          : '',
+    status: typeof raw.status === 'string' ? raw.status : 'pending',
+    sentAt: parseTimestamp(raw.sentAt ?? raw.createdAt),
+    respondedAt: parseTimestamp(raw.respondedAt ?? raw.updatedAt),
+  };
+};
+
 const isDroneAssignment = (name: string | null, category: string | null): boolean => {
   const nameMatch = name?.toLowerCase().includes('drone') ?? false;
   const categoryMatch = category?.toLowerCase().includes('drone') ?? false;
@@ -115,6 +304,74 @@ interface ContentDraftRecord {
   publishedAt: Date | null;
 }
 
+interface BookingUploadFile {
+  id: string;
+  name: string;
+  url: string;
+  contentType: string | null;
+}
+
+interface ProjectBookingResponseRecord {
+  id: string;
+  slotId: string | null;
+  status: string;
+  organisation: string;
+  contactName: string;
+  contactEmail: string;
+  submittedAt: Date | null;
+  agreementAcceptedAt: Date | null;
+  uploads: BookingUploadFile[];
+  answers: Record<string, any>;
+}
+
+interface ProjectBookingInviteRecord {
+  id: string;
+  email: string;
+  organisation: string;
+  status: string;
+  sentAt: Date | null;
+  respondedAt: Date | null;
+}
+
+interface ProjectBookingSlotRecord {
+  id: string;
+  label: string;
+  startAt: string | null;
+  endAt: string | null;
+  capacity: number;
+  priceClass: string;
+  notes: string;
+}
+
+interface ProjectBookingStatsRecord {
+  totalSlots: number;
+  totalCapacity: number;
+  responses: number;
+  confirmed: number;
+  invitesOutstanding: number;
+  assetsUploaded: number;
+}
+
+interface ProjectBookingRecord {
+  id: string;
+  taskTitle: string;
+  taskDescription: string;
+  introduction: string;
+  slots: ProjectBookingSlotRecord[];
+  responseFields: any[];
+  uploadRequirements: any[];
+  agreement: {
+    heading: string;
+    body: string;
+    acknowledgementLabel: string;
+    requireSignature: boolean;
+  };
+  stats: ProjectBookingStatsRecord;
+  updatedAt: Date | null;
+  responses: ProjectBookingResponseRecord[];
+  invites: ProjectBookingInviteRecord[];
+}
+
 export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [project, setProject] = useState<any>(null);
   const [assets, setAssets] = useState<any[]>([]);
@@ -123,6 +380,8 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [brandPacks, setBrandPacks] = useState<any[]>([]);
   const [contentDrafts, setContentDrafts] = useState<ContentDraftRecord[]>([]);
   const [contentDraftsLoading, setContentDraftsLoading] = useState(true);
+  const [projectBookings, setProjectBookings] = useState<ProjectBookingRecord[]>([]);
+  const [projectBookingsLoading, setProjectBookingsLoading] = useState(true);
 
   // Internal messages (staff/contractor comms)
   const [internalMessages, setInternalMessages] = useState<any[]>([]);
@@ -289,6 +548,52 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       }
     })();
   },[params.id, loadMessages, loadInternalMessages]);
+
+  useEffect(() => {
+    let active = true;
+
+    (async () => {
+      setProjectBookingsLoading(true);
+      try {
+        const bookingsSnap = await getDocs(collection(db, 'projects', params.id, 'projectBookings'));
+        const records: ProjectBookingRecord[] = [];
+        for (const bookingDoc of bookingsSnap.docs) {
+          const base = parseProjectBookingBase(bookingDoc);
+          let responses: ProjectBookingResponseRecord[] = [];
+          let invites: ProjectBookingInviteRecord[] = [];
+          try {
+            const responsesSnap = await getDocs(collection(bookingDoc.ref, 'responses'));
+            responses = responsesSnap.docs.map((docSnap) => parseBookingResponseDoc(docSnap));
+          } catch (responseErr) {
+            console.warn('Failed to load booking responses', bookingDoc.id, responseErr);
+          }
+          try {
+            const invitesSnap = await getDocs(collection(bookingDoc.ref, 'invites'));
+            invites = invitesSnap.docs.map((docSnap) => parseBookingInviteDoc(docSnap));
+          } catch (inviteErr) {
+            console.warn('Failed to load booking invites', bookingDoc.id, inviteErr);
+          }
+          records.push({ ...base, responses, invites });
+        }
+        if (active) {
+          setProjectBookings(records);
+        }
+      } catch (err) {
+        console.error('Failed to load project bookings', err);
+        if (active) {
+          setProjectBookings([]);
+        }
+      } finally {
+        if (active) {
+          setProjectBookingsLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [params.id]);
 
   useEffect(() => {
     setContentDraftsLoading(true);
@@ -859,6 +1164,153 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
         </div>
       ) : null}
       {/* Brand pack selector */}
+      <div className="card">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <h2 className="text-base font-semibold text-gray-900">Booking Sessions</h2>
+          <Link href={`/projects/${project?.id ?? params.id}/bookings`} className="btn-sm w-fit">
+            Open bookings overview
+          </Link>
+        </div>
+        {projectBookingsLoading ? (
+          <p className="mt-3 text-sm text-gray-600">Loading booking sessions…</p>
+        ) : projectBookings.length === 0 ? (
+          <p className="mt-3 text-sm text-gray-600">
+            No booking sessions configured for this project yet. Add a booking form to your workflow to collect
+            participants.
+          </p>
+        ) : (
+          <div className="mt-3 grid gap-4">
+            {projectBookings.map((booking) => {
+              const totalCapacity = booking.stats?.totalCapacity ??
+                booking.slots.reduce((sum, slot) => sum + coerceNumber(slot.capacity, 0), 0);
+              const responsesCount = booking.responses.length || booking.stats?.responses || 0;
+              const outstandingInvites = (() => {
+                const pending = booking.invites.filter((invite) => {
+                  const status = invite.status?.toLowerCase?.() ?? '';
+                  return !(status === 'accepted' || status === 'confirmed' || status === 'completed');
+                }).length;
+                return pending || booking.stats?.invitesOutstanding || 0;
+              })();
+              const uploadedAssets = (() => {
+                const total = booking.responses.reduce((sum, response) => sum + response.uploads.length, 0);
+                return total || booking.stats?.assetsUploaded || 0;
+              })();
+              const slotMap = new Map(booking.slots.map((slot) => [slot.id, slot] as const));
+
+              return (
+                <div key={booking.id} className="rounded border border-gray-200 p-4">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="space-y-1">
+                      <h3 className="text-sm font-semibold text-gray-900">{booking.taskTitle || 'Booking form'}</h3>
+                      {booking.introduction ? (
+                        <p className="text-sm text-gray-600">{booking.introduction}</p>
+                      ) : null}
+                      <p className="text-xs text-gray-500">
+                        {booking.slots.length} slots · {totalCapacity} seats · {responsesCount} responses · {outstandingInvites}{' '}
+                        invites awaiting reply · {uploadedAssets} uploaded assets
+                      </p>
+                    </div>
+                    <div className="text-right text-xs text-gray-500">
+                      <p>Last updated {booking.updatedAt ? booking.updatedAt.toLocaleString() : 'recently'}</p>
+                    </div>
+                  </div>
+                  {booking.slots.length > 0 ? (
+                    <div className="mt-3 grid gap-2 text-xs text-gray-600 sm:grid-cols-2 lg:grid-cols-3">
+                      {booking.slots.map((slot) => (
+                        <div key={slot.id} className="rounded border border-dashed border-gray-200 p-2">
+                          <p className="font-semibold text-gray-700">{slot.label}</p>
+                          <p>{formatBookingSlotWindow(slot)}</p>
+                          <p>Capacity: {slot.capacity}</p>
+                          {slot.notes ? <p className="text-[11px] text-gray-500">{slot.notes}</p> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {booking.responses.length > 0 ? (
+                    <div className="mt-4 overflow-x-auto">
+                      <table className="min-w-full divide-y divide-gray-200 text-left text-sm">
+                        <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+                          <tr>
+                            <th className="px-3 py-2">Participant</th>
+                            <th className="px-3 py-2">Slot</th>
+                            <th className="px-3 py-2">Status</th>
+                            <th className="px-3 py-2">Submitted</th>
+                            <th className="px-3 py-2">Assets</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {booking.responses.map((response) => {
+                            const slotLabel = response.slotId ? slotMap.get(response.slotId)?.label || 'Unassigned' : 'Unassigned';
+                            return (
+                              <tr key={response.id} className="align-top">
+                                <td className="px-3 py-2">
+                                  <div className="font-medium text-gray-900">{response.organisation || 'Participant'}</div>
+                                  <div className="text-xs text-gray-600">
+                                    {response.contactName}
+                                    {response.contactEmail ? ` · ${response.contactEmail}` : ''}
+                                  </div>
+                                </td>
+                                <td className="px-3 py-2 text-xs text-gray-600">{slotLabel}</td>
+                                <td className="px-3 py-2 text-xs capitalize text-gray-600">{response.status}</td>
+                                <td className="px-3 py-2 text-xs text-gray-600">
+                                  {response.submittedAt ? response.submittedAt.toLocaleString() : 'Pending'}
+                                  {response.agreementAcceptedAt ? (
+                                    <div className="text-[11px] text-green-600">
+                                      Agreement accepted {response.agreementAcceptedAt.toLocaleString()}
+                                    </div>
+                                  ) : null}
+                                </td>
+                                <td className="px-3 py-2 text-xs text-gray-600">
+                                  {response.uploads.length === 0 ? (
+                                    <span className="text-gray-400">No uploads</span>
+                                  ) : (
+                                    <ul className="grid gap-1">
+                                      {response.uploads.map((upload) => (
+                                        <li key={upload.id}>
+                                          <a
+                                            href={upload.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="text-blue-600 hover:underline"
+                                          >
+                                            {upload.name}
+                                          </a>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="mt-3 text-sm text-gray-600">No responses yet.</p>
+                  )}
+                  {booking.invites.length > 0 ? (
+                    <div className="mt-3 rounded border border-dashed border-gray-200 p-2 text-xs text-gray-600">
+                      <p className="font-semibold text-gray-700">Invitations</p>
+                      <ul className="mt-1 grid gap-1">
+                        {booking.invites.map((invite) => (
+                          <li key={invite.id} className="flex flex-wrap items-center justify-between gap-2">
+                            <span>
+                              {invite.organisation ? `${invite.organisation} · ` : ''}
+                              {invite.email}
+                            </span>
+                            <span className="capitalize">{invite.status || 'pending'}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
       <div className="card">
         <h2 className="mb-2 text-base font-semibold text-gray-900">Brand Pack</h2>
         {brandPacks.length === 0 ? (

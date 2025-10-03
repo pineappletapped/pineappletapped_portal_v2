@@ -73,6 +73,46 @@ const DUE_GROUPS = [
   { key: 'none', label: 'No due date' },
 ] as const;
 
+interface ProjectBookingSlot {
+  id: string;
+  label: string;
+  startAt: string | null;
+  endAt: string | null;
+  capacity: number;
+  priceClass: string;
+  notes: string;
+}
+
+interface ProjectBookingStats {
+  totalSlots: number;
+  totalCapacity: number;
+  responses: number;
+  confirmed: number;
+  invitesOutstanding: number;
+  assetsUploaded: number;
+}
+
+interface ProjectBookingRecord {
+  id: string;
+  taskTitle: string;
+  taskDescription: string;
+  introduction: string;
+  slots: ProjectBookingSlot[];
+  responseFields: any[];
+  uploadRequirements: any[];
+  agreement: {
+    heading: string;
+    body: string;
+    acknowledgementLabel: string;
+    requireSignature: boolean;
+  };
+  workflowId: string | null;
+  workflowTaskId: string | null;
+  workflowTemplateId: string | null;
+  stats: ProjectBookingStats;
+  updatedAt: Date | null;
+}
+
 function coerceDate(value: ProjectRecord['dueDate']): Date | null {
   if (!value) return null;
   if (value instanceof Date) return value;
@@ -105,6 +145,111 @@ function formatDateDisplay(value: any): string {
   return date.toLocaleDateString();
 }
 
+const bookingSlotFormatter = new Intl.DateTimeFormat('en-GB', {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+});
+
+const safeNumber = (value: any, fallback = 0) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+};
+
+const parseIsoDate = (value: unknown): Date | null => {
+  if (typeof value !== 'string') return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const formatBookingSlotWindow = (slot: ProjectBookingSlot): string => {
+  const start = parseIsoDate(slot.startAt);
+  const end = parseIsoDate(slot.endAt);
+  if (start && end) {
+    return `${bookingSlotFormatter.format(start)} – ${bookingSlotFormatter.format(end)}`;
+  }
+  if (start) {
+    return `${bookingSlotFormatter.format(start)} onwards`;
+  }
+  if (end) {
+    return `Ends ${bookingSlotFormatter.format(end)}`;
+  }
+  return slot.label;
+};
+
+const parseProjectBookingDocument = (doc: { id: string; data: () => any }): ProjectBookingRecord => {
+  const raw = (doc.data() as Record<string, any>) ?? {};
+  const slots: ProjectBookingSlot[] = Array.isArray(raw.slots)
+    ? raw.slots
+        .map((slot: any, index: number) => {
+          if (!slot || typeof slot !== 'object') return null;
+          const id =
+            typeof slot.id === 'string' && slot.id.trim().length > 0
+              ? slot.id.trim()
+              : `${doc.id}-slot-${index + 1}`;
+          const label = typeof slot.label === 'string' && slot.label.trim().length > 0 ? slot.label.trim() : `Slot ${
+            index + 1
+          }`;
+          const startAt = typeof slot.startAt === 'string' ? slot.startAt : null;
+          const endAt = typeof slot.endAt === 'string' ? slot.endAt : null;
+          const capacity = safeNumber(slot.capacity, 1);
+          const priceClass = typeof slot.priceClass === 'string' ? slot.priceClass : 'included';
+          const notes = typeof slot.notes === 'string' ? slot.notes : '';
+          return {
+            id,
+            label,
+            startAt,
+            endAt,
+            capacity,
+            priceClass,
+            notes,
+          };
+        })
+        .filter((slot): slot is ProjectBookingSlot => Boolean(slot))
+    : [];
+
+  const statsRaw = raw.stats ?? {};
+  const totalCapacityFallback = slots.reduce((sum, slot) => sum + safeNumber(slot.capacity, 0), 0);
+  const stats: ProjectBookingStats = {
+    totalSlots: safeNumber(statsRaw.totalSlots, slots.length),
+    totalCapacity: safeNumber(statsRaw.totalCapacity, totalCapacityFallback),
+    responses: safeNumber(statsRaw.responses, 0),
+    confirmed: safeNumber(statsRaw.confirmed, safeNumber(statsRaw.responses, 0)),
+    invitesOutstanding: safeNumber(statsRaw.invitesOutstanding, 0),
+    assetsUploaded: safeNumber(statsRaw.assetsUploaded, 0),
+  };
+
+  const agreementRaw = raw.agreement ?? {};
+  const agreement = {
+    heading:
+      typeof agreementRaw.heading === 'string' && agreementRaw.heading.trim().length > 0
+        ? agreementRaw.heading.trim()
+        : 'Participation agreement',
+    body: typeof agreementRaw.body === 'string' ? agreementRaw.body : '',
+    acknowledgementLabel:
+      typeof agreementRaw.acknowledgementLabel === 'string' && agreementRaw.acknowledgementLabel.trim().length > 0
+        ? agreementRaw.acknowledgementLabel.trim()
+        : 'I agree to the terms and conditions',
+    requireSignature: agreementRaw.requireSignature === false ? false : true,
+  };
+
+  return {
+    id: doc.id,
+    taskTitle:
+      typeof raw.taskTitle === 'string' && raw.taskTitle.trim().length > 0 ? raw.taskTitle.trim() : 'Booking form',
+    taskDescription: typeof raw.taskDescription === 'string' ? raw.taskDescription : '',
+    introduction: typeof raw.introduction === 'string' ? raw.introduction : '',
+    slots,
+    responseFields: Array.isArray(raw.responseFields) ? raw.responseFields : [],
+    uploadRequirements: Array.isArray(raw.uploadRequirements) ? raw.uploadRequirements : [],
+    agreement,
+    workflowId: typeof raw.workflowId === 'string' ? raw.workflowId : null,
+    workflowTaskId: typeof raw.workflowTaskId === 'string' ? raw.workflowTaskId : null,
+    workflowTemplateId: typeof raw.workflowTemplateId === 'string' ? raw.workflowTemplateId : null,
+    stats,
+    updatedAt: coerceDate(raw.updatedAt) || coerceDate(raw.createdAt),
+  };
+};
+
 export default function AdminProjectsPage() {
   const { allowed, loading: guardLoading } = useRoleGate(['admin', 'projects']);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -119,6 +264,8 @@ export default function AdminProjectsPage() {
   const [franchiseFilter, setFranchiseFilter] = useState<'all' | '__unassigned' | string>('all');
   const [groupBy, setGroupBy] = useState<'status' | 'owner' | 'due'>('status');
   const [expandedProjects, setExpandedProjects] = useState<string[]>([]);
+  const [projectBookings, setProjectBookings] = useState<Record<string, ProjectBookingRecord[]>>({});
+  const [projectBookingsLoading, setProjectBookingsLoading] = useState(false);
 
   const toggleProjectExpanded = useCallback((projectId: string) => {
     setExpandedProjects((prev) =>
@@ -175,6 +322,7 @@ export default function AdminProjectsPage() {
       if (projects.length === 0) {
         if (!cancelled) {
           setKitSummaries({});
+          setProjectBookings({});
         }
         return;
       }
@@ -214,6 +362,59 @@ export default function AdminProjectsPage() {
         console.warn('Failed to load kit assignments for projects', error);
         if (!cancelled) {
           setKitSummaries({});
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [allowed, guardLoading, projects]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      if (guardLoading || !allowed) return;
+      if (projects.length === 0) {
+        if (!cancelled) {
+          setProjectBookings({});
+        }
+        return;
+      }
+
+      try {
+        setProjectBookingsLoading(true);
+        const { db } = await ensureFirebase();
+        if (!db) {
+          throw new Error('Firestore is unavailable');
+        }
+
+        const results: Record<string, ProjectBookingRecord[]> = {};
+        await Promise.all(
+          projects.map(async (project) => {
+            if (!project.id) return;
+            try {
+              const snap = await getDocs(collection(db, 'projects', project.id, 'projectBookings'));
+              results[project.id] = snap.docs.map((bookingDoc) => parseProjectBookingDocument(bookingDoc));
+            } catch (err) {
+              console.error('Failed to load project bookings', { projectId: project.id }, err);
+              results[project.id] = [];
+            }
+          })
+        );
+
+        if (!cancelled) {
+          setProjectBookings(results);
+        }
+      } catch (err) {
+        console.error('Failed to load project bookings', err);
+        if (!cancelled) {
+          setProjectBookings({});
+        }
+      } finally {
+        if (!cancelled) {
+          setProjectBookingsLoading(false);
         }
       }
     })();
@@ -623,6 +824,7 @@ export default function AdminProjectsPage() {
                 <th className="p-2">Priority</th>
                 <th className="p-2">Status</th>
                 <th className="p-2">Kit assignments</th>
+                <th className="p-2">Bookings</th>
                 <th className="p-2">Created</th>
                 <th className="p-2">Actions</th>
               </tr>
@@ -730,6 +932,46 @@ export default function AdminProjectsPage() {
                               Drone kit
                             </span>
                           ) : null}
+                        </div>
+                      );
+                    })()}
+                  </td>
+                  <td className="p-2 align-top">
+                    {(() => {
+                      if (projectBookingsLoading) {
+                        return <span className="text-xs text-gray-500">Loading…</span>;
+                      }
+                      const bookings = projectBookings[p.id] ?? [];
+                      if (bookings.length === 0) {
+                        return <span className="text-xs text-gray-500">No booking forms</span>;
+                      }
+                      return (
+                        <div className="grid gap-2">
+                          {bookings.map((booking) => {
+                            const totalCapacity = booking.stats?.totalCapacity ??
+                              booking.slots.reduce((sum, slot) => sum + safeNumber(slot.capacity, 0), 0);
+                            const responses = booking.stats?.responses ?? 0;
+                            const invitesOutstanding = booking.stats?.invitesOutstanding ?? 0;
+                            const assetsUploaded = booking.stats?.assetsUploaded ?? 0;
+                            return (
+                              <div key={booking.id} className="rounded border border-gray-200 p-2">
+                                <p className="text-xs font-semibold text-gray-700">{booking.taskTitle || 'Booking form'}</p>
+                                <p className="text-[11px] text-gray-500">
+                                  {responses}/{totalCapacity || responses} responses
+                                </p>
+                                <p className="text-[11px] text-gray-500">
+                                  Outstanding invites: {invitesOutstanding}
+                                </p>
+                                <p className="text-[11px] text-gray-500">Uploaded assets: {assetsUploaded}</p>
+                                <Link
+                                  href={`/projects/${p.id}/bookings`}
+                                  className="mt-1 inline-flex text-[11px] font-medium text-blue-600 hover:underline"
+                                >
+                                  Open booking page
+                                </Link>
+                              </div>
+                            );
+                          })}
                         </div>
                       );
                     })()}
@@ -849,6 +1091,48 @@ export default function AdminProjectsPage() {
                               ) : null}
                             </div>
                           ) : null}
+                          {(() => {
+                            const bookingsForProject = projectBookings[project.id] ?? [];
+                            if (projectBookingsLoading && bookingsForProject.length === 0) {
+                              return <span className="text-[11px] text-gray-500">Loading booking forms…</span>;
+                            }
+                            if (bookingsForProject.length === 0) {
+                              return null;
+                            }
+                            return (
+                              <div className="grid gap-2 rounded border border-dashed border-gray-200 p-2 text-xs">
+                                <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-600">
+                                  Booking sessions
+                                </p>
+                                {bookingsForProject.map((booking) => {
+                                  const totalCapacity = booking.stats?.totalCapacity ??
+                                    booking.slots.reduce((sum, slot) => sum + safeNumber(slot.capacity, 0), 0);
+                                  const responses = booking.stats?.responses ?? 0;
+                                  const invitesOutstanding = booking.stats?.invitesOutstanding ?? 0;
+                                  const nextSlot = booking.slots[0];
+                                  return (
+                                    <div key={booking.id} className="rounded bg-white/60 p-2 shadow-sm">
+                                      <p className="font-semibold text-gray-700">{booking.taskTitle || 'Booking form'}</p>
+                                      {nextSlot ? (
+                                        <p className="text-[11px] text-gray-500">
+                                          {formatBookingSlotWindow(nextSlot)}
+                                        </p>
+                                      ) : null}
+                                      <p className="text-[11px] text-gray-500">
+                                        {responses}/{totalCapacity || responses} responses · {invitesOutstanding} invites pending
+                                      </p>
+                                    </div>
+                                  );
+                                })}
+                                <Link
+                                  href={`/projects/${project.id}/bookings`}
+                                  className="inline-flex w-max text-[11px] font-medium text-blue-600 hover:underline"
+                                >
+                                  Manage bookings
+                                </Link>
+                              </div>
+                            );
+                          })()}
                           <div className="grid gap-2 text-xs">
                             <select
                               value={project.ownerUid || ''}

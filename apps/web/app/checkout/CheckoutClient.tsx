@@ -83,6 +83,18 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             .map((warning) => (typeof warning === "string" ? warning.trim() : ""))
             .filter((warning) => warning.length > 0)
         : [];
+      const campaignBooking = item.campaignBooking
+        ? {
+            projectId: item.campaignBooking.projectId,
+            bookingId: item.campaignBooking.bookingId,
+            slotId: item.campaignBooking.slotId,
+            slotLabel: item.campaignBooking.slotLabel,
+            slotStartAt: item.campaignBooking.slotStartAt ?? null,
+            slotEndAt: item.campaignBooking.slotEndAt ?? null,
+            priceClass: item.campaignBooking.priceClass ?? null,
+            priceAdjustment: item.campaignBooking.priceAdjustment ?? 0,
+          }
+        : null;
       return {
         id: item.id,
         quantity: item.quantity,
@@ -90,6 +102,12 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         modifiers: (item.modifiers ?? []).map((mod) => ({ ...mod })),
         kitStatus: item.kitStatus === "pending" ? "pending" : "confirmed",
         kitWarnings: warnings,
+        variation: item.variation ?? null,
+        date: item.date ?? null,
+        location: item.location ?? null,
+        postalCode: item.postalCode ?? null,
+        coverage: item.coverage ?? null,
+        campaignBooking,
       };
     });
     const kitItemsPayload = items.flatMap((item) => item.kitItems || []);
@@ -150,6 +168,12 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           })),
           kitStatus: item.kitStatus,
           kitWarnings: item.kitWarnings,
+          variation: item.variation,
+          date: item.date,
+          location: item.location,
+          postalCode: item.postalCode,
+          coverage: item.coverage,
+          campaignBooking: item.campaignBooking,
         })),
         kitItems: orderInput.kitItems.map((kit) => ({
           id: kit.id,
