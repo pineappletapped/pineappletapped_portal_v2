@@ -11,6 +11,17 @@ import {
 } from "react";
 import { ProductModifierSelection } from "@/lib/products";
 
+export interface CartCampaignBooking {
+  projectId: string;
+  bookingId: string;
+  slotId: string;
+  slotLabel: string;
+  slotStartAt: string | null;
+  slotEndAt: string | null;
+  priceClass?: string | null;
+  priceAdjustment?: number;
+}
+
 export interface CartItem {
   id: string;
   name: string;
@@ -38,6 +49,7 @@ export interface CartItem {
   rentalTotal?: number;
   kitStatus?: "confirmed" | "pending";
   kitWarnings?: string[];
+  campaignBooking?: CartCampaignBooking | null;
 }
 
 interface ProductInput {
@@ -66,6 +78,7 @@ interface ProductInput {
   rentalTotal?: number;
   kitStatus?: "confirmed" | "pending";
   kitWarnings?: string[];
+  campaignBooking?: CartCampaignBooking | null;
 }
 
 interface CartContextProps {
@@ -161,6 +174,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
           (i.postalCode || "") === (product.postalCode || "") &&
           JSON.stringify(i.coverage || null) ===
             JSON.stringify(product.coverage || null) &&
+          JSON.stringify(i.campaignBooking || null) ===
+            JSON.stringify(product.campaignBooking || null) &&
           (i.kitStatus || "confirmed") === (product.kitStatus || "confirmed") &&
           JSON.stringify(i.kitWarnings || []) ===
             JSON.stringify(product.kitWarnings || [])

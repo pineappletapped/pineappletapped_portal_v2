@@ -68,6 +68,19 @@ interface FranchiseRecord {
   code: string | null;
 }
 
+interface CampaignSlotRecord {
+  id: string;
+  label: string;
+  startAt: string | null;
+  endAt: string | null;
+  capacity: number;
+  booked: number;
+  priceClass: string | null;
+  priceAdjustment: number;
+  notes: string;
+  held: number;
+}
+
 type TerritoryMatchType = "exact" | "prefix" | "superset" | "radius";
 
 interface TerritoryMatch {
@@ -94,6 +107,7 @@ interface CoverageAssignment {
 }
 
 type CoverageStatus = "idle" | "loading" | "success" | "error";
+type CampaignSlotStatus = "idle" | "loading" | "success" | "error";
 
 interface PostcodeLookupResult {
   resolved: string;
@@ -312,6 +326,44 @@ const lookupPostcode = async (
   }
 };
 
+const slotDateFormatter = new Intl.DateTimeFormat("en-GB", {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+const formatCampaignSlotWindow = (slot: CampaignSlotRecord): string => {
+  const parse = (value: string | null): Date | null => {
+    if (!value) {
+      return null;
+    }
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+  const start = parse(slot.startAt);
+  const end = parse(slot.endAt);
+  if (start && end) {
+    return `${slotDateFormatter.format(start)} – ${slotDateFormatter.format(end)}`;
+  }
+  if (start) {
+    return slotDateFormatter.format(start);
+  }
+  if (end) {
+    return `Ends ${slotDateFormatter.format(end)}`;
+  }
+  return slot.label;
+};
+
+const normaliseSlotDate = (value: string | null): string | null => {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed.toISOString();
+};
+
 type FunctionsError = {
   code: string;
   message: string;
@@ -334,7 +386,7 @@ export default function AddToCartWizard({
   if ((product.salesMode ?? "ecommerce") === "quote") {
     throw new Error("Quote-only products cannot be added to the cart.");
   }
-  const { add } = useCart();
+  const { items, add } = useCart();
   const [groups, setGroups] = useState<ModifierGroup[]>([]);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [step, setStep] = useState(0);
@@ -350,11 +402,51 @@ export default function AddToCartWizard({
   const [coverage, setCoverage] = useState<CoverageAssignment | null>(null);
   const [coverageStatus, setCoverageStatus] = useState<CoverageStatus>("idle");
   const [coverageError, setCoverageError] = useState<string | null>(null);
+  const [campaignSlots, setCampaignSlots] = useState<CampaignSlotRecord[]>([]);
+  const [campaignSlotStatus, setCampaignSlotStatus] =
+    useState<CampaignSlotStatus>("idle");
+  const [campaignSlotError, setCampaignSlotError] = useState<string | null>(null);
+  const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const territoriesRef = useRef<TerritoryRecord[] | null>(null);
   const franchiseMapRef = useRef<Map<string, FranchiseRecord> | null>(null);
+  const isCampaignProduct = Boolean(
+    product.campaignBooking?.projectId && product.campaignBooking?.bookingId
+  );
   const priceTier: PriceTierLevel = coverage?.priceTier ?? 1;
+  const cartSlotHolds = useMemo(() => {
+    if (!isCampaignProduct || !product.campaignBooking) {
+      return new Map<string, number>();
+    }
+    const bookingId = product.campaignBooking.bookingId;
+    const projectId = product.campaignBooking.projectId;
+    const map = new Map<string, number>();
+    items.forEach((item) => {
+      if (!item.campaignBooking) {
+        return;
+      }
+      if (
+        item.id !== product.id ||
+        item.campaignBooking.bookingId !== bookingId ||
+        item.campaignBooking.projectId !== projectId
+      ) {
+        return;
+      }
+      const slotId = item.campaignBooking.slotId;
+      if (!slotId) {
+        return;
+      }
+      const existing = map.get(slotId) ?? 0;
+      map.set(slotId, existing + Math.max(1, item.quantity));
+    });
+    return map;
+  }, [
+    isCampaignProduct,
+    items,
+    product.campaignBooking,
+    product.id,
+  ]);
   const effectiveBasePrice = useMemo(
     () => getPriceForTier(basePrice, product.priceTiers ?? null, priceTier),
     [basePrice, product.priceTiers, priceTier]
@@ -465,7 +557,9 @@ export default function AddToCartWizard({
     ? "Confirm the filming location"
     : currentGroup
       ? `Choose ${currentGroup.multiple ? "one or more" : "an"} option for ${currentGroup.name}`
-      : "Confirm the production date";
+      : isCampaignProduct
+        ? "Choose a campaign slot"
+        : "Confirm the production date";
 
   useEffect(() => {
     setLiveMessage(`Step ${step + 1} of ${totalSteps}: ${stepLabel}`);
@@ -475,6 +569,10 @@ export default function AddToCartWizard({
     setCoverage(null);
     setCoverageStatus("idle");
     setCoverageError(null);
+    setCampaignSlots([]);
+    setCampaignSlotStatus("idle");
+    setCampaignSlotError(null);
+    setSelectedSlotId(null);
   }, [locationInput, postcodeInput]);
 
   const loadTerritories = useCallback(async (): Promise<TerritoryRecord[]> => {
@@ -545,6 +643,186 @@ export default function AddToCartWizard({
       franchiseMapRef.current = new Map();
       return franchiseMapRef.current;
     }
+  }, []);
+
+  useEffect(() => {
+    if (!isCampaignProduct) {
+      return;
+    }
+    if (coverageStatus !== "success" || !coverage) {
+      setCampaignSlots([]);
+      setCampaignSlotStatus("idle");
+      setCampaignSlotError(null);
+      return;
+    }
+    let cancelled = false;
+    const booking = product.campaignBooking;
+    if (!booking) {
+      return;
+    }
+    const priceAdjustments: Record<string, number> = Object.entries(
+      booking.priceClassAdjustments ?? {}
+    ).reduce<Record<string, number>>((acc, [key, value]) => {
+      if (typeof key !== "string") {
+        return acc;
+      }
+      const numeric = typeof value === "number" ? value : Number(value);
+      if (!Number.isFinite(numeric)) {
+        return acc;
+      }
+      acc[key.trim().toLowerCase()] = numeric;
+      return acc;
+    }, {});
+
+    const loadSlots = async () => {
+      setCampaignSlotStatus("loading");
+      setCampaignSlotError(null);
+      try {
+        const bookingRef = doc(
+          db,
+          "projects",
+          booking.projectId,
+          "projectBookings",
+          booking.bookingId
+        );
+        const [bookingSnap, responsesSnap] = await Promise.all([
+          getDoc(bookingRef),
+          getDocs(collection(bookingRef, "responses")),
+        ]);
+        if (!bookingSnap.exists()) {
+          throw new Error("Booking session not found.");
+        }
+        const raw = (bookingSnap.data() as Record<string, any>) ?? {};
+        const slotResponses = new Map<string, number>();
+        responsesSnap.forEach((docSnap) => {
+          const data = (docSnap.data() as Record<string, any>) ?? {};
+          const slotId =
+            typeof data.slotId === "string" && data.slotId.trim().length > 0
+              ? data.slotId.trim()
+              : null;
+          if (!slotId) {
+            return;
+          }
+          const status =
+            typeof data.status === "string" && data.status.trim().length > 0
+              ? data.status.trim().toLowerCase()
+              : "pending";
+          if (status === "cancelled" || status === "declined") {
+            return;
+          }
+          slotResponses.set(slotId, (slotResponses.get(slotId) ?? 0) + 1);
+        });
+        const slotsInput: any[] = Array.isArray(raw.slots) ? raw.slots : [];
+        const parsed: CampaignSlotRecord[] = slotsInput
+          .map((slot, index) => {
+            if (!slot || typeof slot !== "object") {
+              return null;
+            }
+            const id =
+              typeof slot.id === "string" && slot.id.trim().length > 0
+                ? slot.id.trim()
+                : `${booking.bookingId}-slot-${index + 1}`;
+            const label =
+              typeof slot.label === "string" && slot.label.trim().length > 0
+                ? slot.label.trim()
+                : `Slot ${index + 1}`;
+            const startAt =
+              typeof slot.startAt === "string" && slot.startAt.trim().length > 0
+                ? slot.startAt
+                : null;
+            const endAt =
+              typeof slot.endAt === "string" && slot.endAt.trim().length > 0
+                ? slot.endAt
+                : null;
+            let capacity = 1;
+            if (typeof slot.capacity === "number" && Number.isFinite(slot.capacity)) {
+              capacity = Math.max(1, Math.round(slot.capacity));
+            } else if (typeof slot.capacity === "string") {
+              const parsedCapacity = Number.parseInt(slot.capacity, 10);
+              if (Number.isFinite(parsedCapacity)) {
+                capacity = Math.max(1, Math.round(parsedCapacity));
+              }
+            }
+            const priceClass =
+              typeof slot.priceClass === "string" && slot.priceClass.trim().length > 0
+                ? slot.priceClass.trim()
+                : null;
+            const priceAdjustment =
+              priceClass && priceAdjustments[priceClass.trim().toLowerCase()]
+                ? priceAdjustments[priceClass.trim().toLowerCase()]
+                : 0;
+            const notes =
+              typeof slot.notes === "string" && slot.notes.trim().length > 0
+                ? slot.notes.trim()
+                : "";
+            const booked = slotResponses.get(id) ?? 0;
+            const held = cartSlotHolds.get(id) ?? 0;
+            return {
+              id,
+              label,
+              startAt,
+              endAt,
+              capacity,
+              booked,
+              priceClass,
+              priceAdjustment,
+              notes,
+              held,
+            } satisfies CampaignSlotRecord;
+          })
+          .filter((slot): slot is CampaignSlotRecord => Boolean(slot));
+        if (!cancelled) {
+          setCampaignSlots(parsed);
+          const stillValid = parsed.some(
+            (slot) =>
+              slot.id === selectedSlotId && slot.capacity - slot.booked - slot.held > 0
+          );
+          if (!stillValid) {
+            setSelectedSlotId(null);
+          }
+          setCampaignSlotStatus("success");
+        }
+      } catch (err) {
+        if (cancelled) {
+          return;
+        }
+        console.error("Failed to load campaign slots", err);
+        setCampaignSlots([]);
+        setCampaignSlotStatus("error");
+        setCampaignSlotError(
+          err instanceof Error ? err.message : "Unable to load available slots right now."
+        );
+      }
+    };
+    void loadSlots();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    cartSlotHolds,
+    coverage,
+    coverageStatus,
+    isCampaignProduct,
+    product.campaignBooking,
+    selectedSlotId,
+  ]);
+
+  const selectedSlot = useMemo(() => {
+    if (!selectedSlotId) {
+      return null;
+    }
+    return campaignSlots.find((slot) => slot.id === selectedSlotId) ?? null;
+  }, [campaignSlots, selectedSlotId]);
+
+  const handleSlotChoice = useCallback((slot: CampaignSlotRecord) => {
+    setSelectedSlotId(slot.id);
+    const slotDate = normaliseSlotDate(slot.startAt) ?? normaliseSlotDate(slot.endAt);
+    if (slotDate) {
+      setDate(slotDate);
+    } else {
+      setDate(slot.id);
+    }
+    setError(null);
   }, []);
 
   const handleCoverageLookup = useCallback(async () => {
@@ -717,13 +995,41 @@ export default function AddToCartWizard({
         }
       });
     });
-    const price = effectiveBasePrice + adj;
+    const slotSelection = isCampaignProduct ? selectedSlot : null;
+    let price = effectiveBasePrice + adj;
+    if (slotSelection) {
+      price += slotSelection.priceAdjustment;
+    }
     if (!coverage || coverageStatus !== "success") {
       setError("Confirm the filming location before selecting a production date.");
       setLiveMessage("Filming location required before booking");
       return;
     }
-    if (!date) {
+    let reservationDate = date;
+    if (isCampaignProduct) {
+      if (!slotSelection) {
+        setError("Select an available slot to continue.");
+        setLiveMessage("Slot selection required before adding to cart");
+        return;
+      }
+      const cartHeld = cartSlotHolds.get(slotSelection.id) ?? 0;
+      const remaining = Math.max(
+        slotSelection.capacity - slotSelection.booked - cartHeld,
+        0
+      );
+      if (remaining <= 0) {
+        setError("This slot has just sold out. Please choose another option.");
+        setLiveMessage("Selected slot unavailable");
+        return;
+      }
+      reservationDate =
+        normaliseSlotDate(slotSelection.startAt) ??
+        normaliseSlotDate(slotSelection.endAt) ??
+        reservationDate;
+      if (!reservationDate) {
+        reservationDate = new Date().toISOString();
+      }
+    } else if (!date) {
       setError("Select a production date to continue.");
       setLiveMessage("Production date required before adding to cart");
       return;
@@ -732,7 +1038,10 @@ export default function AddToCartWizard({
     setLiveMessage("Checking equipment availability");
     try {
       const reserve = httpsCallable(functions, "reserveKit");
-      const res: any = await reserve({ productId: product.id, date });
+      const res: any = await reserve({
+        productId: product.id,
+        date: reservationDate,
+      });
       const {
         conflicts = [],
         kitItems = [],
@@ -786,7 +1095,7 @@ export default function AddToCartWizard({
         id: product.id,
         name: product.name,
         price,
-        date,
+        date: reservationDate || date || new Date().toISOString(),
         variation: variationId,
         modifiers: selections,
         kitItems,
@@ -802,6 +1111,18 @@ export default function AddToCartWizard({
           priceTier,
           hqFallback: coverage.hqFallback,
         },
+        campaignBooking: isCampaignProduct && slotSelection && product.campaignBooking
+          ? {
+              projectId: product.campaignBooking.projectId,
+              bookingId: product.campaignBooking.bookingId,
+              slotId: slotSelection.id,
+              slotLabel: slotSelection.label,
+              slotStartAt: slotSelection.startAt,
+              slotEndAt: slotSelection.endAt,
+              priceClass: slotSelection.priceClass,
+              priceAdjustment: slotSelection.priceAdjustment,
+            }
+          : null,
       });
       setLiveMessage(
         reservationStatus === "pending"
@@ -844,7 +1165,9 @@ export default function AddToCartWizard({
     ? coverageStatus === "success" && !!coverage && locationInput.trim().length > 0
     : currentGroup
       ? (selected[currentGroup.id] || []).length > 0
-      : !!date;
+      : isCampaignProduct
+        ? campaignSlotStatus === "success" && !!selectedSlotId
+        : !!date;
 
   const descriptionIds = useMemo(() => {
     const ids = ["wizard-description"];
@@ -997,8 +1320,85 @@ export default function AddToCartWizard({
           </div>
         ) : (
           <div className="space-y-2">
-            <p className="font-semibold">Production Date</p>
-            {product.category !== "exhibition-videography" ? (
+            <p className="font-semibold">
+              {isCampaignProduct ? "Select a slot" : "Production Date"}
+            </p>
+            {isCampaignProduct ? (
+              <div className="space-y-2">
+                {campaignSlotStatus === "loading" && (
+                  <p className="text-sm text-gray-500">Loading available slots…</p>
+                )}
+                {campaignSlotStatus === "error" && campaignSlotError && (
+                  <p className="text-sm text-red-600">{campaignSlotError}</p>
+                )}
+                {campaignSlotStatus === "success" && campaignSlots.length === 0 ? (
+                  <p className="text-sm text-gray-500">
+                    No slots are available right now. Check back soon or contact the team for
+                    assistance.
+                  </p>
+                ) : null}
+                {campaignSlots.length > 0 && (
+                  <div className="space-y-2">
+                    {campaignSlots.map((slot) => {
+                      const remaining = Math.max(
+                        slot.capacity - slot.booked - slot.held,
+                        0
+                      );
+                      const slotPrice = effectiveBasePrice + slot.priceAdjustment;
+                      const disabled = remaining === 0;
+                      const checked = selectedSlotId === slot.id;
+                      return (
+                        <label
+                          key={slot.id}
+                          className={`flex flex-col gap-1 rounded-md border p-3 transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
+                            checked ? "border-orange-400 bg-orange-50" : "border-gray-200 bg-white"
+                          } ${disabled ? "opacity-60" : ""}`}
+                        >
+                          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                            <div className="flex items-start gap-3">
+                              <input
+                                type="radio"
+                                name="campaign-slot"
+                                className="mt-1"
+                                checked={checked}
+                                disabled={disabled}
+                                onChange={() => handleSlotChoice(slot)}
+                              />
+                              <div className="space-y-1">
+                                <p className="text-sm font-semibold">{slot.label}</p>
+                                <p className="text-xs text-gray-600">
+                                  {formatCampaignSlotWindow(slot)}
+                                </p>
+                                {slot.notes && (
+                                  <p className="text-xs text-gray-500">{slot.notes}</p>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-sm font-semibold">
+                                {GBP.format(slotPrice)}
+                              </p>
+                              {slot.priceClass && (
+                                <p className="text-xs text-gray-500">{slot.priceClass}</p>
+                              )}
+                            </div>
+                          </div>
+                          <p
+                            className={`text-xs ${
+                              remaining > 0 ? "text-emerald-600" : "text-red-600"
+                            }`}
+                          >
+                            {remaining > 0
+                              ? `${remaining} of ${slot.capacity} available`
+                              : "Fully booked"}
+                          </p>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : product.category !== "exhibition-videography" ? (
               coverageStatus === "success" && coverage ? (
                 <ProductDatePicker
                   productId={product.id}

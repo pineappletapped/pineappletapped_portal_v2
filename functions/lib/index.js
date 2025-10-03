@@ -6548,6 +6548,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     }
     const productSnaps = await db.getAll(...productRefs);
     const orderItems = [];
+    const campaignSelections = [];
     let aggregatedKitReservationStatus = kitReservationStatusInitial;
     const aggregatedKitWarnings = new Set(kitReservationWarningsInitial);
     const driveProducts = [];
@@ -6617,7 +6618,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             }
             resolvedModifiers.push(payload);
         });
-        const price = unitPrice + modifiersTotal;
+        let price = unitPrice + modifiersTotal;
         const rawItemKitStatus = items[idx] && typeof items[idx].kitStatus === 'string'
             ? items[idx].kitStatus
             : null;
@@ -6635,6 +6636,79 @@ export const createOrder = functions.https.onCall(async (data, context) => {
                 aggregatedKitWarnings.add(warning);
             }
         });
+        const itemDate = items[idx] && typeof items[idx].date === 'string' && items[idx].date.trim().length > 0
+            ? items[idx].date
+            : null;
+        const itemLocation = items[idx] && typeof items[idx].location === 'string' && items[idx].location.trim().length > 0
+            ? items[idx].location.trim()
+            : null;
+        const itemPostalCode = items[idx] && typeof items[idx].postalCode === 'string' && items[idx].postalCode.trim().length > 0
+            ? items[idx].postalCode.trim()
+            : null;
+        const rawCoverage = items[idx]?.coverage;
+        const coveragePayload = rawCoverage && typeof rawCoverage === 'object'
+            ? {
+                type: rawCoverage.type === 'franchise'
+                    ? 'franchise'
+                    : rawCoverage.type === 'hq'
+                        ? 'hq'
+                        : 'hq',
+                franchiseId: typeof rawCoverage.franchiseId === 'string' && rawCoverage.franchiseId.trim().length > 0
+                    ? rawCoverage.franchiseId.trim()
+                    : null,
+                territoryId: typeof rawCoverage.territoryId === 'string' && rawCoverage.territoryId.trim().length > 0
+                    ? rawCoverage.territoryId.trim()
+                    : null,
+                priceTier: typeof rawCoverage.priceTier === 'number' && Number.isFinite(rawCoverage.priceTier)
+                    ? rawCoverage.priceTier
+                    : null,
+                hqFallback: rawCoverage.hqFallback === true,
+            }
+            : null;
+        const rawCampaignBooking = items[idx]?.campaignBooking;
+        const campaignBooking = rawCampaignBooking && typeof rawCampaignBooking === 'object'
+            ? (() => {
+                const projectId = typeof rawCampaignBooking.projectId === 'string' && rawCampaignBooking.projectId.trim().length > 0
+                    ? rawCampaignBooking.projectId.trim()
+                    : null;
+                const bookingId = typeof rawCampaignBooking.bookingId === 'string' && rawCampaignBooking.bookingId.trim().length > 0
+                    ? rawCampaignBooking.bookingId.trim()
+                    : null;
+                const slotId = typeof rawCampaignBooking.slotId === 'string' && rawCampaignBooking.slotId.trim().length > 0
+                    ? rawCampaignBooking.slotId.trim()
+                    : null;
+                if (!projectId || !bookingId || !slotId) {
+                    return null;
+                }
+                const slotLabel = typeof rawCampaignBooking.slotLabel === 'string' && rawCampaignBooking.slotLabel.trim().length > 0
+                    ? rawCampaignBooking.slotLabel.trim()
+                    : slotId;
+                const priceAdjustmentValue = typeof rawCampaignBooking.priceAdjustment === 'number'
+                    ? rawCampaignBooking.priceAdjustment
+                    : Number(rawCampaignBooking.priceAdjustment ?? 0);
+                const selectionKey = uuidv4();
+                return {
+                    projectId,
+                    bookingId,
+                    slotId,
+                    slotLabel,
+                    slotStartAt: typeof rawCampaignBooking.slotStartAt === 'string'
+                        ? rawCampaignBooking.slotStartAt
+                        : null,
+                    slotEndAt: typeof rawCampaignBooking.slotEndAt === 'string'
+                        ? rawCampaignBooking.slotEndAt
+                        : null,
+                    priceClass: typeof rawCampaignBooking.priceClass === 'string'
+                        ? rawCampaignBooking.priceClass
+                        : null,
+                    priceAdjustment: Number.isFinite(priceAdjustmentValue) ? priceAdjustmentValue : 0,
+                    selectionKey,
+                };
+            })()
+            : null;
+        if (campaignBooking && typeof campaignBooking.priceAdjustment === 'number') {
+            price += campaignBooking.priceAdjustment;
+        }
         const budget = prod.budget || {};
         const labourFilming = parseOptional(budget.labourFilming);
         const labourEditing = parseOptional(budget.labourEditing);
@@ -6669,6 +6743,12 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             modifiers: resolvedModifiers,
             kitReservationStatus: itemKitStatus,
             kitWarnings: itemKitWarnings,
+            variation: variationId,
+            date: itemDate,
+            location: itemLocation,
+            postalCode: itemPostalCode,
+            coverage: coveragePayload,
+            campaignBooking,
             budget: {
                 perUnit: {
                     labour,
@@ -6688,6 +6768,21 @@ export const createOrder = functions.https.onCall(async (data, context) => {
                 },
             },
         });
+        if (campaignBooking) {
+            campaignSelections.push({
+                ...campaignBooking,
+                productId: snap.id,
+                productName: typeof prod.name === 'string' && prod.name.trim().length > 0
+                    ? prod.name
+                    : snap.id,
+                quantity: qty,
+                unitPrice: price,
+                location: itemLocation,
+                postalCode: itemPostalCode,
+                date: itemDate,
+                selectionKey: campaignBooking.selectionKey,
+            });
+        }
         const templateFolderIdRaw = typeof prod.driveTemplateFolderId === 'string'
             ? prod.driveTemplateFolderId
             : '';
@@ -6883,6 +6978,9 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
         priceTierLevel: territoryPriceTier,
     };
+    if (campaignSelections.length > 0) {
+        orderData.campaignBookings = campaignSelections;
+    }
     if (affiliateSnapshot) {
         orderData.affiliate = {
             ...affiliateSnapshot,
@@ -7880,6 +7978,139 @@ export const stripe_createPaymentIntent = functions.https.onCall(async (data, co
     });
     return { clientSecret: paymentIntent.client_secret };
 });
+async function fulfilCampaignBookingPurchase(options) {
+    const selection = options.selection || {};
+    const orderId = options.orderId;
+    const orderData = options.orderData || {};
+    const payment = options.payment;
+    const projectId = normaliseString(selection.projectId);
+    const bookingId = normaliseString(selection.bookingId);
+    const slotId = normaliseString(selection.slotId);
+    const selectionKey = normaliseString(selection.selectionKey) || `${orderId}-${slotId || 'slot'}`;
+    if (!projectId || !bookingId || !slotId) {
+        return;
+    }
+    const quantityRaw = Number(selection.quantity);
+    const requestedQuantity = Number.isFinite(quantityRaw) ? Math.max(1, Math.round(quantityRaw)) : 1;
+    if (requestedQuantity <= 0) {
+        return;
+    }
+    const projectRef = db.collection('projects').doc(projectId);
+    const bookingRef = projectRef.collection('projectBookings').doc(bookingId);
+    const transactionResult = await db.runTransaction(async (tx) => {
+        const bookingSnap = await tx.get(bookingRef);
+        if (!bookingSnap.exists) {
+            return { created: 0, bookingData: null };
+        }
+        const bookingRecord = bookingSnap.data() ?? {};
+        const existingSelectionSnap = await tx.get(bookingRef.collection('responses').where('orderSelectionKey', '==', selectionKey).limit(1));
+        if (!existingSelectionSnap.empty) {
+            return { created: 0, bookingData: bookingRecord };
+        }
+        const slots = Array.isArray(bookingRecord.slots) ? bookingRecord.slots : [];
+        const slotEntry = slots.find((entry) => normaliseString(entry?.id) === slotId);
+        if (!slotEntry) {
+            return { created: 0, bookingData: bookingRecord };
+        }
+        let capacity = 1;
+        if (typeof slotEntry.capacity === 'number' && Number.isFinite(slotEntry.capacity)) {
+            capacity = Math.max(1, Math.round(slotEntry.capacity));
+        }
+        else if (typeof slotEntry.capacity === 'string') {
+            const parsedCapacity = Number.parseInt(slotEntry.capacity, 10);
+            if (Number.isFinite(parsedCapacity)) {
+                capacity = Math.max(1, Math.round(parsedCapacity));
+            }
+        }
+        const responsesSnap = await tx.get(bookingRef.collection('responses').where('slotId', '==', slotId));
+        const activeCount = responsesSnap.docs.filter((docSnap) => {
+            const status = normaliseString(docSnap.data()?.status) || 'pending';
+            return status !== 'cancelled' && status !== 'declined';
+        }).length;
+        const capacityRemaining = Math.max(capacity - activeCount, 0);
+        if (capacityRemaining <= 0) {
+            return { created: 0, bookingData: bookingRecord };
+        }
+        const responsesToCreate = Math.min(requestedQuantity, capacityRemaining);
+        const timestamp = admin.firestore.FieldValue.serverTimestamp();
+        for (let i = 0; i < responsesToCreate; i += 1) {
+            const responseRef = bookingRef.collection('responses').doc();
+            tx.set(responseRef, {
+                orderId,
+                orderSelectionKey: selectionKey,
+                organisation: orderData.companyName || orderData.customerName || null,
+                contactName: orderData.customerName || null,
+                contactEmail: orderData.userEmail || null,
+                slotId,
+                slotLabel: normaliseString(selection.slotLabel) || normaliseString(slotEntry.label) || `Slot ${slotId}`,
+                status: 'paid',
+                agreementAccepted: true,
+                agreementAcceptedAt: timestamp,
+                answers: {},
+                uploads: [],
+                location: selection.location || orderData.location || null,
+                postalCode: selection.postalCode || orderData.clientPostalCode || null,
+                unitPrice: Number(selection.unitPrice) || null,
+                quantity: 1,
+                paymentAmount: payment.amount,
+                paymentCurrency: payment.currency,
+                paymentIntentId: payment.intentId,
+                paidAt: payment.receivedAt,
+                source: 'storefront-checkout',
+                createdAt: timestamp,
+                updatedAt: timestamp,
+            });
+        }
+        const stats = bookingRecord.stats ?? {};
+        const responsesCount = typeof stats.responses === 'number' ? stats.responses : 0;
+        const confirmedCount = typeof stats.confirmed === 'number' ? stats.confirmed : responsesCount;
+        const invitesOutstanding = typeof stats.invitesOutstanding === 'number' ? stats.invitesOutstanding : 0;
+        tx.set(bookingRef, {
+            stats: {
+                ...stats,
+                responses: responsesCount + responsesToCreate,
+                confirmed: confirmedCount + responsesToCreate,
+                invitesOutstanding: Math.max(0, invitesOutstanding),
+            },
+            lastResponseAt: timestamp,
+            updatedAt: timestamp,
+        }, { merge: true });
+        return { created: responsesToCreate, bookingData: bookingRecord };
+    });
+    if (!transactionResult || transactionResult.created <= 0) {
+        return;
+    }
+    const projectSnap = await projectRef.get();
+    const projectData = projectSnap.exists ? (projectSnap.data() ?? {}) : {};
+    const bookingData = transactionResult.bookingData || {};
+    const bookingTitle = normaliseString(bookingData.taskTitle) || normaliseString(bookingData.introduction) || 'Booking purchase';
+    const franchiseId = normaliseString(projectData.franchiseId);
+    const franchiseName = normaliseString(projectData.franchiseName) || normaliseString(projectData.franchiseTitle) || null;
+    const clientId = normaliseString(projectData.orgId);
+    const clientName = normaliseString(orderData.companyName) ||
+        normaliseString(orderData.customerName) ||
+        normaliseString(projectData.orgName) ||
+        null;
+    await db.collection('aiCommandLogs').add({
+        commandName: 'project_booking_purchase',
+        promptName: bookingTitle ? `Booking purchase · ${bookingTitle}` : 'Project booking purchase',
+        clientId: clientId || null,
+        clientName: clientName || null,
+        franchiseId: franchiseId || null,
+        franchiseName: franchiseName || null,
+        modelId: null,
+        modelName: null,
+        totalTokens: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        cost: 0,
+        currency: 'GBP',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        requestId: `${orderId}-${selectionKey}`,
+        projectId,
+        bookingId,
+    });
+}
 // Stripe webhook (deposit/balance) — skeleton
 export const stripe_webhook = functions.https.onRequest(async (req, res) => {
     const sig = req.headers['stripe-signature'];
@@ -7942,6 +8173,39 @@ export const stripe_webhook = functions.https.onRequest(async (req, res) => {
                             createdAt: admin.firestore.FieldValue.serverTimestamp()
                         });
                         await orderRef.set({ projectId: projRef.id }, { merge: true });
+                    }
+                    if (payType === 'deposit') {
+                        const campaignBookingsRaw = Array.isArray(orderData.campaignBookings)
+                            ? orderData.campaignBookings
+                            : [];
+                        if (campaignBookingsRaw.length > 0) {
+                            const amountCents = typeof pi.amount_received === 'number'
+                                ? pi.amount_received
+                                : typeof pi.amount === 'number'
+                                    ? pi.amount
+                                    : 0;
+                            const paymentRecord = {
+                                amount: fromCurrencyCents(amountCents),
+                                currency: typeof pi.currency === 'string' && pi.currency.trim().length > 0
+                                    ? pi.currency.toUpperCase()
+                                    : 'GBP',
+                                intentId: typeof pi.id === 'string' ? pi.id : null,
+                                receivedAt: admin.firestore.Timestamp.fromMillis(typeof pi.created === 'number' ? Math.floor(pi.created * 1000) : Date.now()),
+                            };
+                            for (const selection of campaignBookingsRaw) {
+                                try {
+                                    await fulfilCampaignBookingPurchase({
+                                        selection,
+                                        orderId,
+                                        orderData,
+                                        payment: paymentRecord,
+                                    });
+                                }
+                                catch (campaignErr) {
+                                    console.error('Failed to fulfil campaign booking purchase', selection, campaignErr);
+                                }
+                            }
+                        }
                     }
                 }
             }

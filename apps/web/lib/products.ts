@@ -159,6 +159,20 @@ export interface ProductSpec {
   notes?: string;
 }
 
+export interface ProductCampaignBookingDetails {
+  /** Project document that owns the booking session. */
+  projectId: string;
+  /** Booking template identifier inside the projectBookings subcollection. */
+  bookingId: string;
+  /** Optional public slug used for storefront landing pages. */
+  slug?: string | null;
+  /**
+   * Optional mapping of price class codes to adjustments that should be added on top of the
+   * product base price when a slot declares that price class.
+   */
+  priceClassAdjustments?: Record<string, number> | null;
+}
+
 export interface ProductCrewRole {
   id: string;
   roleId?: string | null;
@@ -234,6 +248,10 @@ export interface Product {
   exampleWorkUrl?: string | null;
   exampleVideos?: ProductVideoLink[];
   category?: string;
+  /** Optional slug exposed on the public campaigns/{slug} route. */
+  campaignSlug?: string | null;
+  /** Optional booking configuration linked to a workflow booking template. */
+  campaignBooking?: ProductCampaignBookingDetails | null;
   /** Optional date for time-limited products such as Exhibition Videography */
   eventDate?: string;
   /** Venue name used for Exhibition Videography filtering */
@@ -408,6 +426,57 @@ export async function getProduct(id: string): Promise<Product | null> {
     return { id: snap.id, ...(snap.data() as any) };
   } catch {
     return sampleProducts.find((p) => p.id === id) || null;
+  }
+}
+
+export async function getProductByCampaignSlug(
+  slug: string
+): Promise<Product | null> {
+  const normalised = slug.trim().toLowerCase();
+  if (!normalised) {
+    return null;
+  }
+  if (typeof window === "undefined") {
+    try {
+      const all = await fetchServerProducts();
+      return (
+        all.find((product) =>
+          typeof product.campaignSlug === "string"
+            ? product.campaignSlug.trim().toLowerCase() === normalised
+            : false
+        ) || null
+      );
+    } catch {
+      return (
+        sampleProducts.find((product) =>
+          typeof product.campaignSlug === "string"
+            ? product.campaignSlug.trim().toLowerCase() === normalised
+            : false
+        ) || null
+      );
+    }
+  }
+  try {
+    const fs = await loadFirestore();
+    if (!fs) throw new Error("unavailable");
+    const query = fs.query(
+      fs.collection(db, "products"),
+      fs.where("campaignSlug", "==", slug)
+    );
+    const snap = await fs.getDocs(query);
+    if (snap.empty) {
+      return null;
+    }
+    const docSnap = snap.docs[0];
+    return { id: docSnap.id, ...(docSnap.data() as any) };
+  } catch {
+    return (
+      sampleProducts.find((product) =>
+        typeof product.campaignSlug === "string"
+          ? product.campaignSlug.trim().toLowerCase() === normalised
+          : false
+      ) || null
+    );
   }
 }
 
