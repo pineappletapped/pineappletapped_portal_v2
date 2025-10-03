@@ -1520,6 +1520,26 @@ async function listDriveChildren(drive, parentId) {
     } while (pageToken);
     return files;
 }
+async function listDriveChildFolders(drive, parentId) {
+    const folders = [];
+    let pageToken;
+    do {
+        const res = await drive.files.list({
+            q: `'${parentId}' in parents and trashed = false and mimeType = 'application/vnd.google-apps.folder'`,
+            fields: 'nextPageToken, files(id, name, mimeType)',
+            pageSize: 100,
+            pageToken,
+            includeItemsFromAllDrives: true,
+            supportsAllDrives: true,
+            orderBy: 'name_natural',
+        });
+        if (res.data.files) {
+            folders.push(...res.data.files);
+        }
+        pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+    return folders;
+}
 async function copyDriveContents(drive, sourceFolderId, destinationFolderId) {
     const children = await listDriveChildren(drive, sourceFolderId);
     for (const child of children) {
@@ -1909,6 +1929,122 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
             orderFolderName: typeof driveInfo.orderFolderName === 'string' ? driveInfo.orderFolderName : null,
             productFolders,
         },
+    };
+});
+export const drive_listTemplateFolders = functions.https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+    }
+    const userContext = await loadUserContext(context.auth.uid);
+    if (userContext.roles.admin !== true && userContext.roles.operations !== true) {
+        throw new functions.https.HttpsError('permission-denied', 'Drive template browsing is restricted to admin and operations roles');
+    }
+    const settingsSnap = await db.collection('settings').doc('clientDrive').get();
+    const settings = settingsSnap.data() || {};
+    const rootFolderId = normaliseDriveId(settings.clientRootFolderId);
+    if (!rootFolderId) {
+        throw new functions.https.HttpsError('failed-precondition', 'Client Drive root folder is not configured.');
+    }
+    const drive = await createDriveService();
+    if (!drive) {
+        throw new functions.https.HttpsError('failed-precondition', 'Google Drive service account credentials are not configured.');
+    }
+    const rawFolderId = typeof data?.folderId === 'string' && data.folderId.trim().length > 0
+        ? data.folderId.trim()
+        : null;
+    const targetFolderIdFromInput = normaliseDriveId(rawFolderId);
+    const pathInput = data?.path;
+    const pathSegments = Array.isArray(pathInput)
+        ? pathInput
+            .map((segment) => (typeof segment === 'string' ? segment.trim() : ''))
+            .filter((segment) => segment.length > 0)
+        : typeof pathInput === 'string'
+            ? pathInput
+                .split('/')
+                .map((segment) => segment.trim())
+                .filter((segment) => segment.length > 0)
+            : [];
+    const breadcrumbs = [];
+    let currentFolderId = rootFolderId;
+    let currentFolderName = null;
+    try {
+        const rootMeta = await drive.files.get({
+            fileId: rootFolderId,
+            fields: 'id, name',
+            supportsAllDrives: true,
+        });
+        currentFolderName = typeof rootMeta.data.name === 'string' ? rootMeta.data.name : null;
+    }
+    catch (error) {
+        console.warn('drive_listTemplateFolders failed to load root metadata', rootFolderId, error);
+    }
+    breadcrumbs.push({ id: rootFolderId, name: currentFolderName });
+    for (const segment of pathSegments) {
+        const children = await listDriveChildFolders(drive, currentFolderId);
+        const match = children.find((child) => {
+            const id = typeof child.id === 'string' ? child.id : null;
+            const name = typeof child.name === 'string' ? child.name.trim() : '';
+            return id && name.toLowerCase() === segment.toLowerCase();
+        });
+        if (!match?.id) {
+            throw new functions.https.HttpsError('not-found', `Folder not found for path segment: ${segment}`);
+        }
+        currentFolderId = match.id;
+        currentFolderName = typeof match.name === 'string' ? match.name : null;
+        breadcrumbs.push({ id: currentFolderId, name: currentFolderName });
+    }
+    let targetFolderId = targetFolderIdFromInput ?? currentFolderId;
+    let folderName = currentFolderName;
+    try {
+        const folderMeta = await drive.files.get({
+            fileId: targetFolderId,
+            fields: 'id, name',
+            supportsAllDrives: true,
+        });
+        if (folderMeta.data.id) {
+            targetFolderId = folderMeta.data.id;
+        }
+        if (typeof folderMeta.data.name === 'string') {
+            folderName = folderMeta.data.name;
+        }
+    }
+    catch (error) {
+        console.warn('drive_listTemplateFolders failed to load folder metadata', targetFolderId, error);
+    }
+    if (targetFolderIdFromInput && !folderName) {
+        throw new functions.https.HttpsError('not-found', 'The requested Drive folder could not be found or accessed.');
+    }
+    if (!breadcrumbs.some((crumb) => crumb.id === targetFolderId)) {
+        breadcrumbs.push({ id: targetFolderId, name: folderName });
+    }
+    else {
+        breadcrumbs.forEach((crumb) => {
+            if (crumb.id === targetFolderId) {
+                crumb.name = folderName;
+            }
+        });
+    }
+    let folderEntries = [];
+    try {
+        folderEntries = await listDriveChildFolders(drive, targetFolderId);
+    }
+    catch (error) {
+        console.error('drive_listTemplateFolders failed to list child folders', targetFolderId, error);
+        throw new functions.https.HttpsError('internal', 'Failed to list Drive folders. Please try again later.');
+    }
+    const folders = folderEntries
+        .map((entry) => ({
+        id: entry.id ?? '',
+        name: typeof entry.name === 'string' && entry.name.trim().length > 0
+            ? entry.name.trim()
+            : 'Untitled folder',
+    }))
+        .filter((item) => item.id.length > 0);
+    return {
+        folderId: targetFolderId,
+        folderName,
+        breadcrumbs,
+        folders,
     };
 });
 export const drive_stageAssetFromFile = functions.https.onCall(async (data, context) => {
@@ -3711,13 +3847,63 @@ export const reserveKit = functions.https.onCall(async (data) => {
     if (!productId || !date) {
         throw new functions.https.HttpsError('invalid-argument', 'productId and date required');
     }
-    const start = new Date(date);
-    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+    const baseStart = new Date(date);
+    if (Number.isNaN(baseStart.getTime())) {
+        throw new functions.https.HttpsError("invalid-argument", "Invalid reservation date");
+    }
+    let start = baseStart;
+    let end = null;
+    const rawWindow = data?.timeWindow;
+    if (rawWindow && typeof rawWindow === 'object') {
+        const windowStartRaw = rawWindow.start;
+        const windowEndRaw = rawWindow.end;
+        if (typeof windowStartRaw === 'string' && typeof windowEndRaw === 'string') {
+            const windowStart = new Date(windowStartRaw);
+            const windowEnd = new Date(windowEndRaw);
+            if (!Number.isNaN(windowStart.getTime()) &&
+                !Number.isNaN(windowEnd.getTime()) &&
+                windowEnd.getTime() > windowStart.getTime()) {
+                start = windowStart;
+                end = windowEnd;
+            }
+        }
+    }
     const prodSnap = await db.collection('products').doc(productId).get();
     if (!prodSnap.exists) {
         throw new functions.https.HttpsError('not-found', 'product not found');
     }
     const productData = prodSnap.data();
+    const rawOnsiteDays = typeof productData?.onsiteDays === 'number'
+        ? productData.onsiteDays
+        : typeof productData?.onsiteDays === 'string'
+            ? Number(productData.onsiteDays)
+            : null;
+    const onsiteDaysValue = typeof rawOnsiteDays === 'number' && Number.isFinite(rawOnsiteDays) && rawOnsiteDays > 0
+        ? rawOnsiteDays
+        : 1;
+    const spanOverrideRaw = typeof data?.spanOverride === 'number'
+        ? data.spanOverride
+        : typeof data?.spanOverride === 'string'
+            ? Number(data.spanOverride)
+            : null;
+    const spanOverride = typeof spanOverrideRaw === 'number' &&
+        Number.isFinite(spanOverrideRaw) &&
+        spanOverrideRaw > 0
+        ? Math.min(spanOverrideRaw, 14)
+        : null;
+    const onsiteDayBlocks = Math.max(1, Math.ceil(spanOverride !== null ? spanOverride : onsiteDaysValue));
+    if (onsiteDayBlocks > 1) {
+        if (baseStart.getTime() < start.getTime()) {
+            start = baseStart;
+        }
+        const blockEnd = new Date(baseStart.getTime() + onsiteDayBlocks * 24 * 60 * 60 * 1000);
+        if (!end || blockEnd.getTime() > end.getTime()) {
+            end = blockEnd;
+        }
+    }
+    if (!end) {
+        end = new Date(start.getTime() + onsiteDayBlocks * 24 * 60 * 60 * 1000);
+    }
     const requiredKitRaw = Array.isArray(productData?.requiredKit)
         ? productData.requiredKit
         : [];
@@ -3728,106 +3914,304 @@ export const reserveKit = functions.https.onCall(async (data) => {
         .map((value) => (typeof value === 'string' ? value.trim() : ''))
         .filter((value) => value.length > 0)));
     const standardsToEnforce = new Set(requiredStandards);
-    const standardMatches = new Map();
-    requiredStandards.forEach((standard) => {
-        standardMatches.set(standard, new Set());
-    });
     const required = requiredKitRaw;
     const eqIds = required.flatMap((g) => g.items || []);
-    const conflicts = [];
-    const kitItems = [];
-    const missingStandards = [];
-    let rentalTotal = 0;
-    let reservationStatus = 'confirmed';
+    const normaliseCoverage = (raw) => {
+        if (!raw || typeof raw !== 'object') {
+            return { type: 'hq', franchiseId: null, territoryId: null, label: null };
+        }
+        const rawType = raw.type;
+        const type = rawType === 'franchise' ? 'franchise' : 'hq';
+        const franchiseId = typeof raw.franchiseId === 'string' && raw.franchiseId.trim().length > 0
+            ? raw.franchiseId.trim()
+            : null;
+        const territoryId = typeof raw.territoryId === 'string' && raw.territoryId.trim().length > 0
+            ? raw.territoryId.trim()
+            : null;
+        const label = typeof raw.label === 'string' && raw.label.trim().length > 0
+            ? raw.label.trim()
+            : null;
+        if (type === 'franchise' && !franchiseId) {
+            return { type: 'hq', franchiseId: null, territoryId, label };
+        }
+        return { type, franchiseId, territoryId, label };
+    };
+    const coverageInfo = normaliseCoverage(data?.coverage);
+    const buildAttempts = (coverage) => {
+        const attempts = [];
+        if (coverage.type === 'franchise' && coverage.franchiseId) {
+            const baseLabel = coverage.label ?? 'Franchise operations';
+            attempts.push({
+                key: 'franchise_primary',
+                ownerType: 'franchise',
+                initialStatus: 'confirmed',
+                franchiseId: coverage.franchiseId,
+                label: baseLabel,
+            });
+            attempts.push({
+                key: 'franchise_team',
+                ownerType: 'user',
+                initialStatus: 'pending',
+                franchiseId: coverage.franchiseId,
+                label: `${baseLabel} freelance team`,
+            });
+            attempts.push({
+                key: 'hq',
+                ownerType: 'company',
+                initialStatus: 'pending',
+                franchiseId: null,
+                label: 'HQ operations',
+            });
+        }
+        else {
+            attempts.push({
+                key: 'hq',
+                ownerType: 'company',
+                initialStatus: 'confirmed',
+                franchiseId: null,
+                label: coverage.label ?? 'HQ operations',
+            });
+        }
+        return attempts;
+    };
+    const attempts = buildAttempts(coverageInfo);
+    if (attempts.length === 0) {
+        attempts.push({
+            key: 'hq',
+            ownerType: 'company',
+            initialStatus: 'confirmed',
+            franchiseId: null,
+            label: coverageInfo.label ?? 'HQ operations',
+        });
+    }
+    const deriveOwnerInfo = (eq) => {
+        const rawOwnerId = typeof eq.ownerId === 'string' && eq.ownerId.trim().length > 0
+            ? eq.ownerId.trim()
+            : null;
+        const rawOwnerType = typeof eq.ownerType === 'string' && eq.ownerType.trim().length > 0
+            ? eq.ownerType.trim().toLowerCase()
+            : '';
+        let ownerType;
+        if (rawOwnerType === 'company' || rawOwnerType === 'user' || rawOwnerType === 'franchise') {
+            ownerType = rawOwnerType;
+        }
+        else if (rawOwnerId && rawOwnerId.startsWith('franchise:')) {
+            ownerType = 'franchise';
+        }
+        else if (!rawOwnerId || rawOwnerId === 'company') {
+            ownerType = 'company';
+        }
+        else {
+            ownerType = 'user';
+        }
+        let franchiseId = null;
+        if (typeof eq.franchiseId === 'string' && eq.franchiseId.trim().length > 0) {
+            franchiseId = eq.franchiseId.trim();
+        }
+        else if (rawOwnerId && rawOwnerId.startsWith('franchise:')) {
+            franchiseId = rawOwnerId.slice('franchise:'.length);
+        }
+        return { ownerType, ownerId: rawOwnerId, franchiseId };
+    };
+    const equipmentRecords = [];
     for (const id of eqIds) {
         const eqRef = db.collection('equipment').doc(id);
         const eqSnap = await eqRef.get();
-        if (!eqSnap.exists)
-            continue;
-        const eq = eqSnap.data();
-        const bookings = await eqRef
-            .collection('bookings')
-            .where('start', '<=', end)
-            .where('end', '>=', start)
-            .get();
-        if (!bookings.empty) {
-            conflicts.push({ id, name: eq.name || id });
-            reservationStatus = 'pending';
-            continue;
-        }
-        if (standardsToEnforce.size > 0) {
-            const meets = Array.isArray(eq.meetsStandards)
-                ? eq.meetsStandards
-                    .map((value) => (typeof value === 'string' ? value.trim() : ''))
-                    .filter((value) => value.length > 0)
-                : [];
-            meets.forEach((standardId) => {
-                if (!standardsToEnforce.has(standardId))
-                    return;
-                const record = standardMatches.get(standardId);
-                if (record) {
-                    record.add(id);
-                }
+        if (!eqSnap.exists) {
+            equipmentRecords.push({
+                id,
+                name: id,
+                category: null,
+                ownerType: 'company',
+                ownerId: null,
+                franchiseId: null,
+                availableFlag: false,
+                booked: false,
+                meetsStandards: [],
+                rentalPrice: 0,
+                exists: false,
             });
+            continue;
         }
-        const equipmentName = typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : null;
-        const equipmentCategory = typeof eq.category === 'string' && eq.category.trim().length > 0
+        const eq = eqSnap.data();
+        const ownerInfo = deriveOwnerInfo(eq);
+        const category = typeof eq.category === 'string' && eq.category.trim().length > 0
             ? eq.category.trim()
             : typeof eq.type === 'string' && eq.type.trim().length > 0
                 ? eq.type.trim()
                 : null;
-        kitItems.push({
-            id,
+        const bookingsSnap = await eqRef
+            .collection('bookings')
+            .where('start', '<=', end)
+            .where('end', '>=', start)
+            .get();
+        const meetsStandards = Array.isArray(eq.meetsStandards)
+            ? eq.meetsStandards
+                .map((value) => (typeof value === 'string' ? value.trim() : ''))
+                .filter((value) => value.length > 0)
+            : [];
+        const equipmentName = typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : eqSnap.id;
+        const rentalPrice = typeof eq.rentalPrice === 'number' && Number.isFinite(eq.rentalPrice)
+            ? eq.rentalPrice
+            : 0;
+        equipmentRecords.push({
+            id: eqSnap.id,
             name: equipmentName,
-            category: equipmentCategory,
-            start: start.toISOString(),
-            end: end.toISOString(),
+            category,
+            ownerType: ownerInfo.ownerType,
+            ownerId: ownerInfo.ownerId,
+            franchiseId: ownerInfo.franchiseId,
+            availableFlag: eq.available !== false,
+            booked: !bookingsSnap.empty,
+            meetsStandards,
+            rentalPrice,
+            exists: true,
         });
-        rentalTotal += eq.rentalPrice || 0;
     }
-    if (conflicts.length > 0) {
-        return {
+    const matchesOwnerForAttempt = (record, attempt) => {
+        if (attempt.ownerType === 'company') {
+            return record.ownerType === 'company';
+        }
+        if (attempt.ownerType === 'franchise') {
+            return (record.ownerType === 'franchise' &&
+                record.franchiseId !== null &&
+                record.franchiseId === attempt.franchiseId);
+        }
+        return (record.ownerType === 'user' &&
+            record.franchiseId !== null &&
+            attempt.franchiseId !== null &&
+            record.franchiseId === attempt.franchiseId);
+    };
+    const evaluateAttempt = (attempt) => {
+        const conflicts = [];
+        const kitItems = [];
+        const missingStandards = [];
+        let rentalTotal = 0;
+        let reservationStatus = attempt.initialStatus;
+        const standardMatches = new Map();
+        requiredStandards.forEach((standard) => {
+            standardMatches.set(standard, new Set());
+        });
+        for (const record of equipmentRecords) {
+            if (!record.exists) {
+                conflicts.push({ id: record.id, name: record.name, reason: 'missing' });
+                reservationStatus = 'pending';
+                continue;
+            }
+            if (!matchesOwnerForAttempt(record, attempt)) {
+                conflicts.push({
+                    id: record.id,
+                    name: record.name,
+                    reason: 'owner_mismatch',
+                });
+                reservationStatus = 'pending';
+                continue;
+            }
+            if (!record.availableFlag) {
+                conflicts.push({
+                    id: record.id,
+                    name: record.name,
+                    reason: 'unavailable',
+                });
+                reservationStatus = 'pending';
+                continue;
+            }
+            if (record.booked) {
+                conflicts.push({ id: record.id, name: record.name, reason: 'booked' });
+                reservationStatus = 'pending';
+                continue;
+            }
+            kitItems.push({
+                id: record.id,
+                name: record.name || record.id,
+                category: record.category,
+                start: start.toISOString(),
+                end: end.toISOString(),
+            });
+            rentalTotal += record.rentalPrice || 0;
+            record.meetsStandards.forEach((standardId) => {
+                if (!standardsToEnforce.has(standardId)) {
+                    return;
+                }
+                const matches = standardMatches.get(standardId);
+                if (matches) {
+                    matches.add(record.id);
+                }
+            });
+        }
+        if (standardsToEnforce.size > 0) {
+            requiredStandards.forEach((standard) => {
+                const matches = standardMatches.get(standard);
+                if (!matches || matches.size === 0) {
+                    if (!missingStandards.includes(standard)) {
+                        missingStandards.push(standard);
+                    }
+                }
+            });
+            if (missingStandards.length > 0) {
+                reservationStatus = 'pending';
+            }
+        }
+        const success = conflicts.length === 0 && missingStandards.length === 0;
+        const response = {
             conflicts,
             kitItems,
             rentalTotal,
-            status: 'pending',
+            status: reservationStatus,
             missingStandards,
+            provider: {
+                level: attempt.key,
+                status: reservationStatus,
+                label: attempt.label,
+                franchiseId: attempt.franchiseId,
+                territoryId: coverageInfo.territoryId,
+            },
         };
-    }
-    if (standardsToEnforce.size > 0) {
-        const missingStandardsList = requiredStandards.filter((standard) => {
-            const matches = standardMatches.get(standard);
-            return !matches || matches.size === 0;
-        });
-        if (missingStandardsList.length > 0) {
-            missingStandardsList.forEach((standard) => {
-                if (!standard)
-                    return;
-                if (!missingStandards.includes(standard)) {
-                    missingStandards.push(standard);
+        return { success, response };
+    };
+    let fallbackResponse = null;
+    for (const attempt of attempts) {
+        const { success, response } = evaluateAttempt(attempt);
+        if (success) {
+            if (response.status === 'confirmed' && response.kitItems.length > 0) {
+                const batch = db.batch();
+                for (const item of response.kitItems) {
+                    const eqRef = db.collection('equipment').doc(item.id);
+                    batch.set(eqRef.collection('bookings').doc(), {
+                        start: admin.firestore.Timestamp.fromDate(start),
+                        end: admin.firestore.Timestamp.fromDate(end),
+                        projectId: null,
+                    });
                 }
-            });
-            reservationStatus = 'pending';
+                await batch.commit();
+            }
+            return response;
         }
+        fallbackResponse = response;
     }
-    if (reservationStatus === 'confirmed') {
-        const batch = db.batch();
-        for (const item of kitItems) {
-            const eqRef = db.collection('equipment').doc(item.id);
-            batch.set(eqRef.collection('bookings').doc(), {
-                start: admin.firestore.Timestamp.fromDate(start),
-                end: admin.firestore.Timestamp.fromDate(end),
-                projectId: null,
-            });
-        }
-        await batch.commit();
+    if (fallbackResponse) {
+        return fallbackResponse;
     }
+    const defaultAttempt = attempts[0] ?? {
+        key: 'hq',
+        ownerType: 'company',
+        initialStatus: 'pending',
+        franchiseId: null,
+        label: coverageInfo.label ?? 'HQ operations',
+    };
     return {
         conflicts: [],
-        kitItems,
-        rentalTotal,
-        status: reservationStatus,
-        missingStandards,
+        kitItems: [],
+        rentalTotal: 0,
+        status: defaultAttempt.initialStatus,
+        missingStandards: requiredStandards,
+        provider: {
+            level: defaultAttempt.key,
+            status: defaultAttempt.initialStatus,
+            label: defaultAttempt.label,
+            franchiseId: defaultAttempt.franchiseId,
+            territoryId: coverageInfo.territoryId,
+        },
     };
 });
 function normaliseRoles(raw) {
@@ -6709,6 +7093,60 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         if (campaignBooking && typeof campaignBooking.priceAdjustment === 'number') {
             price += campaignBooking.priceAdjustment;
         }
+        const rawExhibition = items[idx]?.exhibition;
+        const exhibitionDetails = rawExhibition && typeof rawExhibition === 'object'
+            ? (() => {
+                const showDate = typeof rawExhibition.showDate === 'string' && rawExhibition.showDate.trim().length > 0
+                    ? rawExhibition.showDate.trim()
+                    : null;
+                const setupDate = typeof rawExhibition.setupDate === 'string' && rawExhibition.setupDate.trim().length > 0
+                    ? rawExhibition.setupDate.trim()
+                    : null;
+                const setupIncluded = rawExhibition.setupIncluded === true;
+                if (!showDate && !setupDate && !setupIncluded) {
+                    return null;
+                }
+                return { showDate, setupDate, setupIncluded };
+            })()
+            : null;
+        const rawTimeSlot = items[idx]?.timeSlot;
+        const timeSlotDetails = rawTimeSlot && typeof rawTimeSlot === 'object'
+            ? (() => {
+                const slotStart = typeof rawTimeSlot.start === 'string' && rawTimeSlot.start.trim().length > 0
+                    ? rawTimeSlot.start.trim()
+                    : null;
+                const slotEnd = typeof rawTimeSlot.end === 'string' && rawTimeSlot.end.trim().length > 0
+                    ? rawTimeSlot.end.trim()
+                    : null;
+                if (!slotStart || !slotEnd) {
+                    return null;
+                }
+                const slotLabel = typeof rawTimeSlot.label === 'string' && rawTimeSlot.label.trim().length > 0
+                    ? rawTimeSlot.label.trim()
+                    : null;
+                const totalMinutes = typeof rawTimeSlot.totalMinutes === 'number' && Number.isFinite(rawTimeSlot.totalMinutes)
+                    ? rawTimeSlot.totalMinutes
+                    : null;
+                const setupMinutes = typeof rawTimeSlot.setupMinutes === 'number' && Number.isFinite(rawTimeSlot.setupMinutes)
+                    ? rawTimeSlot.setupMinutes
+                    : null;
+                const shootMinutes = typeof rawTimeSlot.shootMinutes === 'number' && Number.isFinite(rawTimeSlot.shootMinutes)
+                    ? rawTimeSlot.shootMinutes
+                    : null;
+                const breakdownMinutes = typeof rawTimeSlot.breakdownMinutes === 'number' && Number.isFinite(rawTimeSlot.breakdownMinutes)
+                    ? rawTimeSlot.breakdownMinutes
+                    : null;
+                return {
+                    start: slotStart,
+                    end: slotEnd,
+                    label: slotLabel,
+                    totalMinutes,
+                    setupMinutes,
+                    shootMinutes,
+                    breakdownMinutes,
+                };
+            })()
+            : null;
         const budget = prod.budget || {};
         const labourFilming = parseOptional(budget.labourFilming);
         const labourEditing = parseOptional(budget.labourEditing);
@@ -6747,7 +7185,9 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             date: itemDate,
             location: itemLocation,
             postalCode: itemPostalCode,
+            exhibition: exhibitionDetails,
             coverage: coveragePayload,
+            timeSlot: timeSlotDetails,
             campaignBooking,
             budget: {
                 perUnit: {

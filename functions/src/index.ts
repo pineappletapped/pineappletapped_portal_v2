@@ -1915,6 +1915,30 @@ async function listDriveChildren(
   return files;
 }
 
+async function listDriveChildFolders(
+  drive: drive_v3.Drive,
+  parentId: string
+): Promise<drive_v3.Schema$File[]> {
+  const folders: drive_v3.Schema$File[] = [];
+  let pageToken: string | undefined;
+  do {
+    const res = await drive.files.list({
+      q: `'${parentId}' in parents and trashed = false and mimeType = 'application/vnd.google-apps.folder'`,
+      fields: 'nextPageToken, files(id, name, mimeType)',
+      pageSize: 100,
+      pageToken,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+      orderBy: 'name_natural',
+    });
+    if (res.data.files) {
+      folders.push(...res.data.files);
+    }
+    pageToken = res.data.nextPageToken ?? undefined;
+  } while (pageToken);
+  return folders;
+}
+
 async function copyDriveContents(
   drive: drive_v3.Drive,
   sourceFolderId: string,
@@ -2397,6 +2421,152 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
       orderFolderName: typeof driveInfo.orderFolderName === 'string' ? driveInfo.orderFolderName : null,
       productFolders,
     },
+  };
+});
+
+export const drive_listTemplateFolders = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+  }
+
+  const userContext = await loadUserContext(context.auth.uid);
+  if (userContext.roles.admin !== true && userContext.roles.operations !== true) {
+    throw new functions.https.HttpsError(
+      'permission-denied',
+      'Drive template browsing is restricted to admin and operations roles'
+    );
+  }
+
+  const settingsSnap = await db.collection('settings').doc('clientDrive').get();
+  const settings = (settingsSnap.data() as ClientDriveSettingsDoc) || {};
+  const rootFolderId = normaliseDriveId(settings.clientRootFolderId);
+  if (!rootFolderId) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'Client Drive root folder is not configured.'
+    );
+  }
+
+  const drive = await createDriveService();
+  if (!drive) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'Google Drive service account credentials are not configured.'
+    );
+  }
+
+  const rawFolderId =
+    typeof data?.folderId === 'string' && data.folderId.trim().length > 0
+      ? data.folderId.trim()
+      : null;
+  const targetFolderIdFromInput = normaliseDriveId(rawFolderId);
+
+  const pathInput = data?.path;
+  const pathSegments: string[] = Array.isArray(pathInput)
+    ? (pathInput as unknown[])
+        .map((segment) => (typeof segment === 'string' ? segment.trim() : ''))
+        .filter((segment) => segment.length > 0)
+    : typeof pathInput === 'string'
+      ? pathInput
+          .split('/')
+          .map((segment) => segment.trim())
+          .filter((segment) => segment.length > 0)
+      : [];
+
+  const breadcrumbs: Array<{ id: string; name: string | null }> = [];
+
+  let currentFolderId = rootFolderId;
+  let currentFolderName: string | null = null;
+  try {
+    const rootMeta = await drive.files.get({
+      fileId: rootFolderId,
+      fields: 'id, name',
+      supportsAllDrives: true,
+    });
+    currentFolderName = typeof rootMeta.data.name === 'string' ? rootMeta.data.name : null;
+  } catch (error) {
+    console.warn('drive_listTemplateFolders failed to load root metadata', rootFolderId, error);
+  }
+  breadcrumbs.push({ id: rootFolderId, name: currentFolderName });
+
+  for (const segment of pathSegments) {
+    const children = await listDriveChildFolders(drive, currentFolderId);
+    const match = children.find((child) => {
+      const id = typeof child.id === 'string' ? child.id : null;
+      const name = typeof child.name === 'string' ? child.name.trim() : '';
+      return id && name.toLowerCase() === segment.toLowerCase();
+    });
+    if (!match?.id) {
+      throw new functions.https.HttpsError(
+        'not-found',
+        `Folder not found for path segment: ${segment}`
+      );
+    }
+    currentFolderId = match.id;
+    currentFolderName = typeof match.name === 'string' ? match.name : null;
+    breadcrumbs.push({ id: currentFolderId, name: currentFolderName });
+  }
+
+  let targetFolderId = targetFolderIdFromInput ?? currentFolderId;
+  let folderName: string | null = currentFolderName;
+  try {
+    const folderMeta = await drive.files.get({
+      fileId: targetFolderId,
+      fields: 'id, name',
+      supportsAllDrives: true,
+    });
+    if (folderMeta.data.id) {
+      targetFolderId = folderMeta.data.id;
+    }
+    if (typeof folderMeta.data.name === 'string') {
+      folderName = folderMeta.data.name;
+    }
+  } catch (error) {
+    console.warn('drive_listTemplateFolders failed to load folder metadata', targetFolderId, error);
+  }
+
+  if (targetFolderIdFromInput && !folderName) {
+    throw new functions.https.HttpsError(
+      'not-found',
+      'The requested Drive folder could not be found or accessed.'
+    );
+  }
+
+  if (!breadcrumbs.some((crumb) => crumb.id === targetFolderId)) {
+    breadcrumbs.push({ id: targetFolderId, name: folderName });
+  } else {
+    breadcrumbs.forEach((crumb) => {
+      if (crumb.id === targetFolderId) {
+        crumb.name = folderName;
+      }
+    });
+  }
+
+  let folderEntries: drive_v3.Schema$File[] = [];
+  try {
+    folderEntries = await listDriveChildFolders(drive, targetFolderId);
+  } catch (error) {
+    console.error('drive_listTemplateFolders failed to list child folders', targetFolderId, error);
+    throw new functions.https.HttpsError(
+      'internal',
+      'Failed to list Drive folders. Please try again later.'
+    );
+  }
+  const folders = folderEntries
+    .map((entry) => ({
+      id: entry.id ?? '',
+      name:
+        typeof entry.name === 'string' && entry.name.trim().length > 0
+          ? entry.name.trim()
+          : 'Untitled folder',
+    }))
+    .filter((item) => item.id.length > 0);
+
+  return {
+    folderId: targetFolderId,
+    folderName,
+    breadcrumbs,
+    folders,
   };
 });
 

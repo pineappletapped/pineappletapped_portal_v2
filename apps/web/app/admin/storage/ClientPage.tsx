@@ -132,6 +132,8 @@ export default function AdminStoragePage() {
             <h2 className="text-sm font-semibold">Client Drive automation</h2>
             <p className="text-xs text-gray-600">
               Update the Google Drive folders used when provisioning new client orders.
+              Admins can browse these templates directly from the product editor using
+              the Browse Drive picker when configuring deliverable folders.
             </p>
           </div>
           <button
