@@ -19,6 +19,7 @@ interface Props {
   selected: string | null;
   onSelect: (date: string) => void;
   scope?: ProductAvailabilityScope | null;
+  overrides?: Record<string, ProductAvailabilityStatus> | null;
 }
 
 export default function ProductDatePicker({
@@ -26,6 +27,7 @@ export default function ProductDatePicker({
   selected,
   onSelect,
   scope,
+  overrides,
 }: Props) {
   const today = new Date();
   const [view, setView] = useState(
@@ -161,7 +163,7 @@ export default function ProductDatePicker({
             2,
             "0"
           )}`;
-          const status = availability[date] ?? "available";
+          const status = overrides?.[date] ?? availability[date] ?? "available";
           const isDisabled = status === "booked" || status === "unavailable";
           const formattedDate = new Date(`${date}T00:00:00`).toLocaleDateString(
             undefined,

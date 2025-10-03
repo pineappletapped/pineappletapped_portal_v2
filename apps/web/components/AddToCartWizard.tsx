@@ -8,6 +8,7 @@ import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import ProductDatePicker, {
   type ProductAvailabilityScope,
+  type ProductAvailabilityStatus,
 } from "./ProductDatePicker";
 import {
   getPriceForTier,
@@ -364,6 +365,20 @@ const normaliseSlotDate = (value: string | null): string | null => {
   return parsed.toISOString();
 };
 
+const normaliseDateKey = (value: string | null | undefined): string | null => {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  const year = parsed.getUTCFullYear();
+  const month = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
 type FunctionsError = {
   code: string;
   message: string;
@@ -407,6 +422,9 @@ export default function AddToCartWizard({
     useState<CampaignSlotStatus>("idle");
   const [campaignSlotError, setCampaignSlotError] = useState<string | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const [availabilityOverrides, setAvailabilityOverrides] = useState<
+    Record<string, ProductAvailabilityStatus>
+  >({});
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const territoriesRef = useRef<TerritoryRecord[] | null>(null);
@@ -573,6 +591,7 @@ export default function AddToCartWizard({
     setCampaignSlotStatus("idle");
     setCampaignSlotError(null);
     setSelectedSlotId(null);
+    setAvailabilityOverrides({});
   }, [locationInput, postcodeInput]);
 
   const loadTerritories = useCallback(async (): Promise<TerritoryRecord[]> => {
@@ -1034,6 +1053,19 @@ export default function AddToCartWizard({
       setLiveMessage("Production date required before adding to cart");
       return;
     }
+    const calendarKey =
+      normaliseDateKey(reservationDate) ?? normaliseDateKey(date) ?? null;
+    const updateCalendarStatus = (statusValue: ProductAvailabilityStatus) => {
+      if (!calendarKey) {
+        return;
+      }
+      setAvailabilityOverrides((prev) => {
+        if (prev[calendarKey] === statusValue) {
+          return prev;
+        }
+        return { ...prev, [calendarKey]: statusValue };
+      });
+    };
     setSubmitting(true);
     setLiveMessage("Checking equipment availability");
     try {
@@ -1041,6 +1073,14 @@ export default function AddToCartWizard({
       const res: any = await reserve({
         productId: product.id,
         date: reservationDate,
+        coverage: coverage
+          ? {
+              type: coverage.type,
+              franchiseId: coverage.franchiseId,
+              territoryId: coverage.territoryId,
+              label: coverage.label,
+            }
+          : null,
       });
       const {
         conflicts = [],
@@ -1048,6 +1088,7 @@ export default function AddToCartWizard({
         rentalTotal = 0,
         status,
         missingStandards = [],
+        provider: providerInfo = null,
       } = res.data || {};
       const reservationStatus = status === "pending" ? "pending" : "confirmed";
       if (reservationStatus === "confirmed" && conflicts.length > 0) {
@@ -1057,6 +1098,7 @@ export default function AddToCartWizard({
         setConflicts(conflictNames);
         setError("Some equipment is already reserved on the selected date.");
         setLiveMessage("Equipment conflicts found for the selected date");
+        updateCalendarStatus("unavailable");
         setSubmitting(false);
         return;
       }
@@ -1074,6 +1116,31 @@ export default function AddToCartWizard({
             `Missing required equipment standards: ${missingStandards.join(", ")}`
           );
         }
+        if (providerInfo && typeof providerInfo === "object") {
+          const providerLevel = String((providerInfo as any).level ?? "").toLowerCase();
+          const rawLabel = (providerInfo as any).label;
+          const providerLabel =
+            typeof rawLabel === "string" && rawLabel.trim().length > 0
+              ? rawLabel.trim()
+              : null;
+          if (providerLevel === "franchise_team") {
+            const message =
+              providerLabel
+                ? `${providerLabel} will confirm their availability and kit for this date.`
+                : "Local franchise freelancers and crew will confirm availability for this date.";
+            if (!warnings.includes(message)) {
+              warnings.push(message);
+            }
+          } else if (providerLevel === "hq") {
+            const message =
+              providerLabel
+                ? `${providerLabel} will confirm availability and secure the required kit.`
+                : "HQ operations will confirm availability and secure the required kit.";
+            if (!warnings.includes(message)) {
+              warnings.push(message);
+            }
+          }
+        }
         if (warnings.length === 0) {
           warnings.push("Kit availability will be confirmed manually by the operations team.");
         }
@@ -1085,6 +1152,9 @@ export default function AddToCartWizard({
           window.alert(message);
         }
       }
+      updateCalendarStatus(
+        reservationStatus === "pending" ? "pending" : "available"
+      );
       const locationLabel = locationInput.trim();
       const postalCodeLabel =
         coverage.postalCode ||
@@ -1132,6 +1202,7 @@ export default function AddToCartWizard({
       setSubmitting(false);
       onClose();
     } catch (err) {
+      updateCalendarStatus("pending");
       console.error(err);
       setSubmitting(false);
       if (isFunctionsError(err) && err.code === "failed-precondition") {
@@ -1405,6 +1476,7 @@ export default function AddToCartWizard({
                   selected={date}
                   onSelect={handleDateSelect}
                   scope={availabilityScope}
+                  overrides={availabilityOverrides}
                 />
               ) : (
                 <p className="text-sm text-gray-500">
