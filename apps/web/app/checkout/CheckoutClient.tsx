@@ -106,6 +106,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         date: item.date ?? null,
         location: item.location ?? null,
         postalCode: item.postalCode ?? null,
+        exhibition: item.exhibition ?? null,
         coverage: item.coverage ?? null,
         campaignBooking,
       };
@@ -173,6 +174,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           location: item.location,
           postalCode: item.postalCode,
           coverage: item.coverage,
+          exhibition: item.exhibition ?? null,
           campaignBooking: item.campaignBooking,
         })),
         kitItems: orderInput.kitItems.map((kit) => ({

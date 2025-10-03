@@ -1,6 +1,11 @@
 "use client";
 
-import { Product, DeliverableType } from "@/lib/products";
+import {
+  Product,
+  DeliverableType,
+  getProductEventRangeLabel,
+  formatProductOnsiteDuration,
+} from "@/lib/products";
 import type { Venue } from "@/lib/venues";
 import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
@@ -195,6 +200,14 @@ export default function ProductDetail({
             : undefined,
       }),
     [product, basePrice]
+  );
+  const eventRangeLabel = useMemo(
+    () => getProductEventRangeLabel(product),
+    [product]
+  );
+  const onsiteSummary = useMemo(
+    () => formatProductOnsiteDuration(product),
+    [product]
   );
 
   const exampleVideos = useMemo<NormalizedVideo[]>(() => {
@@ -540,13 +553,14 @@ export default function ProductDetail({
               rangeNote={listingPriceDetails?.rangeNote}
             />
           </div>
-          {product.category === "exhibition-videography" && product.eventDate && (
-            <p className="text-sm text-gray-700">
-              Event Date: {new Date(product.eventDate).toLocaleDateString()}
-            </p>
+          {product.category === "exhibition-videography" && eventRangeLabel && (
+            <p className="text-sm text-gray-700">Event dates: {eventRangeLabel}</p>
           )}
           {product.category === "exhibition-videography" && venueName && (
             <p className="text-sm text-gray-700">Venue: {venueName}</p>
+          )}
+          {onsiteSummary && (
+            <p className="text-sm text-gray-700">On-site duration: {onsiteSummary}</p>
           )}
           {product.variations && product.variations.length > 0 && (
             <div className="grid gap-2">

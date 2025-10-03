@@ -521,7 +521,9 @@ export default function NewProductPage() {
   const [category, setCategory] = useState("");
   const [salesMode, setSalesMode] = useState<"ecommerce" | "quote">("ecommerce");
   const [workflowId, setWorkflowId] = useState("");
-  const [eventDate, setEventDate] = useState("");
+  const [eventStartDate, setEventStartDate] = useState("");
+  const [eventEndDate, setEventEndDate] = useState("");
+  const [eventSetupDate, setEventSetupDate] = useState("");
   const [venueId, setVenueId] = useState("");
   const [venue, setVenue] = useState("");
   const [hidden, setHidden] = useState(false);
@@ -548,6 +550,7 @@ export default function NewProductPage() {
   const [roleLibraryMessage, setRoleLibraryMessage] = useState<
     { tone: "success" | "error"; text: string } | null
   >(null);
+  const [onsiteDays, setOnsiteDays] = useState("1");
   const selectedVenue = useMemo(
     () => venues.find((v) => v.id === venueId) || null,
     [venues, venueId]
@@ -1305,6 +1308,11 @@ export default function NewProductPage() {
       priceTier2,
       priceTier3
     );
+    const onsiteDaysValueRaw = Number(onsiteDays);
+    const onsiteDaysValue =
+      onsiteDays.trim().length > 0 && Number.isFinite(onsiteDaysValueRaw) && onsiteDaysValueRaw > 0
+        ? onsiteDaysValueRaw
+        : null;
     const docRef = await addDoc(collection(db, "products"), {
       name,
       description,
@@ -1330,9 +1338,13 @@ export default function NewProductPage() {
       operationsInfo: operationsInfo || null,
       deliveryTime: deliveryOptions[deliveryIndex],
       category: category || null,
-      eventDate: eventDate || null,
+      eventDate: eventStartDate || null,
+      eventStartDate: eventStartDate || null,
+      eventEndDate: eventEndDate || null,
+      eventSetupDate: eventSetupDate || null,
       venue: venueLabel,
       venueId: venueId || null,
+      onsiteDays: onsiteDaysValue,
       hidden,
       driveTemplateFolderId:
         driveTemplateFolderId.trim().length > 0 ? driveTemplateFolderId.trim() : null,
@@ -1815,13 +1827,46 @@ export default function NewProductPage() {
           </select>
           {cats.find((c) => c.id === category)?.name === "Exhibition Videography" && (
             <>
-              <label className="text-sm font-medium">Event Date</label>
+              <label className="text-sm font-medium">Show start date</label>
               <input
                 type="date"
                 className="input"
-                value={eventDate}
-                onChange={(e) => setEventDate(e.target.value)}
+                value={eventStartDate}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setEventStartDate(value);
+                  setEventEndDate((prev) => (prev ? prev : value));
+                  setEventSetupDate((prev) => {
+                    if (prev || !value) return prev;
+                    const parsed = new Date(`${value}T00:00:00`);
+                    if (Number.isNaN(parsed.getTime())) return prev;
+                    const setup = new Date(parsed.getTime() - 24 * 60 * 60 * 1000);
+                    return setup.toISOString().slice(0, 10);
+                  });
+                }}
               />
+              <label className="text-sm font-medium">Show end date</label>
+              <input
+                type="date"
+                className="input"
+                value={eventEndDate}
+                onChange={(e) => setEventEndDate(e.target.value)}
+                min={eventStartDate || undefined}
+              />
+              <p className="text-xs text-gray-500 -mt-1">
+                Clients will see the full run so they can pick the right day for filming.
+              </p>
+              <label className="text-sm font-medium">Optional setup day</label>
+              <input
+                type="date"
+                className="input"
+                value={eventSetupDate}
+                onChange={(e) => setEventSetupDate(e.target.value)}
+                placeholder="Day before the show opens"
+              />
+              <p className="text-xs text-gray-500 -mt-1">
+                Provide a date if you want to offer coverage the day before the show.
+              </p>
               <label className="text-sm font-medium">Linked Venue</label>
               <select
                 className="input"
@@ -1902,6 +1947,19 @@ export default function NewProductPage() {
             value={deliveryIndex}
             onChange={(e) => setDeliveryIndex(Number(e.target.value))}
           />
+          <label className="text-sm font-medium">On-site duration (days)</label>
+          <input
+            type="number"
+            min="0.25"
+            step="0.25"
+            className="input"
+            value={onsiteDays}
+            onChange={(e) => setOnsiteDays(e.target.value)}
+            placeholder="1"
+          />
+          <p className="text-xs text-gray-500 -mt-1">
+            Used to block calendar availability for multi-day shoots.
+          </p>
           <label className="text-sm font-medium">Our Operations</label>
           <textarea
             className="input"

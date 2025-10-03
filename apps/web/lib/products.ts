@@ -66,8 +66,12 @@ async function fetchServerProducts(
     .map((r: any) => ({ id: r.document.name.split("/").pop()!, ...decodeFields(r.document.fields) }))
     .filter((p: any) => {
       if (p.category !== "exhibition-videography") return true;
-      if (!p.eventDate) return true;
-      return new Date(p.eventDate) >= now;
+      const end =
+        parseProductDate(p.eventEndDate) ||
+        parseProductDate(p.eventDate) ||
+        parseProductDate(p.eventStartDate);
+      if (!end) return true;
+      return end.getTime() >= now.getTime();
     });
 }
 
@@ -252,8 +256,14 @@ export interface Product {
   campaignSlug?: string | null;
   /** Optional booking configuration linked to a workflow booking template. */
   campaignBooking?: ProductCampaignBookingDetails | null;
-  /** Optional date for time-limited products such as Exhibition Videography */
+  /** Optional single date maintained for backwards compatibility. */
   eventDate?: string;
+  /** Start date for multi-day events such as exhibitions. */
+  eventStartDate?: string | null;
+  /** End date for multi-day events such as exhibitions. */
+  eventEndDate?: string | null;
+  /** Optional setup day offered before the show opens. */
+  eventSetupDate?: string | null;
   /** Venue name used for Exhibition Videography filtering */
   venue?: string;
   /** Linked venue reference for pulling travel details */
@@ -265,10 +275,146 @@ export interface Product {
   workflowId?: string;
   labourCost?: number;
   defaultKitCost?: number;
+  /** Number of days the crew is expected to be on-site. */
+  onsiteDays?: number | null;
   budget?: ProductBudget;
   productSpec?: ProductSpec;
   crewRoles?: ProductCrewRole[];
 }
+
+export const DAY_IN_MS = 24 * 60 * 60 * 1000;
+
+const parseProductDate = (value: unknown): Date | null => {
+  if (!value) {
+    return null;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as any).toDate === "function"
+  ) {
+    try {
+      const converted = (value as any).toDate();
+      if (converted instanceof Date && !Number.isNaN(converted.getTime())) {
+        return converted;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+};
+
+const toDateKey = (date: Date): string => {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+export interface ProductEventWindow {
+  start: Date | null;
+  end: Date | null;
+  setup: Date | null;
+}
+
+export const getProductEventWindow = (product: Product): ProductEventWindow => {
+  const start =
+    parseProductDate(product.eventStartDate) ||
+    parseProductDate(product.eventDate);
+  let end =
+    parseProductDate(product.eventEndDate) ||
+    parseProductDate(product.eventDate) ||
+    start;
+  if (start && end && end.getTime() < start.getTime()) {
+    end = start;
+  }
+  const setup = parseProductDate(product.eventSetupDate);
+  return { start: start ?? null, end: end ?? null, setup: setup ?? null };
+};
+
+export const getProductEventRangeLabel = (
+  product: Product,
+  locale?: string
+): string | null => {
+  const { start, end } = getProductEventWindow(product);
+  if (!start) {
+    return null;
+  }
+  const resolvedEnd = end ?? start;
+  const startLabel = start.toLocaleDateString(locale);
+  const endLabel = resolvedEnd.toLocaleDateString(locale);
+  if (start.getTime() === resolvedEnd.getTime()) {
+    return startLabel;
+  }
+  return `${startLabel} – ${endLabel}`;
+};
+
+export const getProductEventMonthKeys = (product: Product): string[] => {
+  const { start, end } = getProductEventWindow(product);
+  if (!start) {
+    return [];
+  }
+  const resolvedEnd = end ?? start;
+  const months = new Set<string>();
+  for (
+    let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+    cursor.getTime() <= resolvedEnd.getTime();
+    cursor = new Date(cursor.getTime() + DAY_IN_MS)
+  ) {
+    months.add(`${cursor.getUTCFullYear()}-${String(cursor.getUTCMonth() + 1).padStart(2, "0")}`);
+  }
+  if (months.size === 0) {
+    months.add(`${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, "0")}`);
+  }
+  return Array.from(months);
+};
+
+export const resolveProductOnsiteDays = (
+  product: Product
+): number | null => {
+  const raw = (product as any)?.onsiteDays;
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw > 0 ? raw : null;
+  }
+  if (typeof raw === "string") {
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+};
+
+export const formatProductOnsiteDuration = (
+  product: Product,
+  locale?: string
+): string | null => {
+  const days = resolveProductOnsiteDays(product);
+  if (!days) {
+    return null;
+  }
+  if (Math.abs(days - 0.5) < 0.01) {
+    return "Half day on site";
+  }
+  if (Math.abs(days - 1) < 0.01) {
+    return "1 day on site";
+  }
+  const formatter = new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 1,
+    minimumFractionDigits: days % 1 === 0 ? 0 : 1,
+  });
+  return `${formatter.format(days)} days on site`;
+};
 
 // Fallback sample products if Firestore is unavailable
 const sampleProducts: Product[] = [
@@ -361,8 +507,12 @@ export async function getProducts(): Promise<Product[]> {
       .map((d) => ({ id: d.id, ...(d.data() as any) }))
       .filter((p) => {
         if (p.category !== "exhibition-videography") return true;
-        if (!p.eventDate) return true;
-        return new Date(p.eventDate) >= now;
+        const end =
+          parseProductDate(p.eventEndDate) ||
+          parseProductDate(p.eventDate) ||
+          parseProductDate(p.eventStartDate);
+        if (!end) return true;
+        return end.getTime() >= now.getTime();
       });
   } catch {
     return sampleProducts;
@@ -389,8 +539,12 @@ export async function getProductsByCategory(
       .map((d) => ({ id: d.id, ...(d.data() as any) }))
       .filter((p) => {
         if (p.category !== "exhibition-videography") return true;
-        if (!p.eventDate) return true;
-        return new Date(p.eventDate) >= now;
+        const end =
+          parseProductDate(p.eventEndDate) ||
+          parseProductDate(p.eventDate) ||
+          parseProductDate(p.eventStartDate);
+        if (!end) return true;
+        return end.getTime() >= now.getTime();
       });
   } catch {
     return sampleProducts.filter((p) => p.category === categoryId);

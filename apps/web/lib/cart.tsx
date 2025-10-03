@@ -32,6 +32,11 @@ export interface CartItem {
   modifiers?: ProductModifierSelection[];
   location?: string | null;
   postalCode?: string | null;
+  exhibition?: {
+    showDate?: string | null;
+    setupDate?: string | null;
+    setupIncluded?: boolean;
+  } | null;
   coverage?: {
     type: "hq" | "franchise";
     franchiseId?: string | null;
@@ -61,6 +66,11 @@ interface ProductInput {
   modifiers?: ProductModifierSelection[];
   location?: string | null;
   postalCode?: string | null;
+  exhibition?: {
+    showDate?: string | null;
+    setupDate?: string | null;
+    setupIncluded?: boolean;
+  } | null;
   coverage?: {
     type: "hq" | "franchise";
     franchiseId?: string | null;
@@ -172,6 +182,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
             JSON.stringify(product.modifiers || []) &&
           (i.location || "") === (product.location || "") &&
           (i.postalCode || "") === (product.postalCode || "") &&
+          JSON.stringify(i.exhibition || null) ===
+            JSON.stringify(product.exhibition || null) &&
           JSON.stringify(i.coverage || null) ===
             JSON.stringify(product.coverage || null) &&
           JSON.stringify(i.campaignBooking || null) ===

@@ -1,7 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Product, ProductModifierSelection } from "@/lib/products";
+import {
+  Product,
+  ProductModifierSelection,
+  getProductEventWindow,
+  resolveProductOnsiteDays,
+  formatProductOnsiteDuration,
+  getProductEventRangeLabel,
+} from "@/lib/products";
 import { useCart } from "@/lib/cart";
 import { db, functions } from "@/lib/firebase";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
@@ -332,6 +339,48 @@ const slotDateFormatter = new Intl.DateTimeFormat("en-GB", {
   timeStyle: "short",
 });
 
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+
+const toDateKeyFromDate = (date: Date): string => {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const parseDateKey = (value: string): Date | null => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+  const [year, month, day] = value.split("-").map((part) => Number.parseInt(part, 10));
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return null;
+  }
+  return new Date(Date.UTC(year, month - 1, day));
+};
+
+const expandDateKeyRange = (key: string, span: number): string[] => {
+  const start = parseDateKey(key);
+  if (!start) {
+    return [];
+  }
+  const days = Math.max(1, Math.floor(span));
+  const keys: string[] = [];
+  for (let offset = 0; offset < days; offset += 1) {
+    const cursor = new Date(start.getTime() + offset * DAY_IN_MS);
+    keys.push(toDateKeyFromDate(cursor));
+  }
+  return keys;
+};
+
+const formatDateForSpeech = (date: Date): string =>
+  date.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
+
 const formatCampaignSlotWindow = (slot: CampaignSlotRecord): string => {
   const parse = (value: string | null): Date | null => {
     if (!value) {
@@ -403,11 +452,151 @@ export default function AddToCartWizard({
   }
   const { items, add } = useCart();
   const [groups, setGroups] = useState<ModifierGroup[]>([]);
+  const eventWindow = useMemo(() => getProductEventWindow(product), [product]);
+  const onsiteDaysConfigured = useMemo(
+    () => resolveProductOnsiteDays(product) ?? 1,
+    [product]
+  );
+  const onsiteBlockingDays = useMemo(
+    () => Math.max(1, Math.ceil(onsiteDaysConfigured)),
+    [onsiteDaysConfigured]
+  );
+  const onsiteSummary = useMemo(
+    () => formatProductOnsiteDuration(product),
+    [product]
+  );
+  const eventRangeLabel = useMemo(
+    () => getProductEventRangeLabel(product),
+    [product]
+  );
+  const exhibitionSchedule = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return {
+        showOptions: [] as Array<{ key: string; label: string }>,
+        setupOption: null as { key: string; label: string; helper?: string } | null,
+      };
+    }
+    const { start, end, setup } = eventWindow;
+    if (!start) {
+      return {
+        showOptions: [] as Array<{ key: string; label: string }>,
+        setupOption: null as { key: string; label: string; helper?: string } | null,
+      };
+    }
+    const resolvedEnd = end ?? start;
+    const showOptions: Array<{ key: string; label: string }> = [];
+    let setupOption: { key: string; label: string; helper?: string } | null = null;
+    const fallbackSetup = new Date(start.getTime() - DAY_IN_MS);
+    const setupCandidate = setup ?? fallbackSetup;
+    if (setupCandidate && !Number.isNaN(setupCandidate.getTime())) {
+      const key = toDateKeyFromDate(setupCandidate);
+      setupOption = {
+        key,
+        label: setupCandidate.toLocaleDateString(undefined, {
+          weekday: "long",
+          month: "long",
+          day: "numeric",
+        }),
+        helper: "Arrive a day early to capture stand build and pre-show content.",
+      };
+    }
+    const startCursor = parseDateKey(toDateKeyFromDate(start));
+    const endCursor = parseDateKey(toDateKeyFromDate(resolvedEnd));
+    if (!startCursor || !endCursor) {
+      return { showOptions, setupOption };
+    }
+    let dayIndex = 0;
+    for (
+      let cursor = startCursor;
+      cursor.getTime() <= endCursor.getTime();
+      cursor = new Date(cursor.getTime() + DAY_IN_MS)
+    ) {
+      dayIndex += 1;
+      const key = toDateKeyFromDate(cursor);
+      showOptions.push({
+        key,
+        label: `Day ${dayIndex}: ${cursor.toLocaleDateString(undefined, {
+          weekday: "long",
+          month: "long",
+          day: "numeric",
+        })}`,
+      });
+    }
+    return { showOptions, setupOption };
+  }, [eventWindow, product.category]);
+  const exhibitionOptions = exhibitionSchedule.showOptions;
+  const exhibitionSetupOption = exhibitionSchedule.setupOption;
+  const defaultExhibitionDate = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return null;
+    }
+    return exhibitionOptions[0]?.key ?? null;
+  }, [exhibitionOptions, product.category]);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [step, setStep] = useState(0);
-  const [date, setDate] = useState<string | null>(
-    product.category === "exhibition-videography" ? product.eventDate ?? null : null
+  const [date, setDate] = useState<string | null>(() =>
+    product.category === "exhibition-videography" ? defaultExhibitionDate : null
   );
+  const [includeSetupDay, setIncludeSetupDay] = useState(false);
+  useEffect(() => {
+    if (product.category !== "exhibition-videography") {
+      return;
+    }
+    if (exhibitionOptions.length === 0) {
+      setDate(null);
+      return;
+    }
+    setDate((current) => {
+      if (!current) {
+        return defaultExhibitionDate;
+      }
+      return exhibitionOptions.some((option) => option.key === current)
+        ? current
+        : defaultExhibitionDate;
+    });
+  }, [product.category, exhibitionOptions, defaultExhibitionDate]);
+  useEffect(() => {
+    if (!exhibitionSetupOption) {
+      setIncludeSetupDay(false);
+    }
+  }, [exhibitionSetupOption]);
+  const bookingSpan = useMemo(() => {
+    if (
+      product.category === "exhibition-videography" &&
+      includeSetupDay &&
+      exhibitionSetupOption
+    ) {
+      return onsiteBlockingDays + 1;
+    }
+    return onsiteBlockingDays;
+  }, [
+    exhibitionSetupOption,
+    includeSetupDay,
+    onsiteBlockingDays,
+    product.category,
+  ]);
+  const reservationStartKey = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return date;
+    }
+    if (includeSetupDay && exhibitionSetupOption) {
+      return exhibitionSetupOption.key;
+    }
+    return date;
+  }, [date, exhibitionSetupOption, includeSetupDay, product.category]);
+  const selectedDateRange = useMemo(() => {
+    if (!reservationStartKey) {
+      return null;
+    }
+    const base =
+      parseDateKey(reservationStartKey) ??
+      new Date(`${reservationStartKey}T00:00:00`);
+    if (Number.isNaN(base.getTime())) {
+      return null;
+    }
+    const end = new Date(base.getTime() + (bookingSpan - 1) * DAY_IN_MS);
+    return { start: base, end };
+  }, [bookingSpan, reservationStartKey]);
   const [error, setError] = useState<string | null>(null);
   const [conflicts, setConflicts] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -487,18 +676,51 @@ export default function AddToCartWizard({
     }
     return { type: "hq", organisationId: null } satisfies ProductAvailabilityScope;
   }, [coverage, coverageStatus]);
+  const announceSelection = useCallback(
+    (startKey: string | null, span: number) => {
+      if (!startKey) {
+        return;
+      }
+      const base = parseDateKey(startKey) ?? new Date(`${startKey}T00:00:00`);
+      if (Number.isNaN(base.getTime())) {
+        setLiveMessage(`Selected ${startKey} for production`);
+        return;
+      }
+      if (span > 1) {
+        const end = new Date(base.getTime() + (span - 1) * DAY_IN_MS);
+        setLiveMessage(
+          `Selected ${formatDateForSpeech(base)} – crew reserved until ${formatDateForSpeech(end)}.`
+        );
+      } else {
+        setLiveMessage(`Selected ${formatDateForSpeech(base)} for production`);
+      }
+    },
+    []
+  );
   const handleDateSelect = (value: string) => {
     setDate(value);
     setConflicts([]);
     setError(null);
-    const spokenDate = new Date(`${value}T00:00:00`).toLocaleDateString(undefined, {
-      weekday: "long",
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    });
-    setLiveMessage(`Selected ${spokenDate} for production`);
+    const startKey =
+      product.category === "exhibition-videography" &&
+      includeSetupDay &&
+      exhibitionSetupOption
+        ? exhibitionSetupOption.key
+        : value;
+    const span =
+      product.category === "exhibition-videography" &&
+      includeSetupDay &&
+      exhibitionSetupOption
+        ? onsiteBlockingDays + 1
+        : onsiteBlockingDays;
+    announceSelection(startKey, span);
   };
+  useEffect(() => {
+    if (!date) {
+      return;
+    }
+    announceSelection(reservationStartKey, bookingSpan);
+  }, [announceSelection, bookingSpan, date, reservationStartKey]);
 
   useEffect(() => {
     async function load() {
@@ -1024,7 +1246,12 @@ export default function AddToCartWizard({
       setLiveMessage("Filming location required before booking");
       return;
     }
-    let reservationDate = date;
+    const showDateKey = normaliseDateKey(date);
+    let startDateKey =
+      product.category === "exhibition-videography"
+        ? normaliseDateKey(reservationStartKey)
+        : showDateKey;
+    let requestDateIso: string | null = null;
     if (isCampaignProduct) {
       if (!slotSelection) {
         setError("Select an available slot to continue.");
@@ -1041,38 +1268,56 @@ export default function AddToCartWizard({
         setLiveMessage("Selected slot unavailable");
         return;
       }
-      reservationDate =
+      requestDateIso =
         normaliseSlotDate(slotSelection.startAt) ??
         normaliseSlotDate(slotSelection.endAt) ??
-        reservationDate;
-      if (!reservationDate) {
-        reservationDate = new Date().toISOString();
+        null;
+      startDateKey =
+        normaliseDateKey(slotSelection.startAt) ??
+        normaliseDateKey(slotSelection.endAt) ??
+        startDateKey;
+      if (!requestDateIso) {
+        requestDateIso = new Date().toISOString();
       }
-    } else if (!date) {
+      if (!startDateKey) {
+        startDateKey = showDateKey;
+      }
+    } else if (!date || !startDateKey) {
       setError("Select a production date to continue.");
       setLiveMessage("Production date required before adding to cart");
       return;
+    } else {
+      requestDateIso = `${startDateKey}T00:00:00.000Z`;
     }
-    const calendarKey =
-      normaliseDateKey(reservationDate) ?? normaliseDateKey(date) ?? null;
+    const affectedCalendarKeys =
+      startDateKey ? expandDateKeyRange(startDateKey, bookingSpan) : [];
     const updateCalendarStatus = (statusValue: ProductAvailabilityStatus) => {
-      if (!calendarKey) {
+      if (affectedCalendarKeys.length === 0) {
         return;
       }
       setAvailabilityOverrides((prev) => {
-        if (prev[calendarKey] === statusValue) {
-          return prev;
-        }
-        return { ...prev, [calendarKey]: statusValue };
+        let changed = false;
+        const next = { ...prev };
+        affectedCalendarKeys.forEach((key) => {
+          if (next[key] !== statusValue) {
+            next[key] = statusValue;
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
       });
     };
+    if (!requestDateIso) {
+      requestDateIso = new Date().toISOString();
+    }
     setSubmitting(true);
     setLiveMessage("Checking equipment availability");
     try {
       const reserve = httpsCallable(functions, "reserveKit");
       const res: any = await reserve({
         productId: product.id,
-        date: reservationDate,
+        date: requestDateIso,
+        spanOverride: bookingSpan,
         coverage: coverage
           ? {
               type: coverage.type,
@@ -1161,17 +1406,34 @@ export default function AddToCartWizard({
         (postcodeInput.trim().length > 0
           ? postcodeInput.trim().toUpperCase()
           : null);
+      const exhibitionSelection =
+        product.category === "exhibition-videography"
+          ? {
+              showDate: showDateKey,
+              setupIncluded: includeSetupDay && Boolean(exhibitionSetupOption),
+              setupDate:
+                includeSetupDay && exhibitionSetupOption
+                  ? exhibitionSetupOption.key
+                  : null,
+            }
+          : null;
       add({
         id: product.id,
         name: product.name,
         price,
-        date: reservationDate || date || new Date().toISOString(),
+        date:
+          showDateKey ||
+          startDateKey ||
+          requestDateIso ||
+          date ||
+          new Date().toISOString(),
         variation: variationId,
         modifiers: selections,
         kitItems,
         rentalTotal,
         kitStatus: reservationStatus,
         kitWarnings: warnings,
+        exhibition: exhibitionSelection,
         location: locationLabel.length > 0 ? locationLabel : null,
         postalCode: postalCodeLabel,
         coverage: {
@@ -1483,12 +1745,92 @@ export default function AddToCartWizard({
                   Confirm the filming address and postcode first to check availability.
                 </p>
               )
-            ) : product.eventDate ? (
-              <p className="text-sm">
-                {new Date(product.eventDate).toLocaleDateString()}
-              </p>
+            ) : exhibitionOptions.length > 0 ? (
+              <div className="space-y-3">
+                {eventRangeLabel && (
+                  <p className="text-sm text-gray-600">Show runs {eventRangeLabel}.</p>
+                )}
+                <div
+                  className="grid gap-2"
+                  role="radiogroup"
+                  aria-label="Choose exhibition coverage day"
+                >
+                  {exhibitionOptions.map((option) => {
+                    const checked = date === option.key;
+                    return (
+                      <label
+                        key={option.key}
+                        className={`flex items-start gap-3 rounded-md border px-3 py-2 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
+                          checked ? "border-orange-400 bg-orange-50" : "border-gray-200 bg-white"
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="exhibition-date"
+                          className="mt-1"
+                          checked={checked}
+                          onChange={() => handleDateSelect(option.key)}
+                        />
+                        <p className="text-sm font-semibold">{option.label}</p>
+                      </label>
+                    );
+                  })}
+                </div>
+                {exhibitionSetupOption && (
+                  <label
+                    className={`flex items-start gap-3 rounded-md border px-3 py-2 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
+                      includeSetupDay
+                        ? "border-orange-400 bg-orange-50"
+                        : "border-gray-200 bg-white"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-1"
+                      checked={includeSetupDay}
+                      onChange={() => {
+                        setConflicts([]);
+                        setError(null);
+                        setIncludeSetupDay((prev) => {
+                          const next = !prev;
+                          if (!next) {
+                            announceSelection(date, onsiteBlockingDays);
+                          } else {
+                            announceSelection(exhibitionSetupOption.key, onsiteBlockingDays + 1);
+                          }
+                          return next;
+                        });
+                      }}
+                    />
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold">Include setup day coverage</p>
+                      <p className="text-xs text-gray-500">
+                        We’ll arrive on {exhibitionSetupOption.label} to capture stand build and
+                        pre-show content.
+                      </p>
+                    </div>
+                  </label>
+                )}
+              </div>
             ) : (
-              <p className="text-sm">To be confirmed</p>
+              <p className="text-sm text-gray-500">Show dates coming soon.</p>
+            )}
+            {(onsiteSummary || (selectedDateRange && bookingSpan > 1)) && (
+              <div className="space-y-1 text-xs text-gray-600">
+                {onsiteSummary && <p>{onsiteSummary}</p>}
+                {selectedDateRange && bookingSpan > 1 && (
+                  <p>
+                    Crew reserved {" "}
+                    {selectedDateRange.start.toLocaleDateString()} – {" "}
+                    {selectedDateRange.end.toLocaleDateString()}
+                  </p>
+                )}
+                {product.category === "exhibition-videography" &&
+                  includeSetupDay &&
+                  exhibitionSetupOption && (
+                    <p>Setup day coverage included.</p>
+                  )}
+              </div>
             )}
           </div>
         )}

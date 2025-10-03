@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import ProductCard from "./ProductCard";
-import { Product } from "@/lib/products";
+import { Product, getProductEventMonthKeys } from "@/lib/products";
 
 export default function ExhibitionProductList({ products }: { products: Product[] }) {
   const [search, setSearch] = useState("");
@@ -20,7 +20,7 @@ export default function ExhibitionProductList({ products }: { products: Product[
   const months = useMemo(() => {
     const set = new Set<string>();
     products.forEach((p) => {
-      if (p.eventDate) set.add(p.eventDate.slice(0, 7));
+      getProductEventMonthKeys(p).forEach((key) => set.add(key));
     });
     return Array.from(set).sort();
   }, [products]);
@@ -33,7 +33,7 @@ export default function ExhibitionProductList({ products }: { products: Product[
       if (venue && p.venue !== venue) {
         return false;
       }
-      if (month && (!p.eventDate || !p.eventDate.startsWith(month))) {
+      if (month && !getProductEventMonthKeys(p).includes(month)) {
         return false;
       }
       return true;

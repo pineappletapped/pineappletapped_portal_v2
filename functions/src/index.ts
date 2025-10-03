@@ -4473,12 +4473,41 @@ export const reserveKit = functions.https.onCall(async (data) => {
     throw new functions.https.HttpsError('invalid-argument', 'productId and date required');
   }
   const start = new Date(date);
-  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  if (Number.isNaN(start.getTime())) {
+    throw new functions.https.HttpsError("invalid-argument", "Invalid reservation date");
+  }
   const prodSnap = await db.collection('products').doc(productId).get();
   if (!prodSnap.exists) {
     throw new functions.https.HttpsError('not-found', 'product not found');
   }
   const productData = prodSnap.data() as any;
+  const rawOnsiteDays =
+    typeof productData?.onsiteDays === 'number'
+      ? productData.onsiteDays
+      : typeof productData?.onsiteDays === 'string'
+        ? Number(productData.onsiteDays)
+        : null;
+  const onsiteDaysValue =
+    typeof rawOnsiteDays === 'number' && Number.isFinite(rawOnsiteDays) && rawOnsiteDays > 0
+      ? rawOnsiteDays
+      : 1;
+  const spanOverrideRaw =
+    typeof data?.spanOverride === 'number'
+      ? data.spanOverride
+      : typeof data?.spanOverride === 'string'
+        ? Number(data.spanOverride)
+        : null;
+  const spanOverride =
+    typeof spanOverrideRaw === 'number' &&
+    Number.isFinite(spanOverrideRaw) &&
+    spanOverrideRaw > 0
+      ? Math.min(spanOverrideRaw, 14)
+      : null;
+  const onsiteDayBlocks = Math.max(
+    1,
+    Math.ceil(spanOverride !== null ? spanOverride : onsiteDaysValue),
+  );
+  const end = new Date(start.getTime() + onsiteDayBlocks * 24 * 60 * 60 * 1000);
   const requiredKitRaw = Array.isArray(productData?.requiredKit)
     ? productData.requiredKit
     : [];
@@ -8133,6 +8162,25 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     if (campaignBooking && typeof campaignBooking.priceAdjustment === 'number') {
       price += campaignBooking.priceAdjustment;
     }
+    const rawExhibition = items[idx]?.exhibition;
+    const exhibitionDetails =
+      rawExhibition && typeof rawExhibition === 'object'
+        ? (() => {
+            const showDate =
+              typeof rawExhibition.showDate === 'string' && rawExhibition.showDate.trim().length > 0
+                ? rawExhibition.showDate.trim()
+                : null;
+            const setupDate =
+              typeof rawExhibition.setupDate === 'string' && rawExhibition.setupDate.trim().length > 0
+                ? rawExhibition.setupDate.trim()
+                : null;
+            const setupIncluded = rawExhibition.setupIncluded === true;
+            if (!showDate && !setupDate && !setupIncluded) {
+              return null;
+            }
+            return { showDate, setupDate, setupIncluded };
+          })()
+        : null;
     const budget = (prod as any).budget || {};
     const labourFilming = parseOptional(budget.labourFilming);
     const labourEditing = parseOptional(budget.labourEditing);
@@ -8176,6 +8224,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       date: itemDate,
       location: itemLocation,
       postalCode: itemPostalCode,
+      exhibition: exhibitionDetails,
       coverage: coveragePayload,
       campaignBooking,
       budget: {

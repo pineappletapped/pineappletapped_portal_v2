@@ -34,10 +34,39 @@ export default function CartPage() {
                 ? `Remove ${item.name} from cart`
                 : `Decrease quantity of ${item.name}`;
             const slot = item.campaignBooking;
+            const exhibitionDetails = (() => {
+              const selection = item.exhibition;
+              if (!selection) {
+                return null;
+              }
+              const safeDate = (value: string | null | undefined) => {
+                if (!value) return null;
+                const normalised =
+                  /^\d{4}-\d{2}-\d{2}$/.test(value)
+                    ? `${value}T00:00:00`
+                    : value;
+                const parsed = new Date(normalised);
+                return Number.isNaN(parsed.getTime()) ? null : parsed;
+              };
+              const show = safeDate(selection.showDate ?? null);
+              const setup =
+                selection.setupIncluded && selection.setupDate
+                  ? safeDate(selection.setupDate)
+                  : null;
+              return {
+                showLabel: show ? show.toLocaleDateString() : null,
+                setupLabel: setup ? setup.toLocaleDateString() : null,
+                setupIncluded: Boolean(selection.setupIncluded && setup),
+              };
+            })();
             const dateLabel = (() => {
               const safeDate = (value: string | null | undefined) => {
                 if (!value) return null;
-                const parsed = new Date(value);
+                const normalised =
+                  /^\d{4}-\d{2}-\d{2}$/.test(value)
+                    ? `${value}T00:00:00`
+                    : value;
+                const parsed = new Date(normalised);
                 return Number.isNaN(parsed.getTime()) ? null : parsed;
               };
               if (slot) {
@@ -65,6 +94,40 @@ export default function CartPage() {
                   })}`;
                 }
               }
+              if (exhibitionDetails?.showLabel) {
+                return exhibitionDetails.showLabel;
+              }
+              const kitRange = (() => {
+                if (!item.kitItems || item.kitItems.length === 0) {
+                  return null;
+                }
+                const parsed = item.kitItems
+                  .map((entry) => ({
+                    start: safeDate(entry.start),
+                    end: safeDate(entry.end),
+                  }))
+                  .filter(
+                    (entry): entry is { start: Date; end: Date } =>
+                      Boolean(entry.start) && Boolean(entry.end)
+                  );
+                if (parsed.length === 0) {
+                  return null;
+                }
+                const startDate = new Date(
+                  Math.min(...parsed.map((entry) => entry.start.getTime()))
+                );
+                const endDate = new Date(
+                  Math.max(...parsed.map((entry) => entry.end.getTime()))
+                );
+                return { startDate, endDate };
+              })();
+              if (kitRange) {
+                const startLabel = kitRange.startDate.toLocaleDateString();
+                const endLabel = kitRange.endDate.toLocaleDateString();
+                return startLabel === endLabel
+                  ? startLabel
+                  : `${startLabel} – ${endLabel}`;
+              }
               const fallback = safeDate(item.date);
               if (fallback) {
                 return fallback.toLocaleDateString();
@@ -80,6 +143,11 @@ export default function CartPage() {
                 <div className="min-w-[12rem] flex-1">
                   <p className="font-medium">{item.name}</p>
                   <p className="text-sm text-gray-600">{dateLabel}</p>
+                  {exhibitionDetails?.setupIncluded && exhibitionDetails.setupLabel && (
+                    <p className="text-xs text-gray-500">
+                      Setup day: {exhibitionDetails.setupLabel}
+                    </p>
+                  )}
                   {slot && (
                     <p className="text-xs text-gray-500">
                       Slot: {slot.slotLabel}

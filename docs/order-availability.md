@@ -41,5 +41,7 @@ If no stage can supply the kit, the response lists the conflicts and missing sta
   - **Pending** reservations mark the date as pending confirmation.
   - **Conflicts** that stop the booking mark the date as unavailable.
 - Catch-all errors during reservation also mark the date as pending so users know confirmation is outstanding.
+- Products declare how many days the crew will be on site via the `onsiteDays` field. The wizard blocks that many consecutive days on the availability calendar and shows the resulting range when the customer selects a start date.
+- Exhibition bookings can optionally extend the reservation by a setup day; the storefront passes an explicit span override so the reservation API locks both the setup and filming dates in one request.
 
 These steps ensure customers see the correct availability before checkout while operations receive clear visibility of which team needs to confirm the booking.
