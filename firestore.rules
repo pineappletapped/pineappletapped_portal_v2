@@ -47,6 +47,43 @@ service cloud.firestore {
         path.matches('/databases/([^/]+)/documents/affiliateResources/.*');
     }
 
+    function isNonEmptyString(value) {
+      return value is string && value.size() > 0;
+    }
+
+    function normaliseOrgMembershipId(orgId) {
+      if (!(orgId is string)) {
+        return '';
+      }
+      if (orgId.matches('^orgs/.*$') && orgId.size() > 5) {
+        return orgId.substring(5, orgId.size());
+      }
+      if (orgId.matches('^clients/.*$') && orgId.size() > 8) {
+        return orgId.substring(8, orgId.size());
+      }
+      return orgId;
+    }
+
+    function hasOrgMembership(orgId) {
+      if (!isAuthenticated()) {
+        return false;
+      }
+      if (!(orgId is string)) {
+        return false;
+      }
+      let normalised = normaliseOrgMembershipId(orgId);
+      return isNonEmptyString(normalised) &&
+        exists(/databases/$(database)/documents/memberships/$(normalised + '_' + request.auth.uid));
+    }
+
+    function isProjectDocumentPath(path) {
+      return path.matches('/databases/([^/]+)/documents/projects/[^/]+');
+    }
+
+    function isOrderDocumentPath(path) {
+      return path.matches('/databases/([^/]+)/documents/orders/[^/]+');
+    }
+
     function currentUserAffiliateId() {
       return isAuthenticated() && userProfile().data != null && userProfile().data.affiliate != null
         ? userProfile().data.affiliate.id
@@ -122,12 +159,28 @@ service cloud.firestore {
     // Make sure to write security rules for your app before that time, or else
     // all client requests to your Firestore database will be denied until you Update
     // your rules
+    match /projects/{projectId} {
+      allow read: if isStaffUser() || hasBackofficeRole() || hasOrgMembership(resource.data.orgId);
+      allow create, update, delete: if isStaffUser() || hasBackofficeRole() || isServiceAccountRequest();
+    }
+
+    match /orders/{orderId} {
+      allow read: if isStaffUser() || hasBackofficeRole() || (isAuthenticated() && (
+        request.auth.uid == resource.data.userId ||
+        hasOrgMembership(resource.data.orgId) ||
+        hasOrgMembership(resource.data.clientId)
+      ));
+      allow create, update, delete: if isStaffUser() || hasBackofficeRole() || isServiceAccountRequest();
+    }
+
     match /{document=**} {
       allow read, write: if
         request.time < timestamp.date(2025, 10, 4) &&
         !isSocialAccountDocPath(resource.__name__) &&
         !isAffiliateCommissionDocPath(resource.__name__) &&
         !isAffiliateRestrictedPath(resource.__name__) &&
+        !isProjectDocumentPath(resource.__name__) &&
+        !isOrderDocumentPath(resource.__name__) &&
         !(request.resource != null && isSocialAccountDocPath(request.resource.__name__)) &&
         !(request.resource != null && isAffiliateCommissionDocPath(request.resource.__name__)) &&
         !(request.resource != null && isAffiliateRestrictedPath(request.resource.__name__));

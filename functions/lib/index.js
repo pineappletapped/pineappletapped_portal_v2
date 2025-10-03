@@ -1812,18 +1812,15 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
         throw new functions.https.HttpsError('invalid-argument', 'projectId is required');
     }
     const userContext = await loadUserContext(context.auth.uid);
-    if (!userContext.isStaff && userContext.franchiseIds.length === 0) {
-        throw new functions.https.HttpsError('permission-denied', 'Drive staging requires staff or franchise access');
-    }
+    const userIsStaff = userContext.isStaff;
+    const userFranchiseIds = new Set(userContext.franchiseIds);
     const projectSnap = await db.collection('projects').doc(projectId).get();
     if (!projectSnap.exists) {
         throw new functions.https.HttpsError('not-found', 'Project not found');
     }
     const projectData = projectSnap.data();
     const projectFranchiseId = typeof projectData.franchiseId === 'string' ? projectData.franchiseId : null;
-    if (!userContext.isStaff &&
-        projectFranchiseId &&
-        !userContext.franchiseIds.includes(projectFranchiseId)) {
+    if (!userIsStaff && userFranchiseIds.size > 0 && projectFranchiseId && !userFranchiseIds.has(projectFranchiseId)) {
         throw new functions.https.HttpsError('permission-denied', 'This project is not assigned to your franchise');
     }
     const orderId = typeof projectData.orderId === 'string' ? projectData.orderId : null;
@@ -1836,6 +1833,74 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
     }
     const orderData = orderSnap.data();
     const driveInfo = orderData.drive || {};
+    const orderOwnerUid = typeof orderData.userId === 'string' && orderData.userId.trim().length > 0 ? orderData.userId.trim() : null;
+    const expandOrgMembershipKeys = (raw) => {
+        if (typeof raw !== 'string') {
+            return [];
+        }
+        const trimmed = raw.trim();
+        if (!trimmed) {
+            return [];
+        }
+        const variants = new Set();
+        variants.add(trimmed);
+        const parts = trimmed.split('/').filter((segment) => segment.length > 0);
+        const last = parts.length > 0 ? parts[parts.length - 1] : trimmed;
+        if (last && last.trim().length > 0) {
+            const base = last.trim();
+            variants.add(base);
+            variants.add(`clients/${base}`);
+            variants.add(`orgs/${base}`);
+        }
+        return Array.from(variants);
+    };
+    const candidateOrgKeys = new Set();
+    const addOrgCandidates = (value) => {
+        expandOrgMembershipKeys(value).forEach((key) => {
+            if (key) {
+                candidateOrgKeys.add(key);
+            }
+        });
+    };
+    addOrgCandidates(projectData.orgId);
+    addOrgCandidates(orderData.orgId);
+    const normalisedClientId = normaliseClientDocId(orderData.clientId);
+    if (normalisedClientId) {
+        addOrgCandidates(normalisedClientId);
+    }
+    else {
+        addOrgCandidates(orderData.clientId);
+    }
+    const hasStaffOrFranchiseAccess = userIsStaff || (!userIsStaff && userFranchiseIds.size > 0 && (!projectFranchiseId || userFranchiseIds.has(projectFranchiseId)));
+    const isOrderOwner = orderOwnerUid !== null && orderOwnerUid === context.auth.uid;
+    let hasClientMembershipAccess = false;
+    if (!hasStaffOrFranchiseAccess && !isOrderOwner) {
+        if (candidateOrgKeys.size > 0) {
+            const membershipKeys = new Set();
+            try {
+                const membershipSnap = await db
+                    .collection('memberships')
+                    .where('userId', '==', context.auth.uid)
+                    .limit(50)
+                    .get();
+                membershipSnap.docs.forEach((docSnap) => {
+                    const membershipData = docSnap.data() || {};
+                    expandOrgMembershipKeys(membershipData.orgId).forEach((key) => {
+                        if (key) {
+                            membershipKeys.add(key);
+                        }
+                    });
+                });
+            }
+            catch (membershipError) {
+                console.warn('drive_listProjectFolder failed to load memberships', { projectId, uid: context.auth.uid }, membershipError);
+            }
+            hasClientMembershipAccess = Array.from(candidateOrgKeys).some((key) => membershipKeys.has(key));
+        }
+        if (!hasClientMembershipAccess) {
+            throw new functions.https.HttpsError('permission-denied', 'Project files are limited to Pineapple Tapped staff, franchise operators, and approved client team members.');
+        }
+    }
     const drive = await createDriveService();
     if (!drive) {
         throw new functions.https.HttpsError('failed-precondition', 'Google Drive service account credentials are not configured.');
