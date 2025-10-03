@@ -25,11 +25,6 @@ import {
 } from "firebase/firestore";
 import { adminListUsers } from "@/lib/admin";
 import { useRoleGate } from "@/hooks/useRoleGate";
-import {
-  CRM_STATUS_LABELS,
-  normaliseCrmStatus,
-  type CRMStatus,
-} from "@/lib/crm";
 import { ROLE_LABELS, extractUserRoles, type RoleKey, type UserRoles } from "@/lib/roles";
 
 interface RawMember {
@@ -49,7 +44,6 @@ interface RawMember {
 }
 
 interface Member extends RawMember {
-  crmStatus: CRMStatus;
   roles: UserRoles;
   isTeam: boolean;
   franchiseIds: string[];
@@ -78,11 +72,6 @@ export default function AdminAvailabilityPage() {
     [members]
   );
 
-  const crmContacts = useMemo(
-    () => members.filter((member) => !member.isTeam),
-    [members]
-  );
-
   // load staff status and team list
   useEffect(() => {
     (async () => {
@@ -98,7 +87,6 @@ export default function AdminAvailabilityPage() {
           : [];
         const enriched: Member[] = rawUsers.map((entry) => {
           const roles = extractUserRoles({ ...(entry ?? {}), uid: entry?.id });
-          const crmStatus = normaliseCrmStatus(entry?.crmStatus);
           const franchiseIds = normaliseFranchiseIds(entry?.franchiseIds);
           const primaryFranchiseId = normaliseFranchiseId(entry?.primaryFranchiseId);
           const isTeam =
@@ -113,7 +101,6 @@ export default function AdminAvailabilityPage() {
           return {
             ...entry,
             roles,
-            crmStatus,
             isTeam,
             franchiseIds,
             primaryFranchiseId,
@@ -392,46 +379,6 @@ export default function AdminAvailabilityPage() {
           )}
         </section>
 
-        {crmContacts.length > 0 && (
-          <section>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-600">
-              CRM contacts
-            </h2>
-            <p className="mt-1 text-xs text-slate-500">
-              Prospects and clients appear here for reference and are not selectable for calendar availability.
-            </p>
-            <ul className="mt-3 space-y-2">
-              {crmContacts.map((contact) => {
-                const primary = resolveContactLabel(contact);
-                const organisation = resolveOrganisation(contact);
-                const positionLabel = resolveContactPosition(contact);
-                const stageLabel = CRM_STATUS_LABELS[contact.crmStatus];
-                return (
-                  <li
-                    key={contact.id}
-                    className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="font-medium text-slate-900">{primary}</p>
-                      <span className="inline-flex items-center rounded-full bg-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-700">
-                        {stageLabel}
-                      </span>
-                    </div>
-                    <div className="mt-1 space-y-1 text-xs text-slate-600">
-                      {organisation ? <p>{organisation}</p> : <p>{contact.email}</p>}
-                      {organisation && contact.email && (
-                        <p className="text-slate-500">{contact.email}</p>
-                      )}
-                      {positionLabel && (
-                        <p className="text-slate-500">Role: {positionLabel}</p>
-                      )}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
-        )}
       </div>
       <div className="flex-1">
         <h1 className="mb-4 text-xl font-semibold text-slate-900">Manage availability</h1>
@@ -563,43 +510,6 @@ function describeTeamPosition(member: Member): string | null {
   }
   if (member.isStaff) {
     return "Staff";
-  }
-  return null;
-}
-
-function resolveContactLabel(member: Member): string {
-  const candidates = [member.displayName, member.fullName];
-  for (const candidate of candidates) {
-    if (typeof candidate === "string") {
-      const trimmed = candidate.trim();
-      if (trimmed.length > 0) {
-        return trimmed;
-      }
-    }
-  }
-  const organisation = resolveOrganisation(member);
-  if (organisation) {
-    return organisation;
-  }
-  return member.email;
-}
-
-function resolveOrganisation(member: Member): string | null {
-  if (typeof member.organisation === "string") {
-    const trimmed = member.organisation.trim();
-    if (trimmed.length > 0) {
-      return trimmed;
-    }
-  }
-  return null;
-}
-
-function resolveContactPosition(member: Member): string | null {
-  if (typeof member.position === "string") {
-    const trimmed = member.position.trim();
-    if (trimmed.length > 0) {
-      return trimmed;
-    }
   }
   return null;
 }

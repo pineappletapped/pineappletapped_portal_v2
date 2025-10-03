@@ -19,6 +19,11 @@ interface Props {
   selected: string | null;
   onSelect: (date: string) => void;
   scope?: ProductAvailabilityScope | null;
+  overrides?: Record<string, ProductAvailabilityStatus> | null;
+  allowedDates?: string[] | null;
+  allowedDateLabels?: Record<string, string> | null;
+  highlightedDates?: string[] | null;
+  initialMonth?: string | null;
 }
 
 export default function ProductDatePicker({
@@ -26,17 +31,109 @@ export default function ProductDatePicker({
   selected,
   onSelect,
   scope,
+  overrides,
+  allowedDates,
+  allowedDateLabels,
+  highlightedDates,
+  initialMonth,
 }: Props) {
-  const today = new Date();
-  const [view, setView] = useState(
-    new Date(today.getFullYear(), today.getMonth(), 1)
-  );
+  const today = useMemo(() => new Date(), []);
   const [entries, setEntries] = useState<
     Array<{ id: string; data: Record<string, unknown> }>
   >([]);
   const [availability, setAvailability] = useState<
     Record<string, ProductAvailabilityStatus>
   >({});
+
+  const allowedInfo = useMemo(() => {
+    const allowedSet = new Set<string>();
+    const labelMap = new Map<string, string>();
+    if (Array.isArray(allowedDates)) {
+      allowedDates.forEach((value) => {
+        const key = normaliseDateKey(value);
+        if (key) {
+          allowedSet.add(key);
+        }
+      });
+    }
+    if (allowedDateLabels && typeof allowedDateLabels === "object") {
+      Object.entries(allowedDateLabels).forEach(([rawKey, rawLabel]) => {
+        const key = normaliseDateKey(rawKey);
+        if (!key) {
+          return;
+        }
+        const label = String(rawLabel ?? "").trim();
+        if (label.length > 0) {
+          labelMap.set(key, label);
+        }
+        allowedSet.add(key);
+      });
+    }
+    let earliest: string | null = null;
+    allowedSet.forEach((key) => {
+      if (!earliest || key < earliest) {
+        earliest = key;
+      }
+    });
+    const signature = Array.from(allowedSet)
+      .sort()
+      .join("|");
+    return {
+      hasAllowed: allowedSet.size > 0,
+      allowedSet,
+      labelMap,
+      earliest,
+      signature,
+    } as const;
+  }, [allowedDates, allowedDateLabels]);
+
+  const highlightSet = useMemo(() => {
+    const set = new Set<string>();
+    if (Array.isArray(highlightedDates)) {
+      highlightedDates.forEach((value) => {
+        const key = normaliseDateKey(value);
+        if (key) {
+          set.add(key);
+        }
+      });
+    }
+    return set;
+  }, [highlightedDates]);
+
+  const derivedMonthKey = useMemo(() => {
+    const selectedMonth = monthKeyFromDateKey(selected);
+    if (selectedMonth) {
+      return selectedMonth;
+    }
+    const initialMonthKey = normaliseMonthKey(initialMonth);
+    if (initialMonthKey) {
+      return initialMonthKey;
+    }
+    if (allowedInfo.earliest) {
+      const allowedMonth = monthKeyFromDateKey(allowedInfo.earliest);
+      if (allowedMonth) {
+        return allowedMonth;
+      }
+    }
+    return toMonthKey(today);
+  }, [allowedInfo.earliest, initialMonth, selected, today]);
+
+  const [view, setView] = useState(() =>
+    monthKeyToDate(derivedMonthKey) ??
+    new Date(today.getFullYear(), today.getMonth(), 1)
+  );
+
+  useEffect(() => {
+    setView((current) => {
+      const next = monthKeyToDate(derivedMonthKey);
+      if (!next) {
+        return current;
+      }
+      const currentKey = toMonthKey(current);
+      const nextKey = toMonthKey(next);
+      return currentKey === nextKey ? current : next;
+    });
+  }, [derivedMonthKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,7 +142,10 @@ export default function ProductDatePicker({
         const snap = await getDocs(
           collection(db, "productAvailability", productId, "dates")
         );
-        const docs = snap.docs.map((doc) => ({ id: doc.id, data: doc.data() as Record<string, unknown> }));
+        const docs = snap.docs.map((doc) => ({
+          id: doc.id,
+          data: doc.data() as Record<string, unknown>,
+        }));
         if (!cancelled) {
           setEntries(docs);
         }
@@ -100,35 +200,54 @@ export default function ProductDatePicker({
     unavailable: "Unavailable",
   };
 
-  const cellClasses = (status: ProductAvailabilityStatus, date: string) => {
-    const isDisabled = status === "booked" || status === "unavailable";
+  const indicatorPalette: Record<ProductAvailabilityStatus, string> = {
+    available: "bg-green-500",
+    pending: "bg-amber-500",
+    booked: "bg-red-500",
+    unavailable: "bg-gray-400",
+  };
+
+  const cellClasses = (
+    status: ProductAvailabilityStatus,
+    date: string,
+    options: { isAllowed: boolean; isHighlighted: boolean; isSelected: boolean }
+  ) => {
+    const isDisabled =
+      status === "booked" || status === "unavailable" || !options.isAllowed;
     const base =
-      "flex flex-col items-center justify-center rounded-md border px-2 py-1 text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange";
+      "relative flex min-h-[4.5rem] flex-col items-center justify-center rounded-md border px-2 py-2 text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange";
     const palette: Record<ProductAvailabilityStatus, string> = {
       available: "border-green-500 text-green-700 bg-green-50 hover:bg-green-100",
       pending: "border-amber-500 text-amber-700 bg-amber-50 hover:bg-amber-100",
       booked: "border-red-400 text-red-600 bg-red-50",
       unavailable: "border-gray-300 text-gray-500 bg-gray-100",
     };
+    const allowedClass = options.isAllowed ? palette[status] : palette.unavailable;
     const disabled = isDisabled ? " cursor-not-allowed opacity-70" : "";
-    const isSelected = selected === date ? " ring-2 ring-orange-500" : "";
-    return `${base} ${palette[status]}${disabled}${isSelected}`;
+    const highlight = options.isHighlighted ? " outline outline-1 outline-orange-300" : "";
+    const selectedClass = options.isSelected ? " ring-2 ring-orange-500" : "";
+    return `${base} ${allowedClass}${disabled}${highlight}${selectedClass}`;
   };
 
   const handleSelect = (date: string, status: ProductAvailabilityStatus) => {
+    const isAllowed = !allowedInfo.hasAllowed || allowedInfo.allowedSet.has(date);
+    if (!isAllowed) {
+      return;
+    }
     if (status === "available" || status === "pending") {
       onSelect(date);
     }
   };
 
   return (
-    <div className="max-w-xs text-xs" role="group" aria-label="Select a production date">
-      <div className="flex items-center justify-between mb-1">
+    <div className="max-w-sm text-xs" role="group" aria-label="Select a production date">
+      <div className="mb-1 flex items-center justify-between">
         <button
           className="btn btn-xs"
           onClick={() =>
             setView(new Date(view.getFullYear(), view.getMonth() - 1, 1))
           }
+          aria-label="Previous month"
         >
           ‹
         </button>
@@ -140,6 +259,7 @@ export default function ProductDatePicker({
           onClick={() =>
             setView(new Date(view.getFullYear(), view.getMonth() + 1, 1))
           }
+          aria-label="Next month"
         >
           ›
         </button>
@@ -154,33 +274,56 @@ export default function ProductDatePicker({
           </div>
         ))}
       </div>
-      <div className="grid grid-cols-7 gap-1 mt-1" role="presentation">
+      <div className="mt-1 grid grid-cols-7 gap-1" role="presentation">
         {days.map((d, i) => {
           if (!d) return <div key={i} />;
           const date = `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(
             2,
             "0"
           )}`;
-          const status = availability[date] ?? "available";
-          const isDisabled = status === "booked" || status === "unavailable";
+          const isAllowed =
+            !allowedInfo.hasAllowed || allowedInfo.allowedSet.has(date);
+          const statusSource = overrides?.[date] ?? availability[date];
+          let status: ProductAvailabilityStatus = statusSource ?? "available";
+          let statusLabel = statusText[status];
+          if (!isAllowed) {
+            status = "unavailable";
+            statusLabel = "Not in schedule";
+          }
+          const isDisabled =
+            status === "booked" || status === "unavailable" || !isAllowed;
           const formattedDate = new Date(`${date}T00:00:00`).toLocaleDateString(
             undefined,
             { weekday: "long", month: "long", day: "numeric", year: "numeric" }
           );
+          const helperLabel = allowedInfo.labelMap.get(date) ?? null;
           return (
             <button
               key={date}
               type="button"
-              className={cellClasses(status, date)}
+              className={cellClasses(status, date, {
+                isAllowed,
+                isHighlighted: highlightSet.has(date),
+                isSelected: selected === date,
+              })}
               onClick={() => handleSelect(date, status)}
               aria-disabled={isDisabled}
               disabled={isDisabled}
               aria-pressed={selected === date ? true : undefined}
-              aria-label={`${formattedDate} – ${statusText[status]}`}
+              aria-label={`${formattedDate} – ${statusLabel}`}
             >
+              <span
+                aria-hidden
+                className={`absolute left-1 top-1 h-2 w-2 rounded-full ${indicatorPalette[status]}`}
+              />
               <span className="text-sm font-medium">{d}</span>
+              {helperLabel ? (
+                <span className="mt-0.5 text-[0.55rem] font-semibold text-gray-700">
+                  {helperLabel}
+                </span>
+              ) : null}
               <span className="mt-0.5 text-[0.6rem] font-semibold">
-                {statusText[status]}
+                {statusLabel}
               </span>
             </button>
           );
@@ -324,4 +467,63 @@ const evaluateScopeMatch = (
     return { match: true, priority: 5 };
   }
   return { match: appliesGlobally, priority: appliesGlobally ? 0 : -1 };
+};
+
+const normaliseDateKey = (value: string | null | undefined): string | null => {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const monthKeyFromDateKey = (value: string | null | undefined): string | null => {
+  const key = normaliseDateKey(value);
+  if (!key) {
+    return null;
+  }
+  return key.slice(0, 7);
+};
+
+const normaliseMonthKey = (value: string | null | undefined): string | null => {
+  if (!value || typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}$/.test(trimmed)) {
+    return null;
+  }
+  const [yearStr, monthStr] = trimmed.split("-");
+  const year = Number(yearStr);
+  const month = Number(monthStr);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) {
+    return null;
+  }
+  if (month < 1 || month > 12) {
+    return null;
+  }
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}`;
+};
+
+const toMonthKey = (date: Date): string => {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+};
+
+const monthKeyToDate = (value: string | null): Date | null => {
+  if (!value || typeof value !== "string") {
+    return null;
+  }
+  const [yearStr, monthStr] = value.split("-");
+  const year = Number(yearStr);
+  const month = Number(monthStr);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) {
+    return null;
+  }
+  return new Date(year, month - 1, 1);
 };

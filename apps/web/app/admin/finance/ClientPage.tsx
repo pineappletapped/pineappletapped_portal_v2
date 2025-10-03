@@ -318,6 +318,9 @@ export default function AdminFinancePage() {
               </select>
             </label>
             <div className="flex flex-wrap gap-2 sm:justify-end">
+              <Link href="/admin/finance/invoices" className="btn-outline btn-sm">
+                Manage invoices
+              </Link>
               <Link href="/admin/finance/invoices/new" className="btn btn-sm">
                 Create invoice
               </Link>

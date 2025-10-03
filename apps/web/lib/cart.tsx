@@ -22,6 +22,16 @@ export interface CartCampaignBooking {
   priceAdjustment?: number;
 }
 
+export interface CartTimeSlot {
+  start: string;
+  end: string;
+  label?: string | null;
+  totalMinutes?: number | null;
+  setupMinutes?: number | null;
+  shootMinutes?: number | null;
+  breakdownMinutes?: number | null;
+}
+
 export interface CartItem {
   id: string;
   name: string;
@@ -32,6 +42,12 @@ export interface CartItem {
   modifiers?: ProductModifierSelection[];
   location?: string | null;
   postalCode?: string | null;
+  exhibition?: {
+    showDate?: string | null;
+    setupDate?: string | null;
+    setupIncluded?: boolean;
+  } | null;
+  timeSlot?: CartTimeSlot | null;
   coverage?: {
     type: "hq" | "franchise";
     franchiseId?: string | null;
@@ -61,6 +77,12 @@ interface ProductInput {
   modifiers?: ProductModifierSelection[];
   location?: string | null;
   postalCode?: string | null;
+  exhibition?: {
+    showDate?: string | null;
+    setupDate?: string | null;
+    setupIncluded?: boolean;
+  } | null;
+  timeSlot?: CartTimeSlot | null;
   coverage?: {
     type: "hq" | "franchise";
     franchiseId?: string | null;
@@ -172,6 +194,10 @@ export function CartProvider({ children }: { children: ReactNode }) {
             JSON.stringify(product.modifiers || []) &&
           (i.location || "") === (product.location || "") &&
           (i.postalCode || "") === (product.postalCode || "") &&
+          JSON.stringify(i.exhibition || null) ===
+            JSON.stringify(product.exhibition || null) &&
+          JSON.stringify(i.timeSlot || null) ===
+            JSON.stringify(product.timeSlot || null) &&
           JSON.stringify(i.coverage || null) ===
             JSON.stringify(product.coverage || null) &&
           JSON.stringify(i.campaignBooking || null) ===

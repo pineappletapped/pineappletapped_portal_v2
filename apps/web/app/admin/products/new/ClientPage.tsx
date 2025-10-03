@@ -521,7 +521,9 @@ export default function NewProductPage() {
   const [category, setCategory] = useState("");
   const [salesMode, setSalesMode] = useState<"ecommerce" | "quote">("ecommerce");
   const [workflowId, setWorkflowId] = useState("");
-  const [eventDate, setEventDate] = useState("");
+  const [eventStartDate, setEventStartDate] = useState("");
+  const [eventEndDate, setEventEndDate] = useState("");
+  const [eventSetupDate, setEventSetupDate] = useState("");
   const [venueId, setVenueId] = useState("");
   const [venue, setVenue] = useState("");
   const [hidden, setHidden] = useState(false);
@@ -548,6 +550,12 @@ export default function NewProductPage() {
   const [roleLibraryMessage, setRoleLibraryMessage] = useState<
     { tone: "success" | "error"; text: string } | null
   >(null);
+  const [onsiteDays, setOnsiteDays] = useState("1");
+  const [onsiteSetupMinutes, setOnsiteSetupMinutes] = useState("");
+  const [onsiteShootMinutes, setOnsiteShootMinutes] = useState("");
+  const [onsiteBreakdownMinutes, setOnsiteBreakdownMinutes] = useState("");
+  const [onsiteWindowStart, setOnsiteWindowStart] = useState("");
+  const [onsiteWindowEnd, setOnsiteWindowEnd] = useState("");
   const selectedVenue = useMemo(
     () => venues.find((v) => v.id === venueId) || null,
     [venues, venueId]
@@ -562,6 +570,32 @@ export default function NewProductPage() {
     if (!value || value.trim().length === 0) return null;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
+  };
+  const parseOptionalMinutes = (value: string): number | null => {
+    if (!value || value.trim().length === 0) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+  const normaliseTimeOfDay = (value: string): string | null => {
+    if (!value) return null;
+    const trimmed = value.trim();
+    if (!/^\d{1,2}:\d{2}$/.test(trimmed)) {
+      return null;
+    }
+    const [hoursStr, minutesStr] = trimmed.split(":");
+    const hours = Number.parseInt(hoursStr, 10);
+    const minutes = Number.parseInt(minutesStr, 10);
+    if (
+      !Number.isFinite(hours) ||
+      !Number.isFinite(minutes) ||
+      hours < 0 ||
+      hours > 23 ||
+      minutes < 0 ||
+      minutes > 59
+    ) {
+      return null;
+    }
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
   };
   const buildPriceTierPayload = (
     tier1: number | null,
@@ -1305,6 +1339,16 @@ export default function NewProductPage() {
       priceTier2,
       priceTier3
     );
+    const onsiteDaysValueRaw = Number(onsiteDays);
+    const onsiteDaysValue =
+      onsiteDays.trim().length > 0 && Number.isFinite(onsiteDaysValueRaw) && onsiteDaysValueRaw > 0
+        ? onsiteDaysValueRaw
+        : null;
+    const onsiteSetupValue = parseOptionalMinutes(onsiteSetupMinutes);
+    const onsiteShootValue = parseOptionalMinutes(onsiteShootMinutes);
+    const onsiteBreakdownValue = parseOptionalMinutes(onsiteBreakdownMinutes);
+    const onsiteWindowStartValue = normaliseTimeOfDay(onsiteWindowStart);
+    const onsiteWindowEndValue = normaliseTimeOfDay(onsiteWindowEnd);
     const docRef = await addDoc(collection(db, "products"), {
       name,
       description,
@@ -1330,9 +1374,18 @@ export default function NewProductPage() {
       operationsInfo: operationsInfo || null,
       deliveryTime: deliveryOptions[deliveryIndex],
       category: category || null,
-      eventDate: eventDate || null,
+      eventDate: eventStartDate || null,
+      eventStartDate: eventStartDate || null,
+      eventEndDate: eventEndDate || null,
+      eventSetupDate: eventSetupDate || null,
       venue: venueLabel,
       venueId: venueId || null,
+      onsiteDays: onsiteDaysValue,
+      onsiteSetupMinutes: onsiteSetupValue,
+      onsiteShootMinutes: onsiteShootValue,
+      onsiteBreakdownMinutes: onsiteBreakdownValue,
+      onsiteTimeWindowStart: onsiteWindowStartValue,
+      onsiteTimeWindowEnd: onsiteWindowEndValue,
       hidden,
       driveTemplateFolderId:
         driveTemplateFolderId.trim().length > 0 ? driveTemplateFolderId.trim() : null,
@@ -1815,13 +1868,46 @@ export default function NewProductPage() {
           </select>
           {cats.find((c) => c.id === category)?.name === "Exhibition Videography" && (
             <>
-              <label className="text-sm font-medium">Event Date</label>
+              <label className="text-sm font-medium">Show start date</label>
               <input
                 type="date"
                 className="input"
-                value={eventDate}
-                onChange={(e) => setEventDate(e.target.value)}
+                value={eventStartDate}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setEventStartDate(value);
+                  setEventEndDate((prev) => (prev ? prev : value));
+                  setEventSetupDate((prev) => {
+                    if (prev || !value) return prev;
+                    const parsed = new Date(`${value}T00:00:00`);
+                    if (Number.isNaN(parsed.getTime())) return prev;
+                    const setup = new Date(parsed.getTime() - 24 * 60 * 60 * 1000);
+                    return setup.toISOString().slice(0, 10);
+                  });
+                }}
               />
+              <label className="text-sm font-medium">Show end date</label>
+              <input
+                type="date"
+                className="input"
+                value={eventEndDate}
+                onChange={(e) => setEventEndDate(e.target.value)}
+                min={eventStartDate || undefined}
+              />
+              <p className="text-xs text-gray-500 -mt-1">
+                Clients will see the full run so they can pick the right day for filming.
+              </p>
+              <label className="text-sm font-medium">Optional setup day</label>
+              <input
+                type="date"
+                className="input"
+                value={eventSetupDate}
+                onChange={(e) => setEventSetupDate(e.target.value)}
+                placeholder="Day before the show opens"
+              />
+              <p className="text-xs text-gray-500 -mt-1">
+                Provide a date if you want to offer coverage the day before the show.
+              </p>
               <label className="text-sm font-medium">Linked Venue</label>
               <select
                 className="input"
@@ -1902,6 +1988,94 @@ export default function NewProductPage() {
             value={deliveryIndex}
             onChange={(e) => setDeliveryIndex(Number(e.target.value))}
           />
+          <label className="text-sm font-medium">On-site duration (days)</label>
+          <input
+            type="number"
+            min="0.25"
+            step="0.25"
+            className="input"
+            value={onsiteDays}
+            onChange={(e) => setOnsiteDays(e.target.value)}
+            placeholder="1"
+          />
+          <p className="text-xs text-gray-500 -mt-1">
+            Used to block calendar availability for multi-day shoots.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-1">
+              <label className="text-sm font-medium">Setup minutes</label>
+              <input
+                type="number"
+                min="0"
+                step="15"
+                className="input"
+                value={onsiteSetupMinutes}
+                onChange={(e) => setOnsiteSetupMinutes(e.target.value)}
+                placeholder="60"
+              />
+              <p className="text-xs text-gray-500">
+                Optional. Time your crew needs on site before filming begins.
+              </p>
+            </div>
+            <div className="grid gap-1">
+              <label className="text-sm font-medium">Filming minutes</label>
+              <input
+                type="number"
+                min="0"
+                step="15"
+                className="input"
+                value={onsiteShootMinutes}
+                onChange={(e) => setOnsiteShootMinutes(e.target.value)}
+                placeholder="45"
+              />
+              <p className="text-xs text-gray-500">
+                Optional. Core filming window customers should reserve.
+              </p>
+            </div>
+            <div className="grid gap-1">
+              <label className="text-sm font-medium">Breakdown minutes</label>
+              <input
+                type="number"
+                min="0"
+                step="15"
+                className="input"
+                value={onsiteBreakdownMinutes}
+                onChange={(e) => setOnsiteBreakdownMinutes(e.target.value)}
+                placeholder="15"
+              />
+              <p className="text-xs text-gray-500">
+                Optional. Packing and wrap-up time after filming.
+              </p>
+            </div>
+            <div className="grid gap-1">
+              <label className="text-sm font-medium">Earliest arrival</label>
+              <input
+                type="time"
+                className="input"
+                value={onsiteWindowStart}
+                onChange={(e) => setOnsiteWindowStart(e.target.value)}
+                step={900}
+                placeholder="08:00"
+              />
+              <p className="text-xs text-gray-500">
+                Leave blank to default to 08:00.
+              </p>
+            </div>
+            <div className="grid gap-1">
+              <label className="text-sm font-medium">Latest finish</label>
+              <input
+                type="time"
+                className="input"
+                value={onsiteWindowEnd}
+                onChange={(e) => setOnsiteWindowEnd(e.target.value)}
+                step={900}
+                placeholder="18:00"
+              />
+              <p className="text-xs text-gray-500">
+                Leave blank to default to 18:00 or extend to fit the shoot.
+              </p>
+            </div>
+          </div>
           <label className="text-sm font-medium">Our Operations</label>
           <textarea
             className="input"

@@ -61,6 +61,8 @@ interface AdminUser {
   organisation?: string | null;
   phone?: string | null;
   notes?: string | null;
+  linkedinBio?: string | null;
+  origin?: string | null;
   updatedAt?: unknown;
   lastContactedAt?: unknown;
   createdAt?: unknown;
@@ -130,6 +132,7 @@ export default function AdminUsersPage() {
   const [auditLogs, setAuditLogs] = useState<CrmAuditLogEntry[]>([]);
   const [auditLoading, setAuditLoading] = useState(true);
   const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditExpanded, setAuditExpanded] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -761,11 +764,15 @@ export default function AdminUsersPage() {
       showSuggestedProduct = false,
       showClientValue = false,
       showCompliance = false,
+      primaryColumnLabel = 'Email',
+      getPrimaryValue,
     }: {
       allowedStatuses: CRMStatus[];
       showSuggestedProduct?: boolean;
       showClientValue?: boolean;
       showCompliance?: boolean;
+      primaryColumnLabel?: string;
+      getPrimaryValue?: (user: AdminUser) => string | null | undefined;
     }
   ) => {
     if (list.length === 0) {
@@ -778,7 +785,7 @@ export default function AdminUsersPage() {
       <table className="w-full text-sm border">
         <thead>
           <tr className="bg-gray-100 text-left">
-            <th className="p-2">Email</th>
+            <th className="p-2">{primaryColumnLabel}</th>
             <th className="p-2">Name</th>
             <th className="p-2">Stage</th>
             <th className="p-2">Affiliate</th>
@@ -795,7 +802,9 @@ export default function AdminUsersPage() {
             const complianceEntry = showCompliance ? complianceByUser.get(user.id) : null;
             return (
               <tr key={user.id} className="border-t">
-                <td className="p-2">{user.email}</td>
+                <td className="p-2">
+                  {(getPrimaryValue ? getPrimaryValue(user) : user.email) || '—'}
+                </td>
                 <td className="p-2">{user.fullName || user.organisation || '-'}</td>
                 <td className="p-2">
                   <select
@@ -1095,6 +1104,8 @@ export default function AdminUsersPage() {
               {renderTable(clients, {
                 allowedStatuses: CRM_ALL_STATUSES,
                 showClientValue: true,
+                primaryColumnLabel: 'Organisation',
+                getPrimaryValue: (record) => record.organisation || record.email,
               })}
             </div>
           )}
@@ -1120,36 +1131,49 @@ export default function AdminUsersPage() {
           <section className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-base font-semibold text-gray-900">Activity log</h2>
-              {filteredAuditLogs.length > 0 ? (
-                <span className="text-xs text-gray-500">
-                  Showing {Math.min(auditEntries.length, 25)} of {filteredAuditLogs.length} updates
-                </span>
-              ) : null}
+              <div className="flex items-center gap-3">
+                {auditExpanded && filteredAuditLogs.length > 0 ? (
+                  <span className="text-xs text-gray-500">
+                    Showing {Math.min(auditEntries.length, 25)} of {filteredAuditLogs.length} updates
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  className="text-sm font-medium text-orange"
+                  onClick={() => setAuditExpanded((prev) => !prev)}
+                >
+                  {auditExpanded ? 'Hide activity' : 'Show activity'}
+                </button>
+              </div>
             </div>
-            <div className="mt-3 grid gap-2">
-              {auditLoading ? (
-                <p className="text-sm text-gray-600">Loading recent updates…</p>
-              ) : auditError ? (
-                <p className="text-sm text-red-600">{auditError}</p>
-              ) : auditEntries.length === 0 ? (
-                <p className="text-sm text-gray-600">No recent activity for this view.</p>
-              ) : (
-                <ul className="grid gap-2">
-                  {auditEntries.slice(0, 25).map((log) => (
-                    <li
-                      key={log.id}
-                      className="rounded-lg border border-gray-200 bg-white p-3 text-sm shadow-sm"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <p className="font-medium text-gray-900">{log.description}</p>
-                        <span className="text-xs text-gray-500">{log.timestamp}</span>
-                      </div>
-                      <p className="text-xs text-gray-500">By {log.actor}</p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+            {auditExpanded ? (
+              <div className="mt-3 grid gap-2">
+                {auditLoading ? (
+                  <p className="text-sm text-gray-600">Loading recent updates…</p>
+                ) : auditError ? (
+                  <p className="text-sm text-red-600">{auditError}</p>
+                ) : auditEntries.length === 0 ? (
+                  <p className="text-sm text-gray-600">No recent activity for this view.</p>
+                ) : (
+                  <ul className="grid gap-2">
+                    {auditEntries.slice(0, 25).map((log) => (
+                      <li
+                        key={log.id}
+                        className="rounded-lg border border-gray-200 bg-white p-3 text-sm shadow-sm"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="font-medium text-gray-900">{log.description}</p>
+                          <span className="text-xs text-gray-500">{log.timestamp}</span>
+                        </div>
+                        <p className="text-xs text-gray-500">By {log.actor}</p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : (
+              <p className="mt-3 text-sm text-gray-600">Activity log hidden. Select “Show activity” to view recent updates.</p>
+            )}
           </section>
           {crmStage === 'outreach' &&
             renderTable(filteredOutreach, {

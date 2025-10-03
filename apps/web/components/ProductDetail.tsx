@@ -1,6 +1,11 @@
 "use client";
 
-import { Product, DeliverableType } from "@/lib/products";
+import {
+  Product,
+  DeliverableType,
+  getProductEventRangeLabel,
+  formatProductOnsiteDuration,
+} from "@/lib/products";
 import type { Venue } from "@/lib/venues";
 import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
@@ -195,6 +200,14 @@ export default function ProductDetail({
             : undefined,
       }),
     [product, basePrice]
+  );
+  const eventRangeLabel = useMemo(
+    () => getProductEventRangeLabel(product),
+    [product]
+  );
+  const onsiteSummary = useMemo(
+    () => formatProductOnsiteDuration(product),
+    [product]
   );
 
   const exampleVideos = useMemo<NormalizedVideo[]>(() => {
@@ -540,13 +553,14 @@ export default function ProductDetail({
               rangeNote={listingPriceDetails?.rangeNote}
             />
           </div>
-          {product.category === "exhibition-videography" && product.eventDate && (
-            <p className="text-sm text-gray-700">
-              Event Date: {new Date(product.eventDate).toLocaleDateString()}
-            </p>
+          {product.category === "exhibition-videography" && eventRangeLabel && (
+            <p className="text-sm text-gray-700">Event dates: {eventRangeLabel}</p>
           )}
           {product.category === "exhibition-videography" && venueName && (
             <p className="text-sm text-gray-700">Venue: {venueName}</p>
+          )}
+          {onsiteSummary && (
+            <p className="text-sm text-gray-700">On-site duration: {onsiteSummary}</p>
           )}
           {product.variations && product.variations.length > 0 && (
             <div className="grid gap-2">
@@ -688,39 +702,6 @@ export default function ProductDetail({
                 )}
               </ProductFeatureCard>
             )}
-          </div>
-        </section>
-      )}
-
-      {exampleVideos.length > 0 && (
-        <section>
-          <h2 className="text-xl font-semibold mb-2">Example Videos</h2>
-          <div className="grid gap-6 md:grid-cols-2">
-            {exampleVideos.map((video, index) => {
-              const label = video.title || `Example video ${index + 1}`;
-              return (
-                <div
-                  key={`${video.url}-${index}`}
-                  className="space-y-3 rounded-lg border bg-white p-3 shadow-sm"
-                >
-                  <div className="relative aspect-video w-full overflow-hidden rounded-md bg-black">
-                    <VideoPlayer video={video} label={label} />
-                  </div>
-                  <div className="space-y-1">
-                    <p className="font-medium text-gray-900">{label}</p>
-                    <a
-                      href={video.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-sm font-medium text-orange hover:text-orange/80"
-                    >
-                      <FiExternalLink className="h-4 w-4" aria-hidden />
-                      Watch in new tab
-                    </a>
-                  </div>
-                </div>
-              );
-            })}
           </div>
         </section>
       )}

@@ -17,6 +17,7 @@ import {
 } from "firebase/firestore";
 import Papa from "papaparse";
 import type { Product } from "@/lib/products";
+import { getProductEventRangeLabel, formatProductOnsiteDuration } from "@/lib/products";
 import type { Category } from "@/lib/categories";
 
 export default function AdminProductsPage() {
@@ -196,11 +197,14 @@ export default function AdminProductsPage() {
         <p>No products found.</p>
       ) : (
         <div className="grid gap-3">
-          {filtered.map((p) => (
-            <div
-              key={p.id}
-              className="card p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4"
-            >
+          {filtered.map((p) => {
+            const eventLabel = getProductEventRangeLabel(p);
+            const onsiteLabel = formatProductOnsiteDuration(p);
+            return (
+              <div
+                key={p.id}
+                className="card p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4"
+              >
               <div className="flex items-center gap-4">
                 {p.imageUrl && (
                   <Image
@@ -226,10 +230,11 @@ export default function AdminProductsPage() {
                   {p.venue && (
                     <p className="text-xs text-gray-600">{p.venue}</p>
                   )}
-                  {p.eventDate && (
-                    <p className="text-xs text-gray-600">
-                      {new Date(p.eventDate).toLocaleDateString()}
-                    </p>
+                  {eventLabel && (
+                    <p className="text-xs text-gray-600">{eventLabel}</p>
+                  )}
+                  {onsiteLabel && (
+                    <p className="text-xs text-gray-500">{onsiteLabel}</p>
                   )}
                 </div>
               </div>
@@ -257,7 +262,8 @@ export default function AdminProductsPage() {
                 </button>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

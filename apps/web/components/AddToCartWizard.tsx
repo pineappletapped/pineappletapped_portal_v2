@@ -1,13 +1,24 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Product, ProductModifierSelection } from "@/lib/products";
+import {
+  Product,
+  ProductModifierSelection,
+  getProductEventWindow,
+  resolveProductOnsiteDays,
+  formatProductOnsiteDuration,
+  getProductEventRangeLabel,
+  getProductEventMonthKeys,
+  resolveProductOnsiteTiming,
+  type ProductOnsiteTiming,
+} from "@/lib/products";
 import { useCart } from "@/lib/cart";
 import { db, functions } from "@/lib/firebase";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import ProductDatePicker, {
   type ProductAvailabilityScope,
+  type ProductAvailabilityStatus,
 } from "./ProductDatePicker";
 import {
   getPriceForTier,
@@ -331,6 +342,106 @@ const slotDateFormatter = new Intl.DateTimeFormat("en-GB", {
   timeStyle: "short",
 });
 
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+
+interface WizardTimeSlot {
+  id: string;
+  startMinutes: number;
+  endMinutes: number;
+  label: string;
+}
+
+const formatTimeOfDay = (minutes: number): string => {
+  const hours = Math.floor(minutes / 60) % 24;
+  const mins = Math.round(minutes % 60);
+  return `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}`;
+};
+
+const buildTimeSlots = (
+  timing: ProductOnsiteTiming | null
+): WizardTimeSlot[] => {
+  if (!timing) {
+    return [];
+  }
+  const slots: WizardTimeSlot[] = [];
+  const span = Math.max(0, timing.totalMinutes);
+  if (span <= 0) {
+    return slots;
+  }
+  const start = timing.windowStartMinutes;
+  const end = Math.max(start + span, timing.windowEndMinutes);
+  const windowEnd = timing.windowEndMinutes <= start ? end : timing.windowEndMinutes;
+  const step = span <= 60 ? 15 : span <= 180 ? 30 : 60;
+  for (
+    let cursor = start;
+    cursor + span <= windowEnd + 0.01;
+    cursor += Math.max(step, 15)
+  ) {
+    const slotEnd = cursor + span;
+    if (slotEnd > windowEnd + 0.01) {
+      break;
+    }
+    const label = `${formatTimeOfDay(cursor)} – ${formatTimeOfDay(slotEnd)}`;
+    slots.push({
+      id: `${cursor}-${slotEnd}`,
+      startMinutes: cursor,
+      endMinutes: slotEnd,
+      label,
+    });
+  }
+  if (slots.length === 0) {
+    const slotEnd = start + span;
+    const label = `${formatTimeOfDay(start)} – ${formatTimeOfDay(slotEnd)}`;
+    slots.push({
+      id: `${start}-${slotEnd}`,
+      startMinutes: start,
+      endMinutes: slotEnd,
+      label,
+    });
+  }
+  return slots;
+};
+
+const toDateKeyFromDate = (date: Date): string => {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const parseDateKey = (value: string): Date | null => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+  const [year, month, day] = value.split("-").map((part) => Number.parseInt(part, 10));
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return null;
+  }
+  return new Date(Date.UTC(year, month - 1, day));
+};
+
+const expandDateKeyRange = (key: string, span: number): string[] => {
+  const start = parseDateKey(key);
+  if (!start) {
+    return [];
+  }
+  const days = Math.max(1, Math.floor(span));
+  const keys: string[] = [];
+  for (let offset = 0; offset < days; offset += 1) {
+    const cursor = new Date(start.getTime() + offset * DAY_IN_MS);
+    keys.push(toDateKeyFromDate(cursor));
+  }
+  return keys;
+};
+
+const formatDateForSpeech = (date: Date): string =>
+  date.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
+
 const formatCampaignSlotWindow = (slot: CampaignSlotRecord): string => {
   const parse = (value: string | null): Date | null => {
     if (!value) {
@@ -364,6 +475,20 @@ const normaliseSlotDate = (value: string | null): string | null => {
   return parsed.toISOString();
 };
 
+const normaliseDateKey = (value: string | null | undefined): string | null => {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  const year = parsed.getUTCFullYear();
+  const month = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
 type FunctionsError = {
   code: string;
   message: string;
@@ -388,11 +513,247 @@ export default function AddToCartWizard({
   }
   const { items, add } = useCart();
   const [groups, setGroups] = useState<ModifierGroup[]>([]);
+  const eventWindow = useMemo(() => getProductEventWindow(product), [product]);
+  const onsiteDaysConfigured = useMemo(
+    () => resolveProductOnsiteDays(product) ?? 1,
+    [product]
+  );
+  const onsiteBlockingDays = useMemo(
+    () => Math.max(1, Math.ceil(onsiteDaysConfigured)),
+    [onsiteDaysConfigured]
+  );
+  const onsiteTiming = useMemo(
+    () => resolveProductOnsiteTiming(product),
+    [product]
+  );
+  const timeSlotRequired = useMemo(
+    () => onsiteTiming !== null && onsiteBlockingDays <= 1,
+    [onsiteTiming, onsiteBlockingDays]
+  );
+  const onsiteSummary = useMemo(
+    () => formatProductOnsiteDuration(product),
+    [product]
+  );
+  const eventRangeLabel = useMemo(
+    () => getProductEventRangeLabel(product),
+    [product]
+  );
+  const eventMonths = useMemo(
+    () => getProductEventMonthKeys(product),
+    [product]
+  );
+  const exhibitionSchedule = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return {
+        showOptions: [] as Array<{ key: string; label: string }>,
+        setupOption: null as { key: string; label: string; helper?: string } | null,
+      };
+    }
+    const { start, end, setup } = eventWindow;
+    if (!start) {
+      return {
+        showOptions: [] as Array<{ key: string; label: string }>,
+        setupOption: null as { key: string; label: string; helper?: string } | null,
+      };
+    }
+    const resolvedEnd = end ?? start;
+    const showOptions: Array<{ key: string; label: string }> = [];
+    let setupOption: { key: string; label: string; helper?: string } | null = null;
+    const fallbackSetup = new Date(start.getTime() - DAY_IN_MS);
+    const setupCandidate = setup ?? fallbackSetup;
+    if (setupCandidate && !Number.isNaN(setupCandidate.getTime())) {
+      const key = toDateKeyFromDate(setupCandidate);
+      setupOption = {
+        key,
+        label: setupCandidate.toLocaleDateString(undefined, {
+          weekday: "long",
+          month: "long",
+          day: "numeric",
+        }),
+        helper: "Arrive a day early to capture stand build and pre-show content.",
+      };
+    }
+    const startCursor = parseDateKey(toDateKeyFromDate(start));
+    const endCursor = parseDateKey(toDateKeyFromDate(resolvedEnd));
+    if (!startCursor || !endCursor) {
+      return { showOptions, setupOption };
+    }
+    let dayIndex = 0;
+    for (
+      let cursor = startCursor;
+      cursor.getTime() <= endCursor.getTime();
+      cursor = new Date(cursor.getTime() + DAY_IN_MS)
+    ) {
+      dayIndex += 1;
+      const key = toDateKeyFromDate(cursor);
+      showOptions.push({
+        key,
+        label: `Day ${dayIndex}: ${cursor.toLocaleDateString(undefined, {
+          weekday: "long",
+          month: "long",
+          day: "numeric",
+        })}`,
+      });
+    }
+    return { showOptions, setupOption };
+  }, [eventWindow, product.category]);
+  const exhibitionOptions = exhibitionSchedule.showOptions;
+  const exhibitionSetupOption = exhibitionSchedule.setupOption;
+  const defaultExhibitionDate = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return null;
+    }
+    return exhibitionOptions[0]?.key ?? null;
+  }, [exhibitionOptions, product.category]);
+  const exhibitionDayLabels = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return {} as Record<string, string>;
+    }
+    return exhibitionOptions.reduce<Record<string, string>>((acc, option) => {
+      const key = normaliseDateKey(option.key);
+      if (!key) {
+        return acc;
+      }
+      const prefix = option.label.includes(":")
+        ? option.label.split(":")[0]?.trim()
+        : option.label.trim();
+      acc[key] = prefix && prefix.length > 0 ? prefix : option.label;
+      return acc;
+    }, {});
+  }, [exhibitionOptions, product.category]);
+  const exhibitionHighlightDates = useMemo(() => {
+    if (!exhibitionSetupOption) {
+      return [] as string[];
+    }
+    return [exhibitionSetupOption.key];
+  }, [exhibitionSetupOption]);
+  const exhibitionCalendarMonth = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return null;
+    }
+    const first = exhibitionOptions[0]?.key;
+    if (!first) {
+      return null;
+    }
+    const normalised = normaliseDateKey(first);
+    return normalised ? normalised.slice(0, 7) : null;
+  }, [exhibitionOptions, product.category]);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [step, setStep] = useState(0);
-  const [date, setDate] = useState<string | null>(
-    product.category === "exhibition-videography" ? product.eventDate ?? null : null
+  const [date, setDate] = useState<string | null>(() =>
+    product.category === "exhibition-videography" ? defaultExhibitionDate : null
   );
+  const [includeSetupDay, setIncludeSetupDay] = useState(false);
+  useEffect(() => {
+    if (product.category !== "exhibition-videography") {
+      return;
+    }
+    if (exhibitionOptions.length === 0) {
+      setDate(null);
+      return;
+    }
+    setDate((current) => {
+      if (!current) {
+        return defaultExhibitionDate;
+      }
+      return exhibitionOptions.some((option) => option.key === current)
+        ? current
+        : defaultExhibitionDate;
+    });
+  }, [product.category, exhibitionOptions, defaultExhibitionDate]);
+  useEffect(() => {
+    if (!exhibitionSetupOption) {
+      setIncludeSetupDay(false);
+    }
+  }, [exhibitionSetupOption]);
+  const exhibitionAllowedDates = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return [] as string[];
+    }
+    return exhibitionOptions.map((option) => option.key);
+  }, [exhibitionOptions, product.category]);
+  const calendarInitialMonth = useMemo(() => {
+    const selectedMonth = normaliseDateKey(date)?.slice(0, 7) ?? null;
+    if (selectedMonth) {
+      return selectedMonth;
+    }
+    if (
+      product.category === "exhibition-videography" &&
+      exhibitionCalendarMonth
+    ) {
+      return exhibitionCalendarMonth;
+    }
+    return eventMonths[0] ?? null;
+  }, [
+    date,
+    eventMonths,
+    exhibitionCalendarMonth,
+    product.category,
+  ]);
+  const bookingSpan = useMemo(() => {
+    if (
+      product.category === "exhibition-videography" &&
+      includeSetupDay &&
+      exhibitionSetupOption
+    ) {
+      return onsiteBlockingDays + 1;
+    }
+    return onsiteBlockingDays;
+  }, [
+    exhibitionSetupOption,
+    includeSetupDay,
+    onsiteBlockingDays,
+    product.category,
+  ]);
+  const reservationStartKey = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return date;
+    }
+    if (includeSetupDay && exhibitionSetupOption) {
+      return exhibitionSetupOption.key;
+    }
+    return date;
+  }, [date, exhibitionSetupOption, includeSetupDay, product.category]);
+  const slotDateKey = useMemo(() => {
+    if (product.category === "exhibition-videography") {
+      return normaliseDateKey(date);
+    }
+    return normaliseDateKey(reservationStartKey);
+  }, [date, product.category, reservationStartKey]);
+  const timeSlots = useMemo(
+    () => buildTimeSlots(timeSlotRequired ? onsiteTiming : null),
+    [onsiteTiming, timeSlotRequired]
+  );
+  const selectedDateRange = useMemo(() => {
+    if (!reservationStartKey) {
+      return null;
+    }
+    const base =
+      parseDateKey(reservationStartKey) ??
+      new Date(`${reservationStartKey}T00:00:00`);
+    if (Number.isNaN(base.getTime())) {
+      return null;
+    }
+    const end = new Date(base.getTime() + (bookingSpan - 1) * DAY_IN_MS);
+    return { start: base, end };
+  }, [bookingSpan, reservationStartKey]);
+  const selectedTimeSlotRange = useMemo(() => {
+    if (!selectedTimeSlot || !slotDateKey) {
+      return null;
+    }
+    const base =
+      parseDateKey(slotDateKey) ?? new Date(`${slotDateKey}T00:00:00.000Z`);
+    if (Number.isNaN(base.getTime())) {
+      return null;
+    }
+    const start = new Date(
+      base.getTime() + selectedTimeSlot.startMinutes * 60 * 1000
+    );
+    const end = new Date(
+      base.getTime() + selectedTimeSlot.endMinutes * 60 * 1000
+    );
+    return { start, end };
+  }, [selectedTimeSlot, slotDateKey]);
   const [error, setError] = useState<string | null>(null);
   const [conflicts, setConflicts] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -407,6 +768,11 @@ export default function AddToCartWizard({
     useState<CampaignSlotStatus>("idle");
   const [campaignSlotError, setCampaignSlotError] = useState<string | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const [selectedTimeSlot, setSelectedTimeSlot] =
+    useState<WizardTimeSlot | null>(null);
+  const [availabilityOverrides, setAvailabilityOverrides] = useState<
+    Record<string, ProductAvailabilityStatus>
+  >({});
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const territoriesRef = useRef<TerritoryRecord[] | null>(null);
@@ -469,18 +835,71 @@ export default function AddToCartWizard({
     }
     return { type: "hq", organisationId: null } satisfies ProductAvailabilityScope;
   }, [coverage, coverageStatus]);
+  const announceSelection = useCallback(
+    (startKey: string | null, span: number) => {
+      if (!startKey) {
+        return;
+      }
+      const base = parseDateKey(startKey) ?? new Date(`${startKey}T00:00:00`);
+      if (Number.isNaN(base.getTime())) {
+        setLiveMessage(`Selected ${startKey} for production`);
+        return;
+      }
+      if (span > 1) {
+        const end = new Date(base.getTime() + (span - 1) * DAY_IN_MS);
+        setLiveMessage(
+          `Selected ${formatDateForSpeech(base)} – crew reserved until ${formatDateForSpeech(end)}.`
+        );
+      } else {
+        setLiveMessage(`Selected ${formatDateForSpeech(base)} for production`);
+      }
+    },
+    []
+  );
   const handleDateSelect = (value: string) => {
     setDate(value);
     setConflicts([]);
     setError(null);
-    const spokenDate = new Date(`${value}T00:00:00`).toLocaleDateString(undefined, {
-      weekday: "long",
-      month: "long",
-      day: "numeric",
-      year: "numeric",
-    });
-    setLiveMessage(`Selected ${spokenDate} for production`);
+    setSelectedTimeSlot(null);
+    const startKey =
+      product.category === "exhibition-videography" &&
+      includeSetupDay &&
+      exhibitionSetupOption
+        ? exhibitionSetupOption.key
+        : value;
+    const span =
+      product.category === "exhibition-videography" &&
+      includeSetupDay &&
+      exhibitionSetupOption
+        ? onsiteBlockingDays + 1
+        : onsiteBlockingDays;
+    announceSelection(startKey, span);
   };
+  useEffect(() => {
+    if (!date) {
+      return;
+    }
+    announceSelection(reservationStartKey, bookingSpan);
+  }, [announceSelection, bookingSpan, date, reservationStartKey]);
+
+  const handleTimeSlotSelect = useCallback(
+    (slot: WizardTimeSlot) => {
+      setSelectedTimeSlot(slot);
+      setError(null);
+      setLiveMessage(`Selected ${slot.label} filming window`);
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!timeSlotRequired) {
+      setSelectedTimeSlot(null);
+    }
+  }, [timeSlotRequired]);
+
+  useEffect(() => {
+    setSelectedTimeSlot(null);
+  }, [slotDateKey]);
 
   useEffect(() => {
     async function load() {
@@ -573,6 +992,7 @@ export default function AddToCartWizard({
     setCampaignSlotStatus("idle");
     setCampaignSlotError(null);
     setSelectedSlotId(null);
+    setAvailabilityOverrides({});
   }, [locationInput, postcodeInput]);
 
   const loadTerritories = useCallback(async (): Promise<TerritoryRecord[]> => {
@@ -1005,7 +1425,16 @@ export default function AddToCartWizard({
       setLiveMessage("Filming location required before booking");
       return;
     }
-    let reservationDate = date;
+    const showDateKey = normaliseDateKey(date);
+    let startDateKey =
+      product.category === "exhibition-videography"
+        ? normaliseDateKey(reservationStartKey)
+        : showDateKey;
+    if (!startDateKey) {
+      startDateKey = showDateKey;
+    }
+    let requestDateIso: string | null = null;
+    let timeWindow: { start: string; end: string } | null = null;
     if (isCampaignProduct) {
       if (!slotSelection) {
         setError("Select an available slot to continue.");
@@ -1022,17 +1451,58 @@ export default function AddToCartWizard({
         setLiveMessage("Selected slot unavailable");
         return;
       }
-      reservationDate =
+      requestDateIso =
         normaliseSlotDate(slotSelection.startAt) ??
         normaliseSlotDate(slotSelection.endAt) ??
-        reservationDate;
-      if (!reservationDate) {
-        reservationDate = new Date().toISOString();
+        null;
+      startDateKey =
+        normaliseDateKey(slotSelection.startAt) ??
+        normaliseDateKey(slotSelection.endAt) ??
+        startDateKey;
+      if (!requestDateIso) {
+        requestDateIso = new Date().toISOString();
       }
-    } else if (!date) {
-      setError("Select a production date to continue.");
-      setLiveMessage("Production date required before adding to cart");
-      return;
+      if (!startDateKey) {
+        startDateKey = showDateKey;
+      }
+    } else {
+      if (!date || !startDateKey) {
+        setError("Select a production date to continue.");
+        setLiveMessage("Production date required before adding to cart");
+        return;
+      }
+      if (timeSlotRequired) {
+        if (!selectedTimeSlotRange) {
+          setError("Select a production time to continue.");
+          setLiveMessage("Production time required before adding to cart");
+          return;
+        }
+        const startIso = selectedTimeSlotRange.start.toISOString();
+        const endIso = selectedTimeSlotRange.end.toISOString();
+        timeWindow = { start: startIso, end: endIso };
+      }
+      requestDateIso = `${startDateKey}T00:00:00.000Z`;
+    }
+    const affectedCalendarKeys =
+      startDateKey ? expandDateKeyRange(startDateKey, bookingSpan) : [];
+    const updateCalendarStatus = (statusValue: ProductAvailabilityStatus) => {
+      if (affectedCalendarKeys.length === 0) {
+        return;
+      }
+      setAvailabilityOverrides((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        affectedCalendarKeys.forEach((key) => {
+          if (next[key] !== statusValue) {
+            next[key] = statusValue;
+            changed = true;
+          }
+        });
+        return changed ? next : prev;
+      });
+    };
+    if (!requestDateIso) {
+      requestDateIso = new Date().toISOString();
     }
     setSubmitting(true);
     setLiveMessage("Checking equipment availability");
@@ -1040,7 +1510,17 @@ export default function AddToCartWizard({
       const reserve = httpsCallable(functions, "reserveKit");
       const res: any = await reserve({
         productId: product.id,
-        date: reservationDate,
+        date: requestDateIso,
+        spanOverride: bookingSpan,
+        timeWindow,
+        coverage: coverage
+          ? {
+              type: coverage.type,
+              franchiseId: coverage.franchiseId,
+              territoryId: coverage.territoryId,
+              label: coverage.label,
+            }
+          : null,
       });
       const {
         conflicts = [],
@@ -1048,6 +1528,7 @@ export default function AddToCartWizard({
         rentalTotal = 0,
         status,
         missingStandards = [],
+        provider: providerInfo = null,
       } = res.data || {};
       const reservationStatus = status === "pending" ? "pending" : "confirmed";
       if (reservationStatus === "confirmed" && conflicts.length > 0) {
@@ -1057,6 +1538,7 @@ export default function AddToCartWizard({
         setConflicts(conflictNames);
         setError("Some equipment is already reserved on the selected date.");
         setLiveMessage("Equipment conflicts found for the selected date");
+        updateCalendarStatus("unavailable");
         setSubmitting(false);
         return;
       }
@@ -1074,6 +1556,31 @@ export default function AddToCartWizard({
             `Missing required equipment standards: ${missingStandards.join(", ")}`
           );
         }
+        if (providerInfo && typeof providerInfo === "object") {
+          const providerLevel = String((providerInfo as any).level ?? "").toLowerCase();
+          const rawLabel = (providerInfo as any).label;
+          const providerLabel =
+            typeof rawLabel === "string" && rawLabel.trim().length > 0
+              ? rawLabel.trim()
+              : null;
+          if (providerLevel === "franchise_team") {
+            const message =
+              providerLabel
+                ? `${providerLabel} will confirm their availability and kit for this date.`
+                : "Local franchise freelancers and crew will confirm availability for this date.";
+            if (!warnings.includes(message)) {
+              warnings.push(message);
+            }
+          } else if (providerLevel === "hq") {
+            const message =
+              providerLabel
+                ? `${providerLabel} will confirm availability and secure the required kit.`
+                : "HQ operations will confirm availability and secure the required kit.";
+            if (!warnings.includes(message)) {
+              warnings.push(message);
+            }
+          }
+        }
         if (warnings.length === 0) {
           warnings.push("Kit availability will be confirmed manually by the operations team.");
         }
@@ -1085,25 +1592,57 @@ export default function AddToCartWizard({
           window.alert(message);
         }
       }
+      updateCalendarStatus(
+        reservationStatus === "pending" ? "pending" : "available"
+      );
       const locationLabel = locationInput.trim();
       const postalCodeLabel =
         coverage.postalCode ||
         (postcodeInput.trim().length > 0
           ? postcodeInput.trim().toUpperCase()
           : null);
+      const exhibitionSelection =
+        product.category === "exhibition-videography"
+          ? {
+              showDate: showDateKey,
+              setupIncluded: includeSetupDay && Boolean(exhibitionSetupOption),
+              setupDate:
+                includeSetupDay && exhibitionSetupOption
+                  ? exhibitionSetupOption.key
+                  : null,
+            }
+          : null;
       add({
         id: product.id,
         name: product.name,
         price,
-        date: reservationDate || date || new Date().toISOString(),
+        date:
+          showDateKey ||
+          startDateKey ||
+          requestDateIso ||
+          date ||
+          new Date().toISOString(),
         variation: variationId,
         modifiers: selections,
         kitItems,
         rentalTotal,
         kitStatus: reservationStatus,
         kitWarnings: warnings,
+        exhibition: exhibitionSelection,
         location: locationLabel.length > 0 ? locationLabel : null,
         postalCode: postalCodeLabel,
+        timeSlot:
+          timeSlotRequired && selectedTimeSlotRange
+            ? {
+                start: selectedTimeSlotRange.start.toISOString(),
+                end: selectedTimeSlotRange.end.toISOString(),
+                label: selectedTimeSlot?.label ?? null,
+                totalMinutes: onsiteTiming?.totalMinutes ?? null,
+                setupMinutes: onsiteTiming?.setupMinutes ?? null,
+                shootMinutes: onsiteTiming?.shootMinutes ?? null,
+                breakdownMinutes: onsiteTiming?.breakdownMinutes ?? null,
+              }
+            : null,
         coverage: {
           type: coverage.type,
           franchiseId: coverage.franchiseId,
@@ -1132,6 +1671,7 @@ export default function AddToCartWizard({
       setSubmitting(false);
       onClose();
     } catch (err) {
+      updateCalendarStatus("available");
       console.error(err);
       setSubmitting(false);
       if (isFunctionsError(err) && err.code === "failed-precondition") {
@@ -1398,25 +1938,149 @@ export default function AddToCartWizard({
                   </div>
                 )}
               </div>
-            ) : product.category !== "exhibition-videography" ? (
-              coverageStatus === "success" && coverage ? (
+            ) : product.category === "exhibition-videography" && exhibitionOptions.length === 0 ? (
+              <p className="text-sm text-gray-500">Show dates coming soon.</p>
+            ) : coverageStatus === "success" && coverage ? (
+              <div className="space-y-3">
+                {product.category === "exhibition-videography" && eventRangeLabel && (
+                  <p className="text-sm text-gray-600">Show runs {eventRangeLabel}.</p>
+                )}
                 <ProductDatePicker
                   productId={product.id}
                   selected={date}
                   onSelect={handleDateSelect}
                   scope={availabilityScope}
+                  overrides={availabilityOverrides}
+                  allowedDates={
+                    product.category === "exhibition-videography"
+                      ? exhibitionAllowedDates
+                      : undefined
+                  }
+                  allowedDateLabels={
+                    product.category === "exhibition-videography" &&
+                    Object.keys(exhibitionDayLabels).length > 0
+                      ? exhibitionDayLabels
+                      : undefined
+                  }
+                  highlightedDates={
+                    product.category === "exhibition-videography" &&
+                    exhibitionHighlightDates.length > 0
+                      ? exhibitionHighlightDates
+                      : undefined
+                  }
+                  initialMonth={calendarInitialMonth}
                 />
-              ) : (
-                <p className="text-sm text-gray-500">
-                  Confirm the filming address and postcode first to check availability.
-                </p>
-              )
-            ) : product.eventDate ? (
-              <p className="text-sm">
-                {new Date(product.eventDate).toLocaleDateString()}
-              </p>
+                {timeSlotRequired && (
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium">Select a filming window</p>
+                    {slotDateKey ? (
+                      timeSlots.length > 0 ? (
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {timeSlots.map((slot) => {
+                            const checked = selectedTimeSlot?.id === slot.id;
+                            return (
+                              <label
+                                key={slot.id}
+                                className={`flex items-center justify-between gap-3 rounded-md border p-3 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
+                                  checked
+                                    ? "border-orange-400 bg-orange-50"
+                                    : "border-gray-200 bg-white hover:border-orange/60"
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <input
+                                    type="radio"
+                                    name="onsite-slot"
+                                    className="mt-0.5"
+                                    checked={checked}
+                                    onChange={() => handleTimeSlotSelect(slot)}
+                                  />
+                                  <div className="flex flex-col">
+                                    <span className="font-medium">{slot.label}</span>
+                                  </div>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-500">
+                          This product doesn’t have any bookable windows yet.
+                        </p>
+                      )
+                    ) : (
+                      <p className="text-xs text-gray-500">
+                        Choose a production date to see available times.
+                      </p>
+                    )}
+                    <p className="text-xs text-gray-500">
+                      Times shown in UK local time.
+                    </p>
+                  </div>
+                )}
+                {product.category === "exhibition-videography" && exhibitionSetupOption && (
+                  <label
+                    className={`flex items-start gap-3 rounded-md border px-3 py-2 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
+                      includeSetupDay
+                        ? "border-orange-400 bg-orange-50"
+                        : "border-gray-200 bg-white"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-1"
+                      checked={includeSetupDay}
+                      onChange={() => {
+                        setConflicts([]);
+                        setError(null);
+                        setIncludeSetupDay((prev) => {
+                          const next = !prev;
+                          if (!next) {
+                            announceSelection(date, onsiteBlockingDays);
+                          } else {
+                            announceSelection(
+                              exhibitionSetupOption.key,
+                              onsiteBlockingDays + 1
+                            );
+                          }
+                          return next;
+                        });
+                      }}
+                    />
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold">Include setup day coverage</p>
+                      <p className="text-xs text-gray-500">
+                        We’ll arrive on {exhibitionSetupOption.label} to capture stand build and
+                        pre-show content. The setup day is outlined on the calendar above.
+                      </p>
+                    </div>
+                  </label>
+                )}
+              </div>
             ) : (
-              <p className="text-sm">To be confirmed</p>
+              <p className="text-sm text-gray-500">
+                Confirm the filming address and postcode first to check availability.
+              </p>
+            )}
+            {(onsiteSummary || (selectedDateRange && bookingSpan > 1)) && (
+              <div className="space-y-1 text-xs text-gray-600">
+                {onsiteSummary && <p>{onsiteSummary}</p>}
+                {timeSlotRequired && selectedTimeSlot && (
+                  <p>Preferred time: {selectedTimeSlot.label}</p>
+                )}
+                {selectedDateRange && bookingSpan > 1 && (
+                  <p>
+                    Crew reserved {" "}
+                    {selectedDateRange.start.toLocaleDateString()} – {" "}
+                    {selectedDateRange.end.toLocaleDateString()}
+                  </p>
+                )}
+                {product.category === "exhibition-videography" &&
+                  includeSetupDay &&
+                  exhibitionSetupOption && (
+                    <p>Setup day coverage included.</p>
+                  )}
+              </div>
             )}
           </div>
         )}
@@ -1451,7 +2115,9 @@ export default function AddToCartWizard({
           {dateStep ? (
             <button
               className="btn btn-sm"
-              disabled={!date || submitting}
+              disabled={
+                !date || submitting || (timeSlotRequired && !selectedTimeSlotRange)
+              }
               onClick={handleFinish}
             >
               {submitting ? "Adding…" : "Add to Cart"}

@@ -3,7 +3,11 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { Product } from "@/lib/products";
+import {
+  Product,
+  getProductEventRangeLabel,
+  formatProductOnsiteDuration,
+} from "@/lib/products";
 import {
   FiCalendar,
   FiMapPin,
@@ -40,13 +44,23 @@ export default function ProductCard({ product }: { product: Product }) {
       }),
     [activePrice, product]
   );
+  const eventRangeLabel = useMemo(
+    () => getProductEventRangeLabel(product),
+    [product]
+  );
+  const onsiteSummary = useMemo(
+    () => formatProductOnsiteDuration(product),
+    [product]
+  );
   const priceHeadline = priceDetails?.headline ?? "Pricing on request";
   const basePrice = activeVariation?.price ?? product.price;
   const img =
     product.imageUrl || "https://placehold.co/600x400?text=No+Image";
   const { visibleDeliverables, remainingDeliverableCount } =
     getDeliverableSummary(product);
-  const showSummary = Boolean(product.deliveryTime || visibleDeliverables.length > 0);
+  const showSummary = Boolean(
+    product.deliveryTime || visibleDeliverables.length > 0 || onsiteSummary
+  );
   const variationSelectId = `product-${product.id}-variation`;
 
   const handleQuickAdd = () => {
@@ -90,6 +104,12 @@ export default function ProductCard({ product }: { product: Product }) {
                 {product.deliveryTime}
               </span>
             )}
+            {onsiteSummary && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 font-medium">
+                <FiCalendar className="h-3 w-3" aria-hidden />
+                {onsiteSummary}
+              </span>
+            )}
             {visibleDeliverables.map((deliverable) => {
               const Icon =
                 (deliverable.type && deliverableIconMap[deliverable.type]) || FiCheckCircle;
@@ -112,10 +132,10 @@ export default function ProductCard({ product }: { product: Product }) {
         )}
         {product.category === "exhibition-videography" && (
           <>
-            {product.eventDate && (
+            {eventRangeLabel && (
               <div className="flex items-center gap-1 text-xs text-gray-600">
                 <FiCalendar className="w-3 h-3" />
-                {new Date(product.eventDate).toLocaleDateString()}
+                {eventRangeLabel}
               </div>
             )}
             {product.venue && (

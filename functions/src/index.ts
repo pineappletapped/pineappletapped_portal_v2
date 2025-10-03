@@ -4472,13 +4472,72 @@ export const reserveKit = functions.https.onCall(async (data) => {
   if (!productId || !date) {
     throw new functions.https.HttpsError('invalid-argument', 'productId and date required');
   }
-  const start = new Date(date);
-  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  const baseStart = new Date(date);
+  if (Number.isNaN(baseStart.getTime())) {
+    throw new functions.https.HttpsError("invalid-argument", "Invalid reservation date");
+  }
+  let start = baseStart;
+  let end: Date | null = null;
+  const rawWindow = data?.timeWindow;
+  if (rawWindow && typeof rawWindow === 'object') {
+    const windowStartRaw = (rawWindow as any).start;
+    const windowEndRaw = (rawWindow as any).end;
+    if (typeof windowStartRaw === 'string' && typeof windowEndRaw === 'string') {
+      const windowStart = new Date(windowStartRaw);
+      const windowEnd = new Date(windowEndRaw);
+      if (
+        !Number.isNaN(windowStart.getTime()) &&
+        !Number.isNaN(windowEnd.getTime()) &&
+        windowEnd.getTime() > windowStart.getTime()
+      ) {
+        start = windowStart;
+        end = windowEnd;
+      }
+    }
+  }
   const prodSnap = await db.collection('products').doc(productId).get();
   if (!prodSnap.exists) {
     throw new functions.https.HttpsError('not-found', 'product not found');
   }
   const productData = prodSnap.data() as any;
+  const rawOnsiteDays =
+    typeof productData?.onsiteDays === 'number'
+      ? productData.onsiteDays
+      : typeof productData?.onsiteDays === 'string'
+        ? Number(productData.onsiteDays)
+        : null;
+  const onsiteDaysValue =
+    typeof rawOnsiteDays === 'number' && Number.isFinite(rawOnsiteDays) && rawOnsiteDays > 0
+      ? rawOnsiteDays
+      : 1;
+  const spanOverrideRaw =
+    typeof data?.spanOverride === 'number'
+      ? data.spanOverride
+      : typeof data?.spanOverride === 'string'
+        ? Number(data.spanOverride)
+        : null;
+  const spanOverride =
+    typeof spanOverrideRaw === 'number' &&
+    Number.isFinite(spanOverrideRaw) &&
+    spanOverrideRaw > 0
+      ? Math.min(spanOverrideRaw, 14)
+      : null;
+  const onsiteDayBlocks = Math.max(
+    1,
+    Math.ceil(spanOverride !== null ? spanOverride : onsiteDaysValue),
+  );
+  if (onsiteDayBlocks > 1) {
+    if (baseStart.getTime() < start.getTime()) {
+      start = baseStart;
+    }
+    const blockEnd = new Date(baseStart.getTime() + onsiteDayBlocks * 24 * 60 * 60 * 1000);
+    if (!end || blockEnd.getTime() > end.getTime()) {
+      end = blockEnd;
+    }
+  }
+  if (!end) {
+    end = new Date(start.getTime() + onsiteDayBlocks * 24 * 60 * 60 * 1000);
+  }
   const requiredKitRaw = Array.isArray(productData?.requiredKit)
     ? productData.requiredKit
     : [];
@@ -4489,111 +4548,407 @@ export const reserveKit = functions.https.onCall(async (data) => {
     new Set<string>(
       rawStandards
         .map((value: unknown) => (typeof value === 'string' ? value.trim() : ''))
-        .filter((value: string) => value.length > 0)
-    )
+        .filter((value: string) => value.length > 0),
+    ),
   );
   const standardsToEnforce = new Set(requiredStandards);
-  const standardMatches = new Map<string, Set<string>>();
-  requiredStandards.forEach((standard) => {
-    standardMatches.set(standard, new Set());
-  });
   const required = requiredKitRaw;
   const eqIds: string[] = required.flatMap((g: any) => g.items || []);
-  const conflicts: any[] = [];
-  const kitItems: any[] = [];
-  const missingStandards: string[] = [];
-  let rentalTotal = 0;
-  let reservationStatus: 'confirmed' | 'pending' = 'confirmed';
+
+  type ReservationStatus = 'confirmed' | 'pending';
+  type ProviderLevel = 'franchise_primary' | 'franchise_team' | 'hq';
+
+  interface ConflictRecord {
+    id: string;
+    name: string;
+    reason?: string;
+  }
+
+  interface KitReservationItem {
+    id: string;
+    name: string | null;
+    category: string | null;
+    start: string;
+    end: string;
+  }
+
+  interface ReservationProvider {
+    level: ProviderLevel;
+    status: ReservationStatus;
+    label: string;
+    franchiseId: string | null;
+    territoryId: string | null;
+  }
+
+  interface ReservationResponse {
+    conflicts: ConflictRecord[];
+    kitItems: KitReservationItem[];
+    rentalTotal: number;
+    status: ReservationStatus;
+    missingStandards: string[];
+    provider: ReservationProvider;
+  }
+
+  interface ReservationAttempt {
+    key: ProviderLevel;
+    ownerType: 'company' | 'franchise' | 'user';
+    initialStatus: ReservationStatus;
+    franchiseId: string | null;
+    label: string;
+  }
+
+  interface EquipmentRecord {
+    id: string;
+    name: string;
+    category: string | null;
+    ownerType: 'company' | 'franchise' | 'user';
+    ownerId: string | null;
+    franchiseId: string | null;
+    availableFlag: boolean;
+    booked: boolean;
+    meetsStandards: string[];
+    rentalPrice: number;
+    exists: boolean;
+  }
+
+  interface CoverageInfo {
+    type: 'franchise' | 'hq';
+    franchiseId: string | null;
+    territoryId: string | null;
+    label: string | null;
+  }
+
+  const normaliseCoverage = (raw: unknown): CoverageInfo => {
+    if (!raw || typeof raw !== 'object') {
+      return { type: 'hq', franchiseId: null, territoryId: null, label: null };
+    }
+    const rawType = (raw as any).type;
+    const type: 'franchise' | 'hq' = rawType === 'franchise' ? 'franchise' : 'hq';
+    const franchiseId =
+      typeof (raw as any).franchiseId === 'string' && (raw as any).franchiseId.trim().length > 0
+        ? (raw as any).franchiseId.trim()
+        : null;
+    const territoryId =
+      typeof (raw as any).territoryId === 'string' && (raw as any).territoryId.trim().length > 0
+        ? (raw as any).territoryId.trim()
+        : null;
+    const label =
+      typeof (raw as any).label === 'string' && (raw as any).label.trim().length > 0
+        ? (raw as any).label.trim()
+        : null;
+    if (type === 'franchise' && !franchiseId) {
+      return { type: 'hq', franchiseId: null, territoryId, label };
+    }
+    return { type, franchiseId, territoryId, label };
+  };
+
+  const coverageInfo = normaliseCoverage(data?.coverage);
+
+  const buildAttempts = (coverage: CoverageInfo): ReservationAttempt[] => {
+    const attempts: ReservationAttempt[] = [];
+    if (coverage.type === 'franchise' && coverage.franchiseId) {
+      const baseLabel = coverage.label ?? 'Franchise operations';
+      attempts.push({
+        key: 'franchise_primary',
+        ownerType: 'franchise',
+        initialStatus: 'confirmed',
+        franchiseId: coverage.franchiseId,
+        label: baseLabel,
+      });
+      attempts.push({
+        key: 'franchise_team',
+        ownerType: 'user',
+        initialStatus: 'pending',
+        franchiseId: coverage.franchiseId,
+        label: `${baseLabel} freelance team`,
+      });
+      attempts.push({
+        key: 'hq',
+        ownerType: 'company',
+        initialStatus: 'pending',
+        franchiseId: null,
+        label: 'HQ operations',
+      });
+    } else {
+      attempts.push({
+        key: 'hq',
+        ownerType: 'company',
+        initialStatus: 'confirmed',
+        franchiseId: null,
+        label: coverage.label ?? 'HQ operations',
+      });
+    }
+    return attempts;
+  };
+
+  const attempts = buildAttempts(coverageInfo);
+  if (attempts.length === 0) {
+    attempts.push({
+      key: 'hq',
+      ownerType: 'company',
+      initialStatus: 'confirmed',
+      franchiseId: null,
+      label: coverageInfo.label ?? 'HQ operations',
+    });
+  }
+
+  const deriveOwnerInfo = (eq: any): {
+    ownerType: 'company' | 'franchise' | 'user';
+    ownerId: string | null;
+    franchiseId: string | null;
+  } => {
+    const rawOwnerId =
+      typeof eq.ownerId === 'string' && eq.ownerId.trim().length > 0
+        ? eq.ownerId.trim()
+        : null;
+    const rawOwnerType =
+      typeof eq.ownerType === 'string' && eq.ownerType.trim().length > 0
+        ? eq.ownerType.trim().toLowerCase()
+        : '';
+    let ownerType: 'company' | 'franchise' | 'user';
+    if (rawOwnerType === 'company' || rawOwnerType === 'user' || rawOwnerType === 'franchise') {
+      ownerType = rawOwnerType;
+    } else if (rawOwnerId && rawOwnerId.startsWith('franchise:')) {
+      ownerType = 'franchise';
+    } else if (!rawOwnerId || rawOwnerId === 'company') {
+      ownerType = 'company';
+    } else {
+      ownerType = 'user';
+    }
+    let franchiseId: string | null = null;
+    if (typeof eq.franchiseId === 'string' && eq.franchiseId.trim().length > 0) {
+      franchiseId = eq.franchiseId.trim();
+    } else if (rawOwnerId && rawOwnerId.startsWith('franchise:')) {
+      franchiseId = rawOwnerId.slice('franchise:'.length);
+    }
+    return { ownerType, ownerId: rawOwnerId, franchiseId };
+  };
+
+  const equipmentRecords: EquipmentRecord[] = [];
   for (const id of eqIds) {
     const eqRef = db.collection('equipment').doc(id);
     const eqSnap = await eqRef.get();
-    if (!eqSnap.exists) continue;
-    const eq = eqSnap.data() as any;
-    const bookings = await eqRef
-      .collection('bookings')
-      .where('start', '<=', end)
-      .where('end', '>=', start)
-      .get();
-    if (!bookings.empty) {
-      conflicts.push({ id, name: eq.name || id });
-      reservationStatus = 'pending';
+    if (!eqSnap.exists) {
+      equipmentRecords.push({
+        id,
+        name: id,
+        category: null,
+        ownerType: 'company',
+        ownerId: null,
+        franchiseId: null,
+        availableFlag: false,
+        booked: false,
+        meetsStandards: [],
+        rentalPrice: 0,
+        exists: false,
+      });
       continue;
     }
-    if (standardsToEnforce.size > 0) {
-      const meets = Array.isArray(eq.meetsStandards)
-        ? (eq.meetsStandards as unknown[])
-            .map((value) => (typeof value === 'string' ? value.trim() : ''))
-            .filter((value): value is string => value.length > 0)
-        : [];
-      meets.forEach((standardId) => {
-        if (!standardsToEnforce.has(standardId)) return;
-        const record = standardMatches.get(standardId);
-        if (record) {
-          record.add(id);
-        }
-      });
-    }
-    const equipmentName =
-      typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : null;
-    const equipmentCategory =
+    const eq = eqSnap.data() as any;
+    const ownerInfo = deriveOwnerInfo(eq);
+    const category =
       typeof eq.category === 'string' && eq.category.trim().length > 0
         ? eq.category.trim()
         : typeof eq.type === 'string' && eq.type.trim().length > 0
           ? eq.type.trim()
           : null;
-    kitItems.push({
-      id,
+    const bookingsSnap = await eqRef
+      .collection('bookings')
+      .where('start', '<=', end)
+      .where('end', '>=', start)
+      .get();
+    const meetsStandards = Array.isArray(eq.meetsStandards)
+      ? (eq.meetsStandards as unknown[])
+          .map((value) => (typeof value === 'string' ? value.trim() : ''))
+          .filter((value): value is string => value.length > 0)
+      : [];
+    const equipmentName =
+      typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : eqSnap.id;
+    const rentalPrice =
+      typeof eq.rentalPrice === 'number' && Number.isFinite(eq.rentalPrice)
+        ? eq.rentalPrice
+        : 0;
+    equipmentRecords.push({
+      id: eqSnap.id,
       name: equipmentName,
-      category: equipmentCategory,
-      start: start.toISOString(),
-      end: end.toISOString(),
+      category,
+      ownerType: ownerInfo.ownerType,
+      ownerId: ownerInfo.ownerId,
+      franchiseId: ownerInfo.franchiseId,
+      availableFlag: eq.available !== false,
+      booked: !bookingsSnap.empty,
+      meetsStandards,
+      rentalPrice,
+      exists: true,
     });
-    rentalTotal += eq.rentalPrice || 0;
   }
-  if (conflicts.length > 0) {
-    return {
+
+  const matchesOwnerForAttempt = (
+    record: EquipmentRecord,
+    attempt: ReservationAttempt,
+  ): boolean => {
+    if (attempt.ownerType === 'company') {
+      return record.ownerType === 'company';
+    }
+    if (attempt.ownerType === 'franchise') {
+      return (
+        record.ownerType === 'franchise' &&
+        record.franchiseId !== null &&
+        record.franchiseId === attempt.franchiseId
+      );
+    }
+    return (
+      record.ownerType === 'user' &&
+      record.franchiseId !== null &&
+      attempt.franchiseId !== null &&
+      record.franchiseId === attempt.franchiseId
+    );
+  };
+
+  const evaluateAttempt = (
+    attempt: ReservationAttempt,
+  ): { success: boolean; response: ReservationResponse } => {
+    const conflicts: ConflictRecord[] = [];
+    const kitItems: KitReservationItem[] = [];
+    const missingStandards: string[] = [];
+    let rentalTotal = 0;
+    let reservationStatus: ReservationStatus = attempt.initialStatus;
+    const standardMatches = new Map<string, Set<string>>();
+    requiredStandards.forEach((standard) => {
+      standardMatches.set(standard, new Set());
+    });
+
+    for (const record of equipmentRecords) {
+      if (!record.exists) {
+        conflicts.push({ id: record.id, name: record.name, reason: 'missing' });
+        reservationStatus = 'pending';
+        continue;
+      }
+      if (!matchesOwnerForAttempt(record, attempt)) {
+        conflicts.push({
+          id: record.id,
+          name: record.name,
+          reason: 'owner_mismatch',
+        });
+        reservationStatus = 'pending';
+        continue;
+      }
+      if (!record.availableFlag) {
+        conflicts.push({
+          id: record.id,
+          name: record.name,
+          reason: 'unavailable',
+        });
+        reservationStatus = 'pending';
+        continue;
+      }
+      if (record.booked) {
+        conflicts.push({ id: record.id, name: record.name, reason: 'booked' });
+        reservationStatus = 'pending';
+        continue;
+      }
+      kitItems.push({
+        id: record.id,
+        name: record.name || record.id,
+        category: record.category,
+        start: start.toISOString(),
+        end: end.toISOString(),
+      });
+      rentalTotal += record.rentalPrice || 0;
+      record.meetsStandards.forEach((standardId) => {
+        if (!standardsToEnforce.has(standardId)) {
+          return;
+        }
+        const matches = standardMatches.get(standardId);
+        if (matches) {
+          matches.add(record.id);
+        }
+      });
+    }
+
+    if (standardsToEnforce.size > 0) {
+      requiredStandards.forEach((standard) => {
+        const matches = standardMatches.get(standard);
+        if (!matches || matches.size === 0) {
+          if (!missingStandards.includes(standard)) {
+            missingStandards.push(standard);
+          }
+        }
+      });
+      if (missingStandards.length > 0) {
+        reservationStatus = 'pending';
+      }
+    }
+
+    const success = conflicts.length === 0 && missingStandards.length === 0;
+    const response: ReservationResponse = {
       conflicts,
       kitItems,
       rentalTotal,
-      status: 'pending',
+      status: reservationStatus,
       missingStandards,
+      provider: {
+        level: attempt.key,
+        status: reservationStatus,
+        label: attempt.label,
+        franchiseId: attempt.franchiseId,
+        territoryId: coverageInfo.territoryId,
+      },
     };
-  }
-  if (standardsToEnforce.size > 0) {
-    const missingStandardsList = requiredStandards.filter((standard) => {
-      const matches = standardMatches.get(standard);
-      return !matches || matches.size === 0;
-    });
-    if (missingStandardsList.length > 0) {
-      missingStandardsList.forEach((standard) => {
-        if (!standard) return;
-        if (!missingStandards.includes(standard)) {
-          missingStandards.push(standard);
+
+    return { success, response };
+  };
+
+  let fallbackResponse: ReservationResponse | null = null;
+
+  for (const attempt of attempts) {
+    const { success, response } = evaluateAttempt(attempt);
+    if (success) {
+      if (response.status === 'confirmed' && response.kitItems.length > 0) {
+        const batch = db.batch();
+        for (const item of response.kitItems) {
+          const eqRef = db.collection('equipment').doc(item.id);
+          batch.set(eqRef.collection('bookings').doc(), {
+            start: admin.firestore.Timestamp.fromDate(start),
+            end: admin.firestore.Timestamp.fromDate(end),
+            projectId: null,
+          });
         }
-      });
-      reservationStatus = 'pending';
+        await batch.commit();
+      }
+      return response;
     }
+    fallbackResponse = response;
   }
-  if (reservationStatus === 'confirmed') {
-    const batch = db.batch();
-    for (const item of kitItems) {
-      const eqRef = db.collection('equipment').doc(item.id);
-      batch.set(eqRef.collection('bookings').doc(), {
-        start: admin.firestore.Timestamp.fromDate(start),
-        end: admin.firestore.Timestamp.fromDate(end),
-        projectId: null,
-      });
-    }
-    await batch.commit();
+
+  if (fallbackResponse) {
+    return fallbackResponse;
   }
+
+  const defaultAttempt = attempts[0] ?? {
+    key: 'hq' as ProviderLevel,
+    ownerType: 'company' as const,
+    initialStatus: 'pending' as ReservationStatus,
+    franchiseId: null,
+    label: coverageInfo.label ?? 'HQ operations',
+  };
+
   return {
     conflicts: [],
-    kitItems,
-    rentalTotal,
-    status: reservationStatus,
-    missingStandards,
+    kitItems: [],
+    rentalTotal: 0,
+    status: defaultAttempt.initialStatus,
+    missingStandards: requiredStandards,
+    provider: {
+      level: defaultAttempt.key,
+      status: defaultAttempt.initialStatus,
+      label: defaultAttempt.label,
+      franchiseId: defaultAttempt.franchiseId,
+      territoryId: coverageInfo.territoryId,
+    },
   };
 });
+
 
 type NormalisedRoles = Record<string, boolean>;
 
@@ -7837,6 +8192,71 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     if (campaignBooking && typeof campaignBooking.priceAdjustment === 'number') {
       price += campaignBooking.priceAdjustment;
     }
+    const rawExhibition = items[idx]?.exhibition;
+    const exhibitionDetails =
+      rawExhibition && typeof rawExhibition === 'object'
+        ? (() => {
+            const showDate =
+              typeof rawExhibition.showDate === 'string' && rawExhibition.showDate.trim().length > 0
+                ? rawExhibition.showDate.trim()
+                : null;
+            const setupDate =
+              typeof rawExhibition.setupDate === 'string' && rawExhibition.setupDate.trim().length > 0
+                ? rawExhibition.setupDate.trim()
+                : null;
+            const setupIncluded = rawExhibition.setupIncluded === true;
+            if (!showDate && !setupDate && !setupIncluded) {
+              return null;
+            }
+            return { showDate, setupDate, setupIncluded };
+          })()
+        : null;
+    const rawTimeSlot = items[idx]?.timeSlot;
+    const timeSlotDetails =
+      rawTimeSlot && typeof rawTimeSlot === 'object'
+        ? (() => {
+            const slotStart =
+              typeof rawTimeSlot.start === 'string' && rawTimeSlot.start.trim().length > 0
+                ? rawTimeSlot.start.trim()
+                : null;
+            const slotEnd =
+              typeof rawTimeSlot.end === 'string' && rawTimeSlot.end.trim().length > 0
+                ? rawTimeSlot.end.trim()
+                : null;
+            if (!slotStart || !slotEnd) {
+              return null;
+            }
+            const slotLabel =
+              typeof rawTimeSlot.label === 'string' && rawTimeSlot.label.trim().length > 0
+                ? rawTimeSlot.label.trim()
+                : null;
+            const totalMinutes =
+              typeof rawTimeSlot.totalMinutes === 'number' && Number.isFinite(rawTimeSlot.totalMinutes)
+                ? rawTimeSlot.totalMinutes
+                : null;
+            const setupMinutes =
+              typeof rawTimeSlot.setupMinutes === 'number' && Number.isFinite(rawTimeSlot.setupMinutes)
+                ? rawTimeSlot.setupMinutes
+                : null;
+            const shootMinutes =
+              typeof rawTimeSlot.shootMinutes === 'number' && Number.isFinite(rawTimeSlot.shootMinutes)
+                ? rawTimeSlot.shootMinutes
+                : null;
+            const breakdownMinutes =
+              typeof rawTimeSlot.breakdownMinutes === 'number' && Number.isFinite(rawTimeSlot.breakdownMinutes)
+                ? rawTimeSlot.breakdownMinutes
+                : null;
+            return {
+              start: slotStart,
+              end: slotEnd,
+              label: slotLabel,
+              totalMinutes,
+              setupMinutes,
+              shootMinutes,
+              breakdownMinutes,
+            };
+          })()
+        : null;
     const budget = (prod as any).budget || {};
     const labourFilming = parseOptional(budget.labourFilming);
     const labourEditing = parseOptional(budget.labourEditing);
@@ -7880,7 +8300,9 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       date: itemDate,
       location: itemLocation,
       postalCode: itemPostalCode,
+      exhibition: exhibitionDetails,
       coverage: coveragePayload,
+      timeSlot: timeSlotDetails,
       campaignBooking,
       budget: {
         perUnit: {

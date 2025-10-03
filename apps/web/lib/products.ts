@@ -66,8 +66,12 @@ async function fetchServerProducts(
     .map((r: any) => ({ id: r.document.name.split("/").pop()!, ...decodeFields(r.document.fields) }))
     .filter((p: any) => {
       if (p.category !== "exhibition-videography") return true;
-      if (!p.eventDate) return true;
-      return new Date(p.eventDate) >= now;
+      const end =
+        parseProductDate(p.eventEndDate) ||
+        parseProductDate(p.eventDate) ||
+        parseProductDate(p.eventStartDate);
+      if (!end) return true;
+      return end.getTime() >= now.getTime();
     });
 }
 
@@ -252,8 +256,14 @@ export interface Product {
   campaignSlug?: string | null;
   /** Optional booking configuration linked to a workflow booking template. */
   campaignBooking?: ProductCampaignBookingDetails | null;
-  /** Optional date for time-limited products such as Exhibition Videography */
+  /** Optional single date maintained for backwards compatibility. */
   eventDate?: string;
+  /** Start date for multi-day events such as exhibitions. */
+  eventStartDate?: string | null;
+  /** End date for multi-day events such as exhibitions. */
+  eventEndDate?: string | null;
+  /** Optional setup day offered before the show opens. */
+  eventSetupDate?: string | null;
   /** Venue name used for Exhibition Videography filtering */
   venue?: string;
   /** Linked venue reference for pulling travel details */
@@ -265,10 +275,308 @@ export interface Product {
   workflowId?: string;
   labourCost?: number;
   defaultKitCost?: number;
+  /** Number of days the crew is expected to be on-site. */
+  onsiteDays?: number | null;
+  /** Minutes spent setting up on site before filming begins. */
+  onsiteSetupMinutes?: number | null;
+  /** Minutes allocated to the primary filming window. */
+  onsiteShootMinutes?: number | null;
+  /** Minutes required to wrap down and break down kit on site. */
+  onsiteBreakdownMinutes?: number | null;
+  /** Earliest customer bookable arrival time in HH:mm (24h). */
+  onsiteTimeWindowStart?: string | null;
+  /** Latest customer bookable finish time in HH:mm (24h). */
+  onsiteTimeWindowEnd?: string | null;
   budget?: ProductBudget;
   productSpec?: ProductSpec;
   crewRoles?: ProductCrewRole[];
 }
+
+export interface ProductOnsiteTiming {
+  setupMinutes: number;
+  shootMinutes: number;
+  breakdownMinutes: number;
+  totalMinutes: number;
+  windowStartMinutes: number;
+  windowEndMinutes: number;
+}
+
+export const DAY_IN_MS = 24 * 60 * 60 * 1000;
+
+const parseProductDate = (value: unknown): Date | null => {
+  if (!value) {
+    return null;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as any).toDate === "function"
+  ) {
+    try {
+      const converted = (value as any).toDate();
+      if (converted instanceof Date && !Number.isNaN(converted.getTime())) {
+        return converted;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+};
+
+const toDateKey = (date: Date): string => {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+export interface ProductEventWindow {
+  start: Date | null;
+  end: Date | null;
+  setup: Date | null;
+}
+
+export const getProductEventWindow = (product: Product): ProductEventWindow => {
+  const start =
+    parseProductDate(product.eventStartDate) ||
+    parseProductDate(product.eventDate);
+  let end =
+    parseProductDate(product.eventEndDate) ||
+    parseProductDate(product.eventDate) ||
+    start;
+  if (start && end && end.getTime() < start.getTime()) {
+    end = start;
+  }
+  const setup = parseProductDate(product.eventSetupDate);
+  return { start: start ?? null, end: end ?? null, setup: setup ?? null };
+};
+
+export const getProductEventRangeLabel = (
+  product: Product,
+  locale?: string
+): string | null => {
+  const { start, end } = getProductEventWindow(product);
+  if (!start) {
+    return null;
+  }
+  const resolvedEnd = end ?? start;
+  const startLabel = start.toLocaleDateString(locale);
+  const endLabel = resolvedEnd.toLocaleDateString(locale);
+  if (start.getTime() === resolvedEnd.getTime()) {
+    return startLabel;
+  }
+  return `${startLabel} – ${endLabel}`;
+};
+
+export const getProductEventMonthKeys = (product: Product): string[] => {
+  const { start, end } = getProductEventWindow(product);
+  if (!start) {
+    return [];
+  }
+  const resolvedEnd = end ?? start;
+  const months = new Set<string>();
+  for (
+    let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+    cursor.getTime() <= resolvedEnd.getTime();
+    cursor = new Date(cursor.getTime() + DAY_IN_MS)
+  ) {
+    months.add(`${cursor.getUTCFullYear()}-${String(cursor.getUTCMonth() + 1).padStart(2, "0")}`);
+  }
+  if (months.size === 0) {
+    months.add(`${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, "0")}`);
+  }
+  return Array.from(months);
+};
+
+export const resolveProductOnsiteDays = (
+  product: Product
+): number | null => {
+  const raw = (product as any)?.onsiteDays;
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) && raw > 0 ? raw : null;
+  }
+  if (typeof raw === "string") {
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  const timing = resolveProductOnsiteTiming(product);
+  if (timing) {
+    const days = timing.totalMinutes / (24 * 60);
+    return days > 0 ? days : null;
+  }
+  return null;
+};
+
+const parseMinutes = (value: unknown): number => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Number(value));
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return 0;
+    }
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) {
+      return Math.max(0, parsed);
+    }
+  }
+  return 0;
+};
+
+const parseWindowTime = (value: unknown): number | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!/^\d{2}:\d{2}$/.test(trimmed)) {
+    return null;
+  }
+  const [hoursStr, minutesStr] = trimmed.split(":");
+  const hours = Number.parseInt(hoursStr, 10);
+  const minutes = Number.parseInt(minutesStr, 10);
+  if (
+    !Number.isFinite(hours) ||
+    !Number.isFinite(minutes) ||
+    hours < 0 ||
+    hours > 23 ||
+    minutes < 0 ||
+    minutes > 59
+  ) {
+    return null;
+  }
+  return hours * 60 + minutes;
+};
+
+export const resolveProductOnsiteTiming = (
+  product: Product
+): ProductOnsiteTiming | null => {
+  const setup = parseMinutes((product as any)?.onsiteSetupMinutes);
+  const shoot = parseMinutes((product as any)?.onsiteShootMinutes);
+  const breakdown = parseMinutes((product as any)?.onsiteBreakdownMinutes);
+  const total = setup + shoot + breakdown;
+  if (total <= 0) {
+    return null;
+  }
+  const defaultStart = 8 * 60;
+  const defaultEnd = 18 * 60;
+  const startMinutes =
+    parseWindowTime((product as any)?.onsiteTimeWindowStart) ?? defaultStart;
+  let endMinutes =
+    parseWindowTime((product as any)?.onsiteTimeWindowEnd) ?? defaultEnd;
+  if (endMinutes <= startMinutes) {
+    endMinutes = startMinutes + total;
+  }
+  if (endMinutes - startMinutes < total) {
+    endMinutes = startMinutes + total;
+  }
+  return {
+    setupMinutes: setup,
+    shootMinutes: shoot,
+    breakdownMinutes: breakdown,
+    totalMinutes: total,
+    windowStartMinutes: startMinutes,
+    windowEndMinutes: endMinutes,
+  };
+};
+
+const formatMinutesSummary = (minutes: number, locale?: string): string => {
+  if (minutes <= 0) {
+    return "0 mins";
+  }
+  let hours = Math.floor(minutes / 60);
+  let remainder = Math.round(minutes - hours * 60);
+  if (remainder >= 60) {
+    hours += Math.floor(remainder / 60);
+    remainder %= 60;
+  }
+  if (remainder === 0 && hours > 0) {
+    const formatter = new Intl.NumberFormat(locale, {
+      maximumFractionDigits: 1,
+      minimumFractionDigits: 0,
+    });
+    const label = formatter.format(hours);
+    return `${label} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  if (hours > 0) {
+    return `${hours} hour${hours === 1 ? "" : "s"} ${remainder} min${
+      remainder === 1 ? "" : "s"
+    }`;
+  }
+  return `${remainder} min${remainder === 1 ? "" : "s"}`;
+};
+
+const formatCompactMinutes = (minutes: number): string => {
+  if (minutes <= 0) {
+    return "0m";
+  }
+  let hours = Math.floor(minutes / 60);
+  let remainder = Math.round(minutes - hours * 60);
+  if (remainder >= 60) {
+    hours += Math.floor(remainder / 60);
+    remainder %= 60;
+  }
+  const parts: string[] = [];
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+  if (remainder > 0 || parts.length === 0) {
+    parts.push(`${remainder}m`);
+  }
+  return parts.join(" ");
+};
+
+export const formatProductOnsiteDuration = (
+  product: Product,
+  locale?: string
+): string | null => {
+  const timing = resolveProductOnsiteTiming(product);
+  if (timing) {
+    const totalLabel = formatMinutesSummary(timing.totalMinutes, locale);
+    const breakdownParts: string[] = [];
+    if (timing.setupMinutes > 0) {
+      breakdownParts.push(`Setup ${formatCompactMinutes(timing.setupMinutes)}`);
+    }
+    if (timing.shootMinutes > 0) {
+      breakdownParts.push(`Shoot ${formatCompactMinutes(timing.shootMinutes)}`);
+    }
+    if (timing.breakdownMinutes > 0) {
+      breakdownParts.push(
+        `Breakdown ${formatCompactMinutes(timing.breakdownMinutes)}`
+      );
+    }
+    const breakdown =
+      breakdownParts.length > 0 ? ` (${breakdownParts.join(" · ")})` : "";
+    return `${totalLabel} on site${breakdown}`;
+  }
+  const days = resolveProductOnsiteDays(product);
+  if (!days) {
+    return null;
+  }
+  if (Math.abs(days - 0.5) < 0.01) {
+    return "Half day on site";
+  }
+  if (Math.abs(days - 1) < 0.01) {
+    return "1 day on site";
+  }
+  const formatter = new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 1,
+    minimumFractionDigits: days % 1 === 0 ? 0 : 1,
+  });
+  return `${formatter.format(days)} days on site`;
+};
 
 // Fallback sample products if Firestore is unavailable
 const sampleProducts: Product[] = [
@@ -361,8 +669,12 @@ export async function getProducts(): Promise<Product[]> {
       .map((d) => ({ id: d.id, ...(d.data() as any) }))
       .filter((p) => {
         if (p.category !== "exhibition-videography") return true;
-        if (!p.eventDate) return true;
-        return new Date(p.eventDate) >= now;
+        const end =
+          parseProductDate(p.eventEndDate) ||
+          parseProductDate(p.eventDate) ||
+          parseProductDate(p.eventStartDate);
+        if (!end) return true;
+        return end.getTime() >= now.getTime();
       });
   } catch {
     return sampleProducts;
@@ -389,8 +701,12 @@ export async function getProductsByCategory(
       .map((d) => ({ id: d.id, ...(d.data() as any) }))
       .filter((p) => {
         if (p.category !== "exhibition-videography") return true;
-        if (!p.eventDate) return true;
-        return new Date(p.eventDate) >= now;
+        const end =
+          parseProductDate(p.eventEndDate) ||
+          parseProductDate(p.eventDate) ||
+          parseProductDate(p.eventStartDate);
+        if (!end) return true;
+        return end.getTime() >= now.getTime();
       });
   } catch {
     return sampleProducts.filter((p) => p.category === categoryId);

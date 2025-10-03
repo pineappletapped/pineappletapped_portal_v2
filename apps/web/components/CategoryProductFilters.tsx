@@ -11,6 +11,7 @@ import type { ReactElement } from "react";
 import ProductCard from "./ProductCard";
 import ProductListRow from "./ProductListRow";
 import type { Product } from "@/lib/products";
+import { getProductEventWindow } from "@/lib/products";
 
 type SortOption =
   | "default"
@@ -46,11 +47,9 @@ function getStartingPrice(product: Product): number | null {
 }
 
 function getComparableTimestamp(product: Product): number {
-  if (product.eventDate) {
-    const eventTime = Date.parse(product.eventDate);
-    if (!Number.isNaN(eventTime)) {
-      return eventTime;
-    }
+  const { start } = getProductEventWindow(product);
+  if (start) {
+    return start.getTime();
   }
   const createdAt = (product as any)?.createdAt;
   if (!createdAt) return 0;

@@ -4,6 +4,10 @@ import Image from "next/image";
 import Link from "next/link";
 import type { Product } from "@/lib/products";
 import {
+  getProductEventRangeLabel,
+  formatProductOnsiteDuration,
+} from "@/lib/products";
+import {
   FiCalendar,
   FiClock,
   FiMapPin,
@@ -23,8 +27,11 @@ export default function ProductListRow({ product }: { product: Product }) {
   const priceHeadline = priceDetails?.headline ?? "Pricing on request";
   const { visibleDeliverables, remainingDeliverableCount } =
     getDeliverableSummary(product);
-  const showSummary = Boolean(product.deliveryTime || visibleDeliverables.length > 0);
-  const eventDate = product.eventDate ? new Date(product.eventDate) : null;
+  const onsiteSummary = formatProductOnsiteDuration(product);
+  const showSummary = Boolean(
+    product.deliveryTime || visibleDeliverables.length > 0 || onsiteSummary
+  );
+  const eventLabel = getProductEventRangeLabel(product);
 
   return (
     <article className="card p-4 text-sm shadow-sm">
@@ -53,6 +60,12 @@ export default function ProductListRow({ product }: { product: Product }) {
                   {product.deliveryTime}
                 </span>
               )}
+              {onsiteSummary && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 font-medium">
+                  <FiCalendar className="h-3 w-3" aria-hidden />
+                  {onsiteSummary}
+                </span>
+              )}
               {visibleDeliverables.map((deliverable) => {
                 const Icon =
                   (deliverable.type && deliverableIconMap[deliverable.type]) || FiCheckCircle;
@@ -73,12 +86,12 @@ export default function ProductListRow({ product }: { product: Product }) {
               )}
             </div>
           )}
-          {(eventDate || product.venue) && (
+          {(eventLabel || product.venue) && (
             <div className="flex flex-wrap items-center gap-4 text-xs text-gray-600">
-              {eventDate && (
+              {eventLabel && (
                 <span className="inline-flex items-center gap-1">
                   <FiCalendar className="h-3 w-3" aria-hidden />
-                  {eventDate.toLocaleDateString()}
+                  {eventLabel}
                 </span>
               )}
               {product.venue && (

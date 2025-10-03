@@ -10,7 +10,8 @@ import {
   type KeyboardEvent,
 } from "react";
 import Link from "next/link";
-import { addDoc, collection, getDocs, query, where } from "firebase/firestore";
+import { useRouter } from "next/navigation";
+import { collection, getDocs, query, where } from "firebase/firestore";
 
 import { useRoleGate } from "@/hooks/useRoleGate";
 import { adminListUsers } from "@/lib/admin";
@@ -43,7 +44,6 @@ interface InvoiceFormState {
   paymentTerms: string;
   termsUrl: string;
   allowStripe: boolean;
-  stripePaymentLink: string;
   splitPaymentsEnabled: boolean;
   splitPayments: SplitPayment[];
 }
@@ -108,7 +108,6 @@ const createInitialForm = (): InvoiceFormState => ({
   paymentTerms: "",
   termsUrl: "",
   allowStripe: true,
-  stripePaymentLink: "",
   splitPaymentsEnabled: false,
   splitPayments: [{ ...emptySplitPayment }],
 });
@@ -531,6 +530,24 @@ export default function NewInvoicePage() {
     }
   };
 
+  const router = useRouter();
+
+  const normaliseDateInput = (value: string | null | undefined) => {
+    if (!value) {
+      return null;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      const iso = new Date(`${trimmed}T00:00:00.000Z`);
+      return Number.isNaN(iso.getTime()) ? null : iso.toISOString();
+    }
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  };
+
   const sanitiseLineItems = () => {
     return form.items
       .map((item) => {
@@ -604,7 +621,13 @@ export default function NewInvoicePage() {
       const finalDueDate = form.splitPaymentsEnabled
         ? sortedSchedule.at(-1)?.dueDate || null
         : form.dueDate || null;
-      const payload: Record<string, unknown> = {
+      const splitSchedulePayload = form.splitPaymentsEnabled
+        ? sortedSchedule.map((entry) => ({
+            amount: entry.amount,
+            dueDate: normaliseDateInput(entry.dueDate),
+          }))
+        : [];
+      const payload = {
         orgId: form.orgId || null,
         organisationName: billingName,
         crmRecordId: form.crmRecordId || null,
@@ -614,32 +637,34 @@ export default function NewInvoicePage() {
         clientStatus: form.clientStatus || null,
         billingEntityType: selectedEntry?.type || (billingName ? "custom" : null),
         projectId: form.projectId || null,
-        dueDate: finalDueDate,
+        dueDate: normaliseDateInput(finalDueDate),
         items: lineItems,
-        total: invoiceTotal,
-        status: "unpaid",
-        createdAt: new Date().toISOString(),
         paymentTerms: form.paymentTerms || null,
         termsUrl: form.termsUrl || null,
         allowStripePayment: form.allowStripe,
-        stripePaymentLink: form.stripePaymentLink || null,
-        splitPayments: form.splitPaymentsEnabled ? sortedSchedule : [],
-        splitPaymentsTotal: form.splitPaymentsEnabled
-          ? sortedSchedule.reduce((sum, entry) => sum + entry.amount, 0)
-          : null,
-        splitPaymentsCount: form.splitPaymentsEnabled
-          ? sortedSchedule.length
-          : null,
-        firstPaymentDueDate: form.splitPaymentsEnabled
-          ? sortedSchedule.at(0)?.dueDate || null
-          : null,
+        splitPayments: splitSchedulePayload,
       };
-      await addDoc(collection(db, "clientInvoices"), payload);
+      const response = await fetch("/api/admin/invoices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        const message =
+          typeof errorPayload?.error === "string"
+            ? errorPayload.error
+            : "Failed to create invoice.";
+        throw new Error(message);
+      }
+      const result = await response.json();
       alert("Invoice created");
-      setForm(createInitialForm());
-      setOrganisationQuery("");
-      setSelectedDirectoryKey(null);
-      setShowDirectory(false);
+      const invoiceId = result?.invoice?.id as string | undefined;
+      if (invoiceId) {
+        router.push(`/admin/finance/invoices/${invoiceId}`);
+      } else {
+        router.push("/admin/finance/invoices");
+      }
     } catch (error: any) {
       console.error(error);
       alert(error?.message || "Error creating invoice");
@@ -915,19 +940,6 @@ export default function NewInvoicePage() {
                   Enable
                 </label>
               </div>
-              {form.allowStripe ? (
-                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                  Stripe payment link (optional)
-                  <input
-                    type="url"
-                    name="stripePaymentLink"
-                    className="input mt-1 w-full"
-                    placeholder="https://checkout.stripe.com/..."
-                    value={form.stripePaymentLink}
-                    onChange={handleFormFieldChange}
-                  />
-                </label>
-              ) : null}
               <div className="space-y-3 rounded-2xl border border-gray-200 p-4">
                 <div className="flex items-center justify-between">
                   <div>
