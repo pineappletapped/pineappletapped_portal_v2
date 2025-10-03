@@ -8,6 +8,7 @@ import {
   resolveProductOnsiteDays,
   formatProductOnsiteDuration,
   getProductEventRangeLabel,
+  getProductEventMonthKeys,
 } from "@/lib/products";
 import { useCart } from "@/lib/cart";
 import { db, functions } from "@/lib/firebase";
@@ -469,6 +470,10 @@ export default function AddToCartWizard({
     () => getProductEventRangeLabel(product),
     [product]
   );
+  const eventMonths = useMemo(
+    () => getProductEventMonthKeys(product),
+    [product]
+  );
   const exhibitionSchedule = useMemo(() => {
     if (product.category !== "exhibition-videography") {
       return {
@@ -532,6 +537,39 @@ export default function AddToCartWizard({
     }
     return exhibitionOptions[0]?.key ?? null;
   }, [exhibitionOptions, product.category]);
+  const exhibitionDayLabels = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return {} as Record<string, string>;
+    }
+    return exhibitionOptions.reduce<Record<string, string>>((acc, option) => {
+      const key = normaliseDateKey(option.key);
+      if (!key) {
+        return acc;
+      }
+      const prefix = option.label.includes(":")
+        ? option.label.split(":")[0]?.trim()
+        : option.label.trim();
+      acc[key] = prefix && prefix.length > 0 ? prefix : option.label;
+      return acc;
+    }, {});
+  }, [exhibitionOptions, product.category]);
+  const exhibitionHighlightDates = useMemo(() => {
+    if (!exhibitionSetupOption) {
+      return [] as string[];
+    }
+    return [exhibitionSetupOption.key];
+  }, [exhibitionSetupOption]);
+  const exhibitionCalendarMonth = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return null;
+    }
+    const first = exhibitionOptions[0]?.key;
+    if (!first) {
+      return null;
+    }
+    const normalised = normaliseDateKey(first);
+    return normalised ? normalised.slice(0, 7) : null;
+  }, [exhibitionOptions, product.category]);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [step, setStep] = useState(0);
   const [date, setDate] = useState<string | null>(() =>
@@ -560,6 +598,30 @@ export default function AddToCartWizard({
       setIncludeSetupDay(false);
     }
   }, [exhibitionSetupOption]);
+  const exhibitionAllowedDates = useMemo(() => {
+    if (product.category !== "exhibition-videography") {
+      return [] as string[];
+    }
+    return exhibitionOptions.map((option) => option.key);
+  }, [exhibitionOptions, product.category]);
+  const calendarInitialMonth = useMemo(() => {
+    const selectedMonth = normaliseDateKey(date)?.slice(0, 7) ?? null;
+    if (selectedMonth) {
+      return selectedMonth;
+    }
+    if (
+      product.category === "exhibition-videography" &&
+      exhibitionCalendarMonth
+    ) {
+      return exhibitionCalendarMonth;
+    }
+    return eventMonths[0] ?? null;
+  }, [
+    date,
+    eventMonths,
+    exhibitionCalendarMonth,
+    product.category,
+  ]);
   const bookingSpan = useMemo(() => {
     if (
       product.category === "exhibition-videography" &&
@@ -1464,7 +1526,7 @@ export default function AddToCartWizard({
       setSubmitting(false);
       onClose();
     } catch (err) {
-      updateCalendarStatus("pending");
+      updateCalendarStatus("available");
       console.error(err);
       setSubmitting(false);
       if (isFunctionsError(err) && err.code === "failed-precondition") {
@@ -1731,52 +1793,39 @@ export default function AddToCartWizard({
                   </div>
                 )}
               </div>
-            ) : product.category !== "exhibition-videography" ? (
-              coverageStatus === "success" && coverage ? (
+            ) : product.category === "exhibition-videography" && exhibitionOptions.length === 0 ? (
+              <p className="text-sm text-gray-500">Show dates coming soon.</p>
+            ) : coverageStatus === "success" && coverage ? (
+              <div className="space-y-3">
+                {product.category === "exhibition-videography" && eventRangeLabel && (
+                  <p className="text-sm text-gray-600">Show runs {eventRangeLabel}.</p>
+                )}
                 <ProductDatePicker
                   productId={product.id}
                   selected={date}
                   onSelect={handleDateSelect}
                   scope={availabilityScope}
                   overrides={availabilityOverrides}
+                  allowedDates={
+                    product.category === "exhibition-videography"
+                      ? exhibitionAllowedDates
+                      : undefined
+                  }
+                  allowedDateLabels={
+                    product.category === "exhibition-videography" &&
+                    Object.keys(exhibitionDayLabels).length > 0
+                      ? exhibitionDayLabels
+                      : undefined
+                  }
+                  highlightedDates={
+                    product.category === "exhibition-videography" &&
+                    exhibitionHighlightDates.length > 0
+                      ? exhibitionHighlightDates
+                      : undefined
+                  }
+                  initialMonth={calendarInitialMonth}
                 />
-              ) : (
-                <p className="text-sm text-gray-500">
-                  Confirm the filming address and postcode first to check availability.
-                </p>
-              )
-            ) : exhibitionOptions.length > 0 ? (
-              <div className="space-y-3">
-                {eventRangeLabel && (
-                  <p className="text-sm text-gray-600">Show runs {eventRangeLabel}.</p>
-                )}
-                <div
-                  className="grid gap-2"
-                  role="radiogroup"
-                  aria-label="Choose exhibition coverage day"
-                >
-                  {exhibitionOptions.map((option) => {
-                    const checked = date === option.key;
-                    return (
-                      <label
-                        key={option.key}
-                        className={`flex items-start gap-3 rounded-md border px-3 py-2 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
-                          checked ? "border-orange-400 bg-orange-50" : "border-gray-200 bg-white"
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name="exhibition-date"
-                          className="mt-1"
-                          checked={checked}
-                          onChange={() => handleDateSelect(option.key)}
-                        />
-                        <p className="text-sm font-semibold">{option.label}</p>
-                      </label>
-                    );
-                  })}
-                </div>
-                {exhibitionSetupOption && (
+                {product.category === "exhibition-videography" && exhibitionSetupOption && (
                   <label
                     className={`flex items-start gap-3 rounded-md border px-3 py-2 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
                       includeSetupDay
@@ -1796,7 +1845,10 @@ export default function AddToCartWizard({
                           if (!next) {
                             announceSelection(date, onsiteBlockingDays);
                           } else {
-                            announceSelection(exhibitionSetupOption.key, onsiteBlockingDays + 1);
+                            announceSelection(
+                              exhibitionSetupOption.key,
+                              onsiteBlockingDays + 1
+                            );
                           }
                           return next;
                         });
@@ -1806,14 +1858,16 @@ export default function AddToCartWizard({
                       <p className="text-sm font-semibold">Include setup day coverage</p>
                       <p className="text-xs text-gray-500">
                         We’ll arrive on {exhibitionSetupOption.label} to capture stand build and
-                        pre-show content.
+                        pre-show content. The setup day is outlined on the calendar above.
                       </p>
                     </div>
                   </label>
                 )}
               </div>
             ) : (
-              <p className="text-sm text-gray-500">Show dates coming soon.</p>
+              <p className="text-sm text-gray-500">
+                Confirm the filming address and postcode first to check availability.
+              </p>
             )}
             {(onsiteSummary || (selectedDateRange && bookingSpan > 1)) && (
               <div className="space-y-1 text-xs text-gray-600">
