@@ -737,6 +737,8 @@ export default function AddToCartWizard({
     const end = new Date(base.getTime() + (bookingSpan - 1) * DAY_IN_MS);
     return { start: base, end };
   }, [bookingSpan, reservationStartKey]);
+  const [selectedTimeSlot, setSelectedTimeSlot] =
+    useState<WizardTimeSlot | null>(null);
   const selectedTimeSlotRange = useMemo(() => {
     if (!selectedTimeSlot || !slotDateKey) {
       return null;
@@ -768,8 +770,6 @@ export default function AddToCartWizard({
     useState<CampaignSlotStatus>("idle");
   const [campaignSlotError, setCampaignSlotError] = useState<string | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
-  const [selectedTimeSlot, setSelectedTimeSlot] =
-    useState<WizardTimeSlot | null>(null);
   const [availabilityOverrides, setAvailabilityOverrides] = useState<
     Record<string, ProductAvailabilityStatus>
   >({});
