@@ -47,6 +47,23 @@ type CategoryOption = {
 
 const normalisePostalCodeValue = (value: string): string => value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
+const deriveOutcodeCandidates = (value: string): string[] => {
+  const normalised = normalisePostalCodeValue(value);
+  if (!normalised) {
+    return [];
+  }
+
+  const candidates = new Set<string>();
+  for (let length = Math.max(2, normalised.length - 3); length >= 2; length -= 1) {
+    const candidate = normalised.slice(0, length);
+    if (/^[A-Z]{1,2}\d[A-Z0-9]?$/.test(candidate) || candidate.length >= 3) {
+      candidates.add(candidate);
+    }
+  }
+
+  return Array.from(candidates);
+};
+
 const haversineDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
   const toRad = (degrees: number) => (degrees * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
@@ -148,13 +165,13 @@ export default function JoinTeamPage() {
         raw: string;
         normalised: string;
         resolved: string;
-        lat: number;
-        lng: number;
+        lat: number | null;
+        lng: number | null;
       }
     | null
   >(null);
   const [territorySuggestions, setTerritorySuggestions] = useState<Array<{ id: string; distanceKm: number | null }>>([]);
-  const postalCodeLocationCache = useRef(new Map<string, { lat: number; lng: number; resolved?: string }>());
+  const postalCodeLocationCache = useRef(new Map<string, { lat: number | null; lng: number | null; resolved?: string }>());
   const [marketerForm, setMarketerForm] = useState<MarketerFormState>(initialMarketerForm);
   const [marketerConsent, setMarketerConsent] = useState<MarketerConsentState>(initialMarketerConsent);
   const [marketerSubmitting, setMarketerSubmitting] = useState(false);
@@ -319,15 +336,9 @@ export default function JoinTeamPage() {
   }, [territoryMap]);
 
   const geocodePostalCode = useCallback(
-    async (postalCode: string): Promise<
-      | {
-          lat: number;
-          lng: number;
-          normalised: string;
-          resolved: string;
-        }
-      | null
-    > => {
+    async (
+      postalCode: string
+    ): Promise<{ lat: number | null; lng: number | null; normalised: string; resolved: string } | null> => {
       const normalised = normalisePostalCodeValue(postalCode);
       if (!normalised) {
         return null;
@@ -335,12 +346,13 @@ export default function JoinTeamPage() {
       const cached = postalCodeLocationCache.current.get(normalised);
       if (cached) {
         return {
-          lat: cached.lat,
-          lng: cached.lng,
+          lat: cached.lat ?? null,
+          lng: cached.lng ?? null,
           normalised,
           resolved: cached.resolved ?? normalised,
         };
       }
+
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), 7000);
       try {
@@ -351,23 +363,20 @@ export default function JoinTeamPage() {
             signal: controller.signal,
           }
         );
-        if (response.status === 404) {
-          return null;
+        if (response.ok) {
+          const payload = (await response.json()) as {
+            result?: { latitude?: number; longitude?: number; postcode?: string } | null;
+          };
+          const latitude = typeof payload?.result?.latitude === 'number' ? payload.result.latitude : null;
+          const longitude = typeof payload?.result?.longitude === 'number' ? payload.result.longitude : null;
+          const resolved = typeof payload?.result?.postcode === 'string' ? payload.result.postcode : normalised;
+          postalCodeLocationCache.current.set(normalised, { lat: latitude, lng: longitude, resolved });
+          return { lat: latitude, lng: longitude, normalised, resolved };
         }
-        if (!response.ok) {
+
+        if (response.status !== 404) {
           throw new Error(`Lookup failed with status ${response.status}`);
         }
-        const payload = (await response.json()) as {
-          result?: { latitude?: number; longitude?: number; postcode?: string } | null;
-        };
-        const latitude = typeof payload?.result?.latitude === 'number' ? payload.result.latitude : null;
-        const longitude = typeof payload?.result?.longitude === 'number' ? payload.result.longitude : null;
-        if (latitude == null || longitude == null) {
-          return null;
-        }
-        const resolved = typeof payload?.result?.postcode === 'string' ? payload.result.postcode : normalised;
-        postalCodeLocationCache.current.set(normalised, { lat: latitude, lng: longitude, resolved });
-        return { lat: latitude, lng: longitude, normalised, resolved };
       } catch (error) {
         if ((error as Error)?.name === 'AbortError') {
           throw new Error('Lookup timed out');
@@ -376,6 +385,45 @@ export default function JoinTeamPage() {
       } finally {
         window.clearTimeout(timeoutId);
       }
+
+      const outcodeCandidates = deriveOutcodeCandidates(normalised);
+      for (const candidate of outcodeCandidates) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 7000);
+        try {
+          const response = await fetch(
+            `https://api.postcodes.io/outcodes/${encodeURIComponent(candidate)}`,
+            {
+              headers: { Accept: 'application/json' },
+              signal: controller.signal,
+            }
+          );
+          if (!response.ok) {
+            continue;
+          }
+          const payload = (await response.json()) as {
+            result?: { latitude?: number; longitude?: number; outcode?: string } | null;
+          };
+          const latitude = typeof payload?.result?.latitude === 'number' ? payload.result.latitude : null;
+          const longitude = typeof payload?.result?.longitude === 'number' ? payload.result.longitude : null;
+          const resolved = typeof payload?.result?.outcode === 'string' ? payload.result.outcode : candidate;
+          if (latitude != null && longitude != null) {
+            postalCodeLocationCache.current.set(normalised, { lat: latitude, lng: longitude, resolved });
+            return { lat: latitude, lng: longitude, normalised, resolved };
+          }
+        } catch (error) {
+          if ((error as Error)?.name === 'AbortError') {
+            throw new Error('Lookup timed out');
+          }
+          throw error;
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
+      }
+
+      const resolved = outcodeCandidates.length > 0 ? outcodeCandidates[0] : normalised;
+      postalCodeLocationCache.current.set(normalised, { lat: null, lng: null, resolved });
+      return { lat: null, lng: null, normalised, resolved };
     },
     []
   );
@@ -383,9 +431,15 @@ export default function JoinTeamPage() {
   const computeTerritoryDistance = useCallback(
     async (
       option: TerritoryOption,
-      reference: { lat: number; lng: number; normalised: string }
+      reference: { lat: number | null; lng: number | null; normalised: string }
     ): Promise<number | null> => {
-      if (option.type === 'radius' && option.centerLat != null && option.centerLng != null) {
+      if (
+        reference.lat != null &&
+        reference.lng != null &&
+        option.type === 'radius' &&
+        option.centerLat != null &&
+        option.centerLng != null
+      ) {
         const distance = haversineDistanceKm(reference.lat, reference.lng, option.centerLat, option.centerLng);
         return Number.isFinite(distance) ? distance : null;
       }
@@ -407,9 +461,11 @@ export default function JoinTeamPage() {
           location = { lat: lookup.lat, lng: lookup.lng, resolved: lookup.resolved };
           postalCodeLocationCache.current.set(code, location);
         }
-        const distance = haversineDistanceKm(reference.lat, reference.lng, location.lat, location.lng);
-        if (Number.isFinite(distance)) {
-          bestDistance = bestDistance == null ? distance : Math.min(bestDistance, distance);
+        if (reference.lat != null && reference.lng != null && location.lat != null && location.lng != null) {
+          const distance = haversineDistanceKm(reference.lat, reference.lng, location.lat, location.lng);
+          if (Number.isFinite(distance)) {
+            bestDistance = bestDistance == null ? distance : Math.min(bestDistance, distance);
+          }
         }
       }
       if (bestDistance != null) {
@@ -446,9 +502,16 @@ export default function JoinTeamPage() {
     setPostcodeLookupStatus('loading');
     setPostcodeLookupError(null);
     try {
-      const lookup = await geocodePostalCode(trimmed);
-      if (!lookup) {
-        setPostcodeLookupStatus('notfound');
+      const lookup = (await geocodePostalCode(trimmed)) ?? {
+        lat: null,
+        lng: null,
+        normalised: normalisePostalCodeValue(trimmed),
+        resolved: normalisePostalCodeValue(trimmed),
+      };
+
+      if (!lookup.normalised) {
+        setPostcodeLookupStatus('error');
+        setPostcodeLookupError('Please enter a valid postcode to search for nearby territories.');
         setPostcodeLookupResult(null);
         setTerritorySuggestions([]);
         setSelectedTerritories([]);
