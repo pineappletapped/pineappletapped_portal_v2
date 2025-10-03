@@ -116,7 +116,7 @@ export default function ProductDatePicker({
       }
     }
     return toMonthKey(today);
-  }, [allowedInfo.earliest, allowedInfo.signature, initialMonth, selected, today]);
+  }, [allowedInfo.earliest, initialMonth, selected, today]);
 
   const [view, setView] = useState(() =>
     monthKeyToDate(derivedMonthKey) ??

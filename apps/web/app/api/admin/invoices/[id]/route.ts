@@ -6,6 +6,7 @@ import type { DocumentSnapshot, QueryDocumentSnapshot } from 'firebase-admin/fir
 import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from '@/lib/firebase-admin';
 import { extractUserRoles, hasRole, type RoleKey, type UserRoles } from '@/lib/roles';
 import { getStripeClient } from '@/lib/stripe-config';
+import type Stripe from 'stripe';
 
 const FINANCE_ROLES: RoleKey[] = ['admin', 'finance'];
 
@@ -524,7 +525,11 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
           }));
         if (lineItems.length > 0) {
           const paymentLink = await stripe.paymentLinks.create({
-            line_items: lineItems,
+            // Stripe's API accepts inline `price_data`, but the current type
+            // definition only models the `price` field. Cast to keep the code
+            // aligned with the documented request shape until the upstream
+            // types catch up.
+            line_items: lineItems as unknown as Stripe.PaymentLinkCreateParams.LineItem[],
             after_completion: { type: 'hosted_confirmation', custom_message: 'Thanks for your payment!' },
             metadata: {
               invoiceId: id,
