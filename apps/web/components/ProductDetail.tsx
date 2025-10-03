@@ -706,39 +706,6 @@ export default function ProductDetail({
         </section>
       )}
 
-      {exampleVideos.length > 0 && (
-        <section>
-          <h2 className="text-xl font-semibold mb-2">Example Videos</h2>
-          <div className="grid gap-6 md:grid-cols-2">
-            {exampleVideos.map((video, index) => {
-              const label = video.title || `Example video ${index + 1}`;
-              return (
-                <div
-                  key={`${video.url}-${index}`}
-                  className="space-y-3 rounded-lg border bg-white p-3 shadow-sm"
-                >
-                  <div className="relative aspect-video w-full overflow-hidden rounded-md bg-black">
-                    <VideoPlayer video={video} label={label} />
-                  </div>
-                  <div className="space-y-1">
-                    <p className="font-medium text-gray-900">{label}</p>
-                    <a
-                      href={video.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-sm font-medium text-orange hover:text-orange/80"
-                    >
-                      <FiExternalLink className="h-4 w-4" aria-hidden />
-                      Watch in new tab
-                    </a>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
-
       <ProductModifierSummary product={product} />
 
       <section className="text-center py-8">
