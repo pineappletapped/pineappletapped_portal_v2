@@ -1158,12 +1158,49 @@ interface DriveSetupContext {
   } | null;
 }
 
+/**
+ * Normalises a Drive identifier so callers can safely pass either a raw ID or
+ * one of the common sharing URLs produced by Drive (e.g. when copying from the
+ * browser address bar).
+ *
+ * Examples:
+ * - `normaliseDriveId('abc123') => 'abc123'`
+ * - `normaliseDriveId('https://drive.google.com/drive/folders/abc123?usp=sharing') => 'abc123'`
+ * - `normaliseDriveId('https://drive.google.com/open?id=abc123') => 'abc123'`
+ */
 function normaliseDriveId(input: unknown): string | null {
-  if (typeof input === 'string') {
-    const trimmed = input.trim();
-    return trimmed.length > 0 ? trimmed : null;
+  if (typeof input !== 'string') {
+    return null;
   }
-  return null;
+
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const url = new URL(trimmed);
+      const folderMatch = url.pathname.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+      if (folderMatch) {
+        return folderMatch[1];
+      }
+
+      const idParam = url.searchParams.get('id');
+      if (idParam) {
+        return idParam;
+      }
+
+      const documentMatch = url.pathname.match(/\/d\/([a-zA-Z0-9_-]+)/);
+      if (documentMatch) {
+        return documentMatch[1];
+      }
+    } catch (error) {
+      console.warn('Failed to parse Drive URL – falling back to raw value', error);
+    }
+  }
+
+  return trimmed;
 }
 
 function sanitiseDriveName(name: string | null | undefined, fallback: string): string {
