@@ -25,7 +25,11 @@ import {
 import PortalHero from "@/components/PortalHero";
 import { ensureFirebase } from "@/lib/firebase";
 
-import AiWorkflowCatalog from "./AiWorkflowCatalog";
+import AiWorkflowCatalog, {
+  CatalogPromptRecord,
+  WorkflowCommandUsage,
+} from "./AiWorkflowCatalog";
+import { AiWorkflowPromptTemplate } from "./aiWorkflows";
 
 const MODEL_STATUSES = ["active", "pilot", "inactive", "deprecated"] as const;
 type AiModelStatus = (typeof MODEL_STATUSES)[number];
@@ -644,6 +648,80 @@ export default function AiManagementWorkspace() {
     []
   );
 
+  const promptSummaries: CatalogPromptRecord[] = useMemo(
+    () =>
+      prompts.map((prompt) => ({
+        id: prompt.id,
+        name: prompt.name,
+        status: prompt.status,
+        category: prompt.category,
+        description: prompt.description,
+        notes: prompt.notes,
+        estimatedTokens: prompt.estimatedTokens,
+      })),
+    [prompts]
+  );
+
+  const promptRecordById = useMemo(() => {
+    const map = new Map<string, AiPromptRecord>();
+    prompts.forEach((prompt) => {
+      map.set(prompt.id, prompt);
+    });
+    return map;
+  }, [prompts]);
+
+  const workflowCommandUsage = useMemo<Record<string, WorkflowCommandUsage>>(() => {
+    const stats = new Map<
+      string,
+      {
+        count: number;
+        tokens: number;
+        cost: number;
+        hasCost: boolean;
+        currency: string | null;
+        mixedCurrency: boolean;
+      }
+    >();
+
+    usageEntries.forEach((entry) => {
+      const command = entry.commandName?.trim();
+      if (!command) return;
+      const current = stats.get(command) || {
+        count: 0,
+        tokens: 0,
+        cost: 0,
+        hasCost: false,
+        currency: null as string | null,
+        mixedCurrency: false,
+      };
+      current.count += 1;
+      current.tokens += entry.totalTokens ?? 0;
+      if (entry.cost != null) {
+        current.cost += entry.cost;
+        current.hasCost = true;
+      }
+      if (entry.currency) {
+        if (!current.currency) {
+          current.currency = entry.currency;
+        } else if (current.currency !== entry.currency) {
+          current.mixedCurrency = true;
+        }
+      }
+      stats.set(command, current);
+    });
+
+    const result: Record<string, WorkflowCommandUsage> = {};
+    stats.forEach((value, key) => {
+      result[key] = {
+        count: value.count,
+        tokens: Math.round(value.tokens),
+        cost: value.hasCost ? value.cost : null,
+        currency: value.mixedCurrency ? null : value.currency,
+      };
+    });
+    return result;
+  }, [usageEntries]);
+
   const handleModelFieldChange = (
     event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
   ) => {
@@ -874,6 +952,36 @@ export default function AiManagementWorkspace() {
     }
   };
 
+  const handleManagePromptById = (promptId: string) => {
+    const record = promptRecordById.get(promptId);
+    if (record) {
+      startEditPrompt(record);
+    }
+  };
+
+  const startCreatePromptFromTemplate = (template: AiWorkflowPromptTemplate) => {
+    const status = template.status && isPromptStatus(template.status) ? template.status : "draft";
+    setEditingPromptId(null);
+    setPromptForm({
+      name: template.name,
+      category: template.category ?? "",
+      description: template.description ?? "",
+      content: template.content,
+      defaultModelId: "",
+      status,
+      estimatedTokens:
+        template.estimatedTokens != null ? String(template.estimatedTokens) : "",
+      notes: template.notes ?? "",
+    });
+    setPromptFormExpanded(true);
+    if (typeof window !== "undefined") {
+      window.requestAnimationFrame(() => {
+        promptFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        promptNameInputRef.current?.focus();
+      });
+    }
+  };
+
   const topPromptsWeek = usageAnalytics.perPromptWeek.slice(0, 6);
   const topClientsWeek = usageAnalytics.perClientWeek.slice(0, 6);
   const topFranchisesWeek = usageAnalytics.perFranchiseWeek.slice(0, 6);
@@ -912,7 +1020,12 @@ export default function AiManagementWorkspace() {
         </div>
       ) : null}
 
-      <AiWorkflowCatalog />
+      <AiWorkflowCatalog
+        prompts={promptSummaries}
+        commandUsage={workflowCommandUsage}
+        onManagePrompt={handleManagePromptById}
+        onCreatePrompt={startCreatePromptFromTemplate}
+      />
 
       <section
         ref={modelFormRef}
