@@ -135,7 +135,9 @@ export default function ProjectFilesPage() {
           )}
         </div>
 
-        <DriveProjectFolderViewer projectId={projectId} initialFolderId={orderSummary.folderId} />
+        {orderSummary.folderId ? (
+          <DriveProjectFolderViewer projectId={projectId} initialFolderId={orderSummary.folderId} />
+        ) : null}
       </div>
     </PortalContainer>
   );

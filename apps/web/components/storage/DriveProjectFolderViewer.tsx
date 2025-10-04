@@ -60,6 +60,23 @@ interface DriveProjectFolderViewerProps {
   className?: string;
 }
 
+type FunctionsError = {
+  code: string;
+  message: string;
+  details?: unknown;
+};
+
+const isFunctionsError = (error: unknown): error is FunctionsError => {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  if (!("code" in error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && code.length > 0;
+};
+
 const dateFormatter = new Intl.DateTimeFormat("en-GB", {
   dateStyle: "medium",
   timeStyle: "short",
@@ -100,6 +117,7 @@ export default function DriveProjectFolderViewer({
 }: DriveProjectFolderViewerProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [items, setItems] = useState<DriveProjectFolderItem[]>([]);
   const [breadcrumbs, setBreadcrumbs] = useState<DriveBreadcrumb[]>([]);
   const [currentFolder, setCurrentFolder] = useState<{ id: string | null; name: string | null }>({
@@ -115,6 +133,7 @@ export default function DriveProjectFolderViewer({
       }
       setLoading(true);
       setError(null);
+      setInfoMessage(null);
 
       try {
         const { functions } = await ensureFirebase();
@@ -207,7 +226,16 @@ export default function DriveProjectFolderViewer({
         });
       } catch (err) {
         console.error("DriveProjectFolderViewer failed to load folder", err);
-        setError(err instanceof Error ? err.message : "Failed to load Drive folder.");
+        setItems([]);
+        setBreadcrumbs([]);
+        setCurrentFolder({ id: null, name: null });
+        if (isFunctionsError(err) && err.code === "failed-precondition") {
+          setInfoMessage("The Drive folder is still being provisioned. Please check back soon.");
+          setError(null);
+        } else {
+          setInfoMessage(null);
+          setError(err instanceof Error ? err.message : "Failed to load Drive folder.");
+        }
       } finally {
         setLoading(false);
       }
@@ -252,6 +280,8 @@ export default function DriveProjectFolderViewer({
     [breadcrumbs, fetchFolder]
   );
 
+  const emptyStateMessage = infoMessage ?? "This folder is empty.";
+
   return (
     <div className={className ? `grid gap-4 ${className}` : "grid gap-4"}>
       <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
@@ -295,6 +325,9 @@ export default function DriveProjectFolderViewer({
       {error ? (
         <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
       ) : null}
+      {infoMessage && !error ? (
+        <div className="rounded-md border border-slate-200 bg-white px-4 py-3 text-sm text-gray-600">{infoMessage}</div>
+      ) : null}
 
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200 text-sm">
@@ -318,7 +351,7 @@ export default function DriveProjectFolderViewer({
             {!loading && items.length === 0 ? (
               <tr>
                 <td colSpan={5} className="px-3 py-6 text-center text-gray-500">
-                  This folder is empty.
+                  {emptyStateMessage}
                 </td>
               </tr>
             ) : null}
