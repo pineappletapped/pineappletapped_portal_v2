@@ -280,7 +280,7 @@ export default function DriveProjectFolderViewer({
     [breadcrumbs, fetchFolder]
   );
 
-  const emptyStateMessage = infoMessage ?? "This folder is empty.";
+  const emptyStateMessage = error ?? infoMessage ?? "This folder is empty.";
 
   return (
     <div className={className ? `grid gap-4 ${className}` : "grid gap-4"}>
