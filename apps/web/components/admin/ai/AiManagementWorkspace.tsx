@@ -25,6 +25,8 @@ import {
 import PortalHero from "@/components/PortalHero";
 import { ensureFirebase } from "@/lib/firebase";
 
+import AiWorkflowCatalog from "./AiWorkflowCatalog";
+
 const MODEL_STATUSES = ["active", "pilot", "inactive", "deprecated"] as const;
 type AiModelStatus = (typeof MODEL_STATUSES)[number];
 
@@ -909,6 +911,8 @@ export default function AiManagementWorkspace() {
           {dataError}
         </div>
       ) : null}
+
+      <AiWorkflowCatalog />
 
       <section
         ref={modelFormRef}
