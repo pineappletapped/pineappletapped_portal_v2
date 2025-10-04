@@ -128,6 +128,11 @@ type StoryboardDraft = {
     priceHint: string | null;
     description: string | null;
   }>;
+  requestId?: string | null;
+  promptId?: string | null;
+  promptName?: string | null;
+  modelName?: string | null;
+  generationMode?: string | null;
 };
 
 type ProductSuggestion = {
@@ -1187,12 +1192,23 @@ export default function ContentPlanPanel() {
             )
         : [];
 
+      const requestId = typeof payload.requestId === "string" ? payload.requestId : null;
+      const promptId = typeof payload.promptId === "string" ? payload.promptId : null;
+      const promptName = typeof payload.promptName === "string" ? payload.promptName : null;
+      const modelName = typeof payload.modelName === "string" ? payload.modelName : null;
+      const generationMode = typeof payload.generationMode === "string" ? payload.generationMode : null;
+
       setStoryboardDraft({
         id: typeof payload.id === "string" ? payload.id : randomId(),
         narrative: typeof payload.narrative === "string" ? payload.narrative : "Storyboard prepared.",
         sections,
         timeline,
         recommendedItems,
+        requestId,
+        promptId,
+        promptName,
+        modelName,
+        generationMode,
       });
       setStoryboardStatus("ready");
     } catch (error) {

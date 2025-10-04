@@ -4,6 +4,9 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
 
 import { getFirebaseAdminFirestore } from '@/lib/firebase-admin';
+import { ensurePromptRecord } from '@/lib/ai/prompt-registry.server';
+import { getAiModelRecordById } from '@/lib/ai/models.server';
+import { CONTENT_REPURPOSING_PROMPT_TEMPLATE } from '@/lib/ai/templates';
 
 interface TranscriptSource {
   type: 'drive' | 'upload' | 'manual';
@@ -50,6 +53,11 @@ interface GenerationResult {
   deliverableProductName: string | null;
   createdAt: string;
   updatedAt: string;
+  requestId?: string | null;
+  promptId?: string | null;
+  promptName?: string | null;
+  modelName?: string | null;
+  generationMode?: string | null;
 }
 
 const STOP_WORDS = new Set(
@@ -351,6 +359,11 @@ function mapToResult(id: string, _payload: GenerationPayload | {}, data: any): G
     deliverableProductName: typeof data.deliverableProductName === 'string' ? data.deliverableProductName : null,
     createdAt: typeof data.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
     updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : new Date().toISOString(),
+    requestId: typeof data.requestId === 'string' ? data.requestId : null,
+    promptId: typeof data.promptId === 'string' ? data.promptId : null,
+    promptName: typeof data.promptName === 'string' ? data.promptName : null,
+    modelName: typeof data.modelName === 'string' ? data.modelName : null,
+    generationMode: typeof data.generationMode === 'string' ? data.generationMode : null,
   };
 }
 
@@ -378,6 +391,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Provide an SRT transcript or paste key talking points.' }, { status: 400 });
   }
 
+  const requestId = randomUUID();
+
+  const promptRecord = await ensurePromptRecord(
+    CONTENT_REPURPOSING_PROMPT_TEMPLATE.name,
+    CONTENT_REPURPOSING_PROMPT_TEMPLATE
+  );
+
+  const modelRecord = promptRecord.defaultModelId
+    ? await getAiModelRecordById(promptRecord.defaultModelId)
+    : null;
+
   const transcriptText = createTranscriptPreview(stripSrtCues(payload.transcript));
   const summary = summariseTranscript(transcriptText);
   const keywords = extractKeywords(transcriptText);
@@ -388,6 +412,27 @@ export async function POST(req: NextRequest) {
 
   const firestore = getFirebaseAdminFirestore();
   const now = FieldValue.serverTimestamp();
+  const generationMeta = {
+    requestId,
+    mode: 'rules-draft',
+    prompt: {
+      id: promptRecord.id,
+      name: promptRecord.name,
+      status: promptRecord.status,
+      defaultModelId: promptRecord.defaultModelId,
+      updatedAt: promptRecord.updatedAt ?? null,
+      estimatedTokens: promptRecord.estimatedTokens ?? null,
+    },
+    model: modelRecord
+      ? {
+          docId: modelRecord.id,
+          modelId: modelRecord.modelId,
+          name: modelRecord.name,
+          provider: modelRecord.provider,
+          currency: modelRecord.currency ?? null,
+        }
+      : null,
+  } as const;
   const docRef = await firestore.collection('contentAssistantDrafts').add({
     userId: uid,
     creatorEmail: identity.email || null,
@@ -412,8 +457,42 @@ export async function POST(req: NextRequest) {
     youtubeTags,
     socialPosts,
     status: 'draft',
+    requestId,
+    promptId: promptRecord.id,
+    promptName: promptRecord.name,
+    promptStatus: promptRecord.status,
+    promptDefaultModelId: promptRecord.defaultModelId,
+    promptEstimatedTokens: promptRecord.estimatedTokens ?? null,
+    modelName: modelRecord?.name ?? null,
+    modelIdentifier: modelRecord?.modelId ?? promptRecord.defaultModelId ?? null,
+    generationMode: 'rules-draft',
+    generation: generationMeta,
     createdAt: now,
     updatedAt: now,
+  });
+
+  const currency = modelRecord?.currency ? modelRecord.currency.toUpperCase() : null;
+  await firestore.collection('aiCommandLogs').add({
+    commandName: 'content_repurpose_generate',
+    promptId: promptRecord.id,
+    promptName: promptRecord.name,
+    modelId: modelRecord?.modelId ?? promptRecord.defaultModelId ?? null,
+    modelName: modelRecord?.name ?? null,
+    totalTokens: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    cost: 0,
+    currency,
+    createdAt: FieldValue.serverTimestamp(),
+    requestId,
+    draftId: docRef.id,
+    clientId: payload.clientId || null,
+    clientName: payload.clientName || null,
+    projectId: payload.projectId || null,
+    metadata: {
+      mode: 'rules-draft',
+      transcriptSource: payload.transcriptSource?.type ?? null,
+    },
   });
 
   const timestamp = new Date().toISOString();
@@ -433,6 +512,11 @@ export async function POST(req: NextRequest) {
       deliverableLabel: payload.deliverableLabel || null,
       deliverableProductId: payload.deliverableProductId || null,
       deliverableProductName: payload.deliverableProductName || null,
+      requestId,
+      promptId: promptRecord.id,
+      promptName: promptRecord.name,
+      modelName: modelRecord?.name ?? null,
+      generationMode: 'rules-draft',
       createdAt: timestamp,
       updatedAt: timestamp,
     },

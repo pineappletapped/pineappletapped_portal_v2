@@ -4,6 +4,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
 
 import { getFirebaseAdminFirestore } from "@/lib/firebase-admin";
+import { ensurePromptRecord } from "@/lib/ai/prompt-registry.server";
+import { getAiModelRecordById } from "@/lib/ai/models.server";
+import { PROPOSAL_STORYBOARD_PROMPT_TEMPLATE } from "@/lib/ai/templates";
 
 type InputItem = {
   name: string;
@@ -21,6 +24,7 @@ type ParsedPayload = {
   items: InputItem[];
   notes: string | null;
   orgId: string | null;
+  projectId: string | null;
 };
 
 function unauthorizedResponse() {
@@ -89,7 +93,8 @@ function parsePayload(body: any): ParsedPayload {
   const items = parseItems(body?.items);
   const notes = typeof body?.notes === "string" ? body.notes.trim() : null;
   const orgId = typeof body?.orgId === "string" ? body.orgId.trim() : null;
-  return { projectName, audience, tone, goals, deliverables, items, notes, orgId };
+  const projectId = typeof body?.projectId === "string" ? body.projectId.trim() : null;
+  return { projectName, audience, tone, goals, deliverables, items, notes, orgId, projectId };
 }
 
 function formatCurrency(value: number | null): string | null {
@@ -279,6 +284,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const requestId = randomUUID();
+
+  const promptRecord = await ensurePromptRecord(
+    PROPOSAL_STORYBOARD_PROMPT_TEMPLATE.name,
+    PROPOSAL_STORYBOARD_PROMPT_TEMPLATE
+  );
+
+  const modelRecord = promptRecord.defaultModelId
+    ? await getAiModelRecordById(promptRecord.defaultModelId)
+    : null;
+
   const narrative = buildNarrative(payload);
   const sections = buildSections({ ...payload, deliverables: allDeliverables });
   const timeline = buildTimeline({ ...payload, deliverables: allDeliverables });
@@ -286,9 +302,31 @@ export async function POST(req: NextRequest) {
 
   const firestore = getFirebaseAdminFirestore();
   const now = FieldValue.serverTimestamp();
+  const generationMeta = {
+    requestId,
+    mode: "rules-draft",
+    prompt: {
+      id: promptRecord.id,
+      name: promptRecord.name,
+      status: promptRecord.status,
+      defaultModelId: promptRecord.defaultModelId,
+      updatedAt: promptRecord.updatedAt ?? null,
+      estimatedTokens: promptRecord.estimatedTokens ?? null,
+    },
+    model: modelRecord
+      ? {
+          docId: modelRecord.id,
+          modelId: modelRecord.modelId,
+          name: modelRecord.name,
+          provider: modelRecord.provider,
+          currency: modelRecord.currency ?? null,
+        }
+      : null,
+  } as const;
   const docRef = await firestore.collection("proposalStoryboards").add({
     userId: uid,
     orgId: payload.orgId || null,
+    projectId: payload.projectId || null,
     projectName: payload.projectName || null,
     audience: payload.audience || null,
     tone: payload.tone || null,
@@ -299,9 +337,40 @@ export async function POST(req: NextRequest) {
     sections,
     timeline,
     recommendedItems,
+    requestId,
+    promptId: promptRecord.id,
+    promptName: promptRecord.name,
+    promptStatus: promptRecord.status,
+    promptDefaultModelId: promptRecord.defaultModelId,
+    promptEstimatedTokens: promptRecord.estimatedTokens ?? null,
+    generationMode: "rules-draft",
+    generation: generationMeta,
     status: "ready",
     createdAt: now,
     updatedAt: now,
+  });
+
+  const currency = modelRecord?.currency ? modelRecord.currency.toUpperCase() : null;
+  await firestore.collection("aiCommandLogs").add({
+    commandName: "proposal_storyboard_generate",
+    promptId: promptRecord.id,
+    promptName: promptRecord.name,
+    modelId: modelRecord?.modelId ?? promptRecord.defaultModelId ?? null,
+    modelName: modelRecord?.name ?? null,
+    totalTokens: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    cost: 0,
+    currency,
+    createdAt: FieldValue.serverTimestamp(),
+    requestId,
+    storyboardId: docRef.id,
+    clientId: payload.orgId || null,
+    clientName: null,
+    projectId: payload.projectId || null,
+    metadata: {
+      mode: "rules-draft",
+    },
   });
 
   const timestamp = new Date().toISOString();
@@ -314,6 +383,11 @@ export async function POST(req: NextRequest) {
       sections,
       timeline,
       recommendedItems,
+      requestId,
+      promptId: promptRecord.id,
+      promptName: promptRecord.name,
+      modelName: modelRecord?.name ?? null,
+      generationMode: "rules-draft",
       createdAt: timestamp,
       updatedAt: timestamp,
     },
