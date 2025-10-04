@@ -2434,16 +2434,31 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
     }
   }
 
-  const listResponse = await drive.files.list({
-    q: `'${folderId}' in parents and trashed = false`,
-    fields: 'nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink)',
-    pageSize: 100,
-    includeItemsFromAllDrives: true,
-    supportsAllDrives: true,
-    orderBy: 'name_natural',
-  });
+  const driveFiles: drive_v3.Schema$File[] = [];
+  let pageToken: string | undefined;
+  let safetyCounter = 0;
 
-  const items = (listResponse.data.files || [])
+  do {
+    const listResponse = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: 'nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink)',
+      pageToken,
+      pageSize: 100,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+      orderBy: 'name_natural',
+    });
+
+    if (Array.isArray(listResponse.data.files)) {
+      driveFiles.push(...listResponse.data.files);
+    }
+
+    const next = typeof listResponse.data.nextPageToken === 'string' ? listResponse.data.nextPageToken.trim() : '';
+    pageToken = next.length > 0 ? next : undefined;
+    safetyCounter += 1;
+  } while (pageToken && safetyCounter < 50);
+
+  const items = driveFiles
     .map((file) => ({
       id: file.id ?? '',
       name: typeof file.name === 'string' ? file.name : 'Untitled',
