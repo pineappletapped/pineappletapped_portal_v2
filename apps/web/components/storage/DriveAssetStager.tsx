@@ -121,6 +121,7 @@ export default function DriveAssetStager({
   const [orderStatus, setOrderStatus] = useState<string | null>(null);
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveError, setDriveError] = useState<string | null>(null);
+  const [driveErrorHelp, setDriveErrorHelp] = useState<"integration" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [ingesting, setIngesting] = useState<{
     id: string;
@@ -299,6 +300,7 @@ export default function DriveAssetStager({
       if (!services?.functions) return;
       setDriveLoading(true);
       setDriveError(null);
+      setDriveErrorHelp(null);
       setNotice(null);
       try {
         const callable = httpsCallable(services.functions, "drive_listProjectFolder");
@@ -340,9 +342,29 @@ export default function DriveAssetStager({
               : "Order folder");
           setBreadcrumbs([{ id: payload?.folderId || folderId || project.id, name: rootName }]);
         }
-      } catch (error) {
+      } catch (error: any) {
         console.error("DriveAssetStager folder listing failed", error);
-        setDriveError("Unable to load the requested Drive folder. Please try again.");
+        const details = typeof error?.details === "string" ? error.details : "";
+        const message = typeof error?.message === "string" ? error.message : "";
+        const combined = `${details} ${message}`.toLowerCase();
+        if (
+          (error?.code === "functions/failed-precondition" &&
+            combined.includes("service account credentials are not configured")) ||
+          combined.includes("google drive service account credentials are not configured")
+        ) {
+          setDriveError(
+            "Google Drive integration is not configured. Please connect a service account to browse project folders."
+          );
+          setDriveErrorHelp("integration");
+        } else {
+          const fallback = details || message || "Unable to load the requested Drive folder. Please try again.";
+          setDriveError(
+            typeof fallback === "string"
+              ? fallback
+              : "Unable to load the requested Drive folder. Please try again."
+          );
+          setDriveErrorHelp(null);
+        }
       } finally {
         setDriveLoading(false);
       }
@@ -359,6 +381,7 @@ export default function DriveAssetStager({
       setOrderStatus(null);
       setNotice(null);
       setDriveError(null);
+      setDriveErrorHelp(null);
       if (projectId) {
         const project = projects.find((item) => item.id === projectId);
         if (project) {
@@ -397,6 +420,7 @@ export default function DriveAssetStager({
       if (!selectedProject || !services?.functions) return;
       setNotice(null);
       setDriveError(null);
+      setDriveErrorHelp(null);
       const targetType =
         options.assetType === "flight_plan" ? "flight_plan" : "deliverable";
       setIngesting({ id: item.id, assetType: targetType });
@@ -417,8 +441,25 @@ export default function DriveAssetStager({
         );
       } catch (error: any) {
         console.error("DriveAssetStager staging failed", error);
-        const message = error?.message || error?.code || "Failed to ingest the Drive file.";
-        setDriveError(typeof message === "string" ? message : "Failed to ingest the Drive file.");
+        const details = typeof error?.details === "string" ? error.details : "";
+        const message = typeof error?.message === "string" ? error.message : "";
+        const combined = `${details} ${message}`.toLowerCase();
+        if (
+          (error?.code === "functions/failed-precondition" &&
+            combined.includes("service account credentials are not configured")) ||
+          combined.includes("google drive service account credentials are not configured")
+        ) {
+          setDriveError(
+            "Google Drive integration is not configured. Please connect a service account to ingest Drive files."
+          );
+          setDriveErrorHelp("integration");
+        } else {
+          const fallback = details || message || error?.code || "Failed to ingest the Drive file.";
+          setDriveError(
+            typeof fallback === "string" ? fallback : "Failed to ingest the Drive file."
+          );
+          setDriveErrorHelp(null);
+        }
       } finally {
         setIngesting(null);
       }
@@ -561,7 +602,19 @@ export default function DriveAssetStager({
             </nav>
 
             {notice ? <p className="rounded bg-emerald-50 p-3 text-sm text-emerald-900">{notice}</p> : null}
-            {driveError ? <p className="rounded bg-red-50 p-3 text-sm text-red-700">{driveError}</p> : null}
+            {driveError ? (
+              <div className="rounded bg-red-50 p-3 text-sm text-red-700">
+                <p>{driveError}</p>
+                {driveErrorHelp === "integration" ? (
+                  <p className="mt-2 text-xs">
+                    <Link className="font-semibold underline" href="/admin/storage/integration">
+                      Configure Drive integration
+                    </Link>
+                     to add service account credentials.
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
 
             {driveLoading ? (
               <p className="text-sm text-gray-600">Loading Drive contents…</p>

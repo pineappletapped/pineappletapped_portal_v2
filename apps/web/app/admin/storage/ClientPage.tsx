@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
@@ -136,14 +137,19 @@ export default function AdminStoragePage() {
               the Browse Drive picker when configuring deliverable folders.
             </p>
           </div>
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={saveDriveSettings}
-            disabled={driveSaving}
-          >
-            {driveSaving ? "Saving…" : "Save settings"}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link className="btn btn-sm btn-outline" href="/admin/storage/integration">
+              Configure Drive integration
+            </Link>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={saveDriveSettings}
+              disabled={driveSaving}
+            >
+              {driveSaving ? "Saving…" : "Save settings"}
+            </button>
+          </div>
         </div>
         <div className="mt-3 grid gap-3">
           <label className="text-xs font-medium text-gray-600">
