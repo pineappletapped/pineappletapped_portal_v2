@@ -8661,7 +8661,208 @@ async function fulfilCampaignBookingPurchase(options) {
         bookingId,
     });
 }
-// Stripe webhook (deposit/balance) — skeleton
+function coercePaymentIntent(intent) {
+    return intent;
+}
+async function findInvoiceTarget(invoiceId, paymentLinkId) {
+    if (invoiceId) {
+        const ref = db.collection('clientInvoices').doc(invoiceId);
+        const snapshot = await ref.get();
+        if (snapshot.exists) {
+            return { ref, snapshot };
+        }
+    }
+    if (paymentLinkId) {
+        const querySnap = await db
+            .collection('clientInvoices')
+            .where('stripePaymentLinkId', '==', paymentLinkId)
+            .limit(1)
+            .get();
+        if (!querySnap.empty) {
+            const docSnap = querySnap.docs[0];
+            return { ref: docSnap.ref, snapshot: docSnap };
+        }
+    }
+    return null;
+}
+async function reconcileInvoiceStripePayment(context) {
+    const { invoiceId, paymentLinkId } = context;
+    if (!invoiceId && !paymentLinkId) {
+        return false;
+    }
+    const target = await findInvoiceTarget(invoiceId, paymentLinkId);
+    if (!target) {
+        console.warn('Stripe webhook received payment for unknown invoice', {
+            invoiceId,
+            paymentLinkId,
+            source: context.source,
+        });
+        return false;
+    }
+    const { ref, snapshot } = target;
+    const data = snapshot.data() ?? {};
+    const existingPayment = typeof data.lastStripePayment?.intentId === 'string'
+        ? data.lastStripePayment.intentId
+        : typeof data.stripePaymentIntentId === 'string'
+            ? data.stripePaymentIntentId
+            : null;
+    if (existingPayment && context.paymentIntentId && existingPayment === context.paymentIntentId) {
+        return true;
+    }
+    const nowIso = new Date().toISOString();
+    const amount = typeof context.amountReceivedCents === 'number'
+        ? Number.parseFloat(fromCurrencyCents(context.amountReceivedCents).toFixed(2))
+        : null;
+    const currency = context.currency ? context.currency.toUpperCase() : null;
+    const historyNotes = [];
+    if (amount !== null && currency) {
+        historyNotes.push(`Amount ${amount.toFixed(2)} ${currency}`);
+    }
+    if (context.paymentIntentId) {
+        historyNotes.push(`Intent ${context.paymentIntentId}`);
+    }
+    if (context.source) {
+        historyNotes.push(`Source ${context.source}`);
+    }
+    const historyEntry = {
+        event: data.status === 'paid' ? 'stripe_payment_recorded' : 'status_paid',
+        at: nowIso,
+        actor: null,
+    };
+    if (historyNotes.length > 0) {
+        historyEntry.notes = historyNotes.join(' · ');
+    }
+    const updates = {
+        updatedAt: nowIso,
+        outstandingBalance: 0,
+        history: admin.firestore.FieldValue.arrayUnion(historyEntry),
+        lastStripePayment: {
+            intentId: context.paymentIntentId ?? null,
+            paymentLinkId: paymentLinkId,
+            amount,
+            currency,
+            method: context.paymentMethod ?? null,
+            chargeId: context.chargeId ?? null,
+            receiptUrl: context.receiptUrl ?? null,
+            recordedAt: nowIso,
+            source: context.source,
+        },
+    };
+    if (!paymentLinkId && typeof data.stripePaymentLinkId === 'string') {
+        updates.stripePaymentLinkId = data.stripePaymentLinkId;
+    }
+    else if (paymentLinkId) {
+        updates.stripePaymentLinkId = paymentLinkId;
+    }
+    if (context.paymentIntentId) {
+        updates.stripePaymentIntentId = context.paymentIntentId;
+    }
+    if (data.status !== 'paid') {
+        updates.status = 'paid';
+        updates.paidAt = nowIso;
+    }
+    else if (!data.paidAt) {
+        updates.paidAt = nowIso;
+    }
+    await ref.set(updates, { merge: true });
+    return true;
+}
+async function reconcileInvoiceFromPaymentIntent(paymentIntent, source) {
+    const metadata = (paymentIntent.metadata ?? {});
+    const paymentIntentRecord = coercePaymentIntent(paymentIntent);
+    const invoiceId = normaliseString(metadata.invoiceId);
+    const paymentLinkId = normaliseString(metadata.paymentLinkId) ??
+        (typeof paymentIntentRecord.payment_link === 'string' ? paymentIntentRecord.payment_link : null);
+    const rawCharges = Array.isArray(paymentIntentRecord.charges?.data)
+        ? (paymentIntentRecord.charges?.data ?? [])
+        : [];
+    const charges = rawCharges;
+    const primaryCharge = charges.find((charge) => charge.paid) ?? charges[0];
+    return reconcileInvoiceStripePayment({
+        invoiceId,
+        paymentLinkId,
+        paymentIntentId: typeof paymentIntent.id === 'string' ? paymentIntent.id : null,
+        amountReceivedCents: typeof paymentIntent.amount_received === 'number'
+            ? paymentIntent.amount_received
+            : typeof paymentIntent.amount === 'number'
+                ? paymentIntent.amount
+                : null,
+        currency: typeof paymentIntent.currency === 'string'
+            ? paymentIntent.currency
+            : typeof primaryCharge?.currency === 'string'
+                ? primaryCharge.currency
+                : null,
+        paymentMethod: Array.isArray(paymentIntent.payment_method_types) && paymentIntent.payment_method_types.length > 0
+            ? paymentIntent.payment_method_types[0] ?? null
+            : null,
+        chargeId: typeof primaryCharge?.id === 'string' ? primaryCharge.id : null,
+        receiptUrl: typeof primaryCharge?.receipt_url === 'string' ? primaryCharge.receipt_url : null,
+        source,
+    });
+}
+async function reconcileInvoiceFromCheckoutSession(stripe, session) {
+    const invoiceId = normaliseString((session.metadata ?? {})?.invoiceId);
+    const paymentLinkId = typeof session.payment_link === 'string'
+        ? session.payment_link
+        : normaliseString((session.metadata ?? {})?.paymentLinkId);
+    if (!invoiceId && !paymentLinkId) {
+        return false;
+    }
+    const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : null;
+    let amountCents = typeof session.amount_total === 'number' ? session.amount_total : null;
+    let currency = typeof session.currency === 'string' ? session.currency : null;
+    let paymentMethod = null;
+    let chargeId = null;
+    let receiptUrl = null;
+    if (paymentIntentId) {
+        try {
+            const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+                expand: ['latest_charge', 'charges'],
+            });
+            const paymentIntentRecord = coercePaymentIntent(paymentIntent);
+            if (typeof paymentIntentRecord.amount_received === 'number') {
+                amountCents = paymentIntentRecord.amount_received;
+            }
+            if (typeof paymentIntentRecord.currency === 'string') {
+                currency = paymentIntentRecord.currency;
+            }
+            if (Array.isArray(paymentIntentRecord.payment_method_types) &&
+                paymentIntentRecord.payment_method_types.length > 0) {
+                paymentMethod = paymentIntentRecord.payment_method_types[0] ?? null;
+            }
+            const rawCharges = Array.isArray(paymentIntentRecord.charges?.data)
+                ? (paymentIntentRecord.charges?.data ?? [])
+                : [];
+            const charges = rawCharges;
+            const primaryCharge = charges.find((charge) => charge.paid) ?? charges[0];
+            if (primaryCharge) {
+                if (typeof primaryCharge.id === 'string') {
+                    chargeId = primaryCharge.id;
+                }
+                if (typeof primaryCharge.receipt_url === 'string') {
+                    receiptUrl = primaryCharge.receipt_url;
+                }
+                if (!currency && typeof primaryCharge.currency === 'string') {
+                    currency = primaryCharge.currency;
+                }
+            }
+        }
+        catch (error) {
+            console.error('Failed to retrieve payment intent for checkout session', session.id, error);
+        }
+    }
+    return reconcileInvoiceStripePayment({
+        invoiceId,
+        paymentLinkId,
+        paymentIntentId,
+        amountReceivedCents: amountCents,
+        currency,
+        paymentMethod,
+        chargeId,
+        receiptUrl,
+        source: 'checkout_session',
+    });
+}
 export const stripe_webhook = functions.https.onRequest(async (req, res) => {
     const sig = req.headers['stripe-signature'];
     let stripe;
@@ -8688,7 +8889,14 @@ export const stripe_webhook = functions.https.onRequest(async (req, res) => {
     try {
         const eventType = event.type;
         if (eventType === 'payment_intent.succeeded') {
-            const pi = event.data.object;
+            const paymentIntent = event.data.object;
+            try {
+                await reconcileInvoiceFromPaymentIntent(paymentIntent, eventType);
+            }
+            catch (invoiceErr) {
+                console.error('Failed to reconcile invoice payment intent', paymentIntent.id, invoiceErr);
+            }
+            const pi = paymentIntent;
             const metadata = pi.metadata || {};
             const orderId = metadata.orderId;
             const payType = metadata.type;
@@ -8758,6 +8966,15 @@ export const stripe_webhook = functions.https.onRequest(async (req, res) => {
                         }
                     }
                 }
+            }
+        }
+        if (eventType === 'checkout.session.completed') {
+            const session = event.data.object;
+            try {
+                await reconcileInvoiceFromCheckoutSession(stripe, session);
+            }
+            catch (invoiceErr) {
+                console.error('Failed to reconcile invoice checkout session', session.id, invoiceErr);
             }
         }
         // Optionally handle other event types (payment_intent.payment_failed, etc.)

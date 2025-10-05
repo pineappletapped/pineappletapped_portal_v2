@@ -18,6 +18,20 @@ interface InvoiceRecord extends Record<string, unknown> {
   portalPublished?: boolean;
   updatedAt?: string | null;
   sentAt?: string | null;
+  paidAt?: string | null;
+  outstandingBalance?: number;
+  stripePaymentIntentId?: string | null;
+  lastStripePayment?: {
+    intentId?: string | null;
+    paymentLinkId?: string | null;
+    amount?: number | null;
+    currency?: string | null;
+    method?: string | null;
+    chargeId?: string | null;
+    receiptUrl?: string | null;
+    recordedAt?: string | null;
+    source?: string | null;
+  } | null;
 }
 
 const STATUS_STYLES: Record<string, string> = {
