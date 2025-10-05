@@ -18,6 +18,58 @@ import { useRoleGate } from "@/hooks/useRoleGate";
 import { describeLeadSource } from "@/lib/lead-source";
 import { HQ_UNASSIGNED_TERRITORY_LABEL } from "@/lib/franchises";
 
+function toDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  if (typeof value?.toDate === "function") {
+    try {
+      return value.toDate();
+    } catch (error) {
+      console.warn("Failed to convert Firestore timestamp", error);
+      return null;
+    }
+  }
+  if (typeof value?.seconds === "number" && typeof value?.nanoseconds === "number") {
+    const millis = value.seconds * 1000 + Math.floor(value.nanoseconds / 1_000_000);
+    return new Date(millis);
+  }
+  return null;
+}
+
+function formatDate(value: any): string | null {
+  const date = toDate(value);
+  return date ? date.toLocaleDateString() : null;
+}
+
+function formatDateTime(value: any): string | null {
+  const date = toDate(value);
+  return date ? date.toLocaleString() : null;
+}
+
+function capitaliseWord(value: string | null | undefined): string {
+  if (!value) return "";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function formatStatusLabel(value: string | null | undefined, fallback = "Pending"): string {
+  if (!value) return fallback;
+  return value
+    .split("_")
+    .filter(Boolean)
+    .map((segment) => capitaliseWord(segment))
+    .join(" ");
+}
+
+function normaliseStatus(value: any): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed.toLowerCase() : null;
+}
+
 export default function AdminOrdersPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [orders, setOrders] = useState<any[]>([]);
@@ -249,6 +301,7 @@ export default function AdminOrdersPage() {
               <th className="p-2">Created</th>
               <th className="p-2">Project</th>
               <th className="p-2">Items</th>
+              <th className="p-2">Payments</th>
               <th className="p-2">Actions</th>
             </tr>
           </thead>
@@ -342,6 +395,28 @@ export default function AdminOrdersPage() {
                 typeof o.projectId === "string" && o.projectId.trim().length > 0
                   ? o.projectId
                   : null;
+              const paymentSummary = (o.paymentSummary as Record<string, any> | undefined) || {};
+              const depositSummary = (paymentSummary.deposit as Record<string, any> | undefined) || {};
+              const balanceSummary = (paymentSummary.balance as Record<string, any> | undefined) || {};
+              const depositStatus = normaliseStatus(o.depositStatus) ?? normaliseStatus(depositSummary.status);
+              const balanceStatus = normaliseStatus(o.balanceStatus) ?? normaliseStatus(balanceSummary.status);
+              const depositPaidAt = depositSummary.paidAt ?? o.depositPaidAt;
+              const balancePaidAt = balanceSummary.paidAt ?? o.balancePaidAt;
+              const lastPayment = (o.lastStripePayment as Record<string, any> | undefined) || null;
+              const checkoutSessionsMap = o.stripeCheckoutSessions as Record<string, any> | undefined;
+              const checkoutSessions = checkoutSessionsMap ? Object.values(checkoutSessionsMap) : [];
+              const latestSession =
+                checkoutSessions
+                  .map((entry) => entry || {})
+                  .sort((a, b) => {
+                    const aDate =
+                      toDate(a.updatedAt) ?? toDate(a.completedAt) ?? toDate(a.createdAt);
+                    const bDate =
+                      toDate(b.updatedAt) ?? toDate(b.completedAt) ?? toDate(b.createdAt);
+                    const aMillis = aDate ? aDate.getTime() : 0;
+                    const bMillis = bDate ? bDate.getTime() : 0;
+                    return bMillis - aMillis;
+                  })[0] ?? null;
               return (
                 <tr key={o.id} className="border-t">
                   <td className="p-2">{o.id}</td>
@@ -523,6 +598,95 @@ export default function AdminOrdersPage() {
                         })}
                       </ul>
                     )}
+                  </td>
+                  <td className="p-2 align-top">
+                    <div className="space-y-2 text-xs text-gray-600">
+                      <div>
+                        <div className="font-semibold text-gray-800">Deposit</div>
+                        <div>
+                          {depositStatus === "paid"
+                            ? "Paid"
+                            : formatStatusLabel(depositStatus)}
+                          {formatDate(depositPaidAt)
+                            ? ` · ${formatDate(depositPaidAt)}`
+                            : ""}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="font-semibold text-gray-800">Balance</div>
+                        <div>
+                          {balanceStatus === "paid"
+                            ? "Paid"
+                            : formatStatusLabel(balanceStatus)}
+                          {formatDate(balancePaidAt)
+                            ? ` · ${formatDate(balancePaidAt)}`
+                            : ""}
+                        </div>
+                      </div>
+                      {lastPayment ? (
+                        <div className="space-y-1 rounded border border-slate-200 bg-white p-2 text-xs text-gray-600">
+                          <div className="font-medium text-gray-800">
+                            {formatStatusLabel(normaliseStatus(lastPayment.type), "Stripe")} payment
+                          </div>
+                          <div>
+                            {typeof lastPayment.amount === "number"
+                              ? `£${lastPayment.amount.toFixed(2)}`
+                              : "Amount pending"}
+                            {typeof lastPayment.currency === "string" && lastPayment.currency
+                              ? ` ${(lastPayment.currency as string).toUpperCase()}`
+                              : ""}
+                          </div>
+                          {formatDateTime(lastPayment.recordedAt) ? (
+                            <div>Recorded {formatDateTime(lastPayment.recordedAt)}</div>
+                          ) : null}
+                          {typeof lastPayment.receiptUrl === "string" && lastPayment.receiptUrl ? (
+                            <Link
+                              href={lastPayment.receiptUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-orange underline"
+                            >
+                              Receipt
+                            </Link>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {latestSession ? (
+                        <div className="space-y-1 rounded border border-dashed border-slate-300 bg-slate-50 p-2 text-xs text-gray-600">
+                          <div className="font-medium text-gray-800">
+                            Checkout
+                            {latestSession.type
+                              ? ` (${formatStatusLabel(normaliseStatus(latestSession.type), "")})`
+                              : ""}
+                          </div>
+                          <div>
+                            Status: {formatStatusLabel(normaliseStatus(latestSession.status), "Unknown")}
+                            {latestSession.paymentStatus
+                              ? ` · ${formatStatusLabel(normaliseStatus(latestSession.paymentStatus))}`
+                              : ""}
+                          </div>
+                          {formatDateTime(
+                            latestSession.updatedAt ?? latestSession.completedAt ?? latestSession.createdAt
+                          ) ? (
+                            <div>
+                              Updated {formatDateTime(
+                                latestSession.updatedAt ?? latestSession.completedAt ?? latestSession.createdAt
+                              )}
+                            </div>
+                          ) : null}
+                          {typeof latestSession.url === "string" && latestSession.url ? (
+                            <Link
+                              href={latestSession.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-orange underline"
+                            >
+                              Open session
+                            </Link>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
                   </td>
                   <td className="p-2">
                     <Link href={`/orders/${o.id}`} className="btn-sm">

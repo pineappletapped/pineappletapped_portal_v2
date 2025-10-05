@@ -8,7 +8,7 @@
     "deploy": "npm --prefix functions run build && firebase deploy --only firestore:rules,functions"
   },
   "engines": {
-    "node": "^18"
+    "node": ">=20"
   },
   "dependencies": {
     "@dataconnect/generated": "file:apps/web/src/dataconnect-generated"

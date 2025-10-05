@@ -3,6 +3,7 @@ import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { onRequest } from 'firebase-functions/v2/https';
 import Stripe from 'stripe';
+import type { DocumentData, DocumentReference, DocumentSnapshot } from 'firebase-admin/firestore';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import sharp from 'sharp';
 import { v4 as uuidv4 } from 'uuid';
@@ -1158,12 +1159,49 @@ interface DriveSetupContext {
   } | null;
 }
 
+/**
+ * Normalises a Drive identifier so callers can safely pass either a raw ID or
+ * one of the common sharing URLs produced by Drive (e.g. when copying from the
+ * browser address bar).
+ *
+ * Examples:
+ * - `normaliseDriveId('abc123') => 'abc123'`
+ * - `normaliseDriveId('https://drive.google.com/drive/folders/abc123?usp=sharing') => 'abc123'`
+ * - `normaliseDriveId('https://drive.google.com/open?id=abc123') => 'abc123'`
+ */
 function normaliseDriveId(input: unknown): string | null {
-  if (typeof input === 'string') {
-    const trimmed = input.trim();
-    return trimmed.length > 0 ? trimmed : null;
+  if (typeof input !== 'string') {
+    return null;
   }
-  return null;
+
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const url = new URL(trimmed);
+      const folderMatch = url.pathname.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+      if (folderMatch) {
+        return folderMatch[1];
+      }
+
+      const idParam = url.searchParams.get('id');
+      if (idParam) {
+        return idParam;
+      }
+
+      const documentMatch = url.pathname.match(/\/d\/([a-zA-Z0-9_-]+)/);
+      if (documentMatch) {
+        return documentMatch[1];
+      }
+    } catch (error) {
+      console.warn('Failed to parse Drive URL – falling back to raw value', error);
+    }
+  }
+
+  return trimmed;
 }
 
 function sanitiseDriveName(name: string | null | undefined, fallback: string): string {
@@ -1915,6 +1953,30 @@ async function listDriveChildren(
   return files;
 }
 
+async function listDriveChildFolders(
+  drive: drive_v3.Drive,
+  parentId: string
+): Promise<drive_v3.Schema$File[]> {
+  const folders: drive_v3.Schema$File[] = [];
+  let pageToken: string | undefined;
+  do {
+    const res = await drive.files.list({
+      q: `'${parentId}' in parents and trashed = false and mimeType = 'application/vnd.google-apps.folder'`,
+      fields: 'nextPageToken, files(id, name, mimeType)',
+      pageSize: 100,
+      pageToken,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+      orderBy: 'name_natural',
+    });
+    if (res.data.files) {
+      folders.push(...res.data.files);
+    }
+    pageToken = res.data.nextPageToken ?? undefined;
+  } while (pageToken);
+  return folders;
+}
+
 async function copyDriveContents(
   drive: drive_v3.Drive,
   sourceFolderId: string,
@@ -2259,9 +2321,8 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
   }
 
   const userContext = await loadUserContext(context.auth.uid);
-  if (!userContext.isStaff && userContext.franchiseIds.length === 0) {
-    throw new functions.https.HttpsError('permission-denied', 'Drive staging requires staff or franchise access');
-  }
+  const userIsStaff = userContext.isStaff;
+  const userFranchiseIds = new Set(userContext.franchiseIds);
 
   const projectSnap = await db.collection('projects').doc(projectId).get();
   if (!projectSnap.exists) {
@@ -2271,11 +2332,7 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
   const projectFranchiseId =
     typeof projectData.franchiseId === 'string' ? projectData.franchiseId : null;
 
-  if (
-    !userContext.isStaff &&
-    projectFranchiseId &&
-    !userContext.franchiseIds.includes(projectFranchiseId)
-  ) {
+  if (!userIsStaff && userFranchiseIds.size > 0 && projectFranchiseId && !userFranchiseIds.has(projectFranchiseId)) {
     throw new functions.https.HttpsError('permission-denied', 'This project is not assigned to your franchise');
   }
 
@@ -2293,6 +2350,83 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
   }
   const orderData = orderSnap.data() as Record<string, any>;
   const driveInfo = (orderData.drive as Record<string, any>) || {};
+  const orderOwnerUid =
+    typeof orderData.userId === 'string' && orderData.userId.trim().length > 0 ? orderData.userId.trim() : null;
+
+  const expandOrgMembershipKeys = (raw: unknown): string[] => {
+    if (typeof raw !== 'string') {
+      return [];
+    }
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      return [];
+    }
+    const variants = new Set<string>();
+    variants.add(trimmed);
+    const parts = trimmed.split('/').filter((segment) => segment.length > 0);
+    const last = parts.length > 0 ? parts[parts.length - 1] : trimmed;
+    if (last && last.trim().length > 0) {
+      const base = last.trim();
+      variants.add(base);
+      variants.add(`clients/${base}`);
+      variants.add(`orgs/${base}`);
+    }
+    return Array.from(variants);
+  };
+
+  const candidateOrgKeys = new Set<string>();
+  const addOrgCandidates = (value: unknown) => {
+    expandOrgMembershipKeys(value).forEach((key) => {
+      if (key) {
+        candidateOrgKeys.add(key);
+      }
+    });
+  };
+
+  addOrgCandidates(projectData.orgId);
+  addOrgCandidates(orderData.orgId);
+  const normalisedClientId = normaliseClientDocId(orderData.clientId);
+  if (normalisedClientId) {
+    addOrgCandidates(normalisedClientId);
+  } else {
+    addOrgCandidates(orderData.clientId);
+  }
+
+  const hasStaffOrFranchiseAccess =
+    userIsStaff || (!userIsStaff && userFranchiseIds.size > 0 && (!projectFranchiseId || userFranchiseIds.has(projectFranchiseId)));
+  const isOrderOwner = orderOwnerUid !== null && orderOwnerUid === context.auth.uid;
+  let hasClientMembershipAccess = false;
+
+  if (!hasStaffOrFranchiseAccess && !isOrderOwner) {
+    if (candidateOrgKeys.size > 0) {
+      const membershipKeys = new Set<string>();
+      try {
+        const membershipSnap = await db
+          .collection('memberships')
+          .where('userId', '==', context.auth.uid)
+          .limit(50)
+          .get();
+        membershipSnap.docs.forEach((docSnap) => {
+          const membershipData = (docSnap.data() as Record<string, any>) || {};
+          expandOrgMembershipKeys(membershipData.orgId).forEach((key) => {
+            if (key) {
+              membershipKeys.add(key);
+            }
+          });
+        });
+      } catch (membershipError) {
+        console.warn('drive_listProjectFolder failed to load memberships', { projectId, uid: context.auth.uid }, membershipError);
+      }
+      hasClientMembershipAccess = Array.from(candidateOrgKeys).some((key) => membershipKeys.has(key));
+    }
+
+    if (!hasClientMembershipAccess) {
+      throw new functions.https.HttpsError(
+        'permission-denied',
+        'Project files are limited to Pineapple Tapped staff, franchise operators, and approved client team members.'
+      );
+    }
+  }
 
   const drive = await createDriveService();
   if (!drive) {
@@ -2338,16 +2472,31 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
     }
   }
 
-  const listResponse = await drive.files.list({
-    q: `'${folderId}' in parents and trashed = false`,
-    fields: 'nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink)',
-    pageSize: 100,
-    includeItemsFromAllDrives: true,
-    supportsAllDrives: true,
-    orderBy: 'name_natural',
-  });
+  const driveFiles: drive_v3.Schema$File[] = [];
+  let pageToken: string | undefined;
+  let safetyCounter = 0;
 
-  const items = (listResponse.data.files || [])
+  do {
+    const listResponse = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: 'nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink)',
+      pageToken,
+      pageSize: 100,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+      orderBy: 'name_natural',
+    });
+
+    if (Array.isArray(listResponse.data.files)) {
+      driveFiles.push(...listResponse.data.files);
+    }
+
+    const next = typeof listResponse.data.nextPageToken === 'string' ? listResponse.data.nextPageToken.trim() : '';
+    pageToken = next.length > 0 ? next : undefined;
+    safetyCounter += 1;
+  } while (pageToken && safetyCounter < 50);
+
+  const items = driveFiles
     .map((file) => ({
       id: file.id ?? '',
       name: typeof file.name === 'string' ? file.name : 'Untitled',
@@ -2397,6 +2546,152 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
       orderFolderName: typeof driveInfo.orderFolderName === 'string' ? driveInfo.orderFolderName : null,
       productFolders,
     },
+  };
+});
+
+export const drive_listTemplateFolders = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+  }
+
+  const userContext = await loadUserContext(context.auth.uid);
+  if (userContext.roles.admin !== true && userContext.roles.operations !== true) {
+    throw new functions.https.HttpsError(
+      'permission-denied',
+      'Drive template browsing is restricted to admin and operations roles'
+    );
+  }
+
+  const settingsSnap = await db.collection('settings').doc('clientDrive').get();
+  const settings = (settingsSnap.data() as ClientDriveSettingsDoc) || {};
+  const rootFolderId = normaliseDriveId(settings.clientRootFolderId);
+  if (!rootFolderId) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'Client Drive root folder is not configured.'
+    );
+  }
+
+  const drive = await createDriveService();
+  if (!drive) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'Google Drive service account credentials are not configured.'
+    );
+  }
+
+  const rawFolderId =
+    typeof data?.folderId === 'string' && data.folderId.trim().length > 0
+      ? data.folderId.trim()
+      : null;
+  const targetFolderIdFromInput = normaliseDriveId(rawFolderId);
+
+  const pathInput = data?.path;
+  const pathSegments: string[] = Array.isArray(pathInput)
+    ? (pathInput as unknown[])
+        .map((segment) => (typeof segment === 'string' ? segment.trim() : ''))
+        .filter((segment) => segment.length > 0)
+    : typeof pathInput === 'string'
+      ? pathInput
+          .split('/')
+          .map((segment) => segment.trim())
+          .filter((segment) => segment.length > 0)
+      : [];
+
+  const breadcrumbs: Array<{ id: string; name: string | null }> = [];
+
+  let currentFolderId = rootFolderId;
+  let currentFolderName: string | null = null;
+  try {
+    const rootMeta = await drive.files.get({
+      fileId: rootFolderId,
+      fields: 'id, name',
+      supportsAllDrives: true,
+    });
+    currentFolderName = typeof rootMeta.data.name === 'string' ? rootMeta.data.name : null;
+  } catch (error) {
+    console.warn('drive_listTemplateFolders failed to load root metadata', rootFolderId, error);
+  }
+  breadcrumbs.push({ id: rootFolderId, name: currentFolderName });
+
+  for (const segment of pathSegments) {
+    const children = await listDriveChildFolders(drive, currentFolderId);
+    const match = children.find((child) => {
+      const id = typeof child.id === 'string' ? child.id : null;
+      const name = typeof child.name === 'string' ? child.name.trim() : '';
+      return id && name.toLowerCase() === segment.toLowerCase();
+    });
+    if (!match?.id) {
+      throw new functions.https.HttpsError(
+        'not-found',
+        `Folder not found for path segment: ${segment}`
+      );
+    }
+    currentFolderId = match.id;
+    currentFolderName = typeof match.name === 'string' ? match.name : null;
+    breadcrumbs.push({ id: currentFolderId, name: currentFolderName });
+  }
+
+  let targetFolderId = targetFolderIdFromInput ?? currentFolderId;
+  let folderName: string | null = currentFolderName;
+  try {
+    const folderMeta = await drive.files.get({
+      fileId: targetFolderId,
+      fields: 'id, name',
+      supportsAllDrives: true,
+    });
+    if (folderMeta.data.id) {
+      targetFolderId = folderMeta.data.id;
+    }
+    if (typeof folderMeta.data.name === 'string') {
+      folderName = folderMeta.data.name;
+    }
+  } catch (error) {
+    console.warn('drive_listTemplateFolders failed to load folder metadata', targetFolderId, error);
+  }
+
+  if (targetFolderIdFromInput && !folderName) {
+    throw new functions.https.HttpsError(
+      'not-found',
+      'The requested Drive folder could not be found or accessed.'
+    );
+  }
+
+  if (!breadcrumbs.some((crumb) => crumb.id === targetFolderId)) {
+    breadcrumbs.push({ id: targetFolderId, name: folderName });
+  } else {
+    breadcrumbs.forEach((crumb) => {
+      if (crumb.id === targetFolderId) {
+        crumb.name = folderName;
+      }
+    });
+  }
+
+  let folderEntries: drive_v3.Schema$File[] = [];
+  try {
+    folderEntries = await listDriveChildFolders(drive, targetFolderId);
+  } catch (error) {
+    console.error('drive_listTemplateFolders failed to list child folders', targetFolderId, error);
+    throw new functions.https.HttpsError(
+      'internal',
+      'Failed to list Drive folders. Please try again later.'
+    );
+  }
+  const folders = folderEntries
+    .map((entry) => ({
+      id: entry.id ?? '',
+      name:
+        typeof entry.name === 'string' && entry.name.trim().length > 0
+          ? entry.name.trim()
+          : 'Untitled folder',
+    }))
+    .filter((item) => item.id.length > 0);
+
+  return {
+    folderId: targetFolderId,
+    folderName,
+    breadcrumbs,
+    folders,
   };
 });
 
@@ -9826,6 +10121,677 @@ async function fulfilCampaignBookingPurchase(options: {
 }
 
 // Stripe webhook (deposit/balance) — skeleton
+type StripeInvoiceReconciliationContext = {
+  invoiceId: string | null;
+  paymentLinkId: string | null;
+  paymentIntentId: string | null;
+  amountReceivedCents: number | null;
+  currency: string | null;
+  paymentMethod: string | null;
+  chargeId: string | null;
+  receiptUrl: string | null;
+  source: string;
+};
+
+type PaymentIntentWithExtras = Stripe.PaymentIntent & {
+  payment_link?: string | null;
+  charges?: { data?: Stripe.Charge[] };
+};
+
+function coercePaymentIntent(
+  intent: Stripe.PaymentIntent | Stripe.Response<Stripe.PaymentIntent>
+): PaymentIntentWithExtras {
+  return intent as PaymentIntentWithExtras;
+}
+
+async function findInvoiceTarget(
+  invoiceId: string | null,
+  paymentLinkId: string | null
+): Promise<
+  | {
+      ref: DocumentReference<DocumentData>;
+      snapshot: DocumentSnapshot<DocumentData>;
+    }
+  | null
+> {
+  if (invoiceId) {
+    const ref = db.collection('clientInvoices').doc(invoiceId);
+    const snapshot = await ref.get();
+    if (snapshot.exists) {
+      return { ref, snapshot };
+    }
+  }
+
+  if (paymentLinkId) {
+    const querySnap = await db
+      .collection('clientInvoices')
+      .where('stripePaymentLinkId', '==', paymentLinkId)
+      .limit(1)
+      .get();
+    if (!querySnap.empty) {
+      const docSnap = querySnap.docs[0];
+      return { ref: docSnap.ref, snapshot: docSnap };
+    }
+  }
+
+  return null;
+}
+
+async function reconcileInvoiceStripePayment(
+  context: StripeInvoiceReconciliationContext
+): Promise<boolean> {
+  const { invoiceId, paymentLinkId } = context;
+  if (!invoiceId && !paymentLinkId) {
+    return false;
+  }
+
+  const target = await findInvoiceTarget(invoiceId, paymentLinkId);
+  if (!target) {
+    console.warn('Stripe webhook received payment for unknown invoice', {
+      invoiceId,
+      paymentLinkId,
+      source: context.source,
+    });
+    return false;
+  }
+
+  const { ref, snapshot } = target;
+  const data = (snapshot.data() as Record<string, unknown>) ?? {};
+  const existingPayment =
+    typeof (data.lastStripePayment as Record<string, unknown> | undefined)?.intentId === 'string'
+      ? ((data.lastStripePayment as Record<string, unknown>).intentId as string)
+      : typeof data.stripePaymentIntentId === 'string'
+        ? data.stripePaymentIntentId
+        : null;
+
+  if (existingPayment && context.paymentIntentId && existingPayment === context.paymentIntentId) {
+    return true;
+  }
+
+  const nowIso = new Date().toISOString();
+  const amount =
+    typeof context.amountReceivedCents === 'number'
+      ? Number.parseFloat(fromCurrencyCents(context.amountReceivedCents).toFixed(2))
+      : null;
+  const currency = context.currency ? context.currency.toUpperCase() : null;
+  const historyNotes: string[] = [];
+  if (amount !== null && currency) {
+    historyNotes.push(`Amount ${amount.toFixed(2)} ${currency}`);
+  }
+  if (context.paymentIntentId) {
+    historyNotes.push(`Intent ${context.paymentIntentId}`);
+  }
+  if (context.source) {
+    historyNotes.push(`Source ${context.source}`);
+  }
+
+  const historyEntry: Record<string, unknown> = {
+    event: data.status === 'paid' ? 'stripe_payment_recorded' : 'status_paid',
+    at: nowIso,
+    actor: null,
+  };
+  if (historyNotes.length > 0) {
+    historyEntry.notes = historyNotes.join(' · ');
+  }
+
+  const updates: Record<string, unknown> = {
+    updatedAt: nowIso,
+    outstandingBalance: 0,
+    history: admin.firestore.FieldValue.arrayUnion(historyEntry),
+    lastStripePayment: {
+      intentId: context.paymentIntentId ?? null,
+      paymentLinkId: paymentLinkId,
+      amount,
+      currency,
+      method: context.paymentMethod ?? null,
+      chargeId: context.chargeId ?? null,
+      receiptUrl: context.receiptUrl ?? null,
+      recordedAt: nowIso,
+      source: context.source,
+    },
+  };
+
+  if (!paymentLinkId && typeof data.stripePaymentLinkId === 'string') {
+    updates.stripePaymentLinkId = data.stripePaymentLinkId;
+  } else if (paymentLinkId) {
+    updates.stripePaymentLinkId = paymentLinkId;
+  }
+
+  if (context.paymentIntentId) {
+    updates.stripePaymentIntentId = context.paymentIntentId;
+  }
+
+  if (data.status !== 'paid') {
+    updates.status = 'paid';
+    updates.paidAt = nowIso;
+  } else if (!data.paidAt) {
+    updates.paidAt = nowIso;
+  }
+
+  await ref.set(updates, { merge: true });
+  return true;
+}
+
+type OrderStripePaymentType = 'deposit' | 'balance' | 'custom' | 'other';
+
+interface OrderStripePaymentOptions {
+  orderId: string | null;
+  type: unknown;
+  amountReceivedCents: number | null;
+  currency: string | null;
+  paymentIntentId: string | null;
+  checkoutSessionId: string | null;
+  paymentLinkId?: string | null;
+  paymentMethod?: string | null;
+  chargeId?: string | null;
+  receiptUrl?: string | null;
+  source?: string | null;
+  occurredAt?: number | null;
+  metadata?: Record<string, any> | null | undefined;
+}
+
+interface OrderStripePaymentResult {
+  recorded: boolean;
+  paymentType: OrderStripePaymentType | null;
+  orderData: Record<string, any> | null;
+  recordedAt: admin.firestore.Timestamp;
+  amount: number | null;
+  currency: string | null;
+  paymentIntentId: string | null;
+}
+
+function normaliseOrderPaymentType(value: unknown): OrderStripePaymentType | null {
+  const normalised = normaliseString(value);
+  if (!normalised) {
+    return null;
+  }
+  const lower = normalised.toLowerCase();
+  if (lower === 'deposit') {
+    return 'deposit';
+  }
+  if (lower === 'balance') {
+    return 'balance';
+  }
+  if (lower === 'custom') {
+    return 'custom';
+  }
+  return 'other';
+}
+
+function normaliseCurrencyCode(value: string | null | undefined): string | null {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.slice(0, 3).toUpperCase();
+}
+
+async function recordOrderStripePayment(options: OrderStripePaymentOptions): Promise<OrderStripePaymentResult | null> {
+  const orderId = normaliseString(options.orderId);
+  if (!orderId) {
+    return null;
+  }
+
+  const paymentType = normaliseOrderPaymentType(options.type);
+  const currencyCode = normaliseCurrencyCode(options.currency);
+  const amountDecimal =
+    typeof options.amountReceivedCents === 'number'
+      ? Number.parseFloat(fromCurrencyCents(options.amountReceivedCents).toFixed(2))
+      : null;
+  const recordedAt =
+    typeof options.occurredAt === 'number' && Number.isFinite(options.occurredAt)
+      ? admin.firestore.Timestamp.fromMillis(Math.max(0, Math.floor(options.occurredAt)))
+      : admin.firestore.Timestamp.now();
+
+  const orderRef = db.collection('orders').doc(orderId);
+
+  const transactionResult = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(orderRef);
+    if (!snap.exists) {
+      console.warn('Stripe payment received for unknown order', orderId, {
+        paymentIntentId: options.paymentIntentId,
+        checkoutSessionId: options.checkoutSessionId,
+      });
+      return null;
+    }
+
+    const data = (snap.data() as Record<string, any>) || {};
+    const existingPaymentsRaw = Array.isArray(data.stripePayments)
+      ? (data.stripePayments as Record<string, any>[])
+      : [];
+
+    const duplicate = existingPaymentsRaw.some((entry) => {
+      const entryIntent = normaliseString(entry?.intentId ?? entry?.paymentIntentId);
+      if (entryIntent && options.paymentIntentId && entryIntent === options.paymentIntentId) {
+        return true;
+      }
+      const entrySession = normaliseString(entry?.checkoutSessionId ?? entry?.sessionId);
+      if (entrySession && options.checkoutSessionId && entrySession === options.checkoutSessionId) {
+        return true;
+      }
+      return false;
+    });
+    if (duplicate) {
+      return {
+        recorded: false,
+        paymentType,
+        orderData: data,
+        recordedAt,
+        amount: amountDecimal,
+        currency: currencyCode,
+        paymentIntentId: options.paymentIntentId ?? null,
+      } as OrderStripePaymentResult;
+    }
+
+    const paymentRecord: Record<string, any> = {
+      id: `stripe:${options.paymentIntentId ?? options.checkoutSessionId ?? uuidv4()}`,
+      intentId: options.paymentIntentId ?? null,
+      checkoutSessionId: options.checkoutSessionId ?? null,
+      paymentLinkId: options.paymentLinkId ?? null,
+      amount: amountDecimal,
+      amountCents: options.amountReceivedCents ?? null,
+      currency: currencyCode,
+      method: options.paymentMethod ?? null,
+      chargeId: options.chargeId ?? null,
+      receiptUrl: options.receiptUrl ?? null,
+      type: paymentType ?? null,
+      source: options.source ?? null,
+      metadata: options.metadata ?? null,
+      recordedAt,
+    };
+
+    const updatedPayments = [...existingPaymentsRaw.map((entry) => ({ ...entry })), paymentRecord];
+
+    const updates: Record<string, any> = {
+      stripePayments: updatedPayments,
+      lastStripePayment: paymentRecord,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    const historyEntry: Record<string, any> = {
+      event: 'stripe_payment_recorded',
+      at: recordedAt,
+      amount: amountDecimal,
+      currency: currencyCode,
+      source: options.source ?? null,
+      type: paymentType ?? null,
+      paymentIntentId: options.paymentIntentId ?? null,
+      checkoutSessionId: options.checkoutSessionId ?? null,
+    };
+    updates.history = admin.firestore.FieldValue.arrayUnion(historyEntry);
+
+    const summary =
+      typeof data.paymentSummary === 'object' && data.paymentSummary !== null
+        ? { ...data.paymentSummary }
+        : {};
+    summary.lastPaymentAt = recordedAt;
+    summary.lastPaymentType = paymentType ?? null;
+    summary.lastAmount = amountDecimal;
+    summary.currency = currencyCode;
+    if (paymentType === 'deposit') {
+      summary.deposit = {
+        status: 'paid',
+        paidAt: recordedAt,
+        amount: amountDecimal,
+        currency: currencyCode,
+      };
+      updates.depositStatus = 'paid';
+      updates.depositPaidAt = recordedAt;
+      updates.depositPaidAmount = amountDecimal;
+      const currentStatus = normaliseString(data.status);
+      if (!currentStatus || ['pending', 'quote_sent', 'invoice_sent', 'deposit_due'].includes(currentStatus)) {
+        updates.status = 'deposit_paid';
+      }
+    } else if (paymentType === 'balance') {
+      summary.balance = {
+        status: 'paid',
+        paidAt: recordedAt,
+        amount: amountDecimal,
+        currency: currencyCode,
+      };
+      updates.balanceStatus = 'paid';
+      updates.balancePaidAt = recordedAt;
+      updates.balancePaidAmount = amountDecimal;
+      const currentStatus = normaliseString(data.status);
+      if (!currentStatus || ['pending', 'deposit_paid', 'balance_due', 'in_progress'].includes(currentStatus)) {
+        updates.status = 'balance_paid';
+      }
+    }
+    updates.paymentSummary = summary;
+
+    if (Array.isArray(data.paymentSchedule) && data.paymentSchedule.length > 0) {
+      const schedule = (data.paymentSchedule as Record<string, any>[]).map((entry) => ({ ...entry }));
+      const markPaid = (entry: Record<string, any>) => {
+        entry.status = 'paid';
+        entry.paidAt = recordedAt;
+        entry.updatedAt = recordedAt;
+      };
+      if (paymentType === 'deposit') {
+        const depositIndex = schedule.findIndex((entry) => {
+          const label = normaliseString(entry?.label);
+          if (label && (label === 'deposit' || label.includes('deposit'))) {
+            return true;
+          }
+          return entry?.status !== 'paid';
+        });
+        if (depositIndex >= 0) {
+          markPaid(schedule[depositIndex]);
+        }
+      } else if (paymentType === 'balance') {
+        schedule.forEach((entry, index) => {
+          if (index > 0 && entry.status !== 'paid') {
+            markPaid(entry);
+          }
+        });
+      } else {
+        const nextIndex = schedule.findIndex((entry) => entry?.status !== 'paid');
+        if (nextIndex >= 0) {
+          markPaid(schedule[nextIndex]);
+        }
+      }
+      updates.paymentSchedule = schedule;
+    }
+
+    tx.set(orderRef, updates, { merge: true });
+
+    return {
+      recorded: true,
+      paymentType,
+      orderData: data,
+      recordedAt,
+      amount: amountDecimal,
+      currency: currencyCode,
+      paymentIntentId: options.paymentIntentId ?? null,
+    } as OrderStripePaymentResult;
+  });
+
+  if (!transactionResult) {
+    return null;
+  }
+
+  return transactionResult;
+}
+
+async function processOrderPostPayment(options: {
+  orderId: string;
+  paymentType: OrderStripePaymentType | null;
+  orderData: Record<string, any> | null;
+  paymentRecorded: boolean;
+  amount: number | null;
+  currency: string | null;
+  paymentIntentId: string | null;
+  recordedAt: admin.firestore.Timestamp;
+}): Promise<void> {
+  if (!options.paymentRecorded) {
+    return;
+  }
+
+  let orderData = options.orderData;
+  if (!orderData) {
+    const fallbackSnap = await db.collection('orders').doc(options.orderId).get();
+    if (!fallbackSnap.exists) {
+      return;
+    }
+    orderData = (fallbackSnap.data() as Record<string, any>) || {};
+  }
+
+  if (options.paymentType === 'deposit') {
+    const orderRef = db.collection('orders').doc(options.orderId);
+    let projectId = normaliseString(orderData?.projectId);
+    if (!projectId) {
+      try {
+        const projectRef = await db.collection('projects').add({
+          orgId: orderData?.orgId ?? null,
+          serviceId: orderData?.serviceId ?? null,
+          orderId: options.orderId,
+          title:
+            typeof orderData?.serviceName === 'string' && orderData.serviceName.trim().length > 0
+              ? orderData.serviceName
+              : 'New Project',
+          status: 'intake',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        projectId = projectRef.id;
+        await orderRef.set({ projectId, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      } catch (projectError) {
+        console.error('Failed to auto-create project after deposit payment', options.orderId, projectError);
+      }
+    }
+
+    const campaignBookings = Array.isArray(orderData?.campaignBookings)
+      ? (orderData.campaignBookings as any[])
+      : [];
+    if (campaignBookings.length > 0) {
+      const paymentRecord = {
+        amount: typeof options.amount === 'number' ? options.amount : 0,
+        currency: options.currency ?? 'GBP',
+        intentId: options.paymentIntentId,
+        receivedAt: options.recordedAt,
+      };
+      for (const selection of campaignBookings) {
+        try {
+          await fulfilCampaignBookingPurchase({
+            selection,
+            orderId: options.orderId,
+            orderData,
+            payment: paymentRecord,
+          });
+        } catch (campaignErr) {
+          console.error('Failed to fulfil campaign booking purchase', selection, campaignErr);
+        }
+      }
+    }
+  }
+}
+
+async function updateOrderCheckoutSessionRecord(params: {
+  orderId: string;
+  session: Stripe.Checkout.Session;
+  paymentType: OrderStripePaymentType | null;
+  amountCents: number | null;
+  currency: string | null;
+  paymentIntentId: string | null;
+}): Promise<void> {
+  const orderRef = db.collection('orders').doc(params.orderId);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(orderRef);
+    if (!snap.exists) {
+      return;
+    }
+    const data = (snap.data() as Record<string, any>) || {};
+    const sessions =
+      (data.stripeCheckoutSessions as Record<string, Record<string, any>>) || {};
+    const existing = sessions[params.session.id] || {};
+
+    const createdAtTimestamp =
+      existing.createdAt instanceof admin.firestore.Timestamp
+        ? existing.createdAt
+        : typeof params.session.created === 'number'
+          ? admin.firestore.Timestamp.fromMillis(params.session.created * 1000)
+          : admin.firestore.Timestamp.now();
+    const sessionTransitions = (params.session as any)?.status_transitions;
+    const completedAtTransition =
+      typeof sessionTransitions?.completed_at === 'number'
+        ? sessionTransitions.completed_at
+        : null;
+    const completedAtTimestamp =
+      typeof completedAtTransition === 'number'
+        ? admin.firestore.Timestamp.fromMillis(completedAtTransition * 1000)
+        : existing.completedAt instanceof admin.firestore.Timestamp
+          ? existing.completedAt
+          : null;
+    const expiresAtTimestamp =
+      typeof params.session.expires_at === 'number'
+        ? admin.firestore.Timestamp.fromMillis(params.session.expires_at * 1000)
+        : existing.expiresAt instanceof admin.firestore.Timestamp
+          ? existing.expiresAt
+          : null;
+    const updatedEntry: Record<string, any> = {
+      ...existing,
+      id: params.session.id,
+      url: params.session.url ?? existing.url ?? null,
+      status: params.session.status ?? existing.status ?? null,
+      paymentStatus: params.session.payment_status ?? existing.paymentStatus ?? null,
+      paymentIntentId: params.paymentIntentId ?? existing.paymentIntentId ?? null,
+      paymentLinkId:
+        typeof params.session.payment_link === 'string'
+          ? params.session.payment_link
+          : existing.paymentLinkId ?? null,
+      clientReferenceId:
+        typeof params.session.client_reference_id === 'string'
+          ? params.session.client_reference_id
+          : existing.clientReferenceId ?? null,
+      type: params.paymentType ?? existing.type ?? null,
+      amountTotal:
+        typeof params.session.amount_total === 'number'
+          ? Number.parseFloat(fromCurrencyCents(params.session.amount_total).toFixed(2))
+          : typeof params.amountCents === 'number'
+            ? Number.parseFloat(fromCurrencyCents(params.amountCents).toFixed(2))
+            : existing.amountTotal ?? null,
+      currency: normaliseCurrencyCode(params.currency) ?? existing.currency ?? null,
+      customerEmail:
+        typeof params.session.customer_details?.email === 'string'
+          ? params.session.customer_details.email
+          : existing.customerEmail ?? null,
+      metadata:
+        params.session.metadata && Object.keys(params.session.metadata).length > 0
+          ? params.session.metadata
+          : existing.metadata ?? null,
+      createdAt: createdAtTimestamp,
+      completedAt: completedAtTimestamp,
+      expiresAt: expiresAtTimestamp,
+      updatedAt: admin.firestore.Timestamp.now(),
+    };
+
+    tx.set(
+      orderRef,
+      {
+        [`stripeCheckoutSessions.${params.session.id}`]: updatedEntry,
+        stripeCheckoutStatus: params.session.status ?? existing.status ?? null,
+        stripeSessionId: params.session.id,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  });
+}
+
+async function reconcileInvoiceFromPaymentIntent(
+  paymentIntent: Stripe.PaymentIntent,
+  source: string
+): Promise<boolean> {
+  const metadata = (paymentIntent.metadata ?? {}) as Record<string, unknown>;
+  const paymentIntentRecord = coercePaymentIntent(paymentIntent);
+  const invoiceId = normaliseString(metadata.invoiceId);
+  const paymentLinkId =
+    normaliseString(metadata.paymentLinkId as string | null | undefined) ??
+    (typeof paymentIntentRecord.payment_link === 'string' ? paymentIntentRecord.payment_link : null);
+
+  const rawCharges = Array.isArray(paymentIntentRecord.charges?.data)
+    ? (paymentIntentRecord.charges?.data ?? [])
+    : [];
+  const charges = rawCharges as Stripe.Charge[];
+  const primaryCharge = charges.find((charge) => charge.paid) ?? charges[0];
+
+  return reconcileInvoiceStripePayment({
+    invoiceId,
+    paymentLinkId,
+    paymentIntentId: typeof paymentIntent.id === 'string' ? paymentIntent.id : null,
+    amountReceivedCents:
+      typeof paymentIntent.amount_received === 'number'
+        ? paymentIntent.amount_received
+        : typeof paymentIntent.amount === 'number'
+          ? paymentIntent.amount
+          : null,
+    currency:
+      typeof paymentIntent.currency === 'string'
+        ? paymentIntent.currency
+        : typeof primaryCharge?.currency === 'string'
+          ? primaryCharge.currency
+          : null,
+    paymentMethod:
+      Array.isArray(paymentIntent.payment_method_types) && paymentIntent.payment_method_types.length > 0
+        ? paymentIntent.payment_method_types[0] ?? null
+        : null,
+    chargeId: typeof primaryCharge?.id === 'string' ? primaryCharge.id : null,
+    receiptUrl: typeof primaryCharge?.receipt_url === 'string' ? primaryCharge.receipt_url : null,
+    source,
+  });
+}
+
+async function reconcileInvoiceFromCheckoutSession(
+  stripe: Stripe,
+  session: Stripe.Checkout.Session
+): Promise<boolean> {
+  const invoiceId = normaliseString((session.metadata ?? {})?.invoiceId);
+  const paymentLinkId =
+    typeof session.payment_link === 'string'
+      ? session.payment_link
+      : normaliseString((session.metadata ?? {})?.paymentLinkId);
+
+  if (!invoiceId && !paymentLinkId) {
+    return false;
+  }
+
+  const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : null;
+  let amountCents = typeof session.amount_total === 'number' ? session.amount_total : null;
+  let currency = typeof session.currency === 'string' ? session.currency : null;
+  let paymentMethod: string | null = null;
+  let chargeId: string | null = null;
+  let receiptUrl: string | null = null;
+
+  if (paymentIntentId) {
+    try {
+      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+        expand: ['latest_charge', 'charges'],
+      });
+      const paymentIntentRecord = coercePaymentIntent(paymentIntent);
+      if (typeof paymentIntentRecord.amount_received === 'number') {
+        amountCents = paymentIntentRecord.amount_received;
+      }
+      if (typeof paymentIntentRecord.currency === 'string') {
+        currency = paymentIntentRecord.currency;
+      }
+      if (
+        Array.isArray(paymentIntentRecord.payment_method_types) &&
+        paymentIntentRecord.payment_method_types.length > 0
+      ) {
+        paymentMethod = paymentIntentRecord.payment_method_types[0] ?? null;
+      }
+      const rawCharges = Array.isArray(paymentIntentRecord.charges?.data)
+        ? (paymentIntentRecord.charges?.data ?? [])
+        : [];
+      const charges = rawCharges as Stripe.Charge[];
+      const primaryCharge = charges.find((charge) => charge.paid) ?? charges[0];
+      if (primaryCharge) {
+        if (typeof primaryCharge.id === 'string') {
+          chargeId = primaryCharge.id;
+        }
+        if (typeof primaryCharge.receipt_url === 'string') {
+          receiptUrl = primaryCharge.receipt_url;
+        }
+        if (!currency && typeof primaryCharge.currency === 'string') {
+          currency = primaryCharge.currency;
+        }
+      }
+    } catch (error) {
+      console.error('Failed to retrieve payment intent for checkout session', session.id, error);
+    }
+  }
+
+  return reconcileInvoiceStripePayment({
+    invoiceId,
+    paymentLinkId,
+    paymentIntentId,
+    amountReceivedCents: amountCents,
+    currency,
+    paymentMethod,
+    chargeId,
+    receiptUrl,
+    source: 'checkout_session',
+  });
+}
+
 export const stripe_webhook = functions.https.onRequest(async (req, res) => {
   const sig = req.headers['stripe-signature'] as string;
   let stripe: Stripe;
@@ -9851,78 +10817,186 @@ export const stripe_webhook = functions.https.onRequest(async (req, res) => {
   try {
     const eventType = event.type;
     if (eventType === 'payment_intent.succeeded') {
-      const pi: any = event.data.object;
-      const metadata: any = pi.metadata || {};
-      const orderId = metadata.orderId;
-      const payType = metadata.type;
-      if (orderId && payType) {
-        const orderRef = db.collection('orders').doc(orderId);
-        const orderSnap = await orderRef.get();
-        if (orderSnap.exists) {
-          const updates: any = {
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          };
-          switch (payType) {
-            case 'deposit':
-              updates.status = 'deposit_paid';
-              break;
-            case 'balance':
-              updates.status = 'balance_paid';
-              break;
-            default:
-              console.warn('Unknown payment type', payType);
+      const paymentIntent = event.data.object as Stripe.PaymentIntent;
+      try {
+        await reconcileInvoiceFromPaymentIntent(paymentIntent, eventType);
+      } catch (invoiceErr) {
+        console.error('Failed to reconcile invoice payment intent', paymentIntent.id, invoiceErr);
+      }
+
+      const paymentIntentRecord = coercePaymentIntent(paymentIntent);
+      const metadata = (paymentIntent.metadata ?? {}) as Record<string, unknown>;
+      const orderId = normaliseString(metadata.orderId);
+      const payTypeRaw = metadata.type;
+
+      const amountCents =
+        typeof paymentIntent.amount_received === 'number'
+          ? paymentIntent.amount_received
+          : typeof paymentIntent.amount === 'number'
+            ? paymentIntent.amount
+            : null;
+      const currency = typeof paymentIntent.currency === 'string' ? paymentIntent.currency : null;
+      const paymentMethod =
+        Array.isArray(paymentIntent.payment_method_types) && paymentIntent.payment_method_types.length > 0
+          ? paymentIntent.payment_method_types[0] ?? null
+          : null;
+
+      const rawCharges = Array.isArray(paymentIntentRecord.charges?.data)
+        ? (paymentIntentRecord.charges?.data ?? [])
+        : [];
+      const charges = rawCharges as Stripe.Charge[];
+      const primaryCharge = charges.find((charge) => charge.paid) ?? charges[0];
+      const chargeId = typeof primaryCharge?.id === 'string' ? primaryCharge.id : null;
+      const receiptUrl = typeof primaryCharge?.receipt_url === 'string' ? primaryCharge.receipt_url : null;
+
+      let orderPaymentResult: OrderStripePaymentResult | null = null;
+      if (orderId) {
+        try {
+          orderPaymentResult = await recordOrderStripePayment({
+            orderId,
+            type: payTypeRaw,
+            amountReceivedCents: amountCents,
+            currency,
+            paymentIntentId: typeof paymentIntent.id === 'string' ? paymentIntent.id : null,
+            checkoutSessionId: null,
+            paymentLinkId: typeof paymentIntentRecord.payment_link === 'string' ? paymentIntentRecord.payment_link : null,
+            paymentMethod,
+            chargeId,
+            receiptUrl,
+            source: eventType,
+            occurredAt: typeof paymentIntent.created === 'number' ? paymentIntent.created * 1000 : null,
+            metadata: metadata as Record<string, any>,
+          });
+        } catch (orderRecordErr) {
+          console.error('Failed to record order payment from intent', paymentIntent.id, orderRecordErr);
+        }
+
+        if (orderPaymentResult) {
+          await processOrderPostPayment({
+            orderId,
+            paymentType: orderPaymentResult.paymentType,
+            orderData: orderPaymentResult.orderData,
+            paymentRecorded: orderPaymentResult.recorded,
+            amount: orderPaymentResult.amount,
+            currency: orderPaymentResult.currency,
+            paymentIntentId: orderPaymentResult.paymentIntentId,
+            recordedAt: orderPaymentResult.recordedAt,
+          });
+        }
+      }
+    }
+    if (eventType === 'checkout.session.completed') {
+      const session = event.data.object as Stripe.Checkout.Session;
+      try {
+        await reconcileInvoiceFromCheckoutSession(stripe, session);
+      } catch (invoiceErr) {
+        console.error('Failed to reconcile invoice checkout session', session.id, invoiceErr);
+      }
+
+      const sessionMetadata = (session.metadata ?? {}) as Record<string, unknown>;
+      const orderId =
+        normaliseString(sessionMetadata.orderId) ??
+        normaliseString(sessionMetadata.orderID) ??
+        normaliseString(session.client_reference_id);
+      const payTypeRaw = sessionMetadata.type ?? sessionMetadata.paymentType;
+
+      const paymentIntentId = typeof session.payment_intent === 'string' ? session.payment_intent : null;
+      let amountCents = typeof session.amount_total === 'number' ? session.amount_total : null;
+      let currency = typeof session.currency === 'string' ? session.currency : null;
+      let paymentMethod: string | null = null;
+      let chargeId: string | null = null;
+      let receiptUrl: string | null = null;
+
+      if (paymentIntentId) {
+        try {
+          const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+            expand: ['latest_charge', 'charges'],
+          });
+          const paymentIntentRecord = coercePaymentIntent(paymentIntent);
+          if (typeof paymentIntentRecord.amount_received === 'number') {
+            amountCents = paymentIntentRecord.amount_received;
           }
-          await orderRef.set(updates, { merge: true });
-          // If deposit is paid and project not yet created, create project document here
-          const orderData = orderSnap.data() as any;
-          if (payType === 'deposit' && !orderData.projectId) {
-            // Create a new project using order's orgId and serviceId
-            const projRef = await db.collection('projects').add({
-              orgId: orderData.orgId,
-              serviceId: orderData.serviceId,
-              orderId,
-              title: orderData.serviceName || 'New Project',
-              status: 'intake',
-              createdAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-            await orderRef.set({ projectId: projRef.id }, { merge: true });
+          if (typeof paymentIntentRecord.currency === 'string') {
+            currency = paymentIntentRecord.currency;
           }
-          if (payType === 'deposit') {
-            const campaignBookingsRaw = Array.isArray(orderData.campaignBookings)
-              ? (orderData.campaignBookings as any[])
-              : [];
-            if (campaignBookingsRaw.length > 0) {
-              const amountCents =
-                typeof pi.amount_received === 'number'
-                  ? pi.amount_received
-                  : typeof pi.amount === 'number'
-                    ? pi.amount
-                    : 0;
-              const paymentRecord = {
-                amount: fromCurrencyCents(amountCents),
-                currency:
-                  typeof pi.currency === 'string' && pi.currency.trim().length > 0
-                    ? pi.currency.toUpperCase()
-                    : 'GBP',
-                intentId: typeof pi.id === 'string' ? pi.id : null,
-                receivedAt: admin.firestore.Timestamp.fromMillis(
-                  typeof pi.created === 'number' ? Math.floor(pi.created * 1000) : Date.now()
-                ),
-              };
-              for (const selection of campaignBookingsRaw) {
-                try {
-                  await fulfilCampaignBookingPurchase({
-                    selection,
-                    orderId,
-                    orderData,
-                    payment: paymentRecord,
-                  });
-                } catch (campaignErr) {
-                  console.error('Failed to fulfil campaign booking purchase', selection, campaignErr);
-                }
-              }
+          if (
+            Array.isArray(paymentIntentRecord.payment_method_types) &&
+            paymentIntentRecord.payment_method_types.length > 0
+          ) {
+            paymentMethod = paymentIntentRecord.payment_method_types[0] ?? null;
+          }
+          const rawCharges = Array.isArray(paymentIntentRecord.charges?.data)
+            ? (paymentIntentRecord.charges?.data ?? [])
+            : [];
+          const charges = rawCharges as Stripe.Charge[];
+          const primaryCharge = charges.find((charge) => charge.paid) ?? charges[0];
+          if (primaryCharge) {
+            if (typeof primaryCharge.id === 'string') {
+              chargeId = primaryCharge.id;
+            }
+            if (typeof primaryCharge.receipt_url === 'string') {
+              receiptUrl = primaryCharge.receipt_url;
+            }
+            if (!currency && typeof primaryCharge.currency === 'string') {
+              currency = primaryCharge.currency;
             }
           }
+        } catch (error) {
+          console.error('Failed to retrieve payment intent for checkout session', session.id, error);
+        }
+      }
+
+      let orderPaymentResult: OrderStripePaymentResult | null = null;
+      if (orderId) {
+        try {
+          orderPaymentResult = await recordOrderStripePayment({
+            orderId,
+            type: payTypeRaw,
+            amountReceivedCents: amountCents,
+            currency,
+            paymentIntentId,
+            checkoutSessionId: session.id,
+            paymentLinkId: typeof session.payment_link === 'string' ? session.payment_link : null,
+            paymentMethod,
+            chargeId,
+            receiptUrl,
+            source: eventType,
+            occurredAt:
+              typeof (session as any)?.status_transitions?.completed_at === 'number'
+                ? (session as any).status_transitions.completed_at * 1000
+                : typeof session.created === 'number'
+                  ? session.created * 1000
+                  : null,
+            metadata: sessionMetadata as Record<string, any>,
+          });
+        } catch (orderRecordErr) {
+          console.error('Failed to record order payment from checkout session', session.id, orderRecordErr);
+        }
+
+        if (orderPaymentResult) {
+          await processOrderPostPayment({
+            orderId,
+            paymentType: orderPaymentResult.paymentType,
+            orderData: orderPaymentResult.orderData,
+            paymentRecorded: orderPaymentResult.recorded,
+            amount: orderPaymentResult.amount,
+            currency: orderPaymentResult.currency,
+            paymentIntentId: orderPaymentResult.paymentIntentId,
+            recordedAt: orderPaymentResult.recordedAt,
+          });
+        }
+
+        try {
+          await updateOrderCheckoutSessionRecord({
+            orderId,
+            session,
+            paymentType: orderPaymentResult?.paymentType ?? normaliseOrderPaymentType(payTypeRaw),
+            amountCents,
+            currency,
+            paymentIntentId,
+          });
+        } catch (checkoutUpdateError) {
+          console.error('Failed to update order checkout session record', session.id, checkoutUpdateError);
         }
       }
     }
@@ -10433,21 +11507,97 @@ export const stripe_cancelSubscription = functions.https.onCall(async (data, con
  */
 export const stripe_createCheckoutSession = functions.https.onCall(async (data, context) => {
   const { orderId, lineItems } = data as { orderId?: string; lineItems?: any[] };
-  if (!orderId || !Array.isArray(lineItems) || !lineItems.length) {
+  const paymentTypeInput = (data as Record<string, unknown>)?.type;
+  const successOverride = normaliseString((data as Record<string, unknown>)?.successUrl);
+  const cancelOverride = normaliseString((data as Record<string, unknown>)?.cancelUrl);
+  if (!orderId || !Array.isArray(lineItems) || lineItems.length === 0) {
     throw new functions.https.HttpsError('invalid-argument', 'orderId and lineItems required');
   }
+  const orderRef = db.collection('orders').doc(orderId);
   try {
     const stripe = await getStripeClient();
-    const session = await stripe.checkout.sessions.create({
+    const orderSnap = await orderRef.get();
+    if (!orderSnap.exists) {
+      throw new functions.https.HttpsError('not-found', 'Order not found');
+    }
+    const orderData = (orderSnap.data() as Record<string, any>) || {};
+    const paymentType = normaliseOrderPaymentType(paymentTypeInput);
+    const metadata: Record<string, string> = { orderId };
+    if (paymentType) {
+      metadata.type = paymentType;
+    } else if (typeof paymentTypeInput === 'string' && paymentTypeInput.trim().length > 0) {
+      metadata.type = paymentTypeInput.trim();
+    }
+
+    const baseUrl = process.env.WEBAPP_URL || 'http://localhost:3000';
+    const successUrl = successOverride
+      ? successOverride
+      : `${baseUrl.replace(/\/$/, '')}/orders/${orderId}`;
+    const cancelUrl = cancelOverride
+      ? cancelOverride
+      : `${baseUrl.replace(/\/$/, '')}/cart`;
+
+    const sessionParams: Stripe.Checkout.SessionCreateParams = {
       mode: 'payment',
-      line_items: lineItems,
-      success_url: `${process.env.WEBAPP_URL || 'http://localhost:3000'}/orders/${orderId}`,
-      cancel_url: `${process.env.WEBAPP_URL || 'http://localhost:3000'}/cart`,
-    });
-    await db.collection('orders').doc(orderId).set({ stripeSessionId: session.id }, { merge: true });
+      line_items: lineItems as Stripe.Checkout.SessionCreateParams.LineItem[],
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      client_reference_id: orderId,
+      metadata,
+      payment_intent_data: {
+        metadata,
+      },
+    };
+
+    const emailCandidate = normaliseString(orderData.userEmail) ?? normaliseString(orderData.customerEmail);
+    if (emailCandidate) {
+      sessionParams.customer_email = emailCandidate;
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
+
+    const checkoutEntry: Record<string, any> = {
+      id: session.id,
+      url: session.url ?? null,
+      status: session.status ?? 'open',
+      paymentStatus: session.payment_status ?? null,
+      type: paymentType ?? (metadata.type ?? null),
+      clientReferenceId:
+        typeof session.client_reference_id === 'string' && session.client_reference_id.trim().length > 0
+          ? session.client_reference_id
+          : orderId,
+      paymentIntentId: typeof session.payment_intent === 'string' ? session.payment_intent : null,
+      paymentLinkId: typeof session.payment_link === 'string' ? session.payment_link : null,
+      createdAt:
+        typeof session.created === 'number'
+          ? admin.firestore.Timestamp.fromMillis(session.created * 1000)
+          : admin.firestore.Timestamp.now(),
+      expiresAt:
+        typeof session.expires_at === 'number'
+          ? admin.firestore.Timestamp.fromMillis(session.expires_at * 1000)
+          : null,
+      metadata: session.metadata && Object.keys(session.metadata).length > 0 ? session.metadata : metadata,
+    };
+
+    await orderRef.set(
+      {
+        stripeSessionId: session.id,
+        stripeCheckoutStatus: session.status ?? 'open',
+        stripeCheckoutType: paymentType ?? (metadata.type ?? null),
+        stripeCheckoutSessions: {
+          [session.id]: checkoutEntry,
+        },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
     return { url: session.url };
   } catch (err) {
     console.error('Error creating checkout session', err);
+    if (err instanceof functions.https.HttpsError) {
+      throw err;
+    }
     throw new functions.https.HttpsError('internal', 'Unable to create checkout session');
   }
 });

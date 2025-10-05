@@ -32,10 +32,23 @@ interface InvoiceRecord extends Record<string, unknown> {
   items?: InvoiceLineItemRecord[];
   splitPayments?: InvoiceSplitPaymentRecord[];
   total?: number;
+  outstandingBalance?: number;
   notes?: string | null;
   portalPublished?: boolean;
   status?: string;
   stripePaymentUrl?: string | null;
+  stripePaymentIntentId?: string | null;
+  lastStripePayment?: {
+    intentId?: string | null;
+    paymentLinkId?: string | null;
+    amount?: number | null;
+    currency?: string | null;
+    method?: string | null;
+    chargeId?: string | null;
+    receiptUrl?: string | null;
+    recordedAt?: string | null;
+    source?: string | null;
+  } | null;
   history?: Array<{ event?: string; at?: string; notes?: string }>;
 }
 

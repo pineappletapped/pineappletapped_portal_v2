@@ -85,9 +85,22 @@ export default function ProjectsPage() {
                     </p>
                     <p className="text-sm text-gray-600">Status: {o.status}</p>
                   </div>
-                  <Link href={`/orders/${o.id}`} className="btn">
-                    View
-                  </Link>
+                  <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:gap-3">
+                    {typeof o.projectId === 'string' && o.projectId ? (
+                      <>
+                        <Link href={`/projects/${o.projectId}`} className="btn">
+                          View project
+                        </Link>
+                        <Link href={`/projects/${o.projectId}/files`} className="btn btn-outline">
+                          Project files
+                        </Link>
+                      </>
+                    ) : (
+                      <Link href={`/orders/${o.id}`} className="btn">
+                        View order
+                      </Link>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}

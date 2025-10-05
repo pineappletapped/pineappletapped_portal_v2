@@ -32,6 +32,10 @@ interface CRMUserRecord {
   crmStatus?: string | null;
   discount?: number | null;
   aiBio?: string | null;
+  aiBioStructured?: Record<string, unknown> | null;
+  aiBioWarnings?: string[] | null;
+  aiBioMetadata?: Record<string, unknown> | null;
+  aiBioGeneratedAt?: any;
   linkedinBio?: string | null;
   [key: string]: any;
 }
@@ -195,6 +199,9 @@ export default function AdminUserDetailPage() {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [bioDraft, setBioDraft] = useState('');
   const [savingBio, setSavingBio] = useState(false);
+  const [bioGenerating, setBioGenerating] = useState(false);
+  const [bioNotice, setBioNotice] = useState<string | null>(null);
+  const [bioError, setBioError] = useState<string | null>(null);
   const [sendingReset, setSendingReset] = useState(false);
   const [stageSaving, setStageSaving] = useState(false);
   const [discountDraft, setDiscountDraft] = useState<number>(0);
@@ -412,6 +419,65 @@ export default function AdminUserDetailPage() {
       alert(err?.message || 'Failed to save AI bio');
     } finally {
       setSavingBio(false);
+    }
+  };
+
+  const handleGenerateBio = async () => {
+    if (!userId) return;
+    setBioNotice(null);
+    setBioError(null);
+    setBioGenerating(true);
+    try {
+      const response = await fetch('/api/admin/crm/generate-bio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+
+      let payload: any = null;
+      try {
+        payload = await response.json();
+      } catch (_error) {
+        payload = null;
+      }
+
+      if (!response.ok) {
+        const message = typeof payload?.error === 'string' ? payload.error : 'Failed to generate AI bio.';
+        throw new Error(message);
+      }
+
+      const generatedBio = typeof payload?.bio === 'string' ? payload.bio : '';
+      const warnings = Array.isArray(payload?.warnings)
+        ? (payload.warnings as unknown[])
+            .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+            .filter((entry): entry is string => Boolean(entry))
+        : [];
+
+      if (generatedBio) {
+        setBioDraft(generatedBio);
+        setBioNotice(warnings.length ? 'AI bio generated. Review the assistant warnings below.' : 'AI bio generated and saved.');
+      } else {
+        setBioNotice('The assistant did not return any content. You can try again or add your own notes.');
+      }
+
+      setUser((prev) =>
+        prev
+          ? {
+              ...prev,
+              aiBio: generatedBio || prev.aiBio || null,
+              aiBioWarnings: warnings.length ? warnings : null,
+              aiBioStructured:
+                payload && typeof payload === 'object' && payload.structured
+                  ? (payload.structured as Record<string, unknown>)
+                  : prev.aiBioStructured,
+            }
+          : prev
+      );
+    } catch (error: any) {
+      console.error('Failed to generate AI bio', error);
+      setBioError(error?.message || 'Failed to generate AI bio. Please try again.');
+    } finally {
+      setBioGenerating(false);
     }
   };
 
@@ -823,8 +889,11 @@ export default function AdminUserDetailPage() {
             placeholder="Add a generated bio or talking points for this client"
           />
           <div className="flex items-center gap-3">
-            <button className="btn" onClick={handleSaveBio} disabled={savingBio}>
+            <button className="btn" onClick={handleSaveBio} disabled={savingBio || bioGenerating}>
               {savingBio ? 'Saving…' : 'Save bio'}
+            </button>
+            <button className="btn-outline" onClick={handleGenerateBio} disabled={bioGenerating || savingBio}>
+              {bioGenerating ? 'Generating…' : 'Generate bio'}
             </button>
             <button
               className="btn-outline"
@@ -841,6 +910,18 @@ export default function AdminUserDetailPage() {
               {mergeLoading ? 'Merging…' : 'Merge with another account'}
             </button>
           </div>
+          {bioNotice ? <p className="text-xs text-gray-600">{bioNotice}</p> : null}
+          {bioError ? <p className="text-xs text-red-600">{bioError}</p> : null}
+          {Array.isArray(user.aiBioWarnings) && user.aiBioWarnings.length ? (
+            <div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700">
+              <p className="font-semibold">Assistant warnings</p>
+              <ul className="mt-1 list-disc space-y-1 pl-4">
+                {user.aiBioWarnings.map((warning, index) => (
+                  <li key={`${warning}-${index}`}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </div>
       </section>
 

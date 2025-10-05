@@ -49,6 +49,7 @@ interface DraftRecord {
     body: string;
     hashtags: string[];
   }>;
+  warnings: string[];
   transcriptPreview: string;
   projectName: string | null;
   deliverableLabel: string | null;
@@ -56,6 +57,11 @@ interface DraftRecord {
   deliverableProductName: string | null;
   createdAt: Date | null;
   updatedAt: Date | null;
+  requestId?: string | null;
+  promptId?: string | null;
+  promptName?: string | null;
+  modelName?: string | null;
+  generationMode?: string | null;
 }
 
 interface TranscriptSourceState {
@@ -137,7 +143,7 @@ function stripSrtCues(input: string): string {
 function normaliseWhitespace(value: string) {
   return value
     .replace(/\s+/g, " ")
-  .replace(/\s([?.!])/g, "$1")
+    .replace(/\s([?.!])/g, "$1")
     .trim();
 }
 
@@ -211,6 +217,13 @@ function toDate(value: unknown): Date | null {
     return Number.isNaN(fromString.getTime()) ? null : fromString;
   }
   return null;
+}
+
+function randomId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return Math.random().toString(36).slice(2, 10);
 }
 
 export default function ContentAssistantWorkspace() {
@@ -410,6 +423,11 @@ export default function ContentAssistantWorkspace() {
                   hashtags: Array.isArray(item?.hashtags) ? item.hashtags : [],
                 }))
               : [],
+            warnings: Array.isArray(data.warnings)
+              ? data.warnings
+                  .map((warning: unknown) => (typeof warning === "string" ? warning.trim() : ""))
+                  .filter((warning: string) => Boolean(warning))
+              : [],
             transcriptPreview: typeof data.transcriptPreview === "string" ? data.transcriptPreview : "",
             projectName: typeof data.projectName === "string" ? data.projectName : null,
             deliverableLabel: typeof data.deliverableLabel === "string" ? data.deliverableLabel : null,
@@ -417,6 +435,11 @@ export default function ContentAssistantWorkspace() {
             deliverableProductName: typeof data.deliverableProductName === "string" ? data.deliverableProductName : null,
             createdAt: toDate(data.createdAt),
             updatedAt: toDate(data.updatedAt),
+            requestId: typeof data.requestId === "string" ? data.requestId : null,
+            promptId: typeof data.promptId === "string" ? data.promptId : null,
+            promptName: typeof data.promptName === "string" ? data.promptName : null,
+            modelName: typeof data.modelName === "string" ? data.modelName : null,
+            generationMode: typeof data.generationMode === "string" ? data.generationMode : null,
           } satisfies DraftRecord;
         });
         setDraftHistory(drafts);
@@ -566,9 +589,59 @@ export default function ContentAssistantWorkspace() {
         throw new Error(typeof payload.error === "string" ? payload.error : "Generation failed");
       }
 
-      const payload = (await response.json()) as DraftRecord;
+      const payload = await response.json();
+      const keywords = Array.isArray(payload.keywords)
+        ? payload.keywords.filter((item: unknown): item is string => typeof item === "string")
+        : [];
+      const youtubeTitles = Array.isArray(payload.youtubeTitles)
+        ? payload.youtubeTitles.filter((item: unknown): item is string => typeof item === "string")
+        : [];
+      const youtubeTags = Array.isArray(payload.youtubeTags)
+        ? payload.youtubeTags.filter((item: unknown): item is string => typeof item === "string")
+        : [];
+      const socialPosts = Array.isArray(payload.socialPosts)
+        ? payload.socialPosts.map((item: any) => ({
+            id: typeof item?.id === "string" ? item.id : randomId(),
+            platform: typeof item?.platform === "string" ? item.platform : "Social",
+            headline: typeof item?.headline === "string" ? item.headline : "",
+            body: typeof item?.body === "string" ? item.body : "",
+            hashtags: Array.isArray(item?.hashtags)
+              ? item.hashtags.filter((tag: unknown): tag is string => typeof tag === "string")
+              : [],
+          }))
+        : [];
+
+      const draft: DraftRecord = {
+        id: typeof payload.id === "string" ? payload.id : randomId(),
+        status: typeof payload.status === "string" ? payload.status : "draft",
+        summary: typeof payload.summary === "string" ? payload.summary : "",
+        keywords,
+        youtubeTitles,
+        youtubeDescription: typeof payload.youtubeDescription === "string" ? payload.youtubeDescription : "",
+        youtubeTags,
+        socialPosts,
+        warnings: Array.isArray(payload.warnings)
+          ? payload.warnings
+              .map((warning: unknown) => (typeof warning === "string" ? warning.trim() : ""))
+              .filter((warning: string) => Boolean(warning))
+          : [],
+        transcriptPreview: typeof payload.transcriptPreview === "string" ? payload.transcriptPreview : transcriptText,
+        projectName: typeof payload.projectName === "string" ? payload.projectName : null,
+        deliverableLabel: typeof payload.deliverableLabel === "string" ? payload.deliverableLabel : null,
+        deliverableProductId: typeof payload.deliverableProductId === "string" ? payload.deliverableProductId : null,
+        deliverableProductName:
+          typeof payload.deliverableProductName === "string" ? payload.deliverableProductName : null,
+        createdAt: toDate(payload.createdAt),
+        updatedAt: toDate(payload.updatedAt),
+        requestId: typeof payload.requestId === "string" ? payload.requestId : null,
+        promptId: typeof payload.promptId === "string" ? payload.promptId : null,
+        promptName: typeof payload.promptName === "string" ? payload.promptName : null,
+        modelName: typeof payload.modelName === "string" ? payload.modelName : null,
+        generationMode: typeof payload.generationMode === "string" ? payload.generationMode : null,
+      };
+
       setCurrentDraft({
-        ...payload,
+        ...draft,
         projectName: buildProjectName(),
         deliverableLabel: deliverableLabel.trim() || null,
         deliverableProductId: deliverableProductId.trim() || null,
@@ -882,6 +955,16 @@ export default function ContentAssistantWorkspace() {
 
         {currentDraft && (
           <div className="grid gap-6 rounded-lg border border-dashed border-gray-200 p-4">
+            {currentDraft.warnings.length > 0 && (
+              <div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                <p className="font-medium">Assistant notes</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  {currentDraft.warnings.map((warning, index) => (
+                    <li key={index}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div>
               <h3 className="text-base font-semibold text-gray-900">YouTube suggestions</h3>
               <div className="mt-1 space-y-1 text-xs text-gray-500">

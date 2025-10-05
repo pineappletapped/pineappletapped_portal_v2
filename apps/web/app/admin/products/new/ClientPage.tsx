@@ -38,6 +38,9 @@ import {
 import type { Category } from "@/lib/categories";
 import VenueMap from "@/components/VenueMap";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import DriveFolderPicker, {
+  type DriveFolderSelection,
+} from "@/components/storage/DriveFolderPicker";
 
 const ReactQuill = dynamic(() => import("react-quill"), { ssr: false });
 import "react-quill/dist/quill.snow.css";
@@ -529,6 +532,7 @@ export default function NewProductPage() {
   const [hidden, setHidden] = useState(false);
   const [driveTemplateFolderId, setDriveTemplateFolderId] = useState("");
   const [driveFolderName, setDriveFolderName] = useState("");
+  const [driveTemplatePickerOpen, setDriveTemplatePickerOpen] = useState(false);
   const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
   const [manualKitCost, setManualKitCost] = useState("0");
   const [travelMiles, setTravelMiles] = useState("100");
@@ -949,6 +953,14 @@ export default function NewProductPage() {
     const r = ref(storage, path);
     await uploadBytes(r, file);
     return await getDownloadURL(r);
+  };
+
+  const handleDriveTemplateSelection = (selection: DriveFolderSelection) => {
+    setDriveTemplateFolderId(selection.id);
+    if (selection.name && selection.name.trim().length > 0) {
+      setDriveFolderName(selection.name.trim());
+    }
+    setDriveTemplatePickerOpen(false);
   };
 
   const buildVariationForm = useCallback(
@@ -1654,7 +1666,16 @@ export default function NewProductPage() {
   if (!allowed) return <p>You do not have permission to create products.</p>;
 
   return (
-    <form onSubmit={save} className="grid w-full gap-6">
+    <>
+      <DriveFolderPicker
+        open={driveTemplatePickerOpen}
+        onClose={() => setDriveTemplatePickerOpen(false)}
+        onConfirm={handleDriveTemplateSelection}
+        title="Select template folder"
+        description="Browse the client Drive template structure and choose the folder that should be cloned for this product."
+        confirmLabel="Use this folder"
+      />
+      <form onSubmit={save} className="grid w-full gap-6">
       <h1 className="text-xl font-semibold">Create Product</h1>
       <nav className="flex gap-4 border-b">
         {[ 
@@ -1684,9 +1705,9 @@ export default function NewProductPage() {
           <div className="rounded border bg-slate-50 p-4">
             <h2 className="text-sm font-semibold">Deliverable template folder</h2>
             <p className="text-xs text-gray-600">
-              Provide the Google Drive folder ID that should be cloned whenever an
-              order for this product is created. Leave blank to start with an empty
-              folder.
+              Use Browse Drive to choose the Google Drive folder that should be cloned
+              whenever an order for this product is created. The picker reads from the
+              client Drive root and will populate the default folder name automatically.
             </p>
             <input
               className="input mt-3"
@@ -1694,24 +1715,34 @@ export default function NewProductPage() {
               value={driveTemplateFolderId}
               onChange={(event) => setDriveTemplateFolderId(event.target.value)}
             />
-            {driveTemplateFolderId.trim().length > 0 && (
-              <a
-                className="text-xs text-blue-600 underline"
-                href={`https://drive.google.com/drive/folders/${encodeURIComponent(
-                  driveTemplateFolderId.trim()
-                )}`}
-                target="_blank"
-                rel="noreferrer"
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => setDriveTemplatePickerOpen(true)}
               >
-                Open template in Drive
-              </a>
-            )}
+                Browse Drive
+              </button>
+              {driveTemplateFolderId.trim().length > 0 && (
+                <a
+                  className="text-xs text-blue-600 underline"
+                  href={`https://drive.google.com/drive/folders/${encodeURIComponent(
+                    driveTemplateFolderId.trim()
+                  )}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open template in Drive
+                </a>
+              )}
+            </div>
           </div>
           <div className="rounded border bg-slate-50 p-4">
             <h2 className="text-sm font-semibold">Default folder name</h2>
             <p className="text-xs text-gray-600">
               Override the folder name that is created for this product inside each
-              client&apos;s project. Leave blank to use the product name.
+              client&apos;s project. This will pre-fill when you select a template above,
+              and you can adjust it if a different label is needed.
             </p>
             <input
               className="input mt-3"
@@ -3609,6 +3640,7 @@ export default function NewProductPage() {
       <button type="submit" className="btn w-fit">
         Create
       </button>
-    </form>
+      </form>
+    </>
   );
 }

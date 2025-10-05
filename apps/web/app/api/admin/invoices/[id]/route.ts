@@ -530,7 +530,10 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
             // aligned with the documented request shape until the upstream
             // types catch up.
             line_items: lineItems as unknown as Stripe.PaymentLinkCreateParams.LineItem[],
-            after_completion: { type: 'hosted_confirmation', custom_message: 'Thanks for your payment!' },
+            after_completion: {
+              type: 'hosted_confirmation',
+              hosted_confirmation: { custom_message: 'Thanks for your payment!' },
+            },
             metadata: {
               invoiceId: id,
               organisationName: (updates.organisationName as string | undefined) ?? existing.organisationName ?? '',

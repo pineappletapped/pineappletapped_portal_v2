@@ -753,6 +753,27 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
           <Link href={`/projects/${project.id}/upload`} className="btn self-start">Upload Asset</Link>
         </div>
         <div className="card space-y-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-2 text-sm text-gray-700">
+              <h2 className="text-base font-semibold text-gray-900">Project files</h2>
+              <p>
+                Browse the read-only Drive folder shared with your team. Only Pineapple Tapped staff, franchise operators, and
+                approved client members can access these files.
+              </p>
+              <p className="text-xs text-gray-500">
+                {order?.drive?.orderFolderName
+                  ? `Linked folder: ${order.drive.orderFolderName}`
+                  : 'The Drive folder will appear here once the delivery team provisions it.'}
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+              <Link href={`/projects/${project.id}/files`} className="btn btn-outline">
+                Open files
+              </Link>
+            </div>
+          </div>
+        </div>
+        <div className="card space-y-3">
           <h2 className="text-base font-semibold text-gray-900">Venue</h2>
         {currentVenueName ? (
           <div className="grid gap-2 text-sm text-gray-700">

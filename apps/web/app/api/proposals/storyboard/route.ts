@@ -2,8 +2,19 @@ import { randomUUID } from "crypto";
 import { cookies } from "next/headers";
 import { NextResponse, type NextRequest } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
+import { z } from "zod";
 
 import { getFirebaseAdminFirestore } from "@/lib/firebase-admin";
+import { ensurePromptRecord } from "@/lib/ai/prompt-registry.server";
+import { getAiModelRecordById } from "@/lib/ai/models.server";
+import { PROPOSAL_STORYBOARD_PROMPT_TEMPLATE } from "@/lib/ai/templates";
+import {
+  estimateUsageCost,
+  generateStructuredContent,
+  sanitiseModelRecord,
+  type SanitisedAiModel,
+  type StructuredGenerationUsage,
+} from "@/lib/ai/structured-generation.server";
 
 type InputItem = {
   name: string;
@@ -21,6 +32,7 @@ type ParsedPayload = {
   items: InputItem[];
   notes: string | null;
   orgId: string | null;
+  projectId: string | null;
 };
 
 function unauthorizedResponse() {
@@ -89,7 +101,8 @@ function parsePayload(body: any): ParsedPayload {
   const items = parseItems(body?.items);
   const notes = typeof body?.notes === "string" ? body.notes.trim() : null;
   const orgId = typeof body?.orgId === "string" ? body.orgId.trim() : null;
-  return { projectName, audience, tone, goals, deliverables, items, notes, orgId };
+  const projectId = typeof body?.projectId === "string" ? body.projectId.trim() : null;
+  return { projectName, audience, tone, goals, deliverables, items, notes, orgId, projectId };
 }
 
 function formatCurrency(value: number | null): string | null {
@@ -249,6 +262,89 @@ function buildRecommendedItems(payload: ParsedPayload) {
   });
 }
 
+const STORYBOARD_RESPONSE_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    narrative: { type: "string" },
+    sections: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          summary: { type: "string" },
+          talkingPoints: { type: "array", items: { type: "string" } },
+        },
+        required: ["title", "summary"],
+      },
+    },
+    timeline: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          phase: { type: "string" },
+          duration: { type: "string" },
+          tasks: { type: "array", items: { type: "string" } },
+        },
+        required: ["phase"],
+      },
+    },
+    recommendedItems: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          name: { type: "string" },
+          description: { type: "string" },
+          priceHint: { type: "string" },
+        },
+        required: ["name"],
+      },
+    },
+    warnings: { type: "array", items: { type: "string" } },
+  },
+  required: ["narrative", "sections", "timeline"],
+} as const;
+
+const STORYBOARD_RESPONSE_SCHEMA = z.object({
+  narrative: z.string(),
+  sections: z
+    .array(
+      z.object({
+        id: z.string().optional(),
+        title: z.string(),
+        summary: z.string(),
+        talkingPoints: z.array(z.string()).optional(),
+      })
+    )
+    .min(1),
+  timeline: z
+    .array(
+      z.object({
+        phase: z.string(),
+        duration: z.string().nullable().optional(),
+        tasks: z.array(z.string()).optional(),
+      })
+    )
+    .min(1),
+  recommendedItems: z
+    .array(
+      z.object({
+        id: z.string().optional(),
+        name: z.string(),
+        description: z.string().nullable().optional(),
+        priceHint: z.string().nullable().optional(),
+      })
+    )
+    .default([]),
+  warnings: z.array(z.string()).optional(),
+});
+
+type StoryboardAiPayload = z.infer<typeof STORYBOARD_RESPONSE_SCHEMA>;
+
 export async function POST(req: NextRequest) {
   const cookieStore = cookies();
   const uid = cookieStore.get("uid")?.value;
@@ -279,16 +375,163 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const narrative = buildNarrative(payload);
-  const sections = buildSections({ ...payload, deliverables: allDeliverables });
-  const timeline = buildTimeline({ ...payload, deliverables: allDeliverables });
-  const recommendedItems = buildRecommendedItems({ ...payload, deliverables: allDeliverables });
+  const requestId = randomUUID();
+
+  const promptRecord = await ensurePromptRecord(
+    PROPOSAL_STORYBOARD_PROMPT_TEMPLATE.name,
+    PROPOSAL_STORYBOARD_PROMPT_TEMPLATE
+  );
+
+  const modelRecord = promptRecord.defaultModelId
+    ? await getAiModelRecordById(promptRecord.defaultModelId)
+    : null;
 
   const firestore = getFirebaseAdminFirestore();
   const now = FieldValue.serverTimestamp();
+
+  const aiContext = {
+    project: {
+      name: payload.projectName,
+      audience: payload.audience,
+      tone: payload.tone,
+      goals: payload.goals,
+      deliverables: allDeliverables,
+      notes: payload.notes,
+    },
+    items: payload.items.map((item) => ({
+      name: item.name,
+      category: item.category,
+      price: item.price,
+      deliverables: item.deliverables ?? [],
+    })),
+  };
+
+  let generationMode: "ai" | "rules-draft" = "ai";
+  let generationError: Error | null = null;
+  let aiUsage: StructuredGenerationUsage | null = null;
+  let resolvedModel: SanitisedAiModel | null = sanitiseModelRecord(modelRecord);
+  let warnings: string[] = [];
+
+  let narrative = "";
+  let sections: Array<{ id: string; title: string; summary: string; talkingPoints: string[] }> = [];
+  let timeline: Array<{ phase: string; duration: string | null; tasks: string[] }> = [];
+  let recommendedItems: Array<{ id: string; name: string; priceHint: string | null; description: string | null }> = [];
+
+  try {
+    const aiResult = await generateStructuredContent({
+      prompt: promptRecord,
+      model: modelRecord,
+      context: aiContext,
+      responseSchema: STORYBOARD_RESPONSE_JSON_SCHEMA,
+      maxOutputTokens: 1024,
+    });
+
+    if (aiResult.model) {
+      resolvedModel = aiResult.model;
+    }
+    aiUsage = aiResult.usage;
+
+    const parsed = STORYBOARD_RESPONSE_SCHEMA.parse(aiResult.json) as StoryboardAiPayload;
+
+    narrative = parsed.narrative.trim();
+    warnings = (parsed.warnings ?? []).map((warning) => warning.trim()).filter(Boolean);
+
+    sections = parsed.sections.map((section) => {
+      const talkingPoints = (section.talkingPoints ?? [])
+        .map((point) => point.trim())
+        .filter(Boolean);
+      return {
+        id: section.id && section.id.trim() ? section.id.trim() : randomUUID(),
+        title: section.title.trim(),
+        summary: section.summary.trim(),
+        talkingPoints,
+      };
+    });
+
+    timeline = parsed.timeline.map((entry) => {
+      const tasks = (entry.tasks ?? []).map((task) => task.trim()).filter(Boolean);
+      return {
+        phase: entry.phase.trim(),
+        duration: entry.duration ? entry.duration.trim() || null : null,
+        tasks,
+      };
+    });
+
+    recommendedItems = parsed.recommendedItems.map((item) => ({
+      id: item.id && item.id.trim() ? item.id.trim() : randomUUID(),
+      name: item.name.trim(),
+      priceHint: item.priceHint ? item.priceHint.trim() || null : null,
+      description: item.description ? item.description.trim() || null : null,
+    }));
+
+    if (!narrative || sections.length === 0 || timeline.length === 0) {
+      throw new Error("AI response missing required storyboard fields.");
+    }
+
+    if (recommendedItems.length === 0) {
+      recommendedItems = buildRecommendedItems({ ...payload, deliverables: allDeliverables });
+    }
+  } catch (error) {
+    generationMode = "rules-draft";
+    generationError = error instanceof Error ? error : new Error("Storyboard generation failed");
+    console.error("AI storyboard generation failed", { requestId, error: generationError.message });
+    narrative = buildNarrative(payload);
+    sections = buildSections({ ...payload, deliverables: allDeliverables });
+    timeline = buildTimeline({ ...payload, deliverables: allDeliverables });
+    recommendedItems = buildRecommendedItems({ ...payload, deliverables: allDeliverables });
+    warnings = [];
+    aiUsage = null;
+  }
+
+  sections = sections.map((section) => ({
+    ...section,
+    talkingPoints: section.talkingPoints.slice(0, 6),
+  }));
+  timeline = timeline.map((entry) => ({
+    ...entry,
+    tasks: entry.tasks.slice(0, 6),
+  }));
+  recommendedItems = recommendedItems.slice(0, 5);
+
+  const usageCost = generationMode === "ai" ? estimateUsageCost(aiUsage, resolvedModel) : null;
+
+  const generationMeta = {
+    requestId,
+    mode: generationMode,
+    prompt: {
+      id: promptRecord.id,
+      name: promptRecord.name,
+      status: promptRecord.status,
+      defaultModelId: promptRecord.defaultModelId,
+      updatedAt: promptRecord.updatedAt ?? null,
+      estimatedTokens: promptRecord.estimatedTokens ?? null,
+    },
+    model: resolvedModel
+      ? {
+          docId: resolvedModel.id,
+          modelId: resolvedModel.modelId ?? null,
+          name: resolvedModel.name,
+          provider: resolvedModel.provider ?? null,
+          currency: resolvedModel.currency ?? null,
+          isFallback: resolvedModel.isFallback ?? false,
+        }
+      : null,
+    usage:
+      generationMode === "ai" && aiUsage
+        ? {
+            promptTokens: aiUsage.promptTokens ?? null,
+            completionTokens: aiUsage.completionTokens ?? null,
+            totalTokens: aiUsage.totalTokens ?? null,
+          }
+        : null,
+    warnings: warnings.length ? warnings : null,
+    error: generationError ? generationError.message : null,
+  } as const;
+
   const docRef = await firestore.collection("proposalStoryboards").add({
     userId: uid,
     orgId: payload.orgId || null,
+    projectId: payload.projectId || null,
     projectName: payload.projectName || null,
     audience: payload.audience || null,
     tone: payload.tone || null,
@@ -299,9 +542,53 @@ export async function POST(req: NextRequest) {
     sections,
     timeline,
     recommendedItems,
+    warnings,
+    requestId,
+    promptId: promptRecord.id,
+    promptName: promptRecord.name,
+    promptStatus: promptRecord.status,
+    promptDefaultModelId: promptRecord.defaultModelId,
+    promptEstimatedTokens: promptRecord.estimatedTokens ?? null,
+    generationMode,
+    generation: generationMeta,
     status: "ready",
+    modelName: resolvedModel?.name ?? modelRecord?.name ?? null,
+    modelIdentifier: resolvedModel?.modelId ?? promptRecord.defaultModelId ?? null,
     createdAt: now,
     updatedAt: now,
+  });
+
+  const currencyRaw = resolvedModel?.currency ?? modelRecord?.currency ?? null;
+  const currency = currencyRaw ? currencyRaw.toUpperCase() : null;
+  const promptTokens = generationMode === "ai" ? aiUsage?.promptTokens ?? 0 : 0;
+  const completionTokens = generationMode === "ai" ? aiUsage?.completionTokens ?? 0 : 0;
+  const totalTokens = generationMode === "ai" ? aiUsage?.totalTokens ?? 0 : 0;
+  const cost = generationMode === "ai" ? usageCost ?? 0 : 0;
+
+  await firestore.collection("aiCommandLogs").add({
+    commandName: "proposal_storyboard_generate",
+    promptId: promptRecord.id,
+    promptName: promptRecord.name,
+    modelId: resolvedModel?.modelId ?? promptRecord.defaultModelId ?? null,
+    modelName: resolvedModel?.name ?? modelRecord?.name ?? null,
+    totalTokens,
+    promptTokens,
+    completionTokens,
+    cost,
+    currency,
+    createdAt: FieldValue.serverTimestamp(),
+    requestId,
+    storyboardId: docRef.id,
+    clientId: payload.orgId || null,
+    clientName: null,
+    projectId: payload.projectId || null,
+    metadata: {
+      mode: generationMode,
+      provider: resolvedModel?.provider ?? modelRecord?.provider ?? null,
+      fallback: generationMode !== "ai",
+      ...(warnings.length ? { warnings } : {}),
+      ...(generationError ? { error: generationError.message } : {}),
+    },
   });
 
   const timestamp = new Date().toISOString();
@@ -314,6 +601,12 @@ export async function POST(req: NextRequest) {
       sections,
       timeline,
       recommendedItems,
+      warnings,
+      requestId,
+      promptId: promptRecord.id,
+      promptName: promptRecord.name,
+      modelName: resolvedModel?.name ?? modelRecord?.name ?? null,
+      generationMode,
       createdAt: timestamp,
       updatedAt: timestamp,
     },
