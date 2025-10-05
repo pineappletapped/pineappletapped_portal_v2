@@ -15,6 +15,7 @@ import { google } from 'googleapis';
 import { Readable } from 'stream';
 import fetch from 'node-fetch';
 import * as cors from 'cors';
+import { bookingConflictsWithRange } from './utils/availability.js';
 const corsHandler = cors.default({ origin: true });
 const ANALYTICS_ALLOWED_ORIGINS = [
     'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
@@ -4014,6 +4015,10 @@ export const reserveKit = functions.https.onCall(async (data) => {
     if (!end) {
         end = new Date(start.getTime() + onsiteDayBlocks * 24 * 60 * 60 * 1000);
     }
+    const reservationEnd = end;
+    if (!reservationEnd) {
+        throw new functions.https.HttpsError('invalid-argument', 'Invalid reservation window');
+    }
     const requiredKitRaw = Array.isArray(productData?.requiredKit)
         ? productData.requiredKit
         : [];
@@ -4152,9 +4157,10 @@ export const reserveKit = functions.https.onCall(async (data) => {
                 : null;
         const bookingsSnap = await eqRef
             .collection('bookings')
-            .where('start', '<=', end)
-            .where('end', '>=', start)
+            .where('start', '<', reservationEnd)
+            .where('end', '>', start)
             .get();
+        const conflictingBookings = bookingsSnap.docs.filter((bookingDoc) => bookingConflictsWithRange(bookingDoc.data() ?? null, start, reservationEnd));
         const meetsStandards = Array.isArray(eq.meetsStandards)
             ? eq.meetsStandards
                 .map((value) => (typeof value === 'string' ? value.trim() : ''))
@@ -4172,7 +4178,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
             ownerId: ownerInfo.ownerId,
             franchiseId: ownerInfo.franchiseId,
             availableFlag: eq.available !== false,
-            booked: !bookingsSnap.empty,
+            booked: conflictingBookings.length > 0,
             meetsStandards,
             rentalPrice,
             exists: true,
@@ -4236,7 +4242,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
                 name: record.name || record.id,
                 category: record.category,
                 start: start.toISOString(),
-                end: end.toISOString(),
+                end: reservationEnd.toISOString(),
             });
             rentalTotal += record.rentalPrice || 0;
             record.meetsStandards.forEach((standardId) => {
@@ -4289,7 +4295,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
                     const eqRef = db.collection('equipment').doc(item.id);
                     batch.set(eqRef.collection('bookings').doc(), {
                         start: admin.firestore.Timestamp.fromDate(start),
-                        end: admin.firestore.Timestamp.fromDate(end),
+                        end: admin.firestore.Timestamp.fromDate(reservationEnd),
                         projectId: null,
                     });
                 }
