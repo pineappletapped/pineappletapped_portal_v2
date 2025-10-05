@@ -3,6 +3,7 @@ import {
   CLIENT_RESEARCH_MANUAL_PROMPT_TEMPLATE,
   CONTENT_REPURPOSING_PROMPT_TEMPLATE,
   PROPOSAL_STORYBOARD_PROMPT_TEMPLATE,
+  BLOG_POST_DRAFT_PROMPT_TEMPLATE,
   type PromptTemplateDefinition,
   type PromptTemplateStatus,
 } from "@/lib/ai/templates";
@@ -254,6 +255,32 @@ export const AI_WORKFLOWS: AiWorkflowSummary[] = [
     ],
     notes:
       "Link generated assets back into projectKnowledge so future assistants can reference approved copy.",
+  },
+  {
+    id: "blog-drafting-assistant",
+    title: "Blog drafting assistant",
+    functionName: "POST /api/admin/blog/generate-draft",
+    kind: "api-route",
+    entryPoint: "Route handler · Next.js",
+    description:
+      "Turns an editorial summary and campaign context into a ready-to-review blog draft with refreshed SEO copy for marketing reviewers.",
+    status: "live",
+    codeLocation: {
+      path: "apps/web/app/api/admin/blog/generate-draft/route.ts",
+    },
+    prompts: [
+      {
+        label: "Editorial draft assistant",
+        status: "live",
+        commandName: "blog_post_generate",
+        promptName: "Blog editorial draft assistant",
+        template: BLOG_POST_DRAFT_PROMPT_TEMPLATE,
+        notes:
+          "Flags thin briefs via warnings so editors know when to add more background before publishing.",
+      },
+    ],
+    notes:
+      "Records aiCommandLogs entries (blog_post_generate) with token usage and warnings so the AI management centre can audit editorial output.",
   },
 ];
 

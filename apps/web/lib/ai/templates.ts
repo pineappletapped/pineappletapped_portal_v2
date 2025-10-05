@@ -58,3 +58,15 @@ export const CONTENT_REPURPOSING_PROMPT_TEMPLATE: PromptTemplateDefinition = Obj
     "Aim for 650 output tokens. When hooking into the toolkit UI, persist the commandName and transcript source metadata.",
   estimatedTokens: 650,
 });
+
+export const BLOG_POST_DRAFT_PROMPT_TEMPLATE: PromptTemplateDefinition = Object.freeze({
+  name: "Blog editorial draft assistant",
+  category: "Marketing",
+  status: "draft" as PromptTemplateStatus,
+  description:
+    "Produces a publication-ready blog outline with hero copy, rewritten summary, long-form article body, and SEO hooks from editorial briefs.",
+  content: `You are Pineapple's in-house blog editor. Using the editorial brief provided (summary, target audience, tone, campaign hooks, related products, and tags), craft a ready-to-review blog draft.\n\nReturn JSON with:\n- title (string): punchy, 8-12 words.\n- summary (string): rewrite of the supplied summary in 2 sentences.\n- contentHtml (string): rich HTML with h2/h3 headings, short paragraphs, bullet lists where relevant, and a closing call-to-action referencing Pineapple's services. No inline styles.\n- seoTitle (string): <=60 characters.\n- seoDescription (string): <=155 characters.\n- seoKeywords (array of 6-8 lowercase keyword phrases).\n- outline (array of section titles in reading order).\n- warnings (array of strings) only when critical context is missing.\n\nWrite in confident British English, include supporting statistics or examples only if explicitly present in the brief, and respect any prohibited topics. Never fabricate data or testimonials.`,
+  notes:
+    "Estimate 700-800 output tokens. When the assistant is used interactively, surface warnings back in the UI for editors to review.",
+  estimatedTokens: 780,
+});

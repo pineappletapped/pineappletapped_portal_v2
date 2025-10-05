@@ -11,6 +11,7 @@ import {
 import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   addDoc,
   collection,
@@ -28,127 +29,19 @@ import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import "react-quill/dist/quill.snow.css";
 import { db, storage } from "@/lib/firebase";
 import { useRoleGate } from "@/hooks/useRoleGate";
-
-interface BlogCategory {
-  id: string;
-  name: string;
-  slug: string;
-}
-
-interface BlogPostRecord {
-  id: string;
-  title: string;
-  slug: string;
-  excerpt: string;
-  content: string;
-  heroImageUrl?: string;
-  videoUrl?: string;
-  categories: string[];
-  tags: string[];
-  seoTitle?: string;
-  seoDescription?: string;
-  seoKeywords: string[];
-  relatedProductIds: string[];
-  relatedPostId?: string | null;
-  isVisible: boolean;
-  publishAt?: Date | null;
-  createdAt?: Date | null;
-  updatedAt?: Date | null;
-}
-
-interface BlogPostForm {
-  id?: string;
-  title: string;
-  slug: string;
-  excerpt: string;
-  content: string;
-  heroImageUrl?: string;
-  videoUrl: string;
-  categories: string[];
-  tags: string[];
-  seoTitle: string;
-  seoDescription: string;
-  seoKeywords: string[];
-  relatedProductIds: string[];
-  relatedPostId: string;
-  isVisible: boolean;
-  publishAt: string;
-}
-
-interface ProductOption {
-  id: string;
-  name: string;
-  hidden?: boolean;
-}
-
-const emptyPostForm: BlogPostForm = {
-  title: "",
-  slug: "",
-  excerpt: "",
-  content: "",
-  heroImageUrl: undefined,
-  videoUrl: "",
-  categories: [],
-  tags: [],
-  seoTitle: "",
-  seoDescription: "",
-  seoKeywords: [],
-  relatedProductIds: [],
-  relatedPostId: "",
-  isVisible: false,
-  publishAt: "",
-};
-
-function slugify(input: string): string {
-  return input
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-function timestampToDate(value: any): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return value;
-  if (typeof value === "object" && typeof value.seconds === "number") {
-    return new Date(value.seconds * 1000 + (value.nanoseconds || 0) / 1e6);
-  }
-  return null;
-}
-
-function ensureStringArray(value: any): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => (typeof item === "string" ? item : String(item ?? "")))
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
-  }
-  if (typeof value === "string") {
-    return value
-      .split(",")
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
-  }
-  return [];
-}
-
-function formatDateTimeLocal(date: Date | null | undefined): string {
-  if (!date) return "";
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  const hours = `${date.getHours()}`.padStart(2, "0");
-  const minutes = `${date.getMinutes()}`.padStart(2, "0");
-  return `${year}-${month}-${day}T${hours}:${minutes}`;
-}
-
-function formatDisplayDate(date: Date | null | undefined): string {
-  if (!date) return "Not scheduled";
-  return date.toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
+import {
+  emptyPostForm,
+  ensureStringArray,
+  formatDateTimeLocal,
+  formatDisplayDate,
+  slugify,
+  stripHtml,
+  timestampToDate,
+  type BlogCategory,
+  type BlogPostForm,
+  type BlogPostRecord,
+  type ProductOption,
+} from "@/components/admin/blog/blogUtils";
 
 function getPostStatus(post: BlogPostRecord): "draft" | "scheduled" | "published" {
   const now = new Date();
@@ -157,12 +50,8 @@ function getPostStatus(post: BlogPostRecord): "draft" | "scheduled" | "published
   }
   return post.isVisible ? "published" : "draft";
 }
-
-function stripHtml(html: string): string {
-  return html.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").trim();
-}
-
 export default function AdminBlogPage() {
+  const router = useRouter();
   const { allowed, loading: guardLoading } = useRoleGate(["marketing", "admin"]);
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState<BlogPostRecord[]>([]);
@@ -401,7 +290,7 @@ export default function AdminBlogPage() {
     []
   );
 
-  const startCreatePost = () => {
+  const clearEditor = () => {
     setSelectedPostId(null);
     setForm(emptyPostForm);
     setSlugTouched(false);
@@ -729,7 +618,13 @@ export default function AdminBlogPage() {
                 >
                   Refresh
                 </button>
-                <button type="button" className="btn btn-sm" onClick={startCreatePost}>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => {
+                    router.push("/admin/blog/new");
+                  }}
+                >
                   Create Post
                 </button>
               </div>
@@ -905,8 +800,10 @@ export default function AdminBlogPage() {
           </section>
 
           <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-            <h2 className="text-lg font-semibold">{form.id ? "Edit Post" : "Create Post"}</h2>
-            <form onSubmit={savePost} className="mt-4 grid gap-4">
+            {selectedPostId ? (
+              <>
+                <h2 className="text-lg font-semibold">Edit Post</h2>
+                <form onSubmit={savePost} className="mt-4 grid gap-4">
               <div className="grid gap-1">
                 <label className="text-sm font-medium" htmlFor="post-title">
                   Title
@@ -1179,18 +1076,35 @@ export default function AdminBlogPage() {
               </div>
               <div className="flex flex-wrap gap-2">
                 <button type="submit" className="btn" disabled={savingPost}>
-                  {savingPost ? "Saving…" : form.id ? "Update Post" : "Create Post"}
+                  {savingPost ? "Saving…" : "Update Post"}
                 </button>
                 <button
                   type="button"
                   className="btn btn-outline"
-                  onClick={startCreatePost}
+                  onClick={clearEditor}
                   disabled={savingPost}
                 >
-                  Reset form
+                  Close editor
                 </button>
               </div>
             </form>
+              </>
+            ) : (
+              <div className="grid gap-3 py-6 text-sm">
+                <h2 className="text-lg font-semibold">Open the editor</h2>
+                <p className="max-w-xl text-gray-600">
+                  Select a post from the table to edit it here, or draft something new in the
+                  dedicated create view for a larger workspace.
+                </p>
+                <button
+                  type="button"
+                  className="btn w-fit"
+                  onClick={() => router.push("/admin/blog/new")}
+                >
+                  Create a new post
+                </button>
+              </div>
+            )}
           </section>
         </div>
 
