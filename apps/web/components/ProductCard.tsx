@@ -54,8 +54,12 @@ export default function ProductCard({ product }: { product: Product }) {
   );
   const priceHeadline = priceDetails?.headline ?? "Pricing on request";
   const basePrice = activeVariation?.price ?? product.price;
-  const img =
-    product.imageUrl || "https://placehold.co/600x400?text=No+Image";
+  const coverImage =
+    product.imageUrls?.find(
+      (url) => typeof url === "string" && url.trim().length > 0
+    )?.trim() ||
+    (typeof product.imageUrl === "string" ? product.imageUrl.trim() : "");
+  const img = coverImage || "https://placehold.co/600x400?text=No+Image";
   const { visibleDeliverables, remainingDeliverableCount } =
     getDeliverableSummary(product);
   const showSummary = Boolean(

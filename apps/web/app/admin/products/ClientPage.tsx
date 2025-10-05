@@ -84,6 +84,7 @@ export default function AdminProductsPage() {
       deliverables: JSON.stringify(p.deliverables || []),
       modifiers: JSON.stringify(p.modifiers || []),
       storyboardImages: JSON.stringify(p.storyboardImages || []),
+      imageUrls: JSON.stringify(p.imageUrls || []),
       defaultTasks: JSON.stringify(p.defaultTasks || []),
       seo: JSON.stringify(p.seo || {}),
     }));
@@ -112,6 +113,7 @@ export default function AdminProductsPage() {
       if (row.modifiers) data.modifiers = JSON.parse(row.modifiers);
       if (row.storyboardImages)
         data.storyboardImages = JSON.parse(row.storyboardImages);
+      if (row.imageUrls) data.imageUrls = JSON.parse(row.imageUrls);
       if (row.defaultTasks) data.defaultTasks = JSON.parse(row.defaultTasks);
       if (row.seo) data.seo = JSON.parse(row.seo);
       if (row.hidden !== undefined)
@@ -200,15 +202,20 @@ export default function AdminProductsPage() {
           {filtered.map((p) => {
             const eventLabel = getProductEventRangeLabel(p);
             const onsiteLabel = formatProductOnsiteDuration(p);
+            const coverImage =
+              p.imageUrls?.find(
+                (url) => typeof url === "string" && url.trim().length > 0
+              )?.trim() ||
+              (typeof p.imageUrl === "string" ? p.imageUrl.trim() : "");
             return (
               <div
                 key={p.id}
                 className="card p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4"
               >
               <div className="flex items-center gap-4">
-                {p.imageUrl && (
+                {coverImage && (
                   <Image
-                    src={p.imageUrl}
+                    src={coverImage}
                     alt={p.name}
                     width={64}
                     height={64}

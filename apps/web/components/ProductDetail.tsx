@@ -260,22 +260,45 @@ export default function ProductDetail({
       });
     });
 
-    const coverImage =
+    const gallerySources = Array.isArray(product.imageUrls)
+      ? product.imageUrls
+          .map((url) => (typeof url === "string" ? url.trim() : ""))
+          .filter((url) => url.length > 0)
+      : [];
+    const fallbackCover =
       typeof product.imageUrl === "string" ? product.imageUrl.trim() : "";
+    const coverImage = gallerySources[0] || fallbackCover;
+    const usedImageUrls = new Set<string>();
     if (coverImage) {
       items.push({
-        id: "image-cover",
+        id: `image-cover-${coverImage}`,
         type: "image",
         label: product.name ? `${product.name} cover` : "Product image",
         src: coverImage,
       });
+      usedImageUrls.add(coverImage);
     }
+
+    const additionalGallery = coverImage
+      ? gallerySources.slice(1)
+      : gallerySources;
+    additionalGallery.forEach((imageUrl, index) => {
+      if (usedImageUrls.has(imageUrl)) return;
+      usedImageUrls.add(imageUrl);
+      items.push({
+        id: `gallery-${index}-${imageUrl}`,
+        type: "image",
+        label: `Gallery image ${index + 1}`,
+        src: imageUrl,
+      });
+    });
 
     if (Array.isArray(product.storyboardImages)) {
       product.storyboardImages.forEach((imageUrl, index) => {
         if (typeof imageUrl !== "string") return;
         const trimmed = imageUrl.trim();
-        if (!trimmed) return;
+        if (!trimmed || usedImageUrls.has(trimmed)) return;
+        usedImageUrls.add(trimmed);
         items.push({
           id: `storyboard-${index}-${trimmed}`,
           type: "image",
@@ -294,7 +317,13 @@ export default function ProductDetail({
     }
 
     return items;
-  }, [exampleVideos, product.imageUrl, product.storyboardImages, product.name]);
+  }, [
+    exampleVideos,
+    product.imageUrl,
+    product.imageUrls,
+    product.storyboardImages,
+    product.name,
+  ]);
 
   const [activeMediaId, setActiveMediaId] = useState<string | null>(
     galleryMedia[0]?.id ?? null
