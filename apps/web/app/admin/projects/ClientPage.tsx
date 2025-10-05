@@ -9,6 +9,7 @@ import { extractUserRoles, type UserRoles } from '@/lib/roles';
 import { collection, doc, getDoc, getDocs, Timestamp, updateDoc } from 'firebase/firestore';
 import { summariseKitItems, type KitSummary } from '@/lib/kit-summary';
 import { HQ_UNASSIGNED_TERRITORY_LABEL } from '@/lib/franchises';
+import CallSheetBuilder from '@/components/admin/projects/CallSheetBuilder';
 
 interface StaffOption {
   uid: string;
@@ -266,6 +267,7 @@ export default function AdminProjectsPage() {
   const [expandedProjects, setExpandedProjects] = useState<string[]>([]);
   const [projectBookings, setProjectBookings] = useState<Record<string, ProjectBookingRecord[]>>({});
   const [projectBookingsLoading, setProjectBookingsLoading] = useState(false);
+  const [callSheetProjectId, setCallSheetProjectId] = useState<string | null>(null);
 
   const toggleProjectExpanded = useCallback((projectId: string) => {
     setExpandedProjects((prev) =>
@@ -633,6 +635,14 @@ export default function AdminProjectsPage() {
 
   const statuses = STATUS_ORDER;
 
+  const callSheetProject = useMemo(
+    () => (callSheetProjectId ? projects.find((project) => project.id === callSheetProjectId) || null : null),
+    [callSheetProjectId, projects]
+  );
+
+  const callSheetKitSummary = callSheetProject ? kitSummaries[callSheetProject.id] : undefined;
+  const callSheetBookings = callSheetProject ? projectBookings[callSheetProject.id] : undefined;
+
   const filtered = useMemo(() => {
     const text = filter.trim().toLowerCase();
     return projects.filter((project) => {
@@ -981,6 +991,9 @@ export default function AdminProjectsPage() {
                   </td>
                   <td className="p-2 align-top">
                     <div className="flex flex-wrap gap-2">
+                      <button type="button" className="btn-sm btn-outline" onClick={() => setCallSheetProjectId(p.id)}>
+                        Call sheet
+                      </button>
                       <Link href={`/projects/${p.id}`} className="btn-sm">
                         View
                       </Link>
@@ -1124,12 +1137,21 @@ export default function AdminProjectsPage() {
                                     </div>
                                   );
                                 })}
-                                <Link
-                                  href={`/projects/${project.id}/bookings`}
-                                  className="inline-flex w-max text-[11px] font-medium text-blue-600 hover:underline"
-                                >
-                                  Manage bookings
-                                </Link>
+                                <div className="flex flex-wrap items-center gap-3">
+                                  <Link
+                                    href={`/projects/${project.id}/bookings`}
+                                    className="inline-flex w-max text-[11px] font-medium text-blue-600 hover:underline"
+                                  >
+                                    Manage bookings
+                                  </Link>
+                                  <button
+                                    type="button"
+                                    className="inline-flex w-max text-[11px] font-medium text-blue-600 hover:underline"
+                                    onClick={() => setCallSheetProjectId(project.id)}
+                                  >
+                                    Build call sheet
+                                  </button>
+                                </div>
                               </div>
                             );
                           })()}
@@ -1200,6 +1222,15 @@ export default function AdminProjectsPage() {
           ))}
         </div>
       )}
+      {callSheetProject ? (
+        <CallSheetBuilder
+          project={callSheetProject}
+          kitSummary={callSheetKitSummary}
+          bookings={callSheetBookings}
+          staffOptions={staff}
+          onClose={() => setCallSheetProjectId(null)}
+        />
+      ) : null}
     </div>
   );
 }
