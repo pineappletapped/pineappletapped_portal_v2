@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { db, storage } from '@/lib/firebase';
+import Link from 'next/link';
+import { db } from '@/lib/firebase';
 import {
   addDoc,
   collection,
@@ -11,9 +12,7 @@ import {
   setDoc,
   writeBatch,
 } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, type DropResult } from '@hello-pangea/dnd';
-import Image from 'next/image';
 import type { Category } from '@/lib/categories';
 import { useRoleGate } from '@/hooks/useRoleGate';
 
@@ -44,9 +43,6 @@ export default function WebsiteDesignPage() {
   const [cardText, setCardText] = useState('');
   const [cardLink, setCardLink] = useState('');
 
-  const [logoUrl, setLogoUrl] = useState('');
-  const [logoFile, setLogoFile] = useState<File | null>(null);
-  const [logoUploading, setLogoUploading] = useState(false);
   const [metaPixelId, setMetaPixelId] = useState('');
   const [linkedinPartnerId, setLinkedinPartnerId] = useState('');
   const [savingAnalytics, setSavingAnalytics] = useState(false);
@@ -72,7 +68,6 @@ export default function WebsiteDesignPage() {
             .sort((a, b) => (a.order || 0) - (b.order || 0))
         );
         const branding = brandingSnap.data() as any;
-        setLogoUrl(branding?.logoUrl || '');
         setMetaPixelId(branding?.metaPixelId || '');
         setLinkedinPartnerId(branding?.linkedinPartnerId || '');
         const home = homeSnap.data() as any;
@@ -156,25 +151,6 @@ export default function WebsiteDesignPage() {
     await batch.commit();
   };
 
-  const uploadLogo = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!logoFile) return;
-    try {
-      setLogoUploading(true);
-      const key = `site/logo-${Date.now()}-${logoFile.name}`;
-      const r = ref(storage, key);
-      await uploadBytes(r, logoFile, { contentType: logoFile.type });
-      const url = await getDownloadURL(r);
-      await setDoc(doc(db, 'settings', 'branding'), { logoUrl: url }, { merge: true });
-      setLogoUrl(url);
-      setLogoFile(null);
-    } catch (err: any) {
-      alert(err.message || 'Upload failed');
-    } finally {
-      setLogoUploading(false);
-    }
-  };
-
   const saveAnalytics = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -255,22 +231,20 @@ export default function WebsiteDesignPage() {
 
       {tab === 'branding' && (
         <div className="grid gap-4">
-          <form onSubmit={uploadLogo} className="grid gap-2 max-w-md">
-            {logoUrl && (
-              <Image
-                src={logoUrl}
-                alt="logo"
-                width={48}
-                height={48}
-                className="h-12 object-contain"
-              />
-            )}
-            <input type="file" accept="image/*" onChange={e => setLogoFile(e.target.files?.[0] || null)} />
-            <button type="submit" className="btn btn-sm w-fit" disabled={!logoFile || logoUploading}>
-              {logoUploading ? 'Uploading…' : 'Upload Logo'}
-            </button>
-          </form>
+          <div className="grid gap-3 rounded-2xl border border-dashed border-orange-200 bg-orange-50 p-4 text-sm text-orange-900">
+            <div>
+              <h3 className="text-base font-semibold text-orange-900">Manage brand assets</h3>
+              <p className="mt-1 text-xs text-orange-800">
+                Logos, typography, and colour palettes now live in the dedicated brand guidelines hub so everything stays in sync
+                across proposals and marketing.
+              </p>
+            </div>
+            <Link href="/admin/brand-guidelines" className="btn btn-sm w-fit">
+              Open brand guidelines
+            </Link>
+          </div>
           <form onSubmit={saveAnalytics} className="grid gap-2 max-w-md">
+            <h3 className="text-sm font-semibold text-gray-900">Tracking pixels</h3>
             <input
               className="input"
               placeholder="Meta Pixel ID"

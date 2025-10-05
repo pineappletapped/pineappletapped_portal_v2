@@ -363,6 +363,7 @@ export default function AdminPage() {
                 {
                   title: 'Brand & Content',
                   links: [
+                    { href: '/admin/brand-guidelines', label: 'Brand Guidelines' },
                     { href: '/admin/client-logos', label: 'Manage Client Logos' },
                     { href: '/admin/blog', label: 'Blog Management' },
                     { href: '/admin/website-design', label: 'Website Design' },
