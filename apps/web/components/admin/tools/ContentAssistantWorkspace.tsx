@@ -49,6 +49,7 @@ interface DraftRecord {
     body: string;
     hashtags: string[];
   }>;
+  warnings: string[];
   transcriptPreview: string;
   projectName: string | null;
   deliverableLabel: string | null;
@@ -142,7 +143,7 @@ function stripSrtCues(input: string): string {
 function normaliseWhitespace(value: string) {
   return value
     .replace(/\s+/g, " ")
-  .replace(/\s([?.!])/g, "$1")
+    .replace(/\s([?.!])/g, "$1")
     .trim();
 }
 
@@ -422,6 +423,11 @@ export default function ContentAssistantWorkspace() {
                   hashtags: Array.isArray(item?.hashtags) ? item.hashtags : [],
                 }))
               : [],
+            warnings: Array.isArray(data.warnings)
+              ? data.warnings
+                  .map((warning: unknown) => (typeof warning === "string" ? warning.trim() : ""))
+                  .filter((warning: string) => Boolean(warning))
+              : [],
             transcriptPreview: typeof data.transcriptPreview === "string" ? data.transcriptPreview : "",
             projectName: typeof data.projectName === "string" ? data.projectName : null,
             deliverableLabel: typeof data.deliverableLabel === "string" ? data.deliverableLabel : null,
@@ -614,6 +620,11 @@ export default function ContentAssistantWorkspace() {
         youtubeDescription: typeof payload.youtubeDescription === "string" ? payload.youtubeDescription : "",
         youtubeTags,
         socialPosts,
+        warnings: Array.isArray(payload.warnings)
+          ? payload.warnings
+              .map((warning: unknown) => (typeof warning === "string" ? warning.trim() : ""))
+              .filter((warning: string) => Boolean(warning))
+          : [],
         transcriptPreview: typeof payload.transcriptPreview === "string" ? payload.transcriptPreview : transcriptText,
         projectName: typeof payload.projectName === "string" ? payload.projectName : null,
         deliverableLabel: typeof payload.deliverableLabel === "string" ? payload.deliverableLabel : null,
@@ -944,6 +955,16 @@ export default function ContentAssistantWorkspace() {
 
         {currentDraft && (
           <div className="grid gap-6 rounded-lg border border-dashed border-gray-200 p-4">
+            {currentDraft.warnings.length > 0 && (
+              <div className="rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                <p className="font-medium">Assistant notes</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  {currentDraft.warnings.map((warning, index) => (
+                    <li key={index}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div>
               <h3 className="text-base font-semibold text-gray-900">YouTube suggestions</h3>
               <div className="mt-1 space-y-1 text-xs text-gray-500">

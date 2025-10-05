@@ -2,11 +2,19 @@ import { randomUUID } from 'crypto';
 import { cookies } from 'next/headers';
 import { NextResponse, type NextRequest } from 'next/server';
 import { FieldValue } from 'firebase-admin/firestore';
+import { z } from 'zod';
 
 import { getFirebaseAdminFirestore } from '@/lib/firebase-admin';
 import { ensurePromptRecord } from '@/lib/ai/prompt-registry.server';
 import { getAiModelRecordById } from '@/lib/ai/models.server';
 import { CONTENT_REPURPOSING_PROMPT_TEMPLATE } from '@/lib/ai/templates';
+import {
+  estimateUsageCost,
+  generateStructuredContent,
+  sanitiseModelRecord,
+  type SanitisedAiModel,
+  type StructuredGenerationUsage,
+} from '@/lib/ai/structured-generation.server';
 
 interface TranscriptSource {
   type: 'drive' | 'upload' | 'manual';
@@ -46,6 +54,7 @@ interface GenerationResult {
     body: string;
     hashtags: string[];
   }>;
+  warnings?: string[];
   transcriptPreview: string;
   projectName: string | null;
   deliverableLabel: string | null;
@@ -59,6 +68,63 @@ interface GenerationResult {
   modelName?: string | null;
   generationMode?: string | null;
 }
+
+const CONTENT_ASSISTANT_RESPONSE_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string' },
+    keywords: { type: 'array', items: { type: 'string' } },
+    youtube: {
+      type: 'object',
+      properties: {
+        titles: { type: 'array', items: { type: 'string' } },
+        description: { type: 'string' },
+        tags: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['titles', 'description', 'tags'],
+    },
+    socialPosts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          platform: { type: 'string' },
+          headline: { type: 'string' },
+          body: { type: 'string' },
+          hashtags: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['platform', 'body'],
+      },
+    },
+    warnings: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['summary', 'keywords', 'youtube', 'socialPosts'],
+} as const;
+
+const CONTENT_ASSISTANT_RESPONSE_SCHEMA = z.object({
+  summary: z.string(),
+  keywords: z.array(z.string()),
+  youtube: z.object({
+    titles: z.array(z.string()).min(1),
+    description: z.string(),
+    tags: z.array(z.string()),
+  }),
+  socialPosts: z
+    .array(
+      z.object({
+        id: z.string().optional(),
+        platform: z.string(),
+        headline: z.string().optional(),
+        body: z.string(),
+        hashtags: z.array(z.string()).optional(),
+      })
+    )
+    .min(1),
+  warnings: z.array(z.string()).optional(),
+});
+
+type ContentAssistantAiPayload = z.infer<typeof CONTENT_ASSISTANT_RESPONSE_SCHEMA>;
 
 const STOP_WORDS = new Set(
   [
@@ -352,6 +418,11 @@ function mapToResult(id: string, _payload: GenerationPayload | {}, data: any): G
           hashtags: Array.isArray(item?.hashtags) ? item.hashtags : [],
         }))
       : [],
+    warnings: Array.isArray(data.warnings)
+      ? data.warnings
+          .map((warning: unknown) => (typeof warning === 'string' ? warning.trim() : ''))
+          .filter((warning: string) => Boolean(warning))
+      : [],
     transcriptPreview: typeof data.transcriptPreview === 'string' ? data.transcriptPreview : '',
     projectName: typeof data.projectName === 'string' ? data.projectName : null,
     deliverableLabel: typeof data.deliverableLabel === 'string' ? data.deliverableLabel : null,
@@ -402,19 +473,93 @@ export async function POST(req: NextRequest) {
     ? await getAiModelRecordById(promptRecord.defaultModelId)
     : null;
 
-  const transcriptText = createTranscriptPreview(stripSrtCues(payload.transcript));
-  const summary = summariseTranscript(transcriptText);
-  const keywords = extractKeywords(transcriptText);
-  const youtubeTitles = buildTitleSuggestions(payload, keywords);
-  const youtubeDescription = buildDescription(payload, summary, keywords);
-  const youtubeTags = buildTags(payload, keywords);
-  const socialPosts = buildSocialPosts(payload, summary, keywords);
-
   const firestore = getFirebaseAdminFirestore();
   const now = FieldValue.serverTimestamp();
+
+  const strippedTranscript = stripSrtCues(payload.transcript);
+  const trimmedTranscript = strippedTranscript.length > 15000 ? strippedTranscript.slice(0, 15000) : strippedTranscript;
+  const transcriptPreview = createTranscriptPreview(strippedTranscript);
+
+  let generationMode: 'ai' | 'rules-draft' = 'ai';
+  let generationError: Error | null = null;
+  let aiUsage: StructuredGenerationUsage | null = null;
+  let resolvedModel: SanitisedAiModel | null = sanitiseModelRecord(modelRecord);
+  let warnings: string[] = [];
+
+  let summary = '';
+  let keywords: string[] = [];
+  let youtubeTitles: string[] = [];
+  let youtubeDescription = '';
+  let youtubeTags: string[] = [];
+  let socialPosts: GenerationResult['socialPosts'] = [];
+
+  try {
+    const aiResult = await generateStructuredContent({
+      prompt: promptRecord,
+      model: modelRecord,
+      context: {
+        transcript: trimmedTranscript,
+        metadata: {
+          projectName: payload.projectName,
+          deliverableLabel: payload.deliverableLabel,
+          deliverableProductName: payload.deliverableProductName,
+          tone: payload.tone,
+          callToAction: payload.callToAction,
+          notes: payload.notes,
+          platforms: payload.platforms,
+        },
+      },
+      responseSchema: CONTENT_ASSISTANT_RESPONSE_JSON_SCHEMA,
+      maxOutputTokens: 1200,
+    });
+
+    if (aiResult.model) {
+      resolvedModel = aiResult.model;
+    }
+    aiUsage = aiResult.usage;
+
+    const parsed = CONTENT_ASSISTANT_RESPONSE_SCHEMA.parse(aiResult.json) as ContentAssistantAiPayload;
+
+    summary = parsed.summary.trim();
+    keywords = parsed.keywords.map((keyword) => keyword.trim()).filter(Boolean).slice(0, 12);
+    youtubeTitles = parsed.youtube.titles.map((title) => title.trim()).filter(Boolean).slice(0, 5);
+    youtubeDescription = parsed.youtube.description.trim();
+    youtubeTags = parsed.youtube.tags.map((tag) => tag.trim()).filter(Boolean).slice(0, 15);
+    socialPosts = parsed.socialPosts.map((post) => ({
+      id: post.id && post.id.trim() ? post.id.trim() : randomUUID(),
+      platform: post.platform.trim(),
+      headline: post.headline ? post.headline.trim() : '',
+      body: post.body.trim(),
+      hashtags: (post.hashtags ?? [])
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+        .slice(0, 8),
+    }));
+    warnings = (parsed.warnings ?? []).map((warning) => warning.trim()).filter(Boolean);
+
+    if (!summary || socialPosts.length === 0) {
+      throw new Error('AI response missing required content.');
+    }
+  } catch (error) {
+    generationMode = 'rules-draft';
+    generationError = error instanceof Error ? error : new Error('Content assistant generation failed');
+    console.error('AI content assistant generation failed', { requestId, error: generationError.message });
+    const fallbackTranscript = trimmedTranscript || strippedTranscript;
+    summary = summariseTranscript(fallbackTranscript);
+    keywords = extractKeywords(fallbackTranscript);
+    youtubeTitles = buildTitleSuggestions(payload, keywords);
+    youtubeDescription = buildDescription(payload, summary, keywords);
+    youtubeTags = buildTags(payload, keywords);
+    socialPosts = buildSocialPosts(payload, summary, keywords);
+    warnings = [];
+    aiUsage = null;
+  }
+
+  const usageCost = generationMode === 'ai' ? estimateUsageCost(aiUsage, resolvedModel) : null;
+
   const generationMeta = {
     requestId,
-    mode: 'rules-draft',
+    mode: generationMode,
     prompt: {
       id: promptRecord.id,
       name: promptRecord.name,
@@ -423,16 +568,28 @@ export async function POST(req: NextRequest) {
       updatedAt: promptRecord.updatedAt ?? null,
       estimatedTokens: promptRecord.estimatedTokens ?? null,
     },
-    model: modelRecord
+    model: resolvedModel
       ? {
-          docId: modelRecord.id,
-          modelId: modelRecord.modelId,
-          name: modelRecord.name,
-          provider: modelRecord.provider,
-          currency: modelRecord.currency ?? null,
+          docId: resolvedModel.id,
+          modelId: resolvedModel.modelId ?? null,
+          name: resolvedModel.name,
+          provider: resolvedModel.provider ?? null,
+          currency: resolvedModel.currency ?? null,
+          isFallback: resolvedModel.isFallback ?? false,
         }
       : null,
+    usage:
+      generationMode === 'ai' && aiUsage
+        ? {
+            promptTokens: aiUsage.promptTokens ?? null,
+            completionTokens: aiUsage.completionTokens ?? null,
+            totalTokens: aiUsage.totalTokens ?? null,
+          }
+        : null,
+    warnings: warnings.length ? warnings : null,
+    error: generationError ? generationError.message : null,
   } as const;
+
   const docRef = await firestore.collection('contentAssistantDrafts').add({
     userId: uid,
     creatorEmail: identity.email || null,
@@ -444,7 +601,7 @@ export async function POST(req: NextRequest) {
     deliverableLabel: payload.deliverableLabel || null,
     deliverableProductId: payload.deliverableProductId || null,
     deliverableProductName: payload.deliverableProductName || null,
-    transcriptPreview: transcriptText,
+    transcriptPreview,
     transcriptSource: payload.transcriptSource || null,
     tone: payload.tone || null,
     callToAction: payload.callToAction || null,
@@ -456,6 +613,7 @@ export async function POST(req: NextRequest) {
     youtubeDescription,
     youtubeTags,
     socialPosts,
+    warnings,
     status: 'draft',
     requestId,
     promptId: promptRecord.id,
@@ -463,25 +621,31 @@ export async function POST(req: NextRequest) {
     promptStatus: promptRecord.status,
     promptDefaultModelId: promptRecord.defaultModelId,
     promptEstimatedTokens: promptRecord.estimatedTokens ?? null,
-    modelName: modelRecord?.name ?? null,
-    modelIdentifier: modelRecord?.modelId ?? promptRecord.defaultModelId ?? null,
-    generationMode: 'rules-draft',
+    modelName: resolvedModel?.name ?? modelRecord?.name ?? null,
+    modelIdentifier: resolvedModel?.modelId ?? promptRecord.defaultModelId ?? null,
+    generationMode,
     generation: generationMeta,
     createdAt: now,
     updatedAt: now,
   });
 
-  const currency = modelRecord?.currency ? modelRecord.currency.toUpperCase() : null;
+  const currencyRaw = resolvedModel?.currency ?? modelRecord?.currency ?? null;
+  const currency = currencyRaw ? currencyRaw.toUpperCase() : null;
+  const promptTokens = generationMode === 'ai' ? aiUsage?.promptTokens ?? 0 : 0;
+  const completionTokens = generationMode === 'ai' ? aiUsage?.completionTokens ?? 0 : 0;
+  const totalTokens = generationMode === 'ai' ? aiUsage?.totalTokens ?? 0 : 0;
+  const cost = generationMode === 'ai' ? usageCost ?? 0 : 0;
+
   await firestore.collection('aiCommandLogs').add({
     commandName: 'content_repurpose_generate',
     promptId: promptRecord.id,
     promptName: promptRecord.name,
-    modelId: modelRecord?.modelId ?? promptRecord.defaultModelId ?? null,
-    modelName: modelRecord?.name ?? null,
-    totalTokens: 0,
-    promptTokens: 0,
-    completionTokens: 0,
-    cost: 0,
+    modelId: resolvedModel?.modelId ?? promptRecord.defaultModelId ?? null,
+    modelName: resolvedModel?.name ?? modelRecord?.name ?? null,
+    totalTokens,
+    promptTokens,
+    completionTokens,
+    cost,
     currency,
     createdAt: FieldValue.serverTimestamp(),
     requestId,
@@ -490,8 +654,12 @@ export async function POST(req: NextRequest) {
     clientName: payload.clientName || null,
     projectId: payload.projectId || null,
     metadata: {
-      mode: 'rules-draft',
+      mode: generationMode,
+      provider: resolvedModel?.provider ?? modelRecord?.provider ?? null,
+      fallback: generationMode !== 'ai',
       transcriptSource: payload.transcriptSource?.type ?? null,
+      ...(warnings.length ? { warnings } : {}),
+      ...(generationError ? { error: generationError.message } : {}),
     },
   });
 
@@ -507,7 +675,8 @@ export async function POST(req: NextRequest) {
       youtubeDescription,
       youtubeTags,
       socialPosts,
-      transcriptPreview: transcriptText,
+      warnings,
+      transcriptPreview,
       projectName: payload.projectName || null,
       deliverableLabel: payload.deliverableLabel || null,
       deliverableProductId: payload.deliverableProductId || null,
@@ -515,8 +684,8 @@ export async function POST(req: NextRequest) {
       requestId,
       promptId: promptRecord.id,
       promptName: promptRecord.name,
-      modelName: modelRecord?.name ?? null,
-      generationMode: 'rules-draft',
+      modelName: resolvedModel?.name ?? modelRecord?.name ?? null,
+      generationMode,
       createdAt: timestamp,
       updatedAt: timestamp,
     },

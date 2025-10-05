@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   Timestamp,
@@ -143,6 +144,23 @@ interface SchedulerPost {
   updatedAt: Date | null;
 }
 
+interface AiContentDraft {
+  id: string;
+  summary: string;
+  socialPosts: Array<{
+    id: string;
+    platform: string;
+    headline: string;
+    body: string;
+    hashtags: string[];
+  }>;
+  warnings: string[];
+  createdAt: Date | null;
+  promptName: string | null;
+  modelName: string | null;
+  requestId: string | null;
+}
+
 interface SchedulerFeatureFlags {
   globalEnabled: boolean;
   exportOnlyMode: boolean;
@@ -182,6 +200,14 @@ const PLATFORM_OPTIONS = [
 const PLATFORM_LABELS = PLATFORM_OPTIONS.reduce(
   (acc, option) => {
     acc[option.value] = option.label;
+    return acc;
+  },
+  {} as Record<string, string>
+);
+
+const PLATFORM_VALUE_BY_LABEL = Object.entries(PLATFORM_LABELS).reduce(
+  (acc, [value, label]) => {
+    acc[label.toLowerCase()] = value;
     return acc;
   },
   {} as Record<string, string>
@@ -510,6 +536,10 @@ export default function SocialSchedulerWorkspace({
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
 
+  const [aiDrafts, setAiDrafts] = useState<AiContentDraft[]>([]);
+  const [aiDraftsLoading, setAiDraftsLoading] = useState(false);
+  const [aiDraftsError, setAiDraftsError] = useState<string | null>(null);
+
   const getDefaultVariantDraft = useCallback(
     (platform: string): VariantDraftState => ({
       caption: postCaption,
@@ -540,6 +570,33 @@ export default function SocialSchedulerWorkspace({
       });
     },
     [getDefaultVariantDraft]
+  );
+
+  const applyAiDraftToComposer = useCallback(
+    (draft: AiContentDraft, post: AiContentDraft["socialPosts"][number]) => {
+      const platformKey = PLATFORM_VALUE_BY_LABEL[post.platform.trim().toLowerCase()] ?? post.platform.trim().toLowerCase();
+      const hashtagsText = post.hashtags
+        .map((tag) => (tag.startsWith("#") ? tag : `#${tag}`))
+        .join(" ");
+
+      setPlatformSelection((prev) => {
+        const next = new Set(prev);
+        next.add(platformKey);
+        return next;
+      });
+      setPostCaption(post.body);
+      setPostHashtags(hashtagsText);
+      setVariantDrafts((prev) => ({
+        ...prev,
+        [platformKey]: {
+          ...getDefaultVariantDraft(platformKey),
+          caption: post.body,
+          hashtags: hashtagsText,
+        },
+      }));
+      setFeedback(`Loaded ${post.platform} copy from AI draft ${draft.id}. Review before scheduling.`);
+    },
+    [getDefaultVariantDraft, setFeedback]
   );
 
   const handlePlatformToggle = useCallback(
@@ -673,6 +730,77 @@ export default function SocialSchedulerWorkspace({
     ].forEach((param) => current.searchParams.delete(param));
     window.history.replaceState({}, "", `${current.pathname}${current.search}${current.hash}`);
   }, []);
+
+  useEffect(() => {
+    if (!dbRef || !selectedProjectId) {
+      setAiDrafts([]);
+      setAiDraftsLoading(false);
+      setAiDraftsError(null);
+      return;
+    }
+
+    setAiDraftsLoading(true);
+    setAiDraftsError(null);
+
+    const q = query(
+      collection(dbRef, "contentAssistantDrafts"),
+      where("projectId", "==", selectedProjectId),
+      orderBy("createdAt", "desc"),
+      limit(5)
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const drafts: AiContentDraft[] = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as DocumentData;
+          const socialPosts = Array.isArray(data.socialPosts)
+            ? data.socialPosts.map((item: any) => ({
+                id:
+                  typeof item?.id === "string"
+                    ? item.id
+                    : typeof crypto !== "undefined" && "randomUUID" in crypto
+                      ? crypto.randomUUID()
+                      : Math.random().toString(36).slice(2, 10),
+                platform: typeof item?.platform === "string" ? item.platform : "Social",
+                headline: typeof item?.headline === "string" ? item.headline : "",
+                body: typeof item?.body === "string" ? item.body : "",
+                hashtags: Array.isArray(item?.hashtags)
+                  ? item.hashtags.filter((tag: unknown): tag is string => typeof tag === "string")
+                  : [],
+              }))
+            : [];
+
+          const warnings = Array.isArray(data.warnings)
+            ? data.warnings
+                .map((warning: unknown) => (typeof warning === "string" ? warning.trim() : ""))
+                .filter((warning: string) => Boolean(warning))
+            : [];
+
+          return {
+            id: docSnap.id,
+            summary: typeof data.summary === "string" ? data.summary : "",
+            socialPosts,
+            warnings,
+            createdAt: toDate(data.createdAt),
+            promptName: typeof data.promptName === "string" ? data.promptName : null,
+            modelName: typeof data.modelName === "string" ? data.modelName : null,
+            requestId: typeof data.requestId === "string" ? data.requestId : null,
+          } satisfies AiContentDraft;
+        });
+
+        setAiDrafts(drafts);
+        setAiDraftsLoading(false);
+      },
+      (error) => {
+        console.error("Failed to load AI drafts", error);
+        setAiDraftsError(error?.message || "Unable to load AI drafts");
+        setAiDraftsLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [dbRef, selectedProjectId]);
 
   const loadFeatureFlags = useCallback(async () => {
     setFlagLoading(true);
@@ -2255,6 +2383,91 @@ export default function SocialSchedulerWorkspace({
               Build platform-ready posts linked to deliverables so clients know which asset each caption supports.
             </p>
           </header>
+
+          {selectedProjectId ? (
+            <section className="grid gap-3 rounded border border-indigo-200 bg-indigo-50 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold text-indigo-900">AI copy suggestions</h3>
+                  <p className="text-xs text-indigo-800">
+                    Pull social-ready copy from recent content assistant drafts linked to this project.
+                  </p>
+                </div>
+                <Link
+                  href="/admin/tools"
+                  className="text-xs font-medium text-indigo-900 underline-offset-4 hover:underline"
+                >
+                  Open content assistant
+                </Link>
+              </div>
+              {aiDraftsLoading ? (
+                <p className="text-xs text-indigo-800">Loading AI drafts…</p>
+              ) : aiDraftsError ? (
+                <p className="text-xs text-rose-700">{aiDraftsError}</p>
+              ) : aiDrafts.length === 0 ? (
+                <p className="text-xs text-indigo-800">No AI drafts captured for this project yet.</p>
+              ) : (
+                <div className="grid gap-3">
+                  {aiDrafts.map((draft) => (
+                    <article
+                      key={draft.id}
+                      className="rounded border border-white/60 bg-white/80 p-3 text-sm text-slate-700 shadow-sm"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900">Draft {draft.id}</p>
+                          {draft.createdAt ? (
+                            <p className="text-xs text-slate-500">
+                              {draft.createdAt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
+                            </p>
+                          ) : null}
+                        </div>
+                        <div className="text-right text-xs text-slate-500">
+                          {draft.promptName && <p>Prompt: {draft.promptName}</p>}
+                          {draft.modelName && <p>Model: {draft.modelName}</p>}
+                          {draft.requestId && <p>Req: {draft.requestId}</p>}
+                        </div>
+                      </div>
+                      {draft.warnings.length > 0 && (
+                        <ul className="mt-2 list-disc space-y-1 rounded border border-amber-200 bg-amber-50 p-2 pl-4 text-xs text-amber-900">
+                          {draft.warnings.map((warning, index) => (
+                            <li key={index}>{warning}</li>
+                          ))}
+                        </ul>
+                      )}
+                      <p className="mt-2 text-xs text-slate-600">{draft.summary}</p>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        {draft.socialPosts.map((post) => (
+                          <div
+                            key={post.id}
+                            className="rounded border border-slate-200 bg-white p-3 text-xs text-slate-700"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-900">{post.platform}</span>
+                              <button
+                                type="button"
+                                onClick={() => applyAiDraftToComposer(draft, post)}
+                                className="text-xs font-medium text-indigo-700 underline-offset-2 hover:underline"
+                              >
+                                Use this copy
+                              </button>
+                            </div>
+                            {post.headline && (
+                              <p className="mt-1 text-sm font-medium text-slate-900">{post.headline}</p>
+                            )}
+                            <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{post.body}</p>
+                            {post.hashtags.length > 0 && (
+                              <p className="mt-1 text-[11px] text-slate-500">{post.hashtags.join(" ")}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          ) : null}
 
           {featureFlags?.analyticsEnabled ? (
             <div className="grid gap-4 rounded border border-slate-200 bg-slate-50 p-4">
