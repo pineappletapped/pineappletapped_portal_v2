@@ -326,7 +326,13 @@ export default function SocialManagerClientPage() {
         setFeedback("Account updated.");
       } catch (error) {
         console.error("Failed to update HQ social account", error);
-        setAccountError(error?.message || "Unable to update the account");
+        const message =
+          error instanceof Error
+            ? error.message
+            : typeof error === "string"
+            ? error
+            : "Unable to update the account";
+        setAccountError(message);
       }
     },
     [dbRef]
@@ -340,7 +346,13 @@ export default function SocialManagerClientPage() {
         setFeedback("Account removed.");
       } catch (error) {
         console.error("Failed to remove HQ social account", error);
-        setAccountError(error?.message || "Unable to remove the account");
+        const message =
+          error instanceof Error
+            ? error.message
+            : typeof error === "string"
+            ? error
+            : "Unable to remove the account";
+        setAccountError(message);
       }
     },
     [dbRef]
