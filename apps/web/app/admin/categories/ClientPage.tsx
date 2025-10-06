@@ -16,12 +16,20 @@ import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { useRoleGate } from "@/hooks/useRoleGate";
 import PortalContainer from "@/components/PortalContainer";
 
+const slugify = (value: string) =>
+  value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
 export default function AdminCategoriesPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["marketing"]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
+  const [slugTouched, setSlugTouched] = useState(false);
   const [description, setDescription] = useState("");
   const [howWeWork, setHowWeWork] = useState("");
   const [parentId, setParentId] = useState("");
@@ -32,10 +40,12 @@ export default function AdminCategoriesPage() {
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [parentFilter, setParentFilter] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const [editing, setEditing] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editSlug, setEditSlug] = useState("");
+  const [editSlugTouched, setEditSlugTouched] = useState(false);
   const [editDescription, setEditDescription] = useState("");
   const [editHowWeWork, setEditHowWeWork] = useState("");
   const [editParentId, setEditParentId] = useState("");
@@ -45,6 +55,7 @@ export default function AdminCategoriesPage() {
   const [editLayout, setEditLayout] = useState("grid");
   const [editOrder, setEditOrder] = useState(0);
   const [showCreate, setShowCreate] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -86,9 +97,22 @@ export default function AdminCategoriesPage() {
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
+    const normalizedSlug = slugify(slug);
+    if (!normalizedSlug) {
+      setCreateError("Provide a slug using letters and numbers.");
+      return;
+    }
+    const duplicate = categories.some(
+      (category) => (category.slug ?? "").toLowerCase() === normalizedSlug
+    );
+    if (duplicate) {
+      setCreateError("Another category already uses this slug. Try a different one.");
+      return;
+    }
+    setCreateError(null);
     const docRef = await addDoc(collection(db, "categories"), {
       name,
-      slug,
+      slug: normalizedSlug,
       description: description || null,
       howWeWork: howWeWork || null,
       parentId: parentId || null,
@@ -103,6 +127,7 @@ export default function AdminCategoriesPage() {
     await refresh();
     setName("");
     setSlug("");
+    setSlugTouched(false);
     setDescription("");
     setHowWeWork("");
     setParentId("");
@@ -122,6 +147,7 @@ export default function AdminCategoriesPage() {
     setEditing(c.id);
     setEditName(c.name);
     setEditSlug(c.slug);
+    setEditSlugTouched(false);
     setEditDescription(c.description || "");
     setEditHowWeWork(c.howWeWork || "");
     setEditParentId(c.parentId || "");
@@ -130,15 +156,30 @@ export default function AdminCategoriesPage() {
     setEditHeaderImagePreview(null);
     setEditLayout(c.layout || "grid");
     setEditOrder(c.order ?? 0);
+    setEditError(null);
   };
 
   const saveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editing) return;
+    const normalizedSlug = slugify(editSlug);
+    if (!normalizedSlug) {
+      setEditError("Provide a slug using letters and numbers.");
+      return;
+    }
+    const duplicate = categories.some(
+      (category) =>
+        category.id !== editing && (category.slug ?? "").toLowerCase() === normalizedSlug
+    );
+    if (duplicate) {
+      setEditError("Another category already uses this slug. Try a different one.");
+      return;
+    }
+    setEditError(null);
     const docRef = doc(db, "categories", editing);
     await updateDoc(docRef, {
       name: editName,
-      slug: editSlug,
+      slug: normalizedSlug,
       description: editDescription || null,
       howWeWork: editHowWeWork || null,
       parentId: editParentId || null,
@@ -151,6 +192,7 @@ export default function AdminCategoriesPage() {
       await updateDoc(docRef, { headerImage: url });
     }
     setEditing(null);
+    setEditError(null);
     await refresh();
   };
 
@@ -277,6 +319,11 @@ export default function AdminCategoriesPage() {
       const next = !value;
       if (next) {
         setOrder(nextOrder);
+        setSlugTouched(false);
+        setCreateError(null);
+        if (name) {
+          setSlug(slugify(name));
+        }
       }
       return next;
     });
@@ -323,7 +370,14 @@ export default function AdminCategoriesPage() {
                   <input
                     className="input mt-1"
                     value={editName}
-                    onChange={(event) => setEditName(event.target.value)}
+                    onChange={(event) => {
+                      const nextName = event.target.value;
+                      setEditName(nextName);
+                      setEditError(null);
+                      if (!editSlugTouched) {
+                        setEditSlug(slugify(nextName));
+                      }
+                    }}
                     required
                     placeholder="Name"
                   />
@@ -333,10 +387,17 @@ export default function AdminCategoriesPage() {
                   <input
                     className="input mt-1"
                     value={editSlug}
-                    onChange={(event) => setEditSlug(event.target.value)}
+                    onChange={(event) => {
+                      setEditSlugTouched(true);
+                      setEditSlug(event.target.value);
+                      setEditError(null);
+                    }}
                     required
                     placeholder="Slug"
                   />
+                  {editError && (
+                    <span className="mt-1 block text-[11px] font-medium text-rose-600">{editError}</span>
+                  )}
                 </label>
                 <label className="text-xs font-semibold uppercase tracking-wide text-gray-500 sm:col-span-2">
                   Description
@@ -500,7 +561,14 @@ export default function AdminCategoriesPage() {
                     className="input mt-1"
                     placeholder="e.g. Brand Activations"
                     value={name}
-                    onChange={(event) => setName(event.target.value)}
+                    onChange={(event) => {
+                      const nextName = event.target.value;
+                      setName(nextName);
+                      setCreateError(null);
+                      if (!slugTouched) {
+                        setSlug(slugify(nextName));
+                      }
+                    }}
                     required
                   />
                 </label>
@@ -510,9 +578,16 @@ export default function AdminCategoriesPage() {
                     className="input mt-1"
                     placeholder="brand-activations"
                     value={slug}
-                    onChange={(event) => setSlug(event.target.value)}
+                    onChange={(event) => {
+                      setSlugTouched(true);
+                      setSlug(event.target.value);
+                      setCreateError(null);
+                    }}
                     required
                   />
+                  {createError && (
+                    <span className="mt-1 block text-[11px] font-medium text-rose-600">{createError}</span>
+                  )}
                 </label>
                 <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                   Parent category
@@ -601,6 +676,8 @@ export default function AdminCategoriesPage() {
                   onClick={() => {
                     setShowCreate(false);
                     setOrder(nextOrder);
+                    setCreateError(null);
+                    setSlugTouched(false);
                   }}
                 >
                   Cancel
