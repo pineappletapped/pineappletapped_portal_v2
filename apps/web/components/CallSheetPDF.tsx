@@ -90,8 +90,7 @@ const styles = StyleSheet.create({
     lineHeight: 1.4,
   },
   table: {
-    display: "table",
-    width: "auto",
+    width: "100%",
     borderStyle: "solid",
     borderWidth: 1,
     borderColor: "#D1D5DB",
@@ -99,11 +98,12 @@ const styles = StyleSheet.create({
     borderBottomWidth: 0,
   },
   tableRow: {
-    margin: "auto",
     flexDirection: "row",
+    alignItems: "stretch",
   },
   tableCell: {
-    width: "auto",
+    flexGrow: 1,
+    flexShrink: 1,
     borderStyle: "solid",
     borderWidth: 1,
     borderColor: "#D1D5DB",
