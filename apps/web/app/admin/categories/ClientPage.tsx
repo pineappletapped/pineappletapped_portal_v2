@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { db, storage } from "@/lib/firebase";
 import {
   collection,
@@ -14,6 +14,7 @@ import {
 import type { Category } from "@/lib/categories";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import PortalContainer from "@/components/PortalContainer";
 
 export default function AdminCategoriesPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["marketing"]);
@@ -138,8 +139,32 @@ export default function AdminCategoriesPage() {
     await refresh();
   };
 
-  if (guardLoading || loading) return <p>Loading…</p>;
-  if (!allowed) return <p>You do not have permission to manage categories.</p>;
+  const totalProducts = useMemo(
+    () => Object.values(counts).reduce((total, value) => total + value, 0),
+    [counts]
+  );
+  const topLevelCount = useMemo(
+    () => categories.filter((category) => !category.parentId).length,
+    [categories]
+  );
+
+  if (guardLoading || loading) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">Loading categories…</p>
+      </PortalContainer>
+    );
+  }
+
+  if (!allowed) {
+    return (
+      <PortalContainer>
+        <p className="py-16 text-center text-sm text-gray-600">
+          You do not have permission to manage categories.
+        </p>
+      </PortalContainer>
+    );
+  }
   const CategoryRow = ({
     category,
     depth = 0,
@@ -147,111 +172,138 @@ export default function AdminCategoriesPage() {
     category: Category;
     depth?: number;
   }) => {
-    const children = categories.filter((c) => c.parentId === category.id);
+    const children = categories.filter((candidate) => candidate.parentId === category.id);
     const isEditing = editing === category.id;
+    const paddingLeft = depth * 20;
+
     return (
       <>
         {isEditing ? (
-          <tr className="border-b">
-            <td colSpan={3}>
-              <form onSubmit={saveEdit} className="grid gap-2 p-4">
-                <input
-                  className="input"
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  required
-                  placeholder="Name"
-                />
-                <input
-                  className="input"
-                  value={editSlug}
-                  onChange={(e) => setEditSlug(e.target.value)}
-                  required
-                  placeholder="Slug"
-                />
-                <textarea
-                  className="input"
-                  value={editDescription}
-                  onChange={(e) => setEditDescription(e.target.value)}
-                  placeholder="Description"
-                />
-                <textarea
-                  className="input"
-                  value={editHowWeWork}
-                  onChange={(e) => setEditHowWeWork(e.target.value)}
-                  placeholder="How we work"
-                />
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0] || null;
-                    setEditHeaderImageFile(file);
-                    setEditHeaderImagePreview(file ? URL.createObjectURL(file) : null);
-                  }}
-                />
-                {(editHeaderImagePreview || editHeaderImage) && (
-                  <Image
-                    src={editHeaderImagePreview || editHeaderImage}
-                    alt="Header preview"
-                    width={512}
-                    height={256}
-                    className="h-auto max-h-32 w-full object-cover"
+          <tr className="bg-gray-50/80">
+            <td colSpan={3} className="px-0 py-0">
+              <form onSubmit={saveEdit} className="grid gap-4 px-6 py-5 sm:grid-cols-2">
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Name
+                  <input
+                    className="input mt-1"
+                    value={editName}
+                    onChange={(event) => setEditName(event.target.value)}
+                    required
+                    placeholder="Name"
                   />
-                )}
-                <select
-                  className="input"
-                  value={editLayout}
-                  onChange={(e) => setEditLayout(e.target.value)}
-                >
-                  <option value="grid">Grid</option>
-                  <option value="list">List</option>
-                </select>
-                <select
-                  className="input"
-                  value={editParentId}
-                  onChange={(e) => setEditParentId(e.target.value)}
-                >
-                  <option value="">No parent</option>
-                  {categories
-                    .filter((c) => c.id !== category.id)
-                    .map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                </select>
-                <div className="flex gap-2 mt-2">
-                  <button type="submit" className="btn btn-sm">
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditing(null)}
-                    className="btn btn-sm btn-outline"
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Slug
+                  <input
+                    className="input mt-1"
+                    value={editSlug}
+                    onChange={(event) => setEditSlug(event.target.value)}
+                    required
+                    placeholder="Slug"
+                  />
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500 sm:col-span-2">
+                  Description
+                  <textarea
+                    className="input mt-1 h-24 resize-none"
+                    value={editDescription}
+                    onChange={(event) => setEditDescription(event.target.value)}
+                    placeholder="Description"
+                  />
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500 sm:col-span-2">
+                  How we work
+                  <textarea
+                    className="input mt-1 h-24 resize-none"
+                    value={editHowWeWork}
+                    onChange={(event) => setEditHowWeWork(event.target.value)}
+                    placeholder="How we work"
+                  />
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Layout
+                  <select
+                    className="input mt-1"
+                    value={editLayout}
+                    onChange={(event) => setEditLayout(event.target.value)}
                   >
+                    <option value="grid">Grid</option>
+                    <option value="list">List</option>
+                  </select>
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Parent
+                  <select
+                    className="input mt-1"
+                    value={editParentId}
+                    onChange={(event) => setEditParentId(event.target.value)}
+                  >
+                    <option value="">No parent</option>
+                    {categories
+                      .filter((candidate) => candidate.id !== category.id)
+                      .map((candidate) => (
+                        <option key={candidate.id} value={candidate.id}>
+                          {candidate.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500 sm:col-span-2">
+                  Header image
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="mt-1"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] || null;
+                      setEditHeaderImageFile(file);
+                      setEditHeaderImagePreview(file ? URL.createObjectURL(file) : null);
+                    }}
+                  />
+                  {(editHeaderImagePreview || editHeaderImage) && (
+                    <Image
+                      src={editHeaderImagePreview || editHeaderImage}
+                      alt="Header preview"
+                      width={768}
+                      height={384}
+                      className="mt-3 h-auto max-h-48 w-full rounded-2xl object-cover"
+                    />
+                  )}
+                </label>
+                <div className="sm:col-span-2 flex flex-wrap items-center justify-end gap-3">
+                  <button type="button" className="btn btn-outline btn-sm" onClick={() => setEditing(null)}>
                     Cancel
+                  </button>
+                  <button type="submit" className="btn btn-sm">
+                    Save changes
                   </button>
                 </div>
               </form>
             </td>
           </tr>
         ) : (
-          <tr className="border-b">
-            <td style={{ paddingLeft: depth * 16 }} className="py-2">
-              {category.name}
+          <tr className="hover:bg-gray-50/60">
+            <td className="px-6 py-3">
+              <div style={{ paddingLeft }} className="flex flex-col gap-1">
+                <span className="text-sm font-medium text-gray-900">{category.name}</span>
+                {category.description ? (
+                  <span className="text-xs text-gray-500">{category.description}</span>
+                ) : null}
+              </div>
             </td>
-            <td className="py-2">{counts[category.id] || 0}</td>
-            <td className="py-2 space-x-2">
-              <button onClick={() => startEdit(category)} className="btn btn-sm">
-                Edit
-              </button>
-              <button
-                onClick={() => remove(category.id)}
-                className="btn btn-sm bg-red-600 text-white"
-              >
-                Delete
-              </button>
+            <td className="px-6 py-3 text-sm text-gray-600">{counts[category.id] || 0}</td>
+            <td className="px-6 py-3">
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => startEdit(category)} className="btn btn-xs">
+                  Edit
+                </button>
+                <button
+                  onClick={() => remove(category.id)}
+                  className="btn btn-xs bg-rose-600 text-white hover:bg-rose-500"
+                >
+                  Delete
+                </button>
+              </div>
             </td>
           </tr>
         )}
@@ -263,108 +315,172 @@ export default function AdminCategoriesPage() {
   };
 
   return (
-    <div className="grid gap-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Manage Categories</h1>
-        <button
-          className="btn"
-          onClick={() => setShowCreate((v) => !v)}
-        >
-          {showCreate ? "Close" : "Add Category"}
-        </button>
-      </div>
-      {showCreate && (
-        <form onSubmit={create} className="card p-4 grid gap-2 max-w-md">
-          <input
-            className="input"
-            placeholder="Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-          />
-          <input
-            className="input"
-            placeholder="Slug"
-            value={slug}
-            onChange={(e) => setSlug(e.target.value)}
-            required
-          />
-          <textarea
-            className="input"
-            placeholder="Description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-          <textarea
-            className="input"
-            placeholder="How we work"
-            value={howWeWork}
-            onChange={(e) => setHowWeWork(e.target.value)}
-          />
-          <input
-            type="file"
-            accept="image/*"
-            onChange={(e) => {
-              const file = e.target.files?.[0] || null;
-              setHeaderImageFile(file);
-              setHeaderImagePreview(file ? URL.createObjectURL(file) : null);
-            }}
-          />
-          {headerImagePreview && (
-            <Image
-              src={headerImagePreview}
-              alt="Header preview"
-              width={512}
-              height={256}
-              className="h-auto max-h-32 w-full object-cover"
-            />
+    <PortalContainer>
+      <div className="grid gap-6">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Catalog</p>
+            <h1 className="text-2xl font-semibold text-gray-900">Manage categories</h1>
+            <p className="max-w-2xl text-sm text-gray-600">
+              Organise the taxonomy that powers product detail pages, control nested groupings, and keep hero imagery aligned with the latest brand look.
+            </p>
+            <div className="flex flex-wrap gap-3 text-xs font-medium uppercase tracking-wide text-gray-500">
+              <span>Total categories · {categories.length}</span>
+              <span>Top level · {topLevelCount}</span>
+              <span>Products mapped · {totalProducts}</span>
+            </div>
+          </div>
+          <div className="flex flex-col gap-3 sm:items-end">
+            <button className="btn" onClick={() => setShowCreate((value) => !value)}>
+              {showCreate ? "Close form" : "Add category"}
+            </button>
+          </div>
+        </header>
+
+        {showCreate && (
+          <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <div className="space-y-1 border-b border-gray-100 pb-4">
+              <h2 className="text-lg font-semibold text-gray-900">Create a new category</h2>
+              <p className="text-sm text-gray-600">
+                Define the label, optional parent grouping, and upload an optional hero header that appears on the customer-facing detail page.
+              </p>
+            </div>
+            <form onSubmit={create} className="mt-6 grid gap-4 lg:grid-cols-2">
+              <div className="grid gap-2">
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Name
+                  <input
+                    className="input mt-1"
+                    placeholder="e.g. Brand Activations"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    required
+                  />
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Slug
+                  <input
+                    className="input mt-1"
+                    placeholder="brand-activations"
+                    value={slug}
+                    onChange={(event) => setSlug(event.target.value)}
+                    required
+                  />
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Parent category
+                  <select
+                    className="input mt-1"
+                    value={parentId}
+                    onChange={(event) => setParentId(event.target.value)}
+                  >
+                    <option value="">No parent</option>
+                    {categories.map((category) => (
+                      <option key={category.id} value={category.id}>
+                        {category.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="grid gap-2">
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Layout preference
+                  <select
+                    className="input mt-1"
+                    value={layout}
+                    onChange={(event) => setLayout(event.target.value)}
+                  >
+                    <option value="grid">Grid</option>
+                    <option value="list">List</option>
+                  </select>
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Description
+                  <textarea
+                    className="input mt-1 h-24 resize-none"
+                    placeholder="Optional summary for marketing and SEO"
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                  />
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  How we work blurb
+                  <textarea
+                    className="input mt-1 h-24 resize-none"
+                    placeholder="Explain the process or delivery notes"
+                    value={howWeWork}
+                    onChange={(event) => setHowWeWork(event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="lg:col-span-2">
+                <label className="grid gap-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Header image
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] || null;
+                      setHeaderImageFile(file);
+                      setHeaderImagePreview(file ? URL.createObjectURL(file) : null);
+                    }}
+                  />
+                  {headerImagePreview && (
+                    <Image
+                      src={headerImagePreview}
+                      alt="Header preview"
+                      width={768}
+                      height={384}
+                      className="h-auto max-h-48 w-full rounded-2xl object-cover"
+                    />
+                  )}
+                </label>
+              </div>
+              <div className="lg:col-span-2 flex flex-wrap items-center justify-end gap-3">
+                <button type="button" className="btn btn-outline" onClick={() => setShowCreate(false)}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn">
+                  Create category
+                </button>
+              </div>
+            </form>
+          </section>
+        )}
+
+        <section className="rounded-3xl border border-gray-200 bg-white shadow-sm">
+          <div className="border-b border-gray-100 px-6 py-4">
+            <h2 className="text-lg font-semibold text-gray-900">Existing categories</h2>
+            <p className="text-sm text-gray-600">
+              Edit nested groupings, review product counts, and remove categories that are no longer in use.
+            </p>
+          </div>
+          {categories.length === 0 ? (
+            <p className="px-6 py-8 text-sm text-gray-500">No categories found yet. Create one to get started.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-100 text-sm">
+                <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+                  <tr>
+                    <th scope="col" className="px-6 py-3 text-left font-semibold">Name</th>
+                    <th scope="col" className="px-6 py-3 text-left font-semibold">Products</th>
+                    <th scope="col" className="px-6 py-3 text-left font-semibold">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 bg-white">
+                  {categories
+                    .filter((category) => !category.parentId)
+                    .map((category) => (
+                      <CategoryRow key={category.id} category={category} depth={0} />
+                    ))}
+                </tbody>
+              </table>
+            </div>
           )}
-          <select
-            className="input"
-            value={layout}
-            onChange={(e) => setLayout(e.target.value)}
-          >
-            <option value="grid">Grid</option>
-            <option value="list">List</option>
-          </select>
-          <select
-            className="input"
-            value={parentId}
-            onChange={(e) => setParentId(e.target.value)}
-          >
-            <option value="">No parent</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-          <button type="submit" className="btn w-fit">
-            Create
-          </button>
-        </form>
-      )}
-      {categories.length === 0 ? (
-        <p>No categories.</p>
-      ) : (
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b">
-              <th className="py-2">Name</th>
-              <th className="py-2">Products</th>
-              <th className="py-2">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {categories
-              .filter((c) => !c.parentId)
-              .map((c) => (
-                <CategoryRow key={c.id} category={c} depth={0} />
-              ))}
-          </tbody>
-        </table>
-      )}
-    </div>
+        </section>
+      </div>
+    </PortalContainer>
   );
 }
 
