@@ -327,6 +327,7 @@ export default function AdminPage() {
                     { href: '/admin/workflows', label: 'Manage Workflows' },
                     { href: '/admin/proposals', label: 'Quotes & Proposals' },
                     { href: '/admin/availability', label: 'Manage Availability' },
+                    { href: '/admin/availability/routing', label: 'Routing Workflow' },
                   ],
                 },
                 {

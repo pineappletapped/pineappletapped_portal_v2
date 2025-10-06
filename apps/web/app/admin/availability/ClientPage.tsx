@@ -7,6 +7,7 @@ import {
   useState,
   type SVGProps,
 } from "react";
+import Link from "next/link";
 import clsx from "clsx";
 import AvailabilityCalendar, {
   AVAILABILITY_STATUS_META,
@@ -340,111 +341,128 @@ export default function AdminAvailabilityPage() {
   if (!allowed) return <p>You do not have permission to manage availability.</p>;
 
   return (
-    <div className="flex flex-col gap-6 lg:flex-row">
-      <div className="space-y-6 lg:w-80 lg:flex-none">
-        <section>
-          <h1 className="mb-3 text-xl font-semibold text-slate-900">Team members</h1>
-          {teamMembers.length === 0 ? (
+    <div className="space-y-6">
+      <section className="rounded-3xl border border-orange-200 bg-orange-50 p-6 shadow-sm">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-1">
+            <p className="text-xs font-semibold uppercase tracking-wide text-orange-600">Routing workflow</p>
+            <h2 className="text-xl font-semibold text-slate-900">Reservation routing</h2>
             <p className="text-sm text-slate-600">
-              No active team members were found. Add staff or contractors to manage their availability.
+              Adjust how franchise, team, and HQ availability are sequenced when clients reserve kit or book projects.
             </p>
-          ) : (
-            <ul className="space-y-2">
-              {teamMembers.map((member) => {
-                const label = resolveTeamMemberLabel(member);
-                const positionLabel = describeTeamPosition(member);
-                return (
-                  <li key={member.id}>
-                    <button
-                      type="button"
-                      onClick={() => setSelected(member.id)}
-                      aria-pressed={selected === member.id}
-                      className={clsx(
-                        "flex w-full flex-col rounded-lg border px-3 py-2 text-left text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500",
-                        selected === member.id
-                          ? "border-blue-500 bg-blue-50 text-blue-900 shadow-sm"
-                          : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
-                      )}
-                    >
-                      <span className="font-medium">{label}</span>
-                      {positionLabel && (
-                        <span className="text-xs text-slate-500">{positionLabel}</span>
-                      )}
-                      <span className="text-xs text-slate-500">{member.email}</span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </section>
-
-      </div>
-      <div className="flex-1">
-        <h1 className="mb-4 text-xl font-semibold text-slate-900">Manage availability</h1>
-        {selectedMember ? (
-          <div className="space-y-6">
-            <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
-              <p className="font-medium text-slate-900">{resolveTeamMemberLabel(selectedMember)}</p>
-              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
-                {describeTeamPosition(selectedMember) && (
-                  <span>{describeTeamPosition(selectedMember)}</span>
-                )}
-                <span>{selectedMember.email}</span>
-              </div>
-            </div>
-
-            <AvailabilityCalendar availability={availability} onChange={updateDay} />
-
-            <AvailabilityConflictNotice
-              warning={conflictWarning}
-              onDismiss={() => setConflictWarning(null)}
-            />
-
-            <section
-              aria-labelledby="calendar-legend-heading"
-              className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
-            >
-              <h2
-                id="calendar-legend-heading"
-                className="text-sm font-semibold uppercase tracking-wide text-slate-600"
-              >
-                Calendar key
-              </h2>
-              <dl className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                {(Object.entries(AVAILABILITY_STATUS_META) as [
-                  AvailabilityStatus,
-                  AvailabilityStatusMeta,
-                ][]).map(([status, meta]) => (
-                  <div key={status} className="flex items-start gap-3 text-sm text-slate-700">
-                    <span
-                      className={clsx(
-                        "mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-slate-200",
-                        meta.background,
-                        meta.text ?? "text-white"
-                      )}
-                      aria-hidden="true"
-                    >
-                      <span className="sr-only">{meta.label}</span>
-                    </span>
-                    <div>
-                      <dt className="font-medium text-slate-900">{meta.label}</dt>
-                      {meta.description && <dd className="text-xs text-slate-500">{meta.description}</dd>}
-                    </div>
-                  </div>
-                ))}
-              </dl>
-            </section>
-
-            <UpcomingBookings
-              bookings={bookings}
-              error={bookingsError}
-              loading={bookingsLoading}
-            />
           </div>
-        ) : (
-          <p className="text-sm text-slate-600">Select a team member to view availability.</p>
-        )}
+          <Link href="/admin/availability/routing" className="btn btn-sm self-start whitespace-nowrap">
+            Open builder
+          </Link>
+        </div>
+      </section>
+      <div className="flex flex-col gap-6 lg:flex-row">
+        <div className="space-y-6 lg:w-80 lg:flex-none">
+          <section>
+            <h1 className="mb-3 text-xl font-semibold text-slate-900">Team members</h1>
+            {teamMembers.length === 0 ? (
+              <p className="text-sm text-slate-600">
+                No active team members were found. Add staff or contractors to manage their availability.
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {teamMembers.map((member) => {
+                  const label = resolveTeamMemberLabel(member);
+                  const positionLabel = describeTeamPosition(member);
+                  return (
+                    <li key={member.id}>
+                      <button
+                        type="button"
+                        onClick={() => setSelected(member.id)}
+                        aria-pressed={selected === member.id}
+                        className={clsx(
+                          "flex w-full flex-col rounded-lg border px-3 py-2 text-left text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500",
+                          selected === member.id
+                            ? "border-blue-500 bg-blue-50 text-blue-900 shadow-sm"
+                            : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50",
+                        )}
+                      >
+                        <span className="font-medium">{label}</span>
+                        {positionLabel && (
+                          <span className="text-xs text-slate-500">{positionLabel}</span>
+                        )}
+                        <span className="text-xs text-slate-500">{member.email}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        </div>
+        <div className="flex-1">
+          <h1 className="mb-4 text-xl font-semibold text-slate-900">Manage availability</h1>
+          {selectedMember ? (
+            <div className="space-y-6">
+              <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
+                <p className="font-medium text-slate-900">{resolveTeamMemberLabel(selectedMember)}</p>
+                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                  {describeTeamPosition(selectedMember) && (
+                    <span>{describeTeamPosition(selectedMember)}</span>
+                  )}
+                  <span>{selectedMember.email}</span>
+                </div>
+              </div>
+
+              <AvailabilityCalendar availability={availability} onChange={updateDay} />
+
+              <AvailabilityConflictNotice
+                warning={conflictWarning}
+                onDismiss={() => setConflictWarning(null)}
+              />
+
+              <section
+                aria-labelledby="calendar-legend-heading"
+                className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
+              >
+                <h2
+                  id="calendar-legend-heading"
+                  className="text-sm font-semibold uppercase tracking-wide text-slate-600"
+                >
+                  Calendar key
+                </h2>
+                <dl className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  {(Object.entries(AVAILABILITY_STATUS_META) as [
+                    AvailabilityStatus,
+                    AvailabilityStatusMeta,
+                  ][]).map(([status, meta]) => (
+                    <div key={status} className="flex items-start gap-3 text-sm text-slate-700">
+                      <span
+                        className={clsx(
+                          "mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-slate-200",
+                          meta.background,
+                          meta.text ?? "text-white",
+                        )}
+                        aria-hidden="true"
+                      >
+                        <span className="sr-only">{meta.label}</span>
+                      </span>
+                      <div>
+                        <dt className="font-medium text-slate-900">{meta.label}</dt>
+                        {meta.description && (
+                          <dd className="text-xs text-slate-500">{meta.description}</dd>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </dl>
+              </section>
+
+              <UpcomingBookings
+                bookings={bookings}
+                error={bookingsError}
+                loading={bookingsLoading}
+              />
+            </div>
+          ) : (
+            <p className="text-sm text-slate-600">Select a team member to view availability.</p>
+          )}
+        </div>
       </div>
     </div>
   );

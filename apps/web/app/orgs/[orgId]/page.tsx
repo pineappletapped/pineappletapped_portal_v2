@@ -414,9 +414,9 @@ export default function OrgDetailPage() {
                       </option>
                     ))}
                   </select>
-                  <p className="text-xs text-slate-500">
-                    We'll promote the selected member to client admin so they can manage billing, branding, and team access.
-                  </p>
+                    <p className="text-xs text-slate-500">
+                      We&apos;ll promote the selected member to client admin so they can manage billing, branding, and team access.
+                    </p>
                   <button type="submit" className="btn mt-1" disabled={transferLoading}>
                     {transferLoading ? 'Transferring…' : 'Transfer ownership'}
                   </button>
