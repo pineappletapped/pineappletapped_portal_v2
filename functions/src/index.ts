@@ -454,6 +454,7 @@ type StoreSocialAccountCredentialRequest = {
   provider?: SocialAccountProviderInput;
   initiator?: { uid?: string | null; email?: string | null } | null;
   requestedBy?: string | null;
+  hqManaged?: boolean | null;
 };
 
 type StoreSocialAccountCredentialResponse = {
@@ -683,6 +684,7 @@ async function storeSocialAccountCredentials(
   const scopes = coerceScopes(payload.scopes);
   const organisationId = normaliseString(payload.organisationId);
   const organisationName = normaliseString(payload.organisationName);
+  const hqManaged = payload.hqManaged === true;
   const initiatorUid = normaliseString(payload.initiator?.uid);
   const initiatorEmail = normaliseString(payload.initiator?.email);
   const requestedBy = normaliseString(payload.requestedBy);
@@ -740,6 +742,7 @@ async function storeSocialAccountCredentials(
       organisationName: organisationName ?? null,
       displayName,
       status,
+      hqManaged,
       scopes: { publish: scopes.publish, analytics: scopes.analytics },
       provider: {
         accountId: providerAccountId ?? null,
@@ -787,6 +790,7 @@ async function storeSocialAccountCredentials(
       platform,
       organisationId: organisationId ?? null,
       organisationName: organisationName ?? null,
+      hqManaged,
       current: {
         accessToken: encryptedAccess,
         refreshToken: encryptedRefresh,
@@ -12936,6 +12940,8 @@ export const admin_createProposal = functions.https.onCall(async (data: any, con
     templateId,
     customText,
     setupPlan,
+    brandColor: rawBrandColor,
+    logoUrl: rawLogoUrl,
   } = data;
   if (!orgId || !clientEmail) {
     throw new functions.https.HttpsError('invalid-argument', 'orgId and clientEmail required');
@@ -12944,6 +12950,9 @@ export const admin_createProposal = functions.https.onCall(async (data: any, con
   let finalItems: any[] = Array.isArray(items) ? items : [];
   let finalAgreements: string[] = Array.isArray(agreementIds) ? agreementIds : [];
   let finalSections: string[] = Array.isArray(sectionIds) ? sectionIds : [];
+  let brandColor = typeof rawBrandColor === 'string' ? rawBrandColor.trim() : '';
+  let logoUrl = typeof rawLogoUrl === 'string' ? rawLogoUrl.trim() : '';
+
   if (templateId) {
     const tplSnap = await db.collection('proposalTemplates').doc(templateId).get();
     if (tplSnap.exists) {
@@ -12955,12 +12964,71 @@ export const admin_createProposal = functions.https.onCall(async (data: any, con
       if (tpl.sectionIds) {
         finalSections = Array.from(new Set([...(tpl.sectionIds as string[]), ...finalSections]));
       }
+      if (!brandColor && typeof tpl.brandColor === 'string') {
+        brandColor = tpl.brandColor.trim();
+      }
+      if (!logoUrl && typeof tpl.logoUrl === 'string') {
+        logoUrl = tpl.logoUrl.trim();
+      }
     }
   }
 
   const serviceIds = finalItems
     .filter((i) => i.type === 'product' && i.productId)
     .map((i) => i.productId);
+
+  const [sectionDocs, agreementDocs] = await Promise.all([
+    Promise.all(
+      finalSections.map((id) => db.collection('proposalSections').doc(id).get())
+    ),
+    Promise.all(
+      finalAgreements.map((id) => db.collection('agreements').doc(id).get())
+    ),
+  ]);
+
+  const sections = sectionDocs
+    .filter((snap) => snap.exists)
+    .map((snap) => {
+      const section = snap.data() as Record<string, any>;
+      const title = typeof section?.title === 'string' ? section.title : snap.id;
+      const content = typeof section?.content === 'string' ? section.content : '';
+      const summary = typeof section?.summary === 'string' ? section.summary : undefined;
+      return {
+        id: snap.id,
+        title,
+        content,
+        summary: summary || undefined,
+      };
+    });
+
+  const agreements = agreementDocs
+    .filter((snap) => snap.exists)
+    .map((snap) => {
+      const agreement = snap.data() as Record<string, any>;
+      const title = typeof agreement?.title === 'string' ? agreement.title : snap.id;
+      const content = typeof agreement?.content === 'string' ? agreement.content : '';
+      const category = typeof agreement?.category === 'string' ? agreement.category : undefined;
+      const requireSign = agreement?.requireSign === true;
+      return {
+        id: snap.id,
+        title,
+        content,
+        category: category || undefined,
+        requireSign,
+      };
+    });
+
+  const terms = agreements
+    .map((agreement) => {
+      const heading = agreement.title?.trim();
+      const body = agreement.content?.trim();
+      if (heading && body) {
+        return `${heading}\n\n${body}`;
+      }
+      return heading || body || null;
+    })
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .join('\n\n---\n\n');
 
   const normalizedSetupPlan = (() => {
     if (!setupPlan || typeof setupPlan !== 'object') return null;
@@ -13013,6 +13081,11 @@ export const admin_createProposal = functions.https.onCall(async (data: any, con
     serviceIds,
     customText: customText || '',
     setupPlan: normalizedSetupPlan,
+    sections,
+    agreements,
+    terms: terms || null,
+    brandColor: brandColor || null,
+    logoUrl: logoUrl || null,
     status: 'sent',
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   };

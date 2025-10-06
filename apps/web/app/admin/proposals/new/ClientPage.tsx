@@ -133,6 +133,8 @@ export default function NewProposalPage() {
   const [agreementIds, setAgreementIds] = useState<string[]>([]);
   const [sectionIds, setSectionIds] = useState<string[]>([]);
   const [customText, setCustomText] = useState("");
+  const [brandColor, setBrandColor] = useState("");
+  const [logoUrl, setLogoUrl] = useState("");
   const [setupPlan, setSetupPlan] = useState<ProposalSetupPlan>({
     layout: "conference",
     notes: "",
@@ -240,6 +242,19 @@ export default function NewProposalPage() {
       setItems(tpl.items || []);
       setAgreementIds(tpl.agreementIds || []);
       setSectionIds(tpl.sectionIds || []);
+    }
+  }, [templateId, templates]);
+
+  useEffect(() => {
+    if (!templateId) {
+      setBrandColor("");
+      setLogoUrl("");
+      return;
+    }
+    const tpl = templates.find((t) => t.id === templateId);
+    if (tpl) {
+      setBrandColor(typeof tpl.brandColor === "string" ? tpl.brandColor : "");
+      setLogoUrl(typeof tpl.logoUrl === "string" ? tpl.logoUrl : "");
     }
   }, [templateId, templates]);
 
@@ -512,6 +527,8 @@ export default function NewProposalPage() {
         templateId: templateId || undefined,
         customText,
         setupPlan,
+        brandColor: brandColor || undefined,
+        logoUrl: logoUrl || undefined,
       });
       router.push("/admin/proposals");
     } catch (err: any) {
@@ -780,6 +797,25 @@ export default function NewProposalPage() {
           {sectionIds.length > 0 && <p>Sections: {sectionIds.length}</p>}
           {agreementIds.length > 0 && (
             <p>Agreements: {agreementIds.length}</p>
+          )}
+          {(brandColor || logoUrl) && (
+            <div className="grid gap-1">
+              <p className="font-medium">Branding</p>
+              {logoUrl ? (
+                <p className="text-sm text-gray-600">Logo attached from template.</p>
+              ) : null}
+              {brandColor ? (
+                <div className="flex items-center gap-2 text-sm text-gray-600">
+                  <span>Primary colour</span>
+                  <span
+                    aria-hidden
+                    className="inline-block h-4 w-4 rounded-full border border-gray-200"
+                    style={{ backgroundColor: brandColor }}
+                  />
+                  <span className="font-mono text-xs text-gray-500">{brandColor}</span>
+                </div>
+              ) : null}
+            </div>
           )}
           <div className="flex justify-between mt-2">
             <button className="btn-outline" onClick={() => setStep(4)}>Back</button>

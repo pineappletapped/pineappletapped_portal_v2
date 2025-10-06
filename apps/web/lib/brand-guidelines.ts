@@ -5,6 +5,18 @@ export interface BrandGuidelineFonts {
   headingStyle: string;
 }
 
+export interface BrandGuidelineLogoAsset {
+  id: string;
+  name: string;
+  url: string;
+  notes: string;
+  storagePath?: string;
+}
+
+export interface BrandGuidelineAssets {
+  secondaryLogos: BrandGuidelineLogoAsset[];
+}
+
 export interface BrandGuidelineColors {
   primary: string;
   secondary: string;
@@ -25,6 +37,7 @@ export interface BrandGuidelineImagery {
 
 export interface BrandGuidelinesState {
   fonts: BrandGuidelineFonts;
+  assets: BrandGuidelineAssets;
   colors: BrandGuidelineColors;
   voice: BrandGuidelineVoice;
   imagery: BrandGuidelineImagery;
@@ -36,6 +49,9 @@ export const DEFAULT_BRAND_GUIDELINES: BrandGuidelinesState = {
     secondary: "",
     accent: "",
     headingStyle: "Poppins Bold for headings, Regular for body copy",
+  },
+  assets: {
+    secondaryLogos: [],
   },
   colors: {
     primary: "#215696",
@@ -75,6 +91,29 @@ export const parseBrandGuidelines = (
       accent: normaliseGuidelineString(source?.fonts?.accent) || defaults.fonts.accent,
       headingStyle: fallbackString(source?.fonts?.headingStyle, defaults.fonts.headingStyle),
     },
+    assets: {
+      secondaryLogos: Array.isArray(source?.assets?.secondaryLogos)
+        ? source.assets.secondaryLogos
+            .map((logo: any): BrandGuidelineLogoAsset | null => {
+              if (!logo || typeof logo !== "object") {
+                return null;
+              }
+              const id = normaliseGuidelineString(logo.id) || normaliseGuidelineString(logo.key) || "";
+              const url = normaliseGuidelineString(logo.url);
+              if (!id || !url) {
+                return null;
+              }
+              return {
+                id,
+                name: fallbackString(logo.name, normaliseGuidelineString(logo.fileName) || "Secondary logo"),
+                url,
+                notes: normaliseGuidelineString(logo.notes),
+                storagePath: normaliseGuidelineString(logo.storagePath),
+              };
+            })
+            .filter((logo: BrandGuidelineLogoAsset | null): logo is BrandGuidelineLogoAsset => Boolean(logo))
+        : defaults.assets.secondaryLogos,
+    },
     colors: {
       primary: String(source?.colors?.primary || defaults.colors.primary),
       secondary: String(source?.colors?.secondary || defaults.colors.secondary),
@@ -101,6 +140,19 @@ export const sanitiseBrandGuidelines = (
     secondary: normaliseGuidelineString(value.fonts.secondary),
     accent: normaliseGuidelineString(value.fonts.accent),
     headingStyle: normaliseGuidelineString(value.fonts.headingStyle),
+  },
+  assets: {
+    secondaryLogos: Array.isArray(value.assets.secondaryLogos)
+      ? value.assets.secondaryLogos
+          .map((logo) => ({
+            id: normaliseGuidelineString(logo.id),
+            name: normaliseGuidelineString(logo.name),
+            url: normaliseGuidelineString(logo.url),
+            notes: normaliseGuidelineString(logo.notes),
+            storagePath: normaliseGuidelineString(logo.storagePath),
+          }))
+          .filter((logo) => Boolean(logo.id && logo.url))
+      : [],
   },
   colors: {
     primary: normaliseGuidelineString(value.colors.primary) || DEFAULT_BRAND_GUIDELINES.colors.primary,

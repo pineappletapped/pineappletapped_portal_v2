@@ -7,14 +7,17 @@ import {
   collection,
   collectionGroup,
   doc,
+  getDoc,
   getDocs,
   limit,
   onSnapshot,
   orderBy,
   query,
+  serverTimestamp,
+  setDoc,
   updateDoc,
   where,
-  serverTimestamp,
+  type Firestore,
 } from 'firebase/firestore';
 
 import CRMRecordForm from '@/components/CRMRecordForm';
@@ -79,6 +82,182 @@ interface FranchiseSummary {
   id: string;
   name: string;
   code: string | null;
+}
+
+interface OrganisationSummary {
+  id: string;
+  name: string;
+}
+
+async function findOrganisationByName(db: Firestore, name: string): Promise<OrganisationSummary | null> {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const normalised = trimmed.toLowerCase();
+
+  try {
+    const lowerSnap = await getDocs(
+      query(collection(db, 'orgs'), where('nameLower', '==', normalised), limit(1))
+    );
+    if (!lowerSnap.empty) {
+      const docSnap = lowerSnap.docs[0];
+      const data = docSnap.data() as Record<string, any>;
+      const resolvedName = typeof data?.name === 'string' && data.name.trim().length > 0 ? data.name : trimmed;
+      return { id: docSnap.id, name: resolvedName };
+    }
+  } catch (error) {
+    console.warn('Failed to query organisation by nameLower', { name }, error);
+  }
+
+  try {
+    const rangeSnap = await getDocs(
+      query(collection(db, 'orgs'), where('name', '>=', trimmed), where('name', '<=', `${trimmed}\uf8ff`), limit(5))
+    );
+    if (!rangeSnap.empty) {
+      for (const docSnap of rangeSnap.docs) {
+        const data = docSnap.data() as Record<string, any>;
+        const candidateName = typeof data?.name === 'string' ? data.name : '';
+        if (candidateName.trim().toLowerCase() === normalised) {
+          const resolvedName = candidateName.trim().length > 0 ? candidateName : trimmed;
+          return { id: docSnap.id, name: resolvedName };
+        }
+      }
+      const firstMatch = rangeSnap.docs[0];
+      const firstData = firstMatch.data() as Record<string, any>;
+      const fallbackName =
+        typeof firstData?.name === 'string' && firstData.name.trim().length > 0 ? firstData.name : trimmed;
+      return { id: firstMatch.id, name: fallbackName };
+    }
+  } catch (error) {
+    console.warn('Failed to search organisation by range', { name }, error);
+  }
+
+  return null;
+}
+
+async function createOrganisationFromCrm(
+  db: Firestore,
+  name: string,
+  context: {
+    contactId: string;
+    contactEmail: string;
+    contactName?: string | null;
+    website?: string | null;
+    location?: string | null;
+    address?: string | null;
+    socials?: string | null;
+    actorUid?: string | null;
+  }
+): Promise<OrganisationSummary> {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    throw new Error('Organisation name is required.');
+  }
+
+  const orgRef = doc(collection(db, 'orgs'));
+  const payload: Record<string, unknown> = {
+    name: trimmed,
+    nameLower: trimmed.toLowerCase(),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    createdBy: context.actorUid ?? null,
+    source: 'crm',
+    primaryContactId: context.contactId,
+    primaryContactEmail: context.contactEmail,
+    primaryContactLinkedAt: serverTimestamp(),
+  };
+
+  if (context.contactName && context.contactName.trim()) {
+    payload.primaryContactName = context.contactName.trim();
+  }
+  if (context.website && context.website.trim()) {
+    payload.website = context.website.trim();
+  }
+  if (context.location && context.location.trim()) {
+    payload.location = context.location.trim();
+  }
+  if (context.address && context.address.trim()) {
+    payload.address = context.address.trim();
+  }
+  if (context.socials && context.socials.trim()) {
+    payload.socials = context.socials.trim();
+  }
+
+  await setDoc(orgRef, payload);
+
+  return { id: orgRef.id, name: trimmed };
+}
+
+async function maybeUpdateOrganisationDetails(
+  db: Firestore,
+  orgId: string,
+  details: { website?: string | null; location?: string | null; address?: string | null; socials?: string | null }
+) {
+  const orgRef = doc(db, 'orgs', orgId);
+  try {
+    const orgSnap = await getDoc(orgRef);
+    if (!orgSnap.exists()) {
+      return;
+    }
+    const data = (orgSnap.data() as Record<string, any>) || {};
+    const updates: Record<string, unknown> = {};
+
+    if (details.website && details.website.trim() && !data.website) {
+      updates.website = details.website.trim();
+    }
+    if (details.location && details.location.trim() && !data.location) {
+      updates.location = details.location.trim();
+    }
+    if (details.address && details.address.trim() && !data.address) {
+      updates.address = details.address.trim();
+    }
+    if (details.socials && details.socials.trim() && !data.socials) {
+      updates.socials = details.socials.trim();
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return;
+    }
+
+    updates.updatedAt = serverTimestamp();
+    await updateDoc(orgRef, updates);
+  } catch (error) {
+    console.warn('Failed to enrich existing organisation with CRM details', { orgId }, error);
+  }
+}
+
+async function ensureOrganisationMembership(
+  db: Firestore,
+  orgId: string,
+  userId: string,
+  actorUid: string | null
+): Promise<string> {
+  const membershipRef = doc(db, 'memberships', `${orgId}_${userId}`);
+  const snap = await getDoc(membershipRef);
+  const defaultRole = 'client_admin';
+  const existingData = snap.exists ? ((snap.data() as Record<string, any>) ?? {}) : {};
+  const role =
+    typeof existingData.role === 'string' && existingData.role.trim().length > 0 ? existingData.role : defaultRole;
+
+  const payload: Record<string, unknown> = {
+    orgId,
+    userId,
+    role,
+    updatedAt: serverTimestamp(),
+  };
+
+  if (!snap.exists) {
+    payload.createdAt = serverTimestamp();
+    payload.addedBy = actorUid ?? null;
+  } else if (!existingData.addedBy && actorUid) {
+    payload.addedBy = actorUid;
+  }
+
+  await setDoc(membershipRef, payload, { merge: true });
+
+  return role;
 }
 
 interface CrmAuditLogEntry {
@@ -1022,8 +1201,56 @@ export default function AdminUsersPage() {
       sanitised.createdAt = timestampIso;
       sanitised.updatedAt = timestampIso;
 
+      const { db, storage, auth: firebaseAuth } = await ensureFirebase();
+      if (!db) {
+        throw new Error('Firestore is unavailable.');
+      }
+
+      type OrganisationOutcome = (OrganisationSummary & { mode: 'existing' | 'created' }) | null;
+      let organisationOutcome: OrganisationOutcome = null;
+
+      const organisationInput =
+        typeof sanitised.organisation === 'string' && sanitised.organisation.trim().length > 0
+          ? sanitised.organisation.trim()
+          : '';
+
+      if (organisationInput) {
+        const existing = await findOrganisationByName(db, organisationInput);
+        if (existing) {
+          const confirmationMessage = `An organisation named “${existing.name}” already exists. Connect this contact to the existing organisation?`;
+          const useExisting = typeof window !== 'undefined' ? window.confirm(confirmationMessage) : true;
+          if (useExisting) {
+            organisationOutcome = { ...existing, mode: 'existing' };
+          }
+        }
+
+        if (organisationOutcome?.mode === 'existing') {
+          await maybeUpdateOrganisationDetails(db, organisationOutcome.id, {
+            website: typeof sanitised.website === 'string' ? sanitised.website : null,
+            location: typeof sanitised.location === 'string' ? sanitised.location : null,
+            address: typeof sanitised.address === 'string' ? sanitised.address : null,
+            socials: typeof sanitised.socials === 'string' ? sanitised.socials : null,
+          });
+          sanitised.organisation = organisationOutcome.name;
+          sanitised.organisationId = organisationOutcome.id;
+        } else {
+          const created = await createOrganisationFromCrm(db, organisationInput, {
+            contactId: id,
+            contactEmail: emailValue,
+            contactName: typeof sanitised.fullName === 'string' ? sanitised.fullName : null,
+            website: typeof sanitised.website === 'string' ? sanitised.website : null,
+            location: typeof sanitised.location === 'string' ? sanitised.location : null,
+            address: typeof sanitised.address === 'string' ? sanitised.address : null,
+            socials: typeof sanitised.socials === 'string' ? sanitised.socials : null,
+            actorUid: firebaseAuth?.currentUser?.uid ?? null,
+          });
+          organisationOutcome = { ...created, mode: 'created' };
+          sanitised.organisation = created.name;
+          sanitised.organisationId = created.id;
+        }
+      }
+
       if (fileEntries.length > 0) {
-        const { storage } = await ensureFirebase();
         if (!storage || (storage as any).__isPlaceholder) {
           throw new Error('Firebase storage is unavailable.');
         }
@@ -1043,12 +1270,34 @@ export default function AdminUsersPage() {
 
       await adminUpdateUser({ userId: id, updates: sanitised });
 
+      let membershipRole: string | null = null;
+      if (organisationOutcome) {
+        membershipRole = await ensureOrganisationMembership(
+          db,
+          organisationOutcome.id,
+          id,
+          firebaseAuth?.currentUser?.uid ?? null
+        );
+      }
+
       const newRecord: AdminUser = {
         id,
         email: emailValue,
         ...(sanitised as Partial<AdminUser>),
         crmStatus: defaultStage,
       };
+
+      if (organisationOutcome) {
+        const membershipEntry = {
+          orgId: organisationOutcome.id,
+          orgName: organisationOutcome.name,
+          role: membershipRole,
+        };
+        newRecord.organisation = organisationOutcome.name;
+        newRecord.memberships = Array.isArray(newRecord.memberships)
+          ? [...newRecord.memberships, membershipEntry]
+          : [membershipEntry];
+      }
 
       setUsers((prev) => [...prev, newRecord]);
       void recordCrmAuditEvent(newRecord, {
@@ -1057,6 +1306,20 @@ export default function AdminUsersPage() {
         before: null,
         after: defaultStage,
       });
+
+      if (organisationOutcome) {
+        void recordCrmAuditEvent(newRecord, {
+          action: 'field_update',
+          field: 'organisation',
+          before: null,
+          after: organisationOutcome.name,
+          note:
+            organisationOutcome.mode === 'existing'
+              ? `Linked to existing organisation (${organisationOutcome.id}) during CRM record creation.`
+              : `Created new organisation (${organisationOutcome.id}) during CRM record creation.`,
+        });
+      }
+
       setShowForm(false);
     } catch (err: any) {
       console.error(err);

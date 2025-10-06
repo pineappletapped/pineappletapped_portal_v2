@@ -70,6 +70,11 @@ export default function AdminPage() {
       href: '/admin/email-templates',
     },
     {
+      label: 'HQ social manager',
+      description: 'Connect Pineapple-owned channels and monitor OAuth health.',
+      href: '/admin/social-manager',
+    },
+    {
       label: 'QR code generator',
       description: 'Create scannable links for campaign assets.',
       href: '/admin/tools/qr-code-generator',

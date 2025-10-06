@@ -26,7 +26,13 @@ import {
 } from "firebase/firestore";
 import { adminListUsers } from "@/lib/admin";
 import { useRoleGate } from "@/hooks/useRoleGate";
-import { ROLE_LABELS, extractUserRoles, type RoleKey, type UserRoles } from "@/lib/roles";
+import {
+  ROLE_LABELS,
+  extractUserRoles,
+  isGodAdmin,
+  type RoleKey,
+  type UserRoles,
+} from "@/lib/roles";
 
 interface RawMember {
   id: string;
@@ -479,7 +485,7 @@ interface BookingSummary {
   projectId: string | null;
 }
 
-type MemberType = "franchisee" | "team";
+type MemberType = "franchisee" | "hq" | "team";
 
 interface ConflictWarning {
   date: string;
@@ -528,6 +534,9 @@ function describeTeamPosition(member: Member): string | null {
   }
   if (member.isStaff) {
     return "Staff";
+  }
+  if (resolveMemberType(member) === "hq") {
+    return "HQ operations";
   }
   return null;
 }
@@ -619,7 +628,40 @@ const AvailabilityConflictNotice = ({
   const { date, bookings, member, memberType } = warning;
   const friendlyDate = formatDisplayDate(date);
   const label = resolveTeamMemberLabel(member);
-  const summary = buildConflictSummary(label, friendlyDate, bookings);
+  const summary = buildConflictSummary(label, friendlyDate, bookings, memberType);
+
+  const conflictMessage = (() => {
+    switch (memberType) {
+      case "franchisee":
+        return "This date already has a confirmed booking you are responsible for. Please either keep cover in place or offer it to HQ/another franchise before rescheduling with the client.";
+      case "hq":
+        return "This date already has a confirmed HQ booking. Loop in the operations desk so cover is arranged before you release the slot.";
+      default:
+        return "This date already has a confirmed booking. Please coordinate with your franchise owner or HQ so they can arrange cover before you step away.";
+    }
+  })();
+
+  const copyButtonLabel = (() => {
+    switch (memberType) {
+      case "franchisee":
+        return "Copy coverage request details";
+      case "hq":
+        return "Copy HQ handover summary";
+      default:
+        return "Copy handover summary";
+    }
+  })();
+
+  const tipCopy = (() => {
+    switch (memberType) {
+      case "franchisee":
+        return "Tip: Share this summary with HQ or neighbouring franchises to request cover before contacting the client.";
+      case "hq":
+        return "Tip: Share this summary with the wider HQ operations team so they can reassign cover or escalate if needed.";
+      default:
+        return "Tip: Send this summary to your franchise owner or HQ so they can coordinate a replacement.";
+    }
+  })();
 
   const handleCopy = async () => {
     try {
@@ -641,11 +683,7 @@ const AvailabilityConflictNotice = ({
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-base font-semibold text-amber-900">Existing booking on {friendlyDate}</h2>
-          <p className="mt-1 text-sm text-amber-900">
-            {memberType === "franchisee"
-              ? "This date already has a confirmed booking you are responsible for. Please either keep cover in place or offer it to HQ/another franchise before rescheduling with the client."
-              : "This date already has a confirmed booking. Please coordinate with your franchise owner or HQ so they can arrange cover before you step away."}
-          </p>
+          <p className="mt-1 text-sm text-amber-900">{conflictMessage}</p>
         </div>
         <button
           type="button"
@@ -690,18 +728,10 @@ const AvailabilityConflictNotice = ({
           onClick={handleCopy}
           className="inline-flex items-center justify-center rounded-md bg-amber-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-700"
         >
-          {memberType === "franchisee" ? "Copy coverage request details" : "Copy handover summary"}
+          {copyButtonLabel}
         </button>
         {copied && <span className="text-xs text-amber-800">Copied. Share this with your support contact.</span>}
-        {memberType === "franchisee" ? (
-          <p className="text-xs text-amber-800">
-            Tip: Share this summary with HQ or neighbouring franchises to request cover before contacting the client.
-          </p>
-        ) : (
-          <p className="text-xs text-amber-800">
-            Tip: Send this summary to your franchise owner or HQ so they can coordinate a replacement.
-          </p>
-        )}
+        <p className="text-xs text-amber-800">{tipCopy}</p>
       </div>
     </section>
   );
@@ -864,9 +894,14 @@ const formatDisplayDate = (input: string) => {
 const buildConflictSummary = (
   memberLabel: string,
   dateLabel: string,
-  bookings: BookingSummary[]
+  bookings: BookingSummary[],
+  memberType: MemberType
 ) => {
-  const lines = [`Availability change for ${memberLabel} on ${dateLabel}`, "Conflicting bookings:"];
+  const intro =
+    memberType === "hq"
+      ? `HQ availability change for ${memberLabel} on ${dateLabel}`
+      : `Availability change for ${memberLabel} on ${dateLabel}`;
+  const lines = [intro, "Conflicting bookings:"];
   bookings.forEach((booking, index) => {
     const title = booking.title ?? "Booking";
     const schedule = formatDateRange(booking.start, booking.end);
@@ -897,11 +932,22 @@ const resolveMemberType = (member: Member | null): MemberType => {
   if (!member) {
     return "team";
   }
-  if (member.isStaff) {
-    return "team";
+  if (isGodAdmin(member) || member.isStaff) {
+    return "hq";
   }
   if (member.franchiseIds.length > 0) {
     return "franchisee";
+  }
+  const roles = member.roles ?? {};
+  const hasHqRole =
+    roles.admin ||
+    roles.operations ||
+    roles.projects ||
+    roles.sales ||
+    roles.marketing ||
+    roles.finance;
+  if (hasHqRole) {
+    return "hq";
   }
   return "team";
 };

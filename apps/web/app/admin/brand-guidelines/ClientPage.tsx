@@ -1,6 +1,6 @@
 "use client";
 
-import Image from "next/image";
+import NextImage from "next/image";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage";
@@ -8,11 +8,33 @@ import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage
 import { useRoleGate } from "@/hooks/useRoleGate";
 import { ensureFirebase } from "@/lib/firebase";
 import {
+  BrandGuidelineLogoAsset,
   BrandGuidelinesState,
   DEFAULT_BRAND_GUIDELINES,
   parseBrandGuidelines,
   sanitiseBrandGuidelines,
 } from "@/lib/brand-guidelines";
+
+const createLogoId = (): string =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `logo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+const readBlobAsDataUrl = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+    reader.readAsDataURL(blob);
+  });
+
+const loadImageElement = (src: string): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const image = document.createElement("img");
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Unable to load logo preview"));
+    image.src = src;
+  });
 
 type FeedbackState = { message: string; tone: "success" | "error" } | null;
 
@@ -24,6 +46,15 @@ export default function BrandGuidelinesPage() {
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [removingLogo, setRemovingLogo] = useState(false);
   const [guidelines, setGuidelines] = useState<BrandGuidelinesState>(DEFAULT_BRAND_GUIDELINES);
+  const [secondaryLogoFile, setSecondaryLogoFile] = useState<File | null>(null);
+  const [secondaryLogoName, setSecondaryLogoName] = useState("");
+  const [secondaryLogoNotes, setSecondaryLogoNotes] = useState("");
+  const [uploadingSecondaryLogo, setUploadingSecondaryLogo] = useState(false);
+  const [removingSecondaryLogoId, setRemovingSecondaryLogoId] = useState<string | null>(null);
+  const [monochromeSourceFile, setMonochromeSourceFile] = useState<File | null>(null);
+  const [monochromeGenerating, setMonochromeGenerating] = useState(false);
+  const [monochromeVariants, setMonochromeVariants] = useState<{ white?: string; black?: string }>({});
+  const [monochromeError, setMonochromeError] = useState<string | null>(null);
   const [savingGuidelines, setSavingGuidelines] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
 
@@ -51,6 +82,86 @@ export default function BrandGuidelinesPage() {
       }
     })();
   }, [allowed, guardLoading]);
+
+  const handleSecondaryLogoFileChange = (file: File | null) => {
+    setSecondaryLogoFile(file);
+    if (file && !secondaryLogoName.trim()) {
+      const defaultName = file.name.replace(/\.[^/.]+$/, "");
+      setSecondaryLogoName(defaultName);
+    }
+  };
+
+  const persistGuidelinesSnapshot = async (next: BrandGuidelinesState) => {
+    const { db } = await ensureFirebase();
+    await setDoc(doc(db, "settings", "branding"), { brandGuidelines: sanitiseBrandGuidelines(next) }, { merge: true });
+  };
+
+  const convertImageToVariant = (image: HTMLImageElement, variant: "white" | "black"): string => {
+    const width = image.naturalWidth || image.width;
+    const height = image.naturalHeight || image.height;
+    if (!width || !height) {
+      throw new Error("Logo must have a valid width and height.");
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("Unable to process logo. Try a different browser.");
+    }
+    context.clearRect(0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
+    const imageData = context.getImageData(0, 0, width, height);
+    const { data } = imageData;
+    for (let index = 0; index < data.length; index += 4) {
+      const alpha = data[index + 3];
+      if (alpha === 0) {
+        continue;
+      }
+      if (variant === "white") {
+        data[index] = 255;
+        data[index + 1] = 255;
+        data[index + 2] = 255;
+      } else {
+        data[index] = 0;
+        data[index + 1] = 0;
+        data[index + 2] = 0;
+      }
+    }
+    context.putImageData(imageData, 0, 0);
+    return canvas.toDataURL("image/png");
+  };
+
+  const generateMonochromeVariants = async (source: { file?: File | null; url?: string }) => {
+    try {
+      setMonochromeGenerating(true);
+      setMonochromeError(null);
+      setMonochromeVariants({});
+      let dataUrl: string | null = null;
+      if (source.file) {
+        dataUrl = await readBlobAsDataUrl(source.file);
+      } else if (source.url) {
+        const response = await fetch(source.url);
+        if (!response.ok) {
+          throw new Error("Could not download the logo. Try uploading a file instead.");
+        }
+        const blob = await response.blob();
+        dataUrl = await readBlobAsDataUrl(blob);
+      }
+      if (!dataUrl) {
+        throw new Error("Select a logo file or upload a primary logo first.");
+      }
+      const image = await loadImageElement(dataUrl);
+      const whiteVariant = convertImageToVariant(image, "white");
+      const blackVariant = convertImageToVariant(image, "black");
+      setMonochromeVariants({ white: whiteVariant, black: blackVariant });
+    } catch (error: any) {
+      console.error("Failed to generate monochrome logos", error);
+      setMonochromeError(error?.message || "Unable to generate variants. Try a different file.");
+    } finally {
+      setMonochromeGenerating(false);
+    }
+  };
 
   const colorPreview = useMemo(
     () => [
@@ -112,17 +223,109 @@ export default function BrandGuidelinesPage() {
     }
   };
 
+  const handleSecondaryLogoUpload = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!secondaryLogoFile) return;
+    try {
+      setUploadingSecondaryLogo(true);
+      setFeedback(null);
+      const { db, storage } = await ensureFirebase();
+      const key = `site/brand/secondary/logo-${Date.now()}-${encodeURIComponent(secondaryLogoFile.name)}`;
+      const storageRef = ref(storage, key);
+      await uploadBytes(storageRef, secondaryLogoFile, {
+        contentType: secondaryLogoFile.type || "image/png",
+      });
+      const url = await getDownloadURL(storageRef);
+      const newLogo: BrandGuidelineLogoAsset = {
+        id: createLogoId(),
+        name: secondaryLogoName.trim() || secondaryLogoFile.name,
+        notes: secondaryLogoNotes.trim(),
+        url,
+        storagePath: key,
+      };
+      const nextGuidelines: BrandGuidelinesState = {
+        ...guidelines,
+        assets: {
+          ...guidelines.assets,
+          secondaryLogos: [...guidelines.assets.secondaryLogos, newLogo],
+        },
+      };
+      setGuidelines(nextGuidelines);
+      await persistGuidelinesSnapshot(nextGuidelines);
+      setSecondaryLogoFile(null);
+      setSecondaryLogoName("");
+      setSecondaryLogoNotes("");
+      setFeedback({ message: "Secondary logo uploaded.", tone: "success" });
+    } catch (error: any) {
+      console.error("Failed to upload secondary logo", error);
+      setFeedback({ message: error?.message || "Failed to upload secondary logo.", tone: "error" });
+    } finally {
+      setUploadingSecondaryLogo(false);
+    }
+  };
+
+  const handleSecondaryLogoRemove = async (logo: BrandGuidelineLogoAsset) => {
+    if (!confirm("Remove this secondary logo?")) return;
+    try {
+      setRemovingSecondaryLogoId(logo.id);
+      setFeedback(null);
+      const { db, storage } = await ensureFirebase();
+      if (logo.storagePath) {
+        try {
+          await deleteObject(ref(storage, logo.storagePath));
+        } catch (error) {
+          console.warn("Could not remove secondary logo from storage", error);
+        }
+      } else if (logo.url) {
+        try {
+          const url = new URL(logo.url);
+          const path = decodeURIComponent(url.pathname.replace(/^\//, ""));
+          await deleteObject(ref(storage, path));
+        } catch (error) {
+          console.warn("Could not resolve storage path for secondary logo", error);
+        }
+      }
+      const nextGuidelines: BrandGuidelinesState = {
+        ...guidelines,
+        assets: {
+          ...guidelines.assets,
+          secondaryLogos: guidelines.assets.secondaryLogos.filter((item) => item.id !== logo.id),
+        },
+      };
+      setGuidelines(nextGuidelines);
+      await persistGuidelinesSnapshot(nextGuidelines);
+      setFeedback({ message: "Secondary logo removed.", tone: "success" });
+    } catch (error: any) {
+      console.error("Failed to remove secondary logo", error);
+      setFeedback({ message: error?.message || "Failed to remove secondary logo.", tone: "error" });
+    } finally {
+      setRemovingSecondaryLogoId(null);
+    }
+  };
+
+  const handleMonochromeSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!monochromeSourceFile) {
+      setMonochromeError("Choose a logo file to convert.");
+      return;
+    }
+    await generateMonochromeVariants({ file: monochromeSourceFile });
+  };
+
+  const handleMonochromeFromPrimary = async () => {
+    if (!logoUrl) {
+      setMonochromeError("Upload your primary logo first or choose a file to convert.");
+      return;
+    }
+    await generateMonochromeVariants({ url: logoUrl });
+  };
+
   const saveGuidelines = async (event: FormEvent) => {
     event.preventDefault();
     try {
       setSavingGuidelines(true);
       setFeedback(null);
-      const { db } = await ensureFirebase();
-      await setDoc(
-        doc(db, "settings", "branding"),
-        { brandGuidelines: sanitiseBrandGuidelines(guidelines) },
-        { merge: true },
-      );
+      await persistGuidelinesSnapshot(guidelines);
       setFeedback({ message: "Brand guidelines saved.", tone: "success" });
     } catch (error: any) {
       console.error("Failed to save brand guidelines", error);
@@ -165,12 +368,14 @@ export default function BrandGuidelinesPage() {
       <section className="card grid gap-4 p-5">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Brand assets</h2>
-          <p className="text-sm text-gray-600">Upload your primary logo for use across the portal.</p>
+          <p className="text-sm text-gray-600">
+            Upload your primary logo, catalogue alternate versions, and instantly generate monochrome overlays for marketing and production teams.
+          </p>
         </div>
         <form onSubmit={handleLogoUpload} className="grid gap-4 sm:grid-cols-[auto_1fr] sm:items-center">
           <div className="flex items-center gap-4">
             {logoUrl ? (
-              <Image
+              <NextImage
                 src={logoUrl}
                 alt="Brand logo"
                 width={96}
@@ -210,6 +415,203 @@ export default function BrandGuidelinesPage() {
             </div>
           </div>
         </form>
+        <div className="grid gap-4 rounded-lg border border-gray-200/80 bg-gray-50/70 p-4">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">Secondary logos</h3>
+            <p className="mt-1 text-sm text-gray-600">
+              Save monochrome icons, stacked versions, or campaign-specific marks with guidance for when to use them.
+            </p>
+          </div>
+          {guidelines.assets.secondaryLogos.length ? (
+            <ul className="grid gap-3">
+              {guidelines.assets.secondaryLogos.map((asset) => (
+                <li
+                  key={asset.id}
+                  className="grid gap-3 rounded-lg border border-gray-200 bg-white p-4 sm:grid-cols-[auto_1fr_auto] sm:items-center"
+                >
+                  <div className="flex items-center justify-center">
+                    <NextImage
+                      src={asset.url}
+                      alt={asset.name || "Secondary logo"}
+                      width={88}
+                      height={88}
+                      className="h-20 w-20 rounded-lg border border-gray-200 object-contain p-2"
+                    />
+                  </div>
+                  <div className="space-y-2 text-sm text-gray-700">
+                    <div>
+                      <p className="font-semibold text-gray-900">{asset.name || "Secondary logo"}</p>
+                      <p className="mt-1 text-xs text-gray-500">
+                        {asset.notes || "Add notes so teams know when this variation should be used."}
+                      </p>
+                    </div>
+                    <a
+                      href={asset.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      download
+                      className="inline-flex text-xs font-semibold uppercase tracking-wide text-gray-500 underline decoration-gray-300 decoration-2 underline-offset-4"
+                    >
+                      Download PNG
+                    </a>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-outline btn-sm"
+                    onClick={() => handleSecondaryLogoRemove(asset)}
+                    disabled={removingSecondaryLogoId === asset.id}
+                  >
+                    {removingSecondaryLogoId === asset.id ? "Removing…" : "Remove"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-gray-600">
+              No alternate logos yet. Upload additional marks below to keep campaign assets consistent.
+            </p>
+          )}
+          <form onSubmit={handleSecondaryLogoUpload} className="grid gap-3">
+            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] md:items-start">
+              <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                Logo file
+                <input
+                  className="mt-1"
+                  type="file"
+                  accept="image/*"
+                  onChange={(event) => handleSecondaryLogoFileChange(event.target.files?.[0] || null)}
+                />
+              </label>
+              <div className="grid gap-3">
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Display name
+                  <input
+                    className="input mt-1"
+                    value={secondaryLogoName}
+                    onChange={(event) => setSecondaryLogoName(event.target.value)}
+                    placeholder="e.g. White icon"
+                  />
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Usage notes
+                  <textarea
+                    className="input mt-1"
+                    rows={3}
+                    value={secondaryLogoNotes}
+                    onChange={(event) => setSecondaryLogoNotes(event.target.value)}
+                    placeholder="When to use this version, background considerations, animation notes…"
+                  />
+                </label>
+              </div>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <button type="submit" className="btn btn-sm" disabled={!secondaryLogoFile || uploadingSecondaryLogo}>
+                {uploadingSecondaryLogo ? "Uploading…" : "Upload secondary logo"}
+              </button>
+              {secondaryLogoFile ? (
+                <button
+                  type="button"
+                  className="btn-outline btn-sm"
+                  onClick={() => {
+                    handleSecondaryLogoFileChange(null);
+                    setSecondaryLogoName("");
+                    setSecondaryLogoNotes("");
+                  }}
+                  disabled={uploadingSecondaryLogo}
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
+          </form>
+        </div>
+        <div className="grid gap-4 rounded-lg border border-gray-200/80 bg-gray-50/70 p-4">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">Monochrome logo generator</h3>
+            <p className="mt-1 text-sm text-gray-600">
+              Create transparent all-white and all-black PNGs for video overlays and merchandise with one click.
+            </p>
+          </div>
+          {monochromeError ? (
+            <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-900">{monochromeError}</div>
+          ) : null}
+          <form onSubmit={handleMonochromeSubmit} className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+            <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              Choose logo file
+              <input
+                className="mt-1"
+                type="file"
+                accept="image/*"
+                onChange={(event) => {
+                  setMonochromeVariants({});
+                  setMonochromeError(null);
+                  setMonochromeSourceFile(event.target.files?.[0] || null);
+                }}
+              />
+            </label>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <button type="submit" className="btn btn-sm" disabled={!monochromeSourceFile || monochromeGenerating}>
+                {monochromeGenerating ? "Generating…" : "Generate variants"}
+              </button>
+              <button
+                type="button"
+                className="btn-outline btn-sm"
+                onClick={handleMonochromeFromPrimary}
+                disabled={monochromeGenerating || !logoUrl}
+              >
+                Use saved primary logo
+              </button>
+            </div>
+          </form>
+          {monochromeVariants.white || monochromeVariants.black ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {monochromeVariants.white ? (
+                <div className="grid gap-2 rounded-lg border border-gray-200 bg-white p-3 text-center">
+                  <div className="flex h-28 items-center justify-center rounded-md bg-gray-900">
+                    <NextImage
+                      src={monochromeVariants.white}
+                      alt="White logo preview"
+                      width={220}
+                      height={110}
+                      unoptimized
+                      className="max-h-20 w-auto object-contain"
+                    />
+                  </div>
+                  <a
+                    href={monochromeVariants.white}
+                    download={`brand-white-logo.png`}
+                    className="text-xs font-semibold uppercase tracking-wide text-gray-500 underline decoration-gray-300 decoration-2 underline-offset-4"
+                  >
+                    Download white PNG
+                  </a>
+                </div>
+              ) : null}
+              {monochromeVariants.black ? (
+                <div className="grid gap-2 rounded-lg border border-gray-200 bg-white p-3 text-center">
+                  <div className="flex h-28 items-center justify-center rounded-md bg-gray-100">
+                    <NextImage
+                      src={monochromeVariants.black}
+                      alt="Black logo preview"
+                      width={220}
+                      height={110}
+                      unoptimized
+                      className="max-h-20 w-auto object-contain"
+                    />
+                  </div>
+                  <a
+                    href={monochromeVariants.black}
+                    download={`brand-black-logo.png`}
+                    className="text-xs font-semibold uppercase tracking-wide text-gray-500 underline decoration-gray-300 decoration-2 underline-offset-4"
+                  >
+                    Download black PNG
+                  </a>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-600">Upload a logo file or reuse the saved primary mark to create monochrome variants in seconds.</p>
+          )}
+        </div>
       </section>
 
       <form onSubmit={saveGuidelines} className="card grid gap-6 p-5">

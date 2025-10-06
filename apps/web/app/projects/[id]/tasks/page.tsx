@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { auth, db, ensureFirebase, functions, httpsCallable } from '@/lib/firebase';
 import {
@@ -85,6 +86,41 @@ const DETAIL_FORM_DEFAULT = {
   dueDate: '',
   assignedTo: '',
   status: 'todo',
+};
+
+const BRAND_TASK_KEYWORDS = [
+  'customer logo',
+  'customer brand colours',
+  'customer brand colors',
+  'brand guidelines',
+  'brand colour',
+  'brand color',
+];
+
+const brandTaskNoticeClasses =
+  'space-y-2 rounded-lg border border-dashed border-orange-200 bg-orange-50 p-3 text-xs text-orange-800';
+const brandTaskCtaClasses =
+  'inline-flex w-fit items-center rounded bg-orange-600 px-3 py-1 text-xs font-semibold text-white shadow-sm transition hover:bg-orange-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-600';
+
+const hasStoredBrandGuidelines = (orgData: any): boolean => {
+  if (!orgData || typeof orgData !== 'object') return false;
+  if (typeof orgData.brandLogoUrl === 'string' && orgData.brandLogoUrl.trim().length > 0) {
+    return true;
+  }
+  if (orgData.brandGuidelines && typeof orgData.brandGuidelines === 'object') {
+    return Object.keys(orgData.brandGuidelines).length > 0;
+  }
+  if (orgData.brandGuidelinesUpdatedAt) {
+    return true;
+  }
+  return false;
+};
+
+const isBrandTaskTitle = (value: unknown): boolean => {
+  if (typeof value !== 'string') return false;
+  const normalised = value.trim().toLowerCase();
+  if (!normalised) return false;
+  return BRAND_TASK_KEYWORDS.some((keyword) => normalised.includes(keyword));
 };
 
 function coerceTaskDate(value: any): Date | null {
@@ -172,6 +208,11 @@ export default function ProjectTasksPage() {
   const [newCommentBody, setNewCommentBody] = useState('');
   const [commentError, setCommentError] = useState<string | null>(null);
   const [commentSubmitting, setCommentSubmitting] = useState(false);
+  const [orgBrandInfo, setOrgBrandInfo] = useState<{
+    loading: boolean;
+    hasGuidelines: boolean;
+    orgName: string | null;
+  }>({ loading: false, hasGuidelines: false, orgName: null });
 
   const franchiseMap = useMemo(() => {
     const map = new Map<string, any>();
@@ -230,6 +271,79 @@ export default function ProjectTasksPage() {
     );
     setTasks(tSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
   }, [projectId]);
+
+  const brandTasks = useMemo(
+    () => tasks.filter((task) => isBrandTaskTitle(task?.title)),
+    [tasks]
+  );
+
+  const brandGuidelinesComplete = Boolean(project?.brandGuidelinesCompleted);
+
+  useEffect(() => {
+    let active = true;
+    if (!project?.orgId) {
+      setOrgBrandInfo({ loading: false, hasGuidelines: false, orgName: null });
+      return () => {
+        active = false;
+      };
+    }
+    setOrgBrandInfo((prev) => ({ ...prev, loading: true }));
+    (async () => {
+      try {
+        const orgSnap = await getDoc(doc(db, 'orgs', project.orgId));
+        if (!active) return;
+        if (!orgSnap.exists()) {
+          setOrgBrandInfo({ loading: false, hasGuidelines: false, orgName: null });
+          return;
+        }
+        const data = orgSnap.data() as any;
+        const hasGuidelines = hasStoredBrandGuidelines(data);
+        const orgName =
+          typeof data?.name === 'string' && data.name.trim().length > 0
+            ? data.name.trim()
+            : null;
+        setOrgBrandInfo({ loading: false, hasGuidelines, orgName });
+      } catch (err) {
+        console.error('Failed to load organisation brand info', err);
+        if (!active) return;
+        setOrgBrandInfo({ loading: false, hasGuidelines: false, orgName: null });
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [project?.orgId]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    if (!brandTasks.length) return;
+    const shouldComplete = brandGuidelinesComplete || orgBrandInfo.hasGuidelines;
+    if (!shouldComplete) return;
+    const pending = brandTasks.filter((task) => task.status !== 'done');
+    if (pending.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        await Promise.all(
+          pending.map((task) =>
+            updateDoc(doc(db, 'projects', projectId, 'tasks', task.id), {
+              status: 'done',
+              completedAt: serverTimestamp(),
+              autoCompleted: 'brand_guidelines',
+            })
+          )
+        );
+        if (!cancelled) {
+          await reloadTasks();
+        }
+      } catch (err) {
+        console.error('Failed to auto-complete brand guideline tasks', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [brandTasks, brandGuidelinesComplete, orgBrandInfo.hasGuidelines, projectId, reloadTasks]);
 
   const loadTaskComments = useCallback(
     async (taskId: string) => {
@@ -816,6 +930,40 @@ export default function ProjectTasksPage() {
                         <p className="text-xs text-gray-600">
                           Assigned: {task.assigneeName || 'Unassigned'}
                         </p>
+                        {isBrandTaskTitle(task.title) && (
+                          <div className={brandTaskNoticeClasses}>
+                            {!project?.orgId ? (
+                              <>
+                                <p>
+                                  Tell us which organisation this project belongs to so we can pull the correct brand assets
+                                  from your portfolio.
+                                </p>
+                                <Link href={`/projects/${projectId}`} className={brandTaskCtaClasses}>
+                                  Choose organisation
+                                </Link>
+                              </>
+                            ) : brandGuidelinesComplete || orgBrandInfo.hasGuidelines ? (
+                              <p>
+                                We already have the brand guidelines
+                                {orgBrandInfo.orgName ? ` for ${orgBrandInfo.orgName}` : ''}, so this task has been marked as
+                                complete automatically.
+                              </p>
+                            ) : (
+                              <>
+                                <p>
+                                  Open the brand guidelines form to upload your logo, fonts, and brand colours so production can
+                                  stay on-brand from the first draft.
+                                </p>
+                                <Link
+                                  href={`/projects/${projectId}/brand-wizard`}
+                                  className={brandTaskCtaClasses}
+                                >
+                                  Open brand guidelines form
+                                </Link>
+                              </>
+                            )}
+                          </div>
+                        )}
                         {isStaffOrAdmin && (
                           <div className="grid gap-2">
                             <select

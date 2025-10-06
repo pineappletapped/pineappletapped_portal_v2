@@ -591,6 +591,46 @@ export default function OrgDetailPage() {
                   </div>
                 </div>
 
+                {guidelines.assets.secondaryLogos.length ? (
+                  <div className="rounded-2xl border border-slate-200/70 bg-white/90 p-5 shadow-sm">
+                    <h3 className="text-sm font-semibold text-slate-900">Secondary logos</h3>
+                    <ul className="mt-3 grid gap-3">
+                      {guidelines.assets.secondaryLogos.map((asset) => (
+                        <li
+                          key={asset.id}
+                          className="flex flex-col gap-3 rounded-2xl border border-slate-200/80 bg-slate-50/80 p-3 sm:flex-row sm:items-center sm:justify-between"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="flex h-14 w-14 items-center justify-center rounded-xl border border-slate-200 bg-white">
+                              <Image
+                                src={asset.url}
+                                alt={asset.name || 'Secondary logo'}
+                                width={56}
+                                height={56}
+                                className="h-14 w-14 rounded-xl object-contain p-2"
+                              />
+                            </span>
+                            <div>
+                              <p className="text-sm font-semibold text-slate-900">{asset.name || 'Secondary logo'}</p>
+                              <p className="mt-1 text-xs text-slate-500">
+                                {asset.notes || 'No usage notes yet. Add guidance in the brand guidelines workspace.'}
+                              </p>
+                            </div>
+                          </div>
+                          <a
+                            href={asset.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-xs font-semibold uppercase tracking-wide text-slate-500 underline decoration-slate-400 decoration-2 underline-offset-4"
+                          >
+                            View logo
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4">
                     <h3 className="text-sm font-semibold text-slate-900">Typography</h3>
