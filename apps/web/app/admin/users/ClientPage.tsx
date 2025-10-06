@@ -236,8 +236,9 @@ async function ensureOrganisationMembership(
 ): Promise<string> {
   const membershipRef = doc(db, 'memberships', `${orgId}_${userId}`);
   const snap = await getDoc(membershipRef);
+  const membershipExists = snap.exists();
   const defaultRole = 'client_admin';
-  const existingData = snap.exists ? ((snap.data() as Record<string, any>) ?? {}) : {};
+  const existingData = membershipExists ? ((snap.data() as Record<string, any>) ?? {}) : {};
   const role =
     typeof existingData.role === 'string' && existingData.role.trim().length > 0 ? existingData.role : defaultRole;
 
@@ -248,7 +249,7 @@ async function ensureOrganisationMembership(
     updatedAt: serverTimestamp(),
   };
 
-  if (!snap.exists) {
+  if (!membershipExists) {
     payload.createdAt = serverTimestamp();
     payload.addedBy = actorUid ?? null;
   } else if (!existingData.addedBy && actorUid) {

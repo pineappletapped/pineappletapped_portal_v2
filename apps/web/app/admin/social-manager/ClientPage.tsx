@@ -375,10 +375,10 @@ export default function SocialManagerClientPage() {
   return (
     <div className="grid gap-6">
       <PortalHero
+        eyebrow="Admin portal"
         title="HQ Social Manager"
-        subtitle="Link Pineapple's owned channels, monitor token health, and refresh permissions before scheduled campaigns."
+        description="Link Pineapple's owned channels, monitor token health, and refresh permissions before scheduled campaigns."
         metrics={heroMetrics}
-        actions={[]}
       />
 
       <section className="grid gap-4 rounded border bg-white p-6 shadow-sm">
