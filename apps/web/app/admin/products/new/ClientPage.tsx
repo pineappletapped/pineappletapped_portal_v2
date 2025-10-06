@@ -25,6 +25,7 @@ import type {
 import type { PriceTiers } from "@/lib/pricing";
 import type { Venue } from "@/lib/venues";
 import { defaultFranchiseRoyaltyConfig } from "@/lib/franchises";
+import { generateFormId } from "@/lib/forms";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -205,12 +206,6 @@ const parseRoleQuantity = (value: string): number => {
   const rounded = Math.round(parsed);
   return rounded > 0 ? rounded : 1;
 };
-
-const generateFormId = () =>
-  typeof globalThis !== "undefined" &&
-  (globalThis.crypto?.randomUUID?.() as string | undefined)
-    ? globalThis.crypto.randomUUID()
-    : Math.random().toString(36).slice(2);
 
 type BudgetOverrideFormState = {
   kitManual: string;

@@ -35,6 +35,7 @@ import type { PriceTiers } from "@/lib/pricing";
 import type { Venue } from "@/lib/venues";
 import type { KitBag, EquipmentStandard } from "@/lib/equipment";
 import { defaultFranchiseRoyaltyConfig } from "@/lib/franchises";
+import { generateFormId } from "@/lib/forms";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
