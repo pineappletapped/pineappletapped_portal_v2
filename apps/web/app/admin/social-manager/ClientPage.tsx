@@ -202,7 +202,7 @@ export default function SocialManagerClientPage() {
               platform: normaliseText(data.platform) ?? "unknown",
               displayName: normaliseText(data.displayName) ?? `Account ${docSnap.id}`,
               organisationName:
-                normaliseText(data.organisationName) ?? normaliseText(data.organisationId) ?? "Pineapple Tapped HQ",
+                normaliseText(data.organisationName) ?? normaliseText(data.organisationId) ?? null,
               scopes,
               connection: {
                 status: connectionStatus,
