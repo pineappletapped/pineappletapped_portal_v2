@@ -234,6 +234,7 @@ export interface Product {
   price: number;
   priceTiers?: PriceTiers | null;
   imageUrl?: string;
+  imageUrls?: string[];
   requirements?: string;
   deliveryTime?: string;
   /** Details about on-site operations shared with the customer. */

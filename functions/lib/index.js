@@ -15,6 +15,8 @@ import { google } from 'googleapis';
 import { Readable } from 'stream';
 import fetch from 'node-fetch';
 import * as cors from 'cors';
+import { bookingConflictsWithRange } from './utils/availability.js';
+import { DEFAULT_KIT_ROUTING_SETTINGS, ROUTING_STAGE_META, cloneRoutingSettings, parseKitRoutingSettings, resolveStageLabel as resolveRoutingStageLabel, } from './utils/routing.js';
 const corsHandler = cors.default({ origin: true });
 const ANALYTICS_ALLOWED_ORIGINS = [
     'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
@@ -43,6 +45,29 @@ let cachedStripeWebhookSecret = typeof process.env.STRIPE_WEBHOOK_SECRET === 'st
     ? process.env.STRIPE_WEBHOOK_SECRET.trim()
     : undefined;
 let cachedOperationalSettings = null;
+const KIT_ROUTING_CACHE_TTL_MS = 5 * 60 * 1000;
+let cachedKitRoutingSettings = null;
+async function loadKitRoutingSettings() {
+    const now = Date.now();
+    if (cachedKitRoutingSettings && now - cachedKitRoutingSettings.fetchedAt < KIT_ROUTING_CACHE_TTL_MS) {
+        return cachedKitRoutingSettings.settings;
+    }
+    try {
+        const snap = await db.collection('settings').doc('kitRouting').get();
+        if (snap.exists) {
+            const parsed = parseKitRoutingSettings(snap.data());
+            const cloned = cloneRoutingSettings(parsed);
+            cachedKitRoutingSettings = { settings: cloned, fetchedAt: now };
+            return cloned;
+        }
+    }
+    catch (error) {
+        console.error('Failed to load kit routing settings', error);
+    }
+    const fallback = cloneRoutingSettings(DEFAULT_KIT_ROUTING_SETTINGS);
+    cachedKitRoutingSettings = { settings: fallback, fetchedAt: now };
+    return fallback;
+}
 const BOOKING_INVITE_BASE_URL = (typeof process.env.BOOKING_INVITE_BASE_URL === 'string' && process.env.BOOKING_INVITE_BASE_URL.trim().length > 0
     ? process.env.BOOKING_INVITE_BASE_URL.trim()
     : null) ||
@@ -4014,6 +4039,10 @@ export const reserveKit = functions.https.onCall(async (data) => {
     if (!end) {
         end = new Date(start.getTime() + onsiteDayBlocks * 24 * 60 * 60 * 1000);
     }
+    const reservationEnd = end;
+    if (!reservationEnd) {
+        throw new functions.https.HttpsError('invalid-argument', 'Invalid reservation window');
+    }
     const requiredKitRaw = Array.isArray(productData?.requiredKit)
         ? productData.requiredKit
         : [];
@@ -4047,40 +4076,49 @@ export const reserveKit = functions.https.onCall(async (data) => {
         return { type, franchiseId, territoryId, label };
     };
     const coverageInfo = normaliseCoverage(data?.coverage);
+    const kitRoutingSettings = await loadKitRoutingSettings();
     const buildAttempts = (coverage) => {
+        const flowKey = coverage.type === 'franchise' && coverage.franchiseId ? 'franchiseFlow' : 'hqFlow';
+        const configuredFlow = flowKey === 'franchiseFlow' ? kitRoutingSettings.franchiseFlow : kitRoutingSettings.hqFlow;
         const attempts = [];
-        if (coverage.type === 'franchise' && coverage.franchiseId) {
-            const baseLabel = coverage.label ?? 'Franchise operations';
-            attempts.push({
-                key: 'franchise_primary',
-                ownerType: 'franchise',
-                initialStatus: 'confirmed',
-                franchiseId: coverage.franchiseId,
-                label: baseLabel,
+        const addStage = (stage) => {
+            const meta = ROUTING_STAGE_META[stage.key];
+            if (!meta) {
+                return;
+            }
+            if (flowKey === 'hqFlow' && stage.key !== 'hq') {
+                return;
+            }
+            if (meta.ownerType !== 'company' && (!coverage.franchiseId || coverage.type !== 'franchise')) {
+                return;
+            }
+            if (attempts.some((entry) => entry.key === stage.key)) {
+                return;
+            }
+            const label = resolveRoutingStageLabel(stage, {
+                coverageLabel: coverage.label,
+                fallback: meta.defaultLabel,
             });
+            const franchiseId = meta.ownerType === 'franchise' || meta.ownerType === 'user' ? coverage.franchiseId : null;
             attempts.push({
-                key: 'franchise_team',
-                ownerType: 'user',
-                initialStatus: 'pending',
-                franchiseId: coverage.franchiseId,
-                label: `${baseLabel} freelance team`,
+                key: stage.key,
+                ownerType: meta.ownerType,
+                initialStatus: stage.autoConfirm ? 'confirmed' : 'pending',
+                franchiseId,
+                label,
+                requiresKit: stage.requiresKit === true,
+                description: stage.description ?? null,
+                autoConfirm: stage.autoConfirm === true,
             });
-            attempts.push({
-                key: 'hq',
-                ownerType: 'company',
-                initialStatus: 'pending',
-                franchiseId: null,
-                label: 'HQ operations',
-            });
-        }
-        else {
-            attempts.push({
-                key: 'hq',
-                ownerType: 'company',
-                initialStatus: 'confirmed',
-                franchiseId: null,
-                label: coverage.label ?? 'HQ operations',
-            });
+        };
+        configuredFlow
+            .filter((stage) => stage.enabled !== false)
+            .forEach((stage) => addStage(stage));
+        if (attempts.length === 0) {
+            const fallbackFlow = flowKey === 'franchiseFlow'
+                ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
+                : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
+            fallbackFlow.forEach((stage) => addStage(stage));
         }
         return attempts;
     };
@@ -4092,6 +4130,9 @@ export const reserveKit = functions.https.onCall(async (data) => {
             initialStatus: 'confirmed',
             franchiseId: null,
             label: coverageInfo.label ?? 'HQ operations',
+            requiresKit: true,
+            description: null,
+            autoConfirm: true,
         });
     }
     const deriveOwnerInfo = (eq) => {
@@ -4152,9 +4193,10 @@ export const reserveKit = functions.https.onCall(async (data) => {
                 : null;
         const bookingsSnap = await eqRef
             .collection('bookings')
-            .where('start', '<=', end)
-            .where('end', '>=', start)
+            .where('start', '<', reservationEnd)
+            .where('end', '>', start)
             .get();
+        const conflictingBookings = bookingsSnap.docs.filter((bookingDoc) => bookingConflictsWithRange(bookingDoc.data() ?? null, start, reservationEnd));
         const meetsStandards = Array.isArray(eq.meetsStandards)
             ? eq.meetsStandards
                 .map((value) => (typeof value === 'string' ? value.trim() : ''))
@@ -4172,7 +4214,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
             ownerId: ownerInfo.ownerId,
             franchiseId: ownerInfo.franchiseId,
             availableFlag: eq.available !== false,
-            booked: !bookingsSnap.empty,
+            booked: conflictingBookings.length > 0,
             meetsStandards,
             rentalPrice,
             exists: true,
@@ -4202,6 +4244,26 @@ export const reserveKit = functions.https.onCall(async (data) => {
         requiredStandards.forEach((standard) => {
             standardMatches.set(standard, new Set());
         });
+        if (!attempt.requiresKit) {
+            const response = {
+                conflicts: [],
+                kitItems: [],
+                rentalTotal: 0,
+                status: attempt.initialStatus,
+                missingStandards: [],
+                provider: {
+                    level: attempt.key,
+                    status: attempt.initialStatus,
+                    label: attempt.label,
+                    franchiseId: attempt.franchiseId,
+                    territoryId: coverageInfo.territoryId,
+                    requiresKit: false,
+                    autoConfirm: attempt.autoConfirm,
+                    description: attempt.description ?? null,
+                },
+            };
+            return { success: true, response };
+        }
         for (const record of equipmentRecords) {
             if (!record.exists) {
                 conflicts.push({ id: record.id, name: record.name, reason: 'missing' });
@@ -4236,7 +4298,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
                 name: record.name || record.id,
                 category: record.category,
                 start: start.toISOString(),
-                end: end.toISOString(),
+                end: reservationEnd.toISOString(),
             });
             rentalTotal += record.rentalPrice || 0;
             record.meetsStandards.forEach((standardId) => {
@@ -4275,6 +4337,9 @@ export const reserveKit = functions.https.onCall(async (data) => {
                 label: attempt.label,
                 franchiseId: attempt.franchiseId,
                 territoryId: coverageInfo.territoryId,
+                requiresKit: attempt.requiresKit,
+                autoConfirm: attempt.autoConfirm,
+                description: attempt.description ?? null,
             },
         };
         return { success, response };
@@ -4289,7 +4354,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
                     const eqRef = db.collection('equipment').doc(item.id);
                     batch.set(eqRef.collection('bookings').doc(), {
                         start: admin.firestore.Timestamp.fromDate(start),
-                        end: admin.firestore.Timestamp.fromDate(end),
+                        end: admin.firestore.Timestamp.fromDate(reservationEnd),
                         projectId: null,
                     });
                 }
@@ -4308,6 +4373,9 @@ export const reserveKit = functions.https.onCall(async (data) => {
         initialStatus: 'pending',
         franchiseId: null,
         label: coverageInfo.label ?? 'HQ operations',
+        requiresKit: true,
+        description: null,
+        autoConfirm: false,
     };
     return {
         conflicts: [],
@@ -4321,6 +4389,9 @@ export const reserveKit = functions.https.onCall(async (data) => {
             label: defaultAttempt.label,
             franchiseId: defaultAttempt.franchiseId,
             territoryId: coverageInfo.territoryId,
+            requiresKit: defaultAttempt.requiresKit,
+            autoConfirm: defaultAttempt.autoConfirm,
+            description: defaultAttempt.description,
         },
     };
 });
@@ -5745,6 +5816,8 @@ export const contractor_updateTask = functions.https.onCall(async (data, context
 });
 /**
  * Triggered when a logo is uploaded under orgs/{orgId}/brand-packs/{packId}/logo
+ * or orgs/{orgId}/brand-guidelines/logo-*.png. The handler normalises images by
+ * removing simple backgrounds and resizing them for consistent previews.
  * Validates and processes the image: crops to square, resizes to max 512px, removes
  * any alpha channel background (simple white fill) and stores processed version
  * at orgs/{orgId}/brand/logo-prep/{packId}/processed.png. This function
@@ -5755,8 +5828,9 @@ export const onLogoUpload = functions.storage
     .object()
     .onFinalize(async (object) => {
     const filePath = object.name || '';
-    // Only run for brand pack logos
-    if (!filePath.includes('brand-packs') || !filePath.includes('logo'))
+    const isBrandPackLogo = filePath.includes('brand-packs');
+    const isGuidelineLogo = filePath.includes('brand-guidelines');
+    if (!filePath.includes('logo') || (!isBrandPackLogo && !isGuidelineLogo))
         return;
     const bucket = admin.storage().bucket(object.bucket);
     const tmpFilePath = `/tmp/${uuidv4()}-${object.name?.split('/').pop()}`;
@@ -5774,9 +5848,21 @@ export const onLogoUpload = functions.storage
     const parts = filePath.split('/');
     const orgIdIndex = parts.indexOf('orgs') + 1;
     const orgId = parts[orgIdIndex];
-    const packIndex = parts.indexOf('brand-packs') + 1;
-    const packId = parts[packIndex];
-    const destPath = `orgs/${orgId}/brand/logo-prep/${packId}/processed.png`;
+    if (!orgId) {
+        return;
+    }
+    let destPath = '';
+    if (isBrandPackLogo) {
+        const packIndex = parts.indexOf('brand-packs') + 1;
+        const packId = parts[packIndex] || 'default';
+        destPath = `orgs/${orgId}/brand/logo-prep/${packId}/processed.png`;
+    }
+    else {
+        destPath = `orgs/${orgId}/brand/logo-prep/guidelines/processed.png`;
+    }
+    if (!destPath) {
+        return;
+    }
     await bucket.file(destPath).save(processedBuffer, { contentType: 'image/png' });
     return;
 });

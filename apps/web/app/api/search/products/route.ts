@@ -23,6 +23,9 @@ export async function GET(request: Request) {
       tagline: hit.product.tagline ?? null,
       category: hit.product.category ?? null,
       imageUrl: hit.product.imageUrl ?? null,
+      imageUrls: Array.isArray(hit.product.imageUrls)
+        ? hit.product.imageUrls
+        : [],
       exact: hit.exactName || hit.exactTagline,
     })),
   });

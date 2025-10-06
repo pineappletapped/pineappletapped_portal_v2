@@ -327,6 +327,7 @@ export default function AdminPage() {
                     { href: '/admin/workflows', label: 'Manage Workflows' },
                     { href: '/admin/proposals', label: 'Quotes & Proposals' },
                     { href: '/admin/availability', label: 'Manage Availability' },
+                    { href: '/admin/availability/routing', label: 'Routing Workflow' },
                   ],
                 },
                 {
@@ -363,6 +364,7 @@ export default function AdminPage() {
                 {
                   title: 'Brand & Content',
                   links: [
+                    { href: '/admin/brand-guidelines', label: 'Brand Guidelines' },
                     { href: '/admin/client-logos', label: 'Manage Client Logos' },
                     { href: '/admin/blog', label: 'Blog Management' },
                     { href: '/admin/website-design', label: 'Website Design' },

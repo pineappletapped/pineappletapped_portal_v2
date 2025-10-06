@@ -21,8 +21,12 @@ import {
 import ListingPriceNote from "./ListingPriceNote";
 
 export default function ProductListRow({ product }: { product: Product }) {
-  const imageUrl =
-    product.imageUrl || "https://placehold.co/600x400?text=No+Image";
+  const coverImage =
+    product.imageUrls?.find(
+      (url) => typeof url === "string" && url.trim().length > 0
+    )?.trim() ||
+    (typeof product.imageUrl === "string" ? product.imageUrl.trim() : "");
+  const imageUrl = coverImage || "https://placehold.co/600x400?text=No+Image";
   const priceDetails = getListingPriceLabel(product);
   const priceHeadline = priceDetails?.headline ?? "Pricing on request";
   const { visibleDeliverables, remainingDeliverableCount } =

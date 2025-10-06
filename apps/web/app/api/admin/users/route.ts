@@ -119,9 +119,75 @@ export async function GET() {
   try {
     const firestore = getFirebaseAdminFirestore();
     const snapshot = await firestore.collection('users').get();
-    const users = snapshot.docs.map((doc) => serialiseUserDoc(doc));
+    const userDocs = snapshot.docs;
+    const users = userDocs.map((doc) => serialiseUserDoc(doc));
 
-    return NextResponse.json({ users });
+    const membershipByUser = new Map<string, Array<{ orgId: string; role: string | null }>>();
+    const orgIds = new Set<string>();
+    const userIds = userDocs.map((doc) => doc.id);
+
+    const chunkSize = 10;
+    for (let i = 0; i < userIds.length; i += chunkSize) {
+      const chunk = userIds.slice(i, i + chunkSize);
+      if (chunk.length === 0) {
+        continue;
+      }
+      const membershipSnap = await firestore
+        .collection('memberships')
+        .where('userId', 'in', chunk)
+        .get();
+
+      membershipSnap.docs.forEach((membershipDoc) => {
+        const data = membershipDoc.data() ?? {};
+        const userId = typeof data.userId === 'string' ? data.userId.trim() : '';
+        const orgId = typeof data.orgId === 'string' ? data.orgId.trim() : '';
+        const role = typeof data.role === 'string' ? data.role : null;
+        if (!userId || !orgId) {
+          return;
+        }
+        if (!membershipByUser.has(userId)) {
+          membershipByUser.set(userId, []);
+        }
+        membershipByUser.get(userId)!.push({ orgId, role });
+        orgIds.add(orgId);
+      });
+    }
+
+    const orgNameById = new Map<string, string>();
+    if (orgIds.size > 0) {
+      const orgRefs = Array.from(orgIds).map((orgId) => firestore.collection('orgs').doc(orgId));
+      const orgSnaps = await firestore.getAll(...orgRefs);
+      orgSnaps.forEach((orgSnap) => {
+        if (!orgSnap.exists) {
+          return;
+        }
+        const data = orgSnap.data() ?? {};
+        const name = typeof data.name === 'string' ? data.name : 'Untitled organisation';
+        orgNameById.set(orgSnap.id, name);
+      });
+    }
+
+    const enrichedUsers = users.map((user) => {
+      const base = user as Record<string, any>;
+      const userId = typeof base.id === 'string' ? base.id : null;
+      if (!userId) {
+        return base;
+      }
+      const entries = membershipByUser.get(userId) || [];
+      const memberships = entries.map((entry) => ({
+        orgId: entry.orgId,
+        role: entry.role,
+        orgName: orgNameById.get(entry.orgId) ?? null,
+      }));
+
+      if (!base.organisation && memberships.length > 0) {
+        base.organisation = memberships[0].orgName;
+      }
+
+      return { ...base, memberships };
+    });
+
+    return NextResponse.json({ users: enrichedUsers });
   } catch (error) {
     console.error('Failed to list admin users', error);
     return NextResponse.json({ error: 'Failed to load users.' }, { status: 500 });

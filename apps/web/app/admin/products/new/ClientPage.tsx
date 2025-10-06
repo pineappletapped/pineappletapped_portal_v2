@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { db, storage, functions } from "@/lib/firebase";
@@ -24,6 +25,7 @@ import type {
 import type { PriceTiers } from "@/lib/pricing";
 import type { Venue } from "@/lib/venues";
 import { defaultFranchiseRoyaltyConfig } from "@/lib/franchises";
+import { generateFormId } from "@/lib/forms";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -46,6 +48,14 @@ const ReactQuill = dynamic(() => import("react-quill"), { ssr: false });
 import "react-quill/dist/quill.snow.css";
 
 const PRODUCT_IMAGE_ROOT = "Product_Images";
+
+type GalleryImage = {
+  id: string;
+  previewUrl: string;
+  persisted: boolean;
+  url?: string;
+  file?: File;
+};
 
 interface ModifierCrewAdjustment {
   templateId: string;
@@ -196,12 +206,6 @@ const parseRoleQuantity = (value: string): number => {
   const rounded = Math.round(parsed);
   return rounded > 0 ? rounded : 1;
 };
-
-const generateFormId = () =>
-  typeof globalThis !== "undefined" &&
-  (globalThis.crypto?.randomUUID?.() as string | undefined)
-    ? globalThis.crypto.randomUUID()
-    : Math.random().toString(36).slice(2);
 
 type BudgetOverrideFormState = {
   kitManual: string;
@@ -485,7 +489,8 @@ export default function NewProductPage() {
   const [price, setPrice] = useState("0");
   const [priceTier2, setPriceTier2] = useState("");
   const [priceTier3, setPriceTier3] = useState("");
-  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [galleryImages, setGalleryImages] = useState<GalleryImage[]>([]);
+  const imageObjectUrlsRef = useRef<string[]>([]);
   const [requirements, setRequirements] = useState("");
   const [operationsInfo, setOperationsInfo] = useState("");
   const [deliveryIndex, setDeliveryIndex] = useState(0);
@@ -955,6 +960,63 @@ export default function NewProductPage() {
     return await getDownloadURL(r);
   };
 
+  useEffect(
+    () => () => {
+      imageObjectUrlsRef.current.forEach((url) => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // Ignore failures when cleaning up object URLs.
+        }
+      });
+      imageObjectUrlsRef.current = [];
+    },
+    []
+  );
+
+  const addGalleryFiles = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const additions: GalleryImage[] = Array.from(files).map((file) => {
+      const previewUrl = URL.createObjectURL(file);
+      imageObjectUrlsRef.current.push(previewUrl);
+      return {
+        id: generateFormId(),
+        file,
+        previewUrl,
+        persisted: false,
+      };
+    });
+    setGalleryImages((prev) => [...prev, ...additions]);
+  };
+
+  const removeGalleryImage = (id: string) => {
+    setGalleryImages((prev) => {
+      const target = prev.find((image) => image.id === id);
+      if (target && !target.persisted && target.file) {
+        try {
+          URL.revokeObjectURL(target.previewUrl);
+        } catch {
+          // Ignore revoke errors.
+        }
+        imageObjectUrlsRef.current = imageObjectUrlsRef.current.filter(
+          (url) => url !== target.previewUrl
+        );
+      }
+      return prev.filter((image) => image.id !== id);
+    });
+  };
+
+  const makeGalleryCover = (id: string) => {
+    setGalleryImages((prev) => {
+      const index = prev.findIndex((image) => image.id === id);
+      if (index <= 0) return prev;
+      const next = [...prev];
+      const [selected] = next.splice(index, 1);
+      next.unshift(selected);
+      return next;
+    });
+  };
+
   const handleDriveTemplateSelection = (selection: DriveFolderSelection) => {
     setDriveTemplateFolderId(selection.id);
     if (selection.name && selection.name.trim().length > 0) {
@@ -1415,12 +1477,30 @@ export default function NewProductPage() {
       productSpec: specPayload,
       crewRoles: crewRoleData,
     });
-    let imageUrl = "";
-    if (imageFile)
-      imageUrl = await upload(
-        `${PRODUCT_IMAGE_ROOT}/${docRef.id}/main`,
-        imageFile
+    const uploadedGalleryUrls = new Map<string, string>();
+    const uploadBatchId = Date.now();
+    for (let i = 0; i < galleryImages.length; i++) {
+      const image = galleryImages[i];
+      if (!image.file) continue;
+      const storagePath = `${PRODUCT_IMAGE_ROOT}/${docRef.id}/gallery-${uploadBatchId}-${i}`;
+      const url = await upload(storagePath, image.file);
+      uploadedGalleryUrls.set(image.id, url);
+      try {
+        URL.revokeObjectURL(image.previewUrl);
+      } catch {
+        // Ignore revoke failures so saving never breaks.
+      }
+      imageObjectUrlsRef.current = imageObjectUrlsRef.current.filter(
+        (entry) => entry !== image.previewUrl
       );
+    }
+    const finalImageUrls = galleryImages
+      .map((image) => {
+        if (image.file) return uploadedGalleryUrls.get(image.id) ?? null;
+        if (image.url) return image.url;
+        return null;
+      })
+      .filter((url): url is string => typeof url === "string" && url.trim().length > 0);
     const deliverableData: ProductDeliverable[] = [];
     for (let i = 0; i < deliverables.length; i++) {
       const d = deliverables[i];
@@ -1450,7 +1530,8 @@ export default function NewProductPage() {
         seoImageFile
       );
     await updateDoc(docRef, {
-      imageUrl: imageUrl || null,
+      imageUrl: finalImageUrls[0] ?? null,
+      imageUrls: finalImageUrls,
       deliverables: deliverableData,
       modifierGroups: enabledGroups,
       modifiers: modifierData,
@@ -1797,8 +1878,62 @@ export default function NewProductPage() {
           <input className="input" value={tagline} onChange={(e) => setTagline(e.target.value)} />
           <label className="text-sm font-medium">Description</label>
         <ReactQuill theme="snow" value={description} onChange={setDescription} />
-          <label className="text-sm font-medium">Image</label>
-          <input type="file" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Images</label>
+            <input
+              type="file"
+              multiple
+              onChange={(event) => {
+                addGalleryFiles(event.target.files);
+                if (event.target) {
+                  event.target.value = "";
+                }
+              }}
+            />
+            {galleryImages.length === 0 ? (
+              <p className="text-xs text-gray-500">
+                Select one or more images to showcase the product listing.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-3">
+                {galleryImages.map((image, index) => (
+                  <div key={image.id} className="flex flex-col items-start gap-2">
+                    <div className="relative">
+                      <Image
+                        src={image.previewUrl}
+                        alt={`Product image ${index + 1}`}
+                        width={240}
+                        height={160}
+                        className="h-24 w-36 rounded object-cover"
+                      />
+                      {index === 0 && (
+                        <span className="absolute left-2 top-2 rounded bg-black/70 px-2 py-0.5 text-xs font-medium text-white">
+                          Cover
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      <button
+                        type="button"
+                        className="btn btn-xs"
+                        onClick={() => makeGalleryCover(image.id)}
+                        disabled={index === 0}
+                      >
+                        {index === 0 ? "Cover" : "Make cover"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-xs btn-ghost"
+                        onClick={() => removeGalleryImage(image.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="rounded border bg-slate-50 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
