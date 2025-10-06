@@ -42,6 +42,7 @@ interface CRMUserRecord {
 
 interface ContactDraft {
   fullName: string;
+  position: string;
   email: string;
   phone: string;
   organisation: string;
@@ -97,6 +98,12 @@ interface EventRecord {
   id: string;
   path?: string | null;
   createdAt?: any;
+}
+
+interface OrgMembershipRecord {
+  orgId: string;
+  role?: string | null;
+  orgName?: string | null;
 }
 
 function coerceDate(value: any): Date | null {
@@ -197,6 +204,7 @@ export default function AdminUserDetailPage() {
   const [quotes, setQuotes] = useState<QuoteRecord[]>([]);
   const [proposals, setProposals] = useState<ProposalRecord[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
+  const [memberships, setMemberships] = useState<OrgMembershipRecord[]>([]);
   const [bioDraft, setBioDraft] = useState('');
   const [savingBio, setSavingBio] = useState(false);
   const [bioGenerating, setBioGenerating] = useState(false);
@@ -212,6 +220,7 @@ export default function AdminUserDetailPage() {
   const [deleting, setDeleting] = useState(false);
   const [contactDraft, setContactDraft] = useState<ContactDraft>({
     fullName: '',
+    position: '',
     email: '',
     phone: '',
     organisation: '',
@@ -245,13 +254,44 @@ export default function AdminUserDetailPage() {
             setQuotes([]);
             setProposals([]);
             setEvents([]);
+            setMemberships([]);
           }
           return;
         }
 
         const payload = { id: userSnap.id, ...userSnap.data() } as CRMUserRecord;
+
+        const membershipSnap = await getDocs(query(collection(db, 'memberships'), where('userId', '==', userId)));
+        const membershipEntries = membershipSnap.docs.map((docSnap) => ({
+          id: docSnap.id,
+          ...docSnap.data(),
+        })) as Array<{ orgId?: unknown; role?: unknown }>;
+        const membershipOrgSnaps = await Promise.all(
+          membershipEntries.map((entry) => {
+            const orgId = typeof entry.orgId === 'string' ? entry.orgId : '';
+            return orgId ? getDoc(doc(db, 'orgs', orgId)) : Promise.resolve(null as any);
+          })
+        );
+        const membershipList = membershipEntries
+          .map((entry, index) => {
+            const orgId = typeof entry.orgId === 'string' ? entry.orgId : '';
+            if (!orgId) {
+              return null;
+            }
+            const orgSnap = membershipOrgSnaps[index];
+            const orgName = orgSnap && orgSnap.exists ? ((orgSnap.data() as any)?.name ?? null) : null;
+            const role = typeof entry.role === 'string' ? entry.role : null;
+            return { orgId, orgName, role } as OrgMembershipRecord;
+          })
+          .filter(Boolean) as OrgMembershipRecord[];
+
+        if (!payload.organisation && membershipList[0]?.orgName) {
+          payload.organisation = membershipList[0].orgName as any;
+        }
+
         if (!active) return;
         setUser(payload);
+        setMemberships(membershipList);
         setBioDraft(typeof payload.aiBio === 'string' ? payload.aiBio : '');
         setDiscountDraft(
           typeof payload.discount === 'number' && !Number.isNaN(payload.discount)
@@ -260,10 +300,15 @@ export default function AdminUserDetailPage() {
         );
         setContactDraft({
           fullName: typeof payload.fullName === 'string' ? payload.fullName : '',
+          position: typeof payload.position === 'string' ? payload.position : '',
           email: typeof payload.email === 'string' ? payload.email : '',
           phone: typeof payload.phone === 'string' ? payload.phone : '',
           organisation:
-            typeof payload.organisation === 'string' ? payload.organisation : '',
+            membershipList[0]?.orgName && membershipList[0].orgName.trim()
+              ? (membershipList[0].orgName as string)
+              : typeof payload.organisation === 'string'
+              ? payload.organisation
+              : '',
           linkedinBio:
             typeof payload.linkedinBio === 'string' ? payload.linkedinBio : '',
         });
@@ -344,6 +389,13 @@ export default function AdminUserDetailPage() {
         console.error('Failed to load CRM profile', err);
         if (active) {
           setError(err?.message || 'Failed to load client profile.');
+          setUser(null);
+          setOrders([]);
+          setEvents([]);
+          setProjects([]);
+          setQuotes([]);
+          setProposals([]);
+          setMemberships([]);
         }
       } finally {
         if (active) {
@@ -543,6 +595,7 @@ export default function AdminUserDetailPage() {
     }
     setContactDraft({
       fullName: typeof user.fullName === 'string' ? user.fullName : '',
+      position: typeof user.position === 'string' ? user.position : '',
       email: typeof user.email === 'string' ? user.email : '',
       phone: typeof user.phone === 'string' ? user.phone : '',
       organisation: typeof user.organisation === 'string' ? user.organisation : '',
@@ -554,6 +607,7 @@ export default function AdminUserDetailPage() {
     if (!user) return;
     setContactDraft({
       fullName: typeof user.fullName === 'string' ? user.fullName : '',
+      position: typeof user.position === 'string' ? user.position : '',
       email: typeof user.email === 'string' ? user.email : '',
       phone: typeof user.phone === 'string' ? user.phone : '',
       organisation: typeof user.organisation === 'string' ? user.organisation : '',
@@ -566,6 +620,7 @@ export default function AdminUserDetailPage() {
     if (!user) return;
     setContactDraft({
       fullName: typeof user.fullName === 'string' ? user.fullName : '',
+      position: typeof user.position === 'string' ? user.position : '',
       email: typeof user.email === 'string' ? user.email : '',
       phone: typeof user.phone === 'string' ? user.phone : '',
       organisation: typeof user.organisation === 'string' ? user.organisation : '',
@@ -592,6 +647,7 @@ export default function AdminUserDetailPage() {
     try {
       const updates = {
         fullName: contactDraft.fullName.trim() || null,
+        position: contactDraft.position.trim() || null,
         email,
         phone: contactDraft.phone.trim() || null,
         organisation: contactDraft.organisation.trim() || null,
@@ -674,6 +730,7 @@ export default function AdminUserDetailPage() {
           <div className="text-sm text-gray-600">
             <p>{user.email}</p>
             {user.phone ? <p>{user.phone}</p> : null}
+            {user.position ? <p>{user.position}</p> : null}
             {user.organisation ? <p>{user.organisation}</p> : null}
             {affiliateLabel ? (
               <p className="text-xs font-medium text-purple-600">
@@ -733,6 +790,16 @@ export default function AdminUserDetailPage() {
                   onChange={handleContactDraftChange}
                   type="text"
                   value={contactDraft.fullName}
+                />
+              </label>
+              <label className="grid gap-1 text-sm font-medium text-gray-700">
+                Position
+                <input
+                  className="border p-2"
+                  name="position"
+                  onChange={handleContactDraftChange}
+                  type="text"
+                  value={contactDraft.position}
                 />
               </label>
               <label className="grid gap-1 text-sm font-medium text-gray-700">
@@ -805,6 +872,10 @@ export default function AdminUserDetailPage() {
               <dd className="mt-1 text-gray-900">{user.fullName || '—'}</dd>
             </div>
             <div>
+              <dt className="text-xs font-semibold uppercase text-gray-500">Position</dt>
+              <dd className="mt-1 text-gray-900">{user.position || '—'}</dd>
+            </div>
+            <div>
               <dt className="text-xs font-semibold uppercase text-gray-500">Organisation</dt>
               <dd className="mt-1 text-gray-900">{user.organisation || '—'}</dd>
             </div>
@@ -815,6 +886,41 @@ export default function AdminUserDetailPage() {
               </dd>
             </div>
           </dl>
+        )}
+      </section>
+
+      <section className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-lg font-semibold">Organisation memberships</h2>
+        </div>
+        {memberships.length === 0 ? (
+          <p className="mt-4 text-sm text-gray-600">
+            This contact is not linked to any organisations yet. Invite them from the organisation workspace or create a new membership from the client portal.
+          </p>
+        ) : (
+          <div className="mt-4 grid gap-3">
+            {memberships.map((membership) => (
+              <div
+                key={`${membership.orgId}-${membership.role ?? 'member'}`}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-gray-200 bg-gray-50 p-4"
+              >
+                <div>
+                  <p className="text-sm font-semibold text-gray-900">
+                    {membership.orgName || membership.orgId}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Role: {(membership.role || 'member').replace(/_/g, ' ')}
+                  </p>
+                </div>
+                <Link
+                  href={`/orgs/${membership.orgId}`}
+                  className="text-sm font-medium text-orange-600 hover:text-orange-500"
+                >
+                  View in portal
+                </Link>
+              </div>
+            ))}
+          </div>
         )}
       </section>
 

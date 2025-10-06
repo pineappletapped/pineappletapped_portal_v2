@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
 import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
@@ -16,6 +16,7 @@ import PortalHero from '@/components/PortalHero';
 export default function OrgsPage() {
   const [loading, setLoading] = useState(true);
   const [orgs, setOrgs] = useState<{ id: string; name: string; role?: string }[]>([]);
+  const ensuringDefault = useRef(false);
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -58,11 +59,35 @@ export default function OrgsPage() {
             const memberships = memSnap.docs.map((d) => ({ id: d.id, ...d.data() })) as any[];
             const orgPromises = memberships.map((m) => getDoc(doc(db, 'orgs', m.orgId)));
             const orgDocs = await Promise.all(orgPromises);
-            const list = orgDocs.map((docSnap) => {
+            let list = orgDocs.map((docSnap) => {
               const orgId = docSnap.id;
               const m = memberships.find((mm) => mm.orgId === orgId);
               return { id: orgId, name: (docSnap.data() as any)?.name || 'Untitled', role: m?.role };
             });
+
+            if (list.length === 0 && !ensuringDefault.current) {
+              ensuringDefault.current = true;
+              try {
+                const res = await fetch('/api/orgs/ensure-default', { method: 'POST' });
+                if (res.ok) {
+                  const payload = (await res.json()) as {
+                    organisation?: { id: string; name: string };
+                  };
+                  if (payload.organisation) {
+                    list = [
+                      {
+                        id: payload.organisation.id,
+                        name: payload.organisation.name || 'Untitled organisation',
+                        role: 'client_admin',
+                      },
+                    ];
+                  }
+                }
+              } catch (defaultError) {
+                console.error('Failed to ensure default organisation', defaultError);
+              }
+            }
+
             setOrgs(list);
           } catch (error) {
             console.error('Failed to load organisations', error);

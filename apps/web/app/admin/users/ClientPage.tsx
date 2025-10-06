@@ -59,6 +59,7 @@ interface AdminUser {
   discount?: number;
   suggestedProductId?: string | null;
   organisation?: string | null;
+  position?: string | null;
   phone?: string | null;
   notes?: string | null;
   linkedinBio?: string | null;
@@ -66,6 +67,7 @@ interface AdminUser {
   updatedAt?: unknown;
   lastContactedAt?: unknown;
   createdAt?: unknown;
+  memberships?: Array<{ orgId: string; orgName?: string | null; role?: string | null }>;
   [key: string]: any;
 }
 
@@ -109,6 +111,25 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
     result.push(items.slice(i, i + chunkSize));
   }
   return result;
+}
+
+function resolvePrimaryOrganisation(user: AdminUser): string | null {
+  if (Array.isArray(user.memberships) && user.memberships.length > 0) {
+    const preferred =
+      user.memberships.find((entry) => entry?.role === 'client_admin') || user.memberships[0];
+    if (preferred) {
+      if (preferred.orgName && preferred.orgName.trim()) {
+        return preferred.orgName;
+      }
+      if (preferred.orgId && preferred.orgId.trim()) {
+        return preferred.orgId;
+      }
+    }
+  }
+  if (typeof user.organisation === 'string' && user.organisation.trim()) {
+    return user.organisation;
+  }
+  return null;
 }
 
 export default function AdminUsersPage() {
@@ -659,7 +680,7 @@ export default function AdminUsersPage() {
       const userRecord = userById.get(log.recordId);
       const displayName =
         (userRecord?.fullName && userRecord.fullName.trim()) ||
-        (userRecord?.organisation && userRecord.organisation.trim()) ||
+        (userRecord ? resolvePrimaryOrganisation(userRecord) : null) ||
         userRecord?.email ||
         log.recordEmail ||
         'CRM record';
@@ -787,6 +808,7 @@ export default function AdminUsersPage() {
           <tr className="bg-gray-100 text-left">
             <th className="p-2">{primaryColumnLabel}</th>
             <th className="p-2">Name</th>
+            <th className="p-2">Organisations</th>
             <th className="p-2">Stage</th>
             <th className="p-2">Affiliate</th>
             {showClientValue ? <th className="p-2">Client value</th> : null}
@@ -805,7 +827,32 @@ export default function AdminUsersPage() {
                 <td className="p-2">
                   {(getPrimaryValue ? getPrimaryValue(user) : user.email) || '—'}
                 </td>
-                <td className="p-2">{user.fullName || user.organisation || '-'}</td>
+                <td className="p-2">
+                  <div className="flex flex-col">
+                    <span className="font-medium text-gray-900">
+                      {user.fullName || resolvePrimaryOrganisation(user) || '-'}
+                    </span>
+                    {user.position ? (
+                      <span className="text-xs text-gray-500">{user.position}</span>
+                    ) : null}
+                  </div>
+                </td>
+                <td className="p-2">
+                  {Array.isArray(user.memberships) && user.memberships.length > 0 ? (
+                    <div className="flex flex-wrap gap-1">
+                      {user.memberships.map((membership) => (
+                        <span
+                          key={`${user.id}-${membership.orgId}`}
+                          className="inline-flex items-center rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-700"
+                        >
+                          {membership.orgName || membership.orgId || '—'}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-gray-500">—</span>
+                  )}
+                </td>
                 <td className="p-2">
                   <select
                     className="border p-1 text-sm"
@@ -1105,7 +1152,7 @@ export default function AdminUsersPage() {
                 allowedStatuses: CRM_ALL_STATUSES,
                 showClientValue: true,
                 primaryColumnLabel: 'Organisation',
-                getPrimaryValue: (record) => record.organisation || record.email,
+                getPrimaryValue: (record) => resolvePrimaryOrganisation(record) || record.email,
               })}
             </div>
           )}

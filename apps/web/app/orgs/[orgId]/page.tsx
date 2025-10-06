@@ -28,13 +28,20 @@ export default function OrgDetailPage() {
   const [projects, setProjects] = useState<any[]>([]);
   const [myRole, setMyRole] = useState<string | null>(null);
   const [isStaff, setIsStaff] = useState<boolean>(false);
+  const [owner, setOwner] = useState<any | null>(null);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('client_member');
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteExpiry, setInviteExpiry] = useState('');
   const [inviteScopes, setInviteScopes] = useState('');
+  const [transferTarget, setTransferTarget] = useState('');
+  const [transferLoading, setTransferLoading] = useState(false);
+  const [transferFeedback, setTransferFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null);
 
   const canInvite = myRole === 'client_admin' || isStaff;
+  const currentUserId = auth.currentUser?.uid ?? null;
+  const isOwner = owner?.id && currentUserId ? owner.id === currentUserId : false;
+  const canTransferOwnership = isStaff || isOwner;
 
   const heroMetrics = useMemo(
     () => [
@@ -81,6 +88,74 @@ export default function OrgDetailPage() {
       })),
     [guidelines.colors]
   );
+
+  const ownershipTransferOptions = useMemo(
+    () => members.filter((member) => member.id !== owner?.id),
+    [members, owner?.id]
+  );
+
+  const handleOwnershipTransfer = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!transferTarget || !orgId) {
+      return;
+    }
+
+    setTransferLoading(true);
+    setTransferFeedback(null);
+
+    try {
+      await ensureFirebase();
+      const newOwner = members.find((member) => member.id === transferTarget) || null;
+      const nextOwnerName = newOwner?.fullName || newOwner?.email || newOwner?.id || null;
+      const nextOwnerEmail = newOwner?.email || null;
+      await setDoc(
+        doc(db, 'orgs', orgId),
+        {
+          ownerId: transferTarget,
+          ownerName: nextOwnerName,
+          ownerEmail: nextOwnerEmail,
+          ownerTransferredAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      await setDoc(
+        doc(db, 'memberships', `${orgId}_${transferTarget}`),
+        {
+          role: 'client_admin',
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      setOwner(
+        newOwner
+          ? { ...newOwner, role: 'client_admin' }
+          : {
+              id: transferTarget,
+              fullName: nextOwnerName || undefined,
+              email: nextOwnerEmail || undefined,
+              role: 'client_admin',
+            }
+      );
+      setMembers((prev) =>
+        prev.map((member) =>
+          member.id === transferTarget ? { ...member, role: 'client_admin' } : member
+        )
+      );
+      setTransferTarget('');
+      setTransferFeedback({ tone: 'success', message: 'Organisation ownership updated.' });
+    } catch (error: any) {
+      console.error('Failed to transfer organisation ownership', error);
+      setTransferFeedback({
+        tone: 'error',
+        message: error?.message || 'Failed to transfer organisation ownership.',
+      });
+    } finally {
+      setTransferLoading(false);
+    }
+  };
 
   // Invite a new member by email and assign a role. Only client_admin or staff can invite.
   const inviteMember = async (e: React.FormEvent) => {
@@ -181,6 +256,21 @@ export default function OrgDetailPage() {
           orgData?.brandGuidelinesUpdatedAt?.toDate ? orgData.brandGuidelinesUpdatedAt.toDate() : null
         );
         setProjects(loadedProjects);
+        const ownerId = typeof orgData?.ownerId === 'string' ? orgData.ownerId : null;
+        if (ownerId) {
+          const matchedMember = loadedMembers.find((member) => member.id === ownerId);
+          if (matchedMember) {
+            setOwner(matchedMember);
+          } else {
+            setOwner({
+              id: ownerId,
+              fullName: typeof orgData?.ownerName === 'string' ? orgData.ownerName : undefined,
+              email: typeof orgData?.ownerEmail === 'string' ? orgData.ownerEmail : undefined,
+            });
+          }
+        } else {
+          setOwner(null);
+        }
         setLoading(false);
       } catch (error) {
         console.error('Failed to load organisation details', error);
@@ -194,6 +284,7 @@ export default function OrgDetailPage() {
           setProjects([]);
           setMyRole(null);
           setIsStaff(false);
+          setOwner(null);
           setLoading(false);
         }
       }
@@ -256,6 +347,92 @@ export default function OrgDetailPage() {
         <section className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
+              <h2 className="text-lg font-semibold text-slate-900">Organisation ownership</h2>
+              <p className="text-sm text-slate-500">
+                Review who leads this workspace and transfer ownership when teams change.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-slate-200/70 bg-white p-5 shadow-sm">
+                <h3 className="text-sm font-semibold text-slate-900">Current owner</h3>
+                {owner ? (
+                  <div className="mt-3 space-y-2 text-sm text-slate-700">
+                    <p className="font-medium text-slate-900">{owner.fullName || owner.email || owner.id}</p>
+                    {owner.email ? <p className="text-xs text-slate-500">{owner.email}</p> : null}
+                    <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
+                      Owner
+                    </span>
+                  </div>
+                ) : (
+                  <p className="mt-3 text-sm text-slate-500">
+                    No owner recorded yet. Assign one below to keep responsibilities clear.
+                  </p>
+                )}
+              </div>
+              {transferFeedback ? (
+                <div
+                  className={`rounded-2xl border p-4 text-sm ${
+                    transferFeedback.tone === 'success'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : 'border-rose-200 bg-rose-50 text-rose-700'
+                  }`}
+                >
+                  {transferFeedback.message}
+                </div>
+              ) : null}
+            </div>
+
+            {canTransferOwnership ? (
+              <form
+                onSubmit={handleOwnershipTransfer}
+                className="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-4 shadow-sm"
+              >
+                <fieldset className="grid gap-3">
+                  <legend className="text-sm font-semibold text-slate-700">Transfer ownership</legend>
+                  <label
+                    className="text-xs font-medium uppercase tracking-wide text-slate-500"
+                    htmlFor="transfer-owner"
+                  >
+                    New owner
+                  </label>
+                  <select
+                    id="transfer-owner"
+                    className="input"
+                    value={transferTarget}
+                    onChange={(event) => setTransferTarget(event.target.value)}
+                    required
+                  >
+                    <option value="" disabled>
+                      Select a member
+                    </option>
+                    {ownershipTransferOptions.map((member) => (
+                      <option key={member.id} value={member.id}>
+                        {member.fullName || member.email || member.id}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-slate-500">
+                    We'll promote the selected member to client admin so they can manage billing, branding, and team access.
+                  </p>
+                  <button type="submit" className="btn mt-1" disabled={transferLoading}>
+                    {transferLoading ? 'Transferring…' : 'Transfer ownership'}
+                  </button>
+                </fieldset>
+              </form>
+            ) : (
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-4 text-sm text-slate-500">
+                Only the current owner or Pineapple staff can transfer ownership.
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
               <h2 className="text-lg font-semibold text-slate-900">Team members</h2>
               <p className="text-sm text-slate-500">Manage who can access this organisation and the projects it contains.</p>
             </div>
@@ -281,10 +458,20 @@ export default function OrgDetailPage() {
                       {member.email && (
                         <p className="text-xs text-slate-500">{member.email}</p>
                       )}
+                      {member.position ? (
+                        <p className="text-xs text-slate-500">{member.position}</p>
+                      ) : null}
                     </div>
-                    <span className="inline-flex items-center justify-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium uppercase tracking-wide text-slate-600">
-                      {(member.role || '').replace(/_/g, ' ') || 'member'}
-                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {owner?.id === member.id ? (
+                        <span className="inline-flex items-center justify-center rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-amber-700">
+                          Owner
+                        </span>
+                      ) : null}
+                      <span className="inline-flex items-center justify-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium uppercase tracking-wide text-slate-600">
+                        {(member.role || '').replace(/_/g, ' ') || 'member'}
+                      </span>
+                    </div>
                   </div>
                 ))
               )}
