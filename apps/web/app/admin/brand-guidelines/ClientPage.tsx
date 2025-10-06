@@ -6,7 +6,7 @@ import { doc, getDoc, setDoc } from "firebase/firestore";
 import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage";
 
 import { useRoleGate } from "@/hooks/useRoleGate";
-import { db, storage } from "@/lib/firebase";
+import { ensureFirebase } from "@/lib/firebase";
 import {
   BrandGuidelinesState,
   DEFAULT_BRAND_GUIDELINES,
@@ -35,14 +35,15 @@ export default function BrandGuidelinesPage() {
     }
     (async () => {
       try {
+        const { db } = await ensureFirebase();
         const snap = await getDoc(doc(db, "settings", "branding"));
-          if (snap.exists()) {
-            const data = snap.data() as any;
-            if (typeof data?.logoUrl === "string") {
-              setLogoUrl(data.logoUrl);
-            }
-            setGuidelines(parseBrandGuidelines(data?.brandGuidelines));
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          if (typeof data?.logoUrl === "string") {
+            setLogoUrl(data.logoUrl);
           }
+          setGuidelines(parseBrandGuidelines(data?.brandGuidelines));
+        }
       } catch (error) {
         console.error("Failed to load brand guidelines", error);
       } finally {
@@ -67,6 +68,7 @@ export default function BrandGuidelinesPage() {
     if (!logoFile) return;
     try {
       setUploadingLogo(true);
+      const { db, storage } = await ensureFirebase();
       const key = `site/brand/${Date.now()}-${logoFile.name}`;
       const storageRef = ref(storage, key);
       await uploadBytes(storageRef, logoFile, { contentType: logoFile.type });
@@ -88,6 +90,7 @@ export default function BrandGuidelinesPage() {
     if (!confirm("Remove the current logo?")) return;
     try {
       setRemovingLogo(true);
+      const { db, storage } = await ensureFirebase();
       try {
         const url = new URL(logoUrl);
         const path = decodeURIComponent(url.pathname.replace(/^\//, ""));
@@ -114,6 +117,7 @@ export default function BrandGuidelinesPage() {
     try {
       setSavingGuidelines(true);
       setFeedback(null);
+      const { db } = await ensureFirebase();
       await setDoc(
         doc(db, "settings", "branding"),
         { brandGuidelines: sanitiseBrandGuidelines(guidelines) },
