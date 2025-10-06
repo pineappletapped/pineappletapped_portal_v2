@@ -26,6 +26,7 @@ import type { User as FirebaseUser } from "firebase/auth";
 import PortalHero from "@/components/PortalHero";
 import SchedulerCalendar from "@/components/admin/tools/SchedulerCalendar";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
+import { buildAppUrl } from "@/lib/origin";
 import { hasRole, type RoleKey, type UserRoles } from "@/lib/roles";
 
 interface ClientOrganisation {
@@ -1596,11 +1597,14 @@ export default function SocialSchedulerWorkspace({
       return;
     }
 
-    const origin = window.location.origin;
-    const redirectUrl = new URL("/admin/tools/social-scheduler", origin);
-    redirectUrl.searchParams.set("tab", "accounts");
+    const redirectUrl = buildAppUrl("/admin/tools/social-scheduler", {
+      allowLocalhost: true,
+      params: { tab: "accounts" },
+    });
 
-    const authUrl = new URL(`/api/social-accounts/${platformKey}`, origin);
+    const authUrl = buildAppUrl(`/api/social-accounts/${platformKey}`, {
+      allowLocalhost: true,
+    });
     if (organisationId) {
       authUrl.searchParams.set("organisationId", organisationId);
     }

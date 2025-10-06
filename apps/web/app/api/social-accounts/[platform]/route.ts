@@ -5,6 +5,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 
 import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from '@/lib/firebase-admin';
+import { resolveAppOrigin } from '@/lib/origin';
 import {
   buildAuthorizationUrl,
   exchangeAuthorizationCode,
@@ -36,6 +37,18 @@ const SUPPORTED_PLATFORMS: SocialPlatform[] = [
   'twitter',
   'vimeo',
 ];
+
+function getRequestOrigin(request: NextRequest): string {
+  return (
+    resolveAppOrigin({
+      request: {
+        headers: request.headers,
+        nextUrl: { origin: request.nextUrl.origin },
+        url: request.url,
+      },
+    }) ?? request.nextUrl.origin
+  );
+}
 
 interface AuthStateDoc {
   platform: SocialPlatform;
@@ -229,7 +242,7 @@ function ensureSupportedPlatform(platform: string): SocialPlatform {
 }
 
 function getCallbackUri(request: NextRequest, platform: SocialPlatform): string {
-  const origin = request.nextUrl.origin;
+  const origin = getRequestOrigin(request);
   return `${origin}/api/social-accounts/${platform}`;
 }
 
@@ -239,7 +252,7 @@ function resolveStateExpiry(): Timestamp {
 
 async function handleInitiation(request: NextRequest, platform: SocialPlatform) {
   const user = await resolveAuthenticatedUser();
-  const origin = request.nextUrl.origin;
+  const origin = getRequestOrigin(request);
   if (!user) {
     const loginUrl = new URL('/login', origin);
     loginUrl.searchParams.set('redirect', request.nextUrl.pathname + request.nextUrl.search);
@@ -315,7 +328,7 @@ function extractTimestamp(value: unknown): Date | null {
 }
 
 async function handleCallback(request: NextRequest, platform: SocialPlatform) {
-  const origin = request.nextUrl.origin;
+  const origin = getRequestOrigin(request);
   const params = request.nextUrl.searchParams;
   const stateParam = parseString(params.get('state'));
   const code = parseString(params.get('code'));
