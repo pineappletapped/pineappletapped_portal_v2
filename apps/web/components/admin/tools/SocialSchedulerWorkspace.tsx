@@ -19,6 +19,7 @@ import {
   where,
   type DocumentData,
   type Firestore,
+  type QueryDocumentSnapshot,
 } from "firebase/firestore";
 import type { User as FirebaseUser } from "firebase/auth";
 
@@ -27,11 +28,21 @@ import SchedulerCalendar from "@/components/admin/tools/SchedulerCalendar";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import { hasRole, type RoleKey, type UserRoles } from "@/lib/roles";
 
+interface ClientOrganisation {
+  id: string;
+  name: string;
+  role: string | null;
+  isPrimary: boolean;
+}
+
 interface ClientRecord {
   id: string;
   name: string;
   email: string | null;
   company: string | null;
+  organisations: ClientOrganisation[];
+  defaultOrganisationId: string | null;
+  defaultOrganisationName: string | null;
 }
 
 interface ProjectSummary {
@@ -55,6 +66,7 @@ interface SchedulerAccount {
   platform: string;
   displayName: string;
   status: string;
+  hqManaged: boolean;
   scopes: { publish: boolean; analytics: boolean };
   providerAccountId: string | null;
   providerAccountName: string | null;
@@ -477,6 +489,7 @@ export default function SocialSchedulerWorkspace({
   const [clientError, setClientError] = useState<string | null>(null);
   const [clientSearch, setClientSearch] = useState("");
   const [selectedClientId, setSelectedClientId] = useState<string>("");
+  const [selectedOrganisationId, setSelectedOrganisationId] = useState<string>("");
   const [manualClientName, setManualClientName] = useState("");
 
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -914,11 +927,83 @@ export default function SocialSchedulerWorkspace({
               : typeof data.name === "string" && data.name.trim()
               ? data.name.trim()
               : data.email || `Client ${docSnap.id}`;
+          const membershipEntries = Array.isArray(data.memberships)
+            ? data.memberships
+                .map((entry: any) => {
+                  if (!entry || typeof entry !== "object") {
+                    return null;
+                  }
+                  const orgId =
+                    typeof entry.orgId === "string" && entry.orgId.trim().length > 0
+                      ? entry.orgId.trim()
+                      : null;
+                  if (!orgId) {
+                    return null;
+                  }
+                  const orgName =
+                    typeof entry.orgName === "string" && entry.orgName.trim().length > 0
+                      ? entry.orgName.trim()
+                      : null;
+                  const role =
+                    typeof entry.role === "string" && entry.role.trim().length > 0
+                      ? entry.role.trim()
+                      : null;
+                  return { id: orgId, name: orgName, role };
+                })
+                .filter((entry): entry is { id: string; name: string | null; role: string | null } => entry !== null)
+            : [];
+          const primaryOrganisationId =
+            typeof data.organisationId === "string" && data.organisationId.trim().length > 0
+              ? data.organisationId.trim()
+              : null;
+          const primaryOrganisationName =
+            typeof data.organisation === "string" && data.organisation.trim().length > 0
+              ? data.organisation.trim()
+              : null;
+          const organisationsMap = new Map<string, ClientOrganisation>();
+          membershipEntries.forEach((entry, index) => {
+            organisationsMap.set(entry.id, {
+              id: entry.id,
+              name: entry.name ?? `Organisation ${index + 1}`,
+              role: entry.role,
+              isPrimary: entry.id === primaryOrganisationId,
+            });
+          });
+          if (primaryOrganisationId && !organisationsMap.has(primaryOrganisationId)) {
+            organisationsMap.set(primaryOrganisationId, {
+              id: primaryOrganisationId,
+              name: primaryOrganisationName ?? data.company ?? name,
+              role: null,
+              isPrimary: true,
+            });
+          } else if (primaryOrganisationId) {
+            const existing = organisationsMap.get(primaryOrganisationId);
+            if (existing) {
+              organisationsMap.set(primaryOrganisationId, {
+                ...existing,
+                name: existing.name || primaryOrganisationName || data.company || name,
+                isPrimary: true,
+              });
+            }
+          }
+          const organisations = Array.from(organisationsMap.values()).map((org, index) => ({
+            ...org,
+            name: org.name || `Organisation ${index + 1}`,
+          }));
+          const defaultOrganisationId =
+            primaryOrganisationId || organisations.find((org) => org.isPrimary)?.id || organisations[0]?.id || null;
+          const defaultOrganisationName =
+            (defaultOrganisationId && organisationsMap.get(defaultOrganisationId)?.name) ||
+            primaryOrganisationName ||
+            null;
           return {
             id: docSnap.id,
             name,
             email: typeof data.email === "string" ? data.email : null,
             company: typeof data.company === "string" ? data.company : null,
+            organisations,
+            defaultOrganisationId,
+            defaultOrganisationName,
           } satisfies ClientRecord;
         });
         results.sort((a, b) => a.name.localeCompare(b.name));
@@ -956,18 +1041,62 @@ export default function SocialSchedulerWorkspace({
   }, [dbRef, firebaseReady]);
 
   useEffect(() => {
-    if (!dbRef || !selectedClientId) {
+    if (!dbRef) {
+      return;
+    }
+
+    const resolvedClient = selectedClientId
+      ? clients.find((client) => client.id === selectedClientId) || null
+      : null;
+
+    const orgIds = selectedOrganisationId
+      ? [selectedOrganisationId]
+      : resolvedClient
+      ? resolvedClient.organisations.map((org) => org.id).filter((id): id is string => Boolean(id))
+      : [];
+
+    if (orgIds.length === 0 && !selectedClientId) {
       setProjects([]);
       setSelectedProjectId("");
       setManualProjectName("");
       return;
     }
+
     setProjectLoading(true);
-    getDocs(
-      query(collection(dbRef, "projects"), where("userId", "==", selectedClientId), orderBy("createdAt", "desc"), limit(50))
-    )
-      .then((snapshot) => {
-        const records: ProjectSummary[] = snapshot.docs.map((docSnap) => {
+
+    const fetchByOrganisation = async () => {
+      const queries = orgIds.map((orgId) =>
+        getDocs(
+          query(
+            collection(dbRef, "projects"),
+            where("organisationId", "==", orgId),
+            orderBy("createdAt", "desc"),
+            limit(20)
+          )
+        )
+      );
+      const snapshots = await Promise.all(queries);
+      return snapshots.flatMap((snapshot) => snapshot.docs);
+    };
+
+    const fetchFallbackByUser = async () =>
+      getDocs(
+        query(collection(dbRef, "projects"), where("userId", "==", selectedClientId), orderBy("createdAt", "desc"), limit(50))
+      ).then((snapshot) => snapshot.docs);
+
+    (async () => {
+      try {
+        let docs: QueryDocumentSnapshot<DocumentData>[];
+        if (orgIds.length > 0) {
+          docs = await fetchByOrganisation();
+          if (docs.length === 0 && selectedClientId) {
+            docs = await fetchFallbackByUser();
+          }
+        } else {
+          docs = await fetchFallbackByUser();
+        }
+
+        const records: ProjectSummary[] = docs.map((docSnap) => {
           const data = docSnap.data() as DocumentData;
           const name =
             typeof data.name === "string" && data.name.trim()
@@ -989,12 +1118,13 @@ export default function SocialSchedulerWorkspace({
           return bTime - aTime;
         });
         setProjects(records);
-      })
-      .catch((error) => {
+      } catch (error) {
         console.error("Failed to load projects", error);
-      })
-      .finally(() => setProjectLoading(false));
-  }, [dbRef, selectedClientId]);
+      } finally {
+        setProjectLoading(false);
+      }
+    })();
+  }, [dbRef, clients, selectedClientId, selectedOrganisationId]);
   useEffect(() => {
     if (!dbRef) return;
     setAccountsLoading(true);
@@ -1058,6 +1188,7 @@ export default function SocialSchedulerWorkspace({
               ) ?? null,
             updatedAt: toDate(connectionData.updatedAt ?? data.updatedAt),
           };
+          const hqManaged = data.hqManaged === true;
           return {
             id: docSnap.id,
             organisationId: normaliseText(data.organisationId) ?? null,
@@ -1065,6 +1196,7 @@ export default function SocialSchedulerWorkspace({
             platform: normaliseText(data.platform) ?? "unknown",
             displayName: normaliseText(data.displayName) ?? `Account ${docSnap.id}`,
             status: normaliseText(data.status) ?? "active",
+            hqManaged,
             scopes,
             providerAccountId:
               normaliseText(
@@ -1262,12 +1394,82 @@ export default function SocialSchedulerWorkspace({
   const filteredClients = useMemo(() => {
     if (!clientSearch.trim()) return clients;
     const term = clientSearch.trim().toLowerCase();
-    return clients.filter((client) => client.name.toLowerCase().includes(term));
+    return clients.filter((client) => {
+      if (client.name.toLowerCase().includes(term)) {
+        return true;
+      }
+      if (client.email && client.email.toLowerCase().includes(term)) {
+        return true;
+      }
+      return client.organisations.some((org) => org.name.toLowerCase().includes(term));
+    });
   }, [clients, clientSearch]);
 
   const selectedClient = selectedClientId
     ? clients.find((client) => client.id === selectedClientId) || null
     : null;
+
+  const selectedOrganisation = selectedOrganisationId && selectedClient
+    ? selectedClient.organisations.find((org) => org.id === selectedOrganisationId) || null
+    : selectedClient?.organisations.find((org) => org.isPrimary) || null;
+
+  const [organisationOverrideTouched, setOrganisationOverrideTouched] = useState(false);
+
+  const organisationOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const options: Array<{ id: string; label: string }> = [];
+    clients.forEach((client) => {
+      client.organisations.forEach((org) => {
+        if (!org.id || seen.has(org.id)) {
+          return;
+        }
+        seen.add(org.id);
+        const label = client.name
+          ? `${org.name} — ${client.name}`
+          : org.name;
+        options.push({ id: org.id, label });
+      });
+    });
+    options.sort((a, b) => a.label.localeCompare(b.label));
+    if (selectedOrganisationId && !seen.has(selectedOrganisationId)) {
+      const fallbackLabel = selectedOrganisation?.name || manualClientName || "Selected organisation";
+      options.unshift({ id: selectedOrganisationId, label: fallbackLabel });
+    }
+    return options;
+  }, [clients, selectedOrganisationId, selectedOrganisation, manualClientName]);
+
+  useEffect(() => {
+    if (!selectedClient) {
+      setSelectedOrganisationId("");
+      if (!organisationOverrideTouched) {
+        setManualClientName("");
+      }
+      return;
+    }
+
+    const hasSelection =
+      selectedOrganisationId && selectedClient.organisations.some((org) => org.id === selectedOrganisationId);
+    if (hasSelection) {
+      return;
+    }
+
+    const fallbackId =
+      selectedClient.defaultOrganisationId ||
+      selectedClient.organisations.find((org) => org.isPrimary)?.id ||
+      selectedClient.organisations[0]?.id ||
+      "";
+    setSelectedOrganisationId(fallbackId || "");
+
+    if (!organisationOverrideTouched) {
+      const fallbackOrg =
+        (fallbackId && selectedClient.organisations.find((org) => org.id === fallbackId)) ||
+        selectedClient.organisations.find((org) => org.isPrimary) ||
+        null;
+      if (fallbackOrg?.name) {
+        setManualClientName(fallbackOrg.name);
+      }
+    }
+  }, [selectedClient, selectedOrganisationId, organisationOverrideTouched]);
 
   const selectedProject = selectedProjectId
     ? projects.find((project) => project.id === selectedProjectId) || null
@@ -1293,9 +1495,17 @@ export default function SocialSchedulerWorkspace({
   const canEditFlags = allowFlagEditing && hasRole(roles, "admin");
 
   const exportablePosts = useMemo(() => {
-    if (!selectedClientId) return posts;
-    return posts.filter((post) => post.organisationId === selectedClientId);
-  }, [posts, selectedClientId]);
+    if (selectedOrganisationId) {
+      return posts.filter((post) => post.organisationId === selectedOrganisationId);
+    }
+    if (selectedClient) {
+      const membershipIds = selectedClient.organisations.map((org) => org.id);
+      if (membershipIds.length > 0) {
+        return posts.filter((post) => post.organisationId && membershipIds.includes(post.organisationId));
+      }
+    }
+    return posts;
+  }, [posts, selectedOrganisationId, selectedClient]);
 
   const analyticsSummary = useMemo(() => {
     const totals = {
@@ -1375,14 +1585,14 @@ export default function SocialSchedulerWorkspace({
       return;
     }
 
-    const organisationId = account?.organisationId ?? selectedClient?.id ?? null;
+    const organisationId = account?.organisationId ?? selectedOrganisation?.id ?? null;
     const organisationName =
       account?.organisationName ??
-      selectedClient?.name ??
-      (manualClientName.trim() || null);
+      selectedOrganisation?.name ??
+      (manualClientName.trim() || selectedClient?.company || selectedClient?.name || null);
 
     if (!organisationId && !organisationName) {
-      setAccountError("Select a client or enter an organisation name before connecting an account.");
+      setAccountError("Select an organisation or provide an override name before connecting an account.");
       return;
     }
 
@@ -1418,6 +1628,10 @@ export default function SocialSchedulerWorkspace({
 
     if (account?.id) {
       authUrl.searchParams.set("accountId", account.id);
+    }
+
+    if (account?.hqManaged) {
+      authUrl.searchParams.set("hqManaged", "true");
     }
 
     setAccountError(null);
@@ -1465,11 +1679,12 @@ export default function SocialSchedulerWorkspace({
   async function handleCreatePost(event: FormEvent) {
     event.preventDefault();
     if (!dbRef) return;
-    const organisationId = selectedClient?.id ?? null;
+    const organisationId = selectedOrganisation?.id ?? null;
     const organisationName =
-      selectedClient?.name ?? (manualClientName.trim() || null);
+      selectedOrganisation?.name ??
+      (manualClientName.trim() || selectedClient?.company || selectedClient?.name || null);
     if (!organisationName) {
-      setPostError("Select or enter a client before drafting a post.");
+      setPostError("Select an organisation or provide an override before drafting a post.");
       return;
     }
     const scheduledAt = postForm.scheduledAtInput ? new Date(postForm.scheduledAtInput) : null;
@@ -1875,7 +2090,7 @@ export default function SocialSchedulerWorkspace({
               <table className="min-w-full divide-y divide-slate-200 text-sm">
   <thead className="bg-slate-100 text-left text-xs uppercase tracking-wide text-slate-600">
   <tr>
-    <th className="p-2">Client</th>
+                  <th className="p-2">Organisation</th>
     <th className="p-2">Platform</th>
     <th className="p-2">Permissions</th>
     <th className="p-2">Connection</th>
@@ -2133,7 +2348,10 @@ export default function SocialSchedulerWorkspace({
       />
       <select
         value={selectedClientId}
-        onChange={(event) => setSelectedClientId(event.target.value)}
+        onChange={(event) => {
+          setSelectedClientId(event.target.value);
+          setOrganisationOverrideTouched(false);
+        }}
         className="mt-2 w-full rounded border px-3 py-2"
       >
         <option value="">Select a client (optional)</option>
@@ -2145,11 +2363,47 @@ export default function SocialSchedulerWorkspace({
       </select>
     </label>
     <label className="text-sm">
+      <span className="font-medium">Organisation</span>
+      <select
+        value={selectedOrganisationId}
+        onChange={(event) => {
+          const value = event.target.value;
+          setSelectedOrganisationId(value);
+          setOrganisationOverrideTouched(false);
+          if (value && selectedClient) {
+            const match = selectedClient.organisations.find((org) => org.id === value);
+            if (match?.name) {
+              setManualClientName(match.name);
+            }
+          }
+        }}
+        className="mt-1 w-full rounded border px-3 py-2"
+        disabled={!selectedClient || selectedClient.organisations.length === 0}
+      >
+        <option value="">Select an organisation</option>
+        {selectedClient?.organisations.map((org) => (
+          <option key={org.id} value={org.id}>
+            {org.name}
+            {org.role ? ` · ${org.role}` : ""}
+          </option>
+        ))}
+      </select>
+      {selectedClient && selectedClient.organisations.length === 0 ? (
+        <span className="mt-1 block text-xs text-slate-500">
+          No organisation memberships detected. Use the override field below.
+        </span>
+      ) : null}
+    </label>
+    <label className="text-sm">
       <span className="font-medium">Organisation name override</span>
       <input
         type="text"
         value={manualClientName}
-        onChange={(event) => setManualClientName(event.target.value)}
+        onChange={(event) => {
+          const value = event.target.value;
+          setManualClientName(value);
+          setOrganisationOverrideTouched(value.trim().length > 0);
+        }}
         placeholder="Use when the client is not yet in CRM"
         className="mt-1 w-full rounded border px-3 py-2"
       />
@@ -2213,7 +2467,7 @@ export default function SocialSchedulerWorkspace({
             <table className="min-w-full divide-y divide-slate-200 text-sm">
               <thead className="bg-slate-100 text-left text-xs uppercase tracking-wide text-slate-600">
                 <tr>
-                  <th className="p-2">Client</th>
+                  <th className="p-2">Organisation</th>
                   <th className="p-2">Platform</th>
                   <th className="p-2">Connection</th>
                   <th className="p-2">Permissions</th>
@@ -2241,6 +2495,11 @@ export default function SocialSchedulerWorkspace({
                       <td className="p-2 align-top">
                         <div className="font-medium text-gray-900">
                           {account.organisationName || account.organisationId || "Unknown"}
+                          {account.hqManaged ? (
+                            <span className="ml-2 inline-flex items-center rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-700">
+                              HQ
+                            </span>
+                          ) : null}
                         </div>
                         <div className="text-xs text-gray-500">{account.displayName}</div>
                       </td>
@@ -2512,29 +2771,69 @@ export default function SocialSchedulerWorkspace({
           <form className="grid gap-4 rounded border border-slate-200 p-4" onSubmit={handleCreatePost}>
             <h3 className="text-sm font-semibold text-gray-900">Create draft</h3>
             <div className="grid gap-4 md:grid-cols-2">
-              <label className="text-sm">
-                <span className="font-medium">Client</span>
-                <select
-                  value={selectedClientId}
-                  onChange={(event) => setSelectedClientId(event.target.value)}
-                  className="mt-1 w-full rounded border px-3 py-2"
-                >
-                  <option value="">Select a client</option>
-                  {clients.map((client) => (
-                    <option key={client.id} value={client.id}>
-                      {client.name}
-                    </option>
-                  ))}
-                </select>
-                {clientLoading ? <span className="mt-1 block text-xs text-gray-500">Loading clients…</span> : null}
-              </label>
+            <label className="text-sm">
+              <span className="font-medium">Client</span>
+              <select
+                value={selectedClientId}
+                onChange={(event) => {
+                  setSelectedClientId(event.target.value);
+                  setOrganisationOverrideTouched(false);
+                }}
+                className="mt-1 w-full rounded border px-3 py-2"
+              >
+                <option value="">Select a client</option>
+                {clients.map((client) => (
+                  <option key={client.id} value={client.id}>
+                    {client.name}
+                  </option>
+                ))}
+              </select>
+              {clientLoading ? <span className="mt-1 block text-xs text-gray-500">Loading clients…</span> : null}
+            </label>
 
-              <label className="text-sm">
-                <span className="font-medium">Manual client label</span>
-                <input
-                  type="text"
+            <label className="text-sm">
+              <span className="font-medium">Organisation</span>
+              <select
+                value={selectedOrganisationId}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setSelectedOrganisationId(value);
+                  setOrganisationOverrideTouched(false);
+                  if (value && selectedClient) {
+                    const match = selectedClient.organisations.find((org) => org.id === value);
+                    if (match?.name) {
+                      setManualClientName(match.name);
+                    }
+                  }
+                }}
+                className="mt-1 w-full rounded border px-3 py-2"
+                disabled={!selectedClient || selectedClient.organisations.length === 0}
+              >
+                <option value="">Select an organisation</option>
+                {selectedClient?.organisations.map((org) => (
+                  <option key={org.id} value={org.id}>
+                    {org.name}
+                    {org.role ? ` · ${org.role}` : ""}
+                  </option>
+                ))}
+              </select>
+              {selectedClient && selectedClient.organisations.length === 0 ? (
+                <span className="mt-1 block text-xs text-gray-500">
+                  No organisation memberships detected. Use the manual label field.
+                </span>
+              ) : null}
+            </label>
+
+            <label className="text-sm">
+              <span className="font-medium">Organisation label override</span>
+              <input
+                type="text"
                   value={manualClientName}
-                  onChange={(event) => setManualClientName(event.target.value)}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setManualClientName(value);
+                    setOrganisationOverrideTouched(value.trim().length > 0);
+                  }}
                   className="mt-1 w-full rounded border px-3 py-2"
                   placeholder="Use if the client is not listed"
                 />
@@ -3078,16 +3377,16 @@ export default function SocialSchedulerWorkspace({
 
           <div className="flex flex-wrap items-center gap-3">
             <label className="text-sm">
-              <span className="mr-2 font-medium">Filter by client</span>
+              <span className="mr-2 font-medium">Filter by organisation</span>
               <select
-                value={selectedClientId}
-                onChange={(event) => setSelectedClientId(event.target.value)}
+                value={selectedOrganisationId}
+                onChange={(event) => setSelectedOrganisationId(event.target.value)}
                 className="rounded border px-3 py-2"
               >
-                <option value="">All clients</option>
-                {clients.map((client) => (
-                  <option key={client.id} value={client.id}>
-                    {client.name}
+                <option value="">All organisations</option>
+                {organisationOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
                   </option>
                 ))}
               </select>
@@ -3115,7 +3414,7 @@ export default function SocialSchedulerWorkspace({
             <table className="min-w-full divide-y divide-slate-200 text-sm">
               <thead className="bg-slate-100 text-left text-xs uppercase tracking-wide text-slate-600">
                 <tr>
-                  <th className="p-2">Client</th>
+                  <th className="p-2">Organisation</th>
                   <th className="p-2">Deliverable</th>
                   <th className="p-2">Platforms</th>
                   <th className="p-2">Scheduled</th>

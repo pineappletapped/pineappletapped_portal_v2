@@ -44,6 +44,7 @@ interface AuthStateDoc {
   displayName: string | null;
   redirectUri: string;
   scopes?: RequestedScopes;
+  hqManaged?: boolean | null;
   createdAt?: Timestamp | Date | FieldValue | null;
   createdBy?: string | null;
   accountId?: string | null;
@@ -62,6 +63,7 @@ interface StoreCredentialPayload {
   organisationName: string | null;
   displayName: string | null;
   scopes: RequestedScopes;
+  hqManaged: boolean;
   tokens: {
     accessToken: string;
     refreshToken: string | null;
@@ -116,6 +118,14 @@ function parseScopesParam(value: string | null): RequestedScopes {
     publish: entries.includes('publish'),
     analytics: entries.includes('analytics'),
   };
+}
+
+function parseBooleanFlag(value: string | null): boolean {
+  if (!value) {
+    return false;
+  }
+  const normalised = value.trim().toLowerCase();
+  return normalised === 'true' || normalised === '1' || normalised === 'yes';
 }
 
 function sanitiseRedirect(origin: string, candidate: string | null): string {
@@ -243,6 +253,7 @@ async function handleInitiation(request: NextRequest, platform: SocialPlatform) 
   const redirectCandidate = parseString(params.get('redirect'));
   const accountId = parseString(params.get('accountId'));
   const scopes = parseScopesParam(params.get('scopes'));
+  const hqManaged = parseBooleanFlag(params.get('hqManaged'));
 
   if (!organisationId && !organisationName) {
     return NextResponse.json(
@@ -265,6 +276,7 @@ async function handleInitiation(request: NextRequest, platform: SocialPlatform) 
       displayName: displayName ?? organisationName ?? null,
       redirectUri,
       scopes,
+      hqManaged,
       createdAt: FieldValue.serverTimestamp(),
       createdBy: user.uid,
       accountId: accountId ?? null,
@@ -412,6 +424,7 @@ async function handleCallback(request: NextRequest, platform: SocialPlatform) {
       organisationName: stateData.organisationName ?? null,
       displayName: stateData.displayName ?? stateData.organisationName ?? null,
       scopes: stateData.scopes ?? { publish: true, analytics: true },
+      hqManaged: stateData.hqManaged === true,
       tokens: {
         accessToken: tokenResult.accessToken,
         refreshToken: tokenResult.refreshToken,

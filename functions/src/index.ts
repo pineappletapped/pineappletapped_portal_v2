@@ -454,6 +454,7 @@ type StoreSocialAccountCredentialRequest = {
   provider?: SocialAccountProviderInput;
   initiator?: { uid?: string | null; email?: string | null } | null;
   requestedBy?: string | null;
+  hqManaged?: boolean | null;
 };
 
 type StoreSocialAccountCredentialResponse = {
@@ -683,6 +684,7 @@ async function storeSocialAccountCredentials(
   const scopes = coerceScopes(payload.scopes);
   const organisationId = normaliseString(payload.organisationId);
   const organisationName = normaliseString(payload.organisationName);
+  const hqManaged = payload.hqManaged === true;
   const initiatorUid = normaliseString(payload.initiator?.uid);
   const initiatorEmail = normaliseString(payload.initiator?.email);
   const requestedBy = normaliseString(payload.requestedBy);
@@ -740,6 +742,7 @@ async function storeSocialAccountCredentials(
       organisationName: organisationName ?? null,
       displayName,
       status,
+      hqManaged,
       scopes: { publish: scopes.publish, analytics: scopes.analytics },
       provider: {
         accountId: providerAccountId ?? null,
@@ -787,6 +790,7 @@ async function storeSocialAccountCredentials(
       platform,
       organisationId: organisationId ?? null,
       organisationName: organisationName ?? null,
+      hqManaged,
       current: {
         accessToken: encryptedAccess,
         refreshToken: encryptedRefresh,
