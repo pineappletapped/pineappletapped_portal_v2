@@ -171,70 +171,70 @@ export default function SocialManagerClientPage() {
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        const mapped = snapshot.docs
-          .map((docSnap: QueryDocumentSnapshot<DocumentData>) => {
-            const data = docSnap.data() as Record<string, unknown>;
-            const hqManaged = data.hqManaged === true || (!data.organisationId && !data.organisationName);
-            if (!hqManaged) {
-              return null;
-            }
-            const connectionData = (data.connection ?? {}) as Record<string, unknown>;
-            const connectionStatus =
-              normaliseText(connectionData.status) ?? normaliseText(data.status) ?? "active";
-            const connectionExpiresAt = toDate(connectionData.expiresAt ?? connectionData.expiry ?? null);
-            const requiresReauth =
-              connectionStatus === "requires_reauth" || Boolean(connectionData.requiresReauth ?? connectionData.reauthRequired);
-            const reauthRecommended =
-              requiresReauth ||
-              Boolean(
-                connectionData.reauthRecommended ??
-                  connectionData.reauthSoon ??
-                  connectionData.requiresReauthSoon
-              ) ||
-              (connectionExpiresAt ? connectionExpiresAt.getTime() - Date.now() < 48 * 60 * 60 * 1000 : false);
-            const scopesRaw = (data.scopes ?? {}) as Record<string, unknown>;
-            const scopes = {
-              publish: scopesRaw.publish === true,
-              analytics: scopesRaw.analytics === true || scopesRaw.insights === true,
-            } satisfies HqAccount["scopes"];
-            return {
-              id: docSnap.id,
-              platform: normaliseText(data.platform) ?? "unknown",
-              displayName: normaliseText(data.displayName) ?? `Account ${docSnap.id}`,
-              organisationName:
-                normaliseText(data.organisationName) ?? normaliseText(data.organisationId) ?? null,
-              scopes,
-              connection: {
-                status: connectionStatus,
-                requiresReauth,
-                reauthRecommended,
-                expiresAt: connectionExpiresAt,
-                lastAuthorizedAt: toDate(
-                  connectionData.lastAuthorizedAt ??
-                    connectionData.authorizedAt ??
-                    connectionData.lastLinkedAt ??
-                    data.lastAuthorizedAt ??
-                    data.lastLinkedAt ??
-                    null
-                ),
-              },
-              providerAccountName:
-                normaliseText(
-                  (data.provider as Record<string, unknown> | undefined)?.accountName ??
-                    (data.provider as Record<string, unknown> | undefined)?.name ??
-                    data.accountName
-                ) ?? null,
-              providerAccountUrl:
-                normaliseText(
-                  (data.provider as Record<string, unknown> | undefined)?.accountUrl ??
-                    data.accountUrl ??
-                    data.channelUrl
-                ) ?? null,
-              updatedAt: toDate(data.updatedAt),
-              createdAt: toDate(data.createdAt),
-            } satisfies HqAccount;
-          })
-          .filter((entry): entry is HqAccount => entry !== null);
+        const mapped = snapshot.docs.reduce<HqAccount[]>((acc, docSnap: QueryDocumentSnapshot<DocumentData>) => {
+          const data = docSnap.data() as Record<string, unknown>;
+          const hqManaged = data.hqManaged === true || (!data.organisationId && !data.organisationName);
+          if (!hqManaged) {
+            return acc;
+          }
+          const connectionData = (data.connection ?? {}) as Record<string, unknown>;
+          const connectionStatus: string | null =
+            normaliseText(connectionData.status) ?? normaliseText(data.status) ?? "active";
+          const connectionExpiresAt = toDate(connectionData.expiresAt ?? connectionData.expiry ?? null);
+          const requiresReauth =
+            connectionStatus === "requires_reauth" || Boolean(connectionData.requiresReauth ?? connectionData.reauthRequired);
+          const reauthRecommended =
+            requiresReauth ||
+            Boolean(
+              connectionData.reauthRecommended ??
+                connectionData.reauthSoon ??
+                connectionData.requiresReauthSoon
+            ) ||
+            (connectionExpiresAt ? connectionExpiresAt.getTime() - Date.now() < 48 * 60 * 60 * 1000 : false);
+          const scopesRaw = (data.scopes ?? {}) as Record<string, unknown>;
+          const scopes: HqAccount["scopes"] = {
+            publish: scopesRaw.publish === true,
+            analytics: scopesRaw.analytics === true || scopesRaw.insights === true,
+          };
+          const account: HqAccount = {
+            id: docSnap.id,
+            platform: normaliseText(data.platform) ?? "unknown",
+            displayName: normaliseText(data.displayName) ?? `Account ${docSnap.id}`,
+            organisationName:
+              normaliseText(data.organisationName) ?? normaliseText(data.organisationId) ?? null,
+            scopes,
+            connection: {
+              status: connectionStatus,
+              requiresReauth,
+              reauthRecommended,
+              expiresAt: connectionExpiresAt,
+              lastAuthorizedAt: toDate(
+                connectionData.lastAuthorizedAt ??
+                  connectionData.authorizedAt ??
+                  connectionData.lastLinkedAt ??
+                  data.lastAuthorizedAt ??
+                  data.lastLinkedAt ??
+                  null
+              ),
+            },
+            providerAccountName:
+              normaliseText(
+                (data.provider as Record<string, unknown> | undefined)?.accountName ??
+                  (data.provider as Record<string, unknown> | undefined)?.name ??
+                  data.accountName
+              ) ?? null,
+            providerAccountUrl:
+              normaliseText(
+                (data.provider as Record<string, unknown> | undefined)?.accountUrl ??
+                  data.accountUrl ??
+                  data.channelUrl
+              ) ?? null,
+            updatedAt: toDate(data.updatedAt),
+            createdAt: toDate(data.createdAt),
+          };
+          acc.push(account);
+          return acc;
+        }, []);
         setAccounts(mapped);
         setAccountsLoading(false);
         setAccountError(null);
