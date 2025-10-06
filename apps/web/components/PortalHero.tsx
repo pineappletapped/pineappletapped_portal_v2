@@ -16,7 +16,12 @@ type PortalHeroAction = {
 interface PortalHeroProps {
   eyebrow: string;
   title: string;
-  description: string;
+  description?: string;
+  /**
+   * @deprecated Use `description` instead. `subtitle` remains for backwards
+   * compatibility while older admin screens are migrated.
+   */
+  subtitle?: string;
   backgroundClass?: string;
   metrics?: PortalHeroMetric[];
   quickActions?: PortalHeroAction[];
@@ -30,10 +35,13 @@ export default function PortalHero({
   eyebrow,
   title,
   description,
+  subtitle,
   backgroundClass = "bg-slate-900",
   metrics = [],
   quickActions = [],
 }: PortalHeroProps) {
+  const heroDescription = description ?? subtitle ?? "";
+
   return (
     <header
       className={`rounded-3xl ${backgroundClass} text-white p-6 sm:p-8 shadow-sm`}
@@ -46,7 +54,11 @@ export default function PortalHero({
           <h1 className="text-3xl sm:text-4xl font-semibold leading-tight">
             {title}
           </h1>
-          <p className="text-sm sm:text-base text-white/80">{description}</p>
+          {heroDescription && (
+            <p className="text-sm sm:text-base text-white/80">
+              {heroDescription}
+            </p>
+          )}
         </div>
         {metrics.length > 0 && (
           <dl className="grid grid-cols-2 gap-4 text-left sm:grid-cols-4">
