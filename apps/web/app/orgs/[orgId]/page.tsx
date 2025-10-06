@@ -1,11 +1,13 @@
 "use client";
 import Image from 'next/image';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { auth, db, ensureFirebase } from '@/lib/firebase';
 import { doc, getDoc, collection, query, where, getDocs, setDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
 import { extractUserRoles, hasRole } from '@/lib/roles';
+import PortalContainer from '@/components/PortalContainer';
+import PortalHero from '@/components/PortalHero';
 
 /**
  * Shows details for a single organisation, including its members, brand packs and
@@ -27,6 +29,44 @@ export default function OrgDetailPage() {
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteExpiry, setInviteExpiry] = useState('');
   const [inviteScopes, setInviteScopes] = useState('');
+
+  const canInvite = myRole === 'client_admin' || isStaff;
+
+  const heroMetrics = useMemo(
+    () => [
+      { label: 'Members', value: members.length.toString() },
+      { label: 'Brand packs', value: brandPacks.length.toString() },
+      { label: 'Projects', value: projects.length.toString() },
+    ],
+    [brandPacks.length, members.length, projects.length]
+  );
+
+  const handleInviteScroll = useCallback(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+    const target = document.getElementById('org-invite-form');
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+
+  const heroQuickActions = useMemo(() => {
+    const actions: { label: string; description: string; href?: string; onClick?: () => void }[] = [];
+    if (org?.id) {
+      actions.push({
+        label: 'New brand pack',
+        description: 'Upload updated guidelines and assets',
+        href: `/orgs/${org.id}/brand-packs/new`,
+      });
+    }
+    if (canInvite) {
+      actions.push({
+        label: 'Invite a teammate',
+        description: 'Share access to this organisation',
+        onClick: handleInviteScroll,
+      });
+    }
+    return actions;
+  }, [canInvite, handleInviteScroll, org?.id]);
 
   // Invite a new member by email and assign a role. Only client_admin or staff can invite.
   const inviteMember = async (e: React.FormEvent) => {
@@ -144,106 +184,256 @@ export default function OrgDetailPage() {
     };
   }, [orgId]);
 
-  if (!orgId) return <p>Organisation id missing.</p>;
-  if (loading) return <p>Loading…</p>;
-  if (!org) return <p>Organisation not found.</p>;
+  if (!orgId) {
+    return (
+      <PortalContainer>
+        <div className="rounded-3xl border border-rose-100 bg-rose-50 p-6 text-sm text-rose-700">
+          Organisation id missing.
+        </div>
+      </PortalContainer>
+    );
+  }
+
+  if (loading) {
+    return (
+      <PortalContainer>
+        <div className="grid gap-8">
+          <div className="h-64 animate-pulse rounded-3xl bg-slate-100" />
+          <div className="grid gap-4">
+            {Array.from({ length: 3 }).map((_, index) => (
+              <div
+                key={`org-loading-${index}`}
+                className="h-40 animate-pulse rounded-3xl border border-slate-200/70 bg-white"
+              />
+            ))}
+          </div>
+        </div>
+      </PortalContainer>
+    );
+  }
+
+  if (!org) {
+    return (
+      <PortalContainer>
+        <div className="rounded-3xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-700">
+          Organisation not found.
+        </div>
+      </PortalContainer>
+    );
+  }
 
   return (
-    <div className="grid gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">{org.name}</h1>
-        </div>
-        <Link href={`/orgs/${org.id}/brand-packs/new`} className="btn">New Brand Pack</Link>
-      </div>
+    <PortalContainer>
+      <div className="grid gap-8">
+        <PortalHero
+          eyebrow="Organisations"
+          title={org.name || 'Untitled organisation'}
+          description="Collaborate with your team, share assets, and keep every project aligned with the right brand context."
+          metrics={heroMetrics}
+          quickActions={heroQuickActions}
+        />
 
-      <div className="card">
-        <h2 className="font-semibold mb-2">Members</h2>
-        <div className="grid gap-2">
-          {members.length === 0 ? <p>No members.</p> : members.map((m) => (
-            <div key={m.id} className="flex justify-between text-sm">
-              <div>{m.fullName || m.email || m.id}</div>
-              <div className="text-gray-500">{m.role}</div>
+        <section className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900">Team members</h2>
+              <p className="text-sm text-slate-500">Manage who can access this organisation and the projects it contains.</p>
             </div>
-          ))}
-        </div>
-        {/* Invite new member */}
-        {(myRole === 'client_admin' || isStaff) && (
-          <form onSubmit={inviteMember} className="mt-4 grid gap-2">
-            <h3 className="font-medium text-sm">Invite Member</h3>
-            <input
-              type="email"
-              className="input"
-              placeholder="Email address"
-              value={inviteEmail}
-              onChange={(e) => setInviteEmail(e.target.value)}
-              required
-            />
-            <select
-              className="input"
-              value={inviteRole}
-              onChange={(e) => setInviteRole(e.target.value)}
-            >
-              <option value="client_member">Client Member</option>
-              <option value="client_admin">Client Admin</option>
-              <option value="viewer">Viewer</option>
-            </select>
-          {/* Optional scopes as comma separated IDs for contractor access */}
-          <input
-            type="text"
-            className="input"
-            placeholder="Scopes (comma separated project or asset IDs)"
-            value={inviteScopes}
-            onChange={(e) => setInviteScopes(e.target.value)}
-          />
-          {/* Expiration in days */}
-          <input
-            type="number"
-            className="input"
-            placeholder="Expires in days (optional)"
-            min="0"
-            value={inviteExpiry}
-            onChange={(e) => setInviteExpiry(e.target.value)}
-          />
-            <button type="submit" className="btn" disabled={inviteLoading}>
-              {inviteLoading ? 'Inviting…' : 'Send Invite'}
-            </button>
-          </form>
-        )}
-      </div>
-      <div className="card">
-        <h2 className="font-semibold mb-2">Brand Packs</h2>
-        <div className="grid gap-2">
-          {brandPacks.length === 0 ? <p>No brand packs.</p> : brandPacks.map((b) => (
-            <div key={b.id} className="flex items-center gap-3">
-              {b.logoUrl && (
-                <Image
-                  src={b.logoUrl}
-                  alt={`${b.name} logo`}
-                  width={24}
-                  height={24}
-                  className="h-6 w-6 rounded object-contain"
-                />
+            <span className="text-sm font-medium text-slate-500">{members.length} member{members.length === 1 ? '' : 's'}</span>
+          </div>
+
+          <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <div className="space-y-3">
+              {members.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-6 text-sm text-slate-500">
+                  No members yet. Invite collaborators to share updates and files effortlessly.
+                </div>
+              ) : (
+                members.map((member) => (
+                  <div
+                    key={member.id}
+                    className="flex flex-col gap-2 rounded-2xl border border-slate-200/80 bg-white p-4 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">
+                        {member.fullName || member.email || member.id}
+                      </p>
+                      {member.email && (
+                        <p className="text-xs text-slate-500">{member.email}</p>
+                      )}
+                    </div>
+                    <span className="inline-flex items-center justify-center rounded-full bg-slate-100 px-3 py-1 text-xs font-medium uppercase tracking-wide text-slate-600">
+                      {(member.role || '').replace(/_/g, ' ') || 'member'}
+                    </span>
+                  </div>
+                ))
               )}
-              <div className="font-medium">{b.name}</div>
-              <div className="flex gap-2">
-                {b.primaryColor && <span className="inline-block h-3 w-3 rounded-full" style={{ background: b.primaryColor }} />}
-                {b.secondaryColor && <span className="inline-block h-3 w-3 rounded-full" style={{ background: b.secondaryColor }} />}
-              </div>
             </div>
-          ))}
-        </div>
-      </div>
-      <div className="card">
-        <h2 className="font-semibold mb-2">Projects</h2>
-        <div className="grid gap-2">
-          {projects.length === 0 ? <p>No projects.</p> : projects.map((p) => (
-            <Link key={p.id} href={`/projects/${p.id}`} className="hover:underline">
-              {p.name || 'Untitled'}
+
+            {canInvite && (
+              <form
+                id="org-invite-form"
+                onSubmit={inviteMember}
+                className="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-4 shadow-sm focus-within:border-slate-300"
+              >
+                <fieldset className="grid gap-3">
+                  <legend className="text-sm font-semibold text-slate-700">Invite a member</legend>
+                  <label className="text-xs font-medium uppercase tracking-wide text-slate-500" htmlFor="invite-email">
+                    Email address
+                  </label>
+                  <input
+                    id="invite-email"
+                    type="email"
+                    className="input"
+                    placeholder="name@email.com"
+                    value={inviteEmail}
+                    onChange={(event) => setInviteEmail(event.target.value)}
+                    required
+                  />
+
+                  <label className="text-xs font-medium uppercase tracking-wide text-slate-500" htmlFor="invite-role">
+                    Role
+                  </label>
+                  <select
+                    id="invite-role"
+                    className="input"
+                    value={inviteRole}
+                    onChange={(event) => setInviteRole(event.target.value)}
+                  >
+                    <option value="client_member">Client member</option>
+                    <option value="client_admin">Client admin</option>
+                    <option value="viewer">Viewer</option>
+                  </select>
+
+                  <label className="text-xs font-medium uppercase tracking-wide text-slate-500" htmlFor="invite-scopes">
+                    Scopes (optional)
+                  </label>
+                  <input
+                    id="invite-scopes"
+                    type="text"
+                    className="input"
+                    placeholder="Comma separated project or asset IDs"
+                    value={inviteScopes}
+                    onChange={(event) => setInviteScopes(event.target.value)}
+                  />
+
+                  <label className="text-xs font-medium uppercase tracking-wide text-slate-500" htmlFor="invite-expiry">
+                    Expiry in days (optional)
+                  </label>
+                  <input
+                    id="invite-expiry"
+                    type="number"
+                    className="input"
+                    placeholder="e.g. 30"
+                    min="0"
+                    value={inviteExpiry}
+                    onChange={(event) => setInviteExpiry(event.target.value)}
+                  />
+
+                  <button type="submit" className="btn mt-2" disabled={inviteLoading}>
+                    {inviteLoading ? 'Inviting…' : 'Send invite'}
+                  </button>
+                </fieldset>
+              </form>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900">Brand packs</h2>
+              <p className="text-sm text-slate-500">Reference the latest logos, typography, and colour palettes before kicking off new work.</p>
+            </div>
+            <Link href={`/orgs/${org.id}/brand-packs/new`} className="btn btn-outline self-start sm:self-auto">
+              Upload brand pack
             </Link>
-          ))}
-        </div>
+          </div>
+
+          <div className="mt-6 grid gap-3">
+            {brandPacks.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-6 text-sm text-slate-500">
+                No brand packs yet. Add one to centralise your guidelines and share them with the team.
+              </div>
+            ) : (
+              brandPacks.map((pack) => (
+                <div
+                  key={pack.id}
+                  className="flex flex-col gap-4 rounded-2xl border border-slate-200/80 bg-white p-5 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="flex items-center gap-4">
+                    {pack.logoUrl ? (
+                      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100">
+                        <Image
+                          src={pack.logoUrl}
+                          alt={`${pack.name || 'Brand pack'} logo`}
+                          width={48}
+                          height={48}
+                          className="h-12 w-12 rounded-2xl object-contain"
+                        />
+                      </span>
+                    ) : (
+                      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-sm font-semibold text-slate-600">
+                        {pack.name?.slice(0, 2)?.toUpperCase() || 'BP'}
+                      </span>
+                    )}
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">{pack.name || 'Untitled brand pack'}</p>
+                      <div className="mt-1 flex items-center gap-2">
+                        {pack.primaryColor && (
+                          <span
+                            className="inline-flex h-4 w-4 rounded-full border border-slate-200"
+                            style={{ background: pack.primaryColor }}
+                            aria-label="Primary colour"
+                          />
+                        )}
+                        {pack.secondaryColor && (
+                          <span
+                            className="inline-flex h-4 w-4 rounded-full border border-slate-200"
+                            style={{ background: pack.secondaryColor }}
+                            aria-label="Secondary colour"
+                          />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 text-sm text-slate-500">
+                    {pack.updatedAt?.toDate ? `Updated ${pack.updatedAt.toDate().toLocaleDateString()}` : ''}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900">Projects</h2>
+              <p className="text-sm text-slate-500">Stay on top of in-flight productions connected to this organisation.</p>
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-3">
+            {projects.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-6 text-sm text-slate-500">
+                No projects yet. Kick things off from the Projects page to see them appear here.
+              </div>
+            ) : (
+              projects.map((project) => (
+                <Link
+                  key={project.id}
+                  href={`/projects/${project.id}`}
+                  className="group flex flex-col gap-2 rounded-2xl border border-slate-200/80 bg-white p-5 transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
+                >
+                  <span className="text-sm font-semibold text-slate-900">{project.name || 'Untitled project'}</span>
+                  <span className="text-xs font-medium uppercase tracking-wide text-slate-400">View project workspace</span>
+                </Link>
+              ))
+            )}
+          </div>
+        </section>
       </div>
-    </div>
+    </PortalContainer>
   );
 }
