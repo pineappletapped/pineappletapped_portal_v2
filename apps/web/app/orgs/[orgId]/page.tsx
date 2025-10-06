@@ -8,6 +8,7 @@ import { doc, getDoc, collection, query, where, getDocs, setDoc, serverTimestamp
 import { extractUserRoles, hasRole } from '@/lib/roles';
 import PortalContainer from '@/components/PortalContainer';
 import PortalHero from '@/components/PortalHero';
+import { BrandGuidelineColors, BrandGuidelinesState, DEFAULT_BRAND_GUIDELINES, parseBrandGuidelines } from '@/lib/brand-guidelines';
 
 /**
  * Shows details for a single organisation, including its members, brand packs and
@@ -20,7 +21,10 @@ export default function OrgDetailPage() {
   const [loading, setLoading] = useState(true);
   const [org, setOrg] = useState<any>(null);
   const [members, setMembers] = useState<any[]>([]);
-  const [brandPacks, setBrandPacks] = useState<any[]>([]);
+  const [guidelines, setGuidelines] = useState<BrandGuidelinesState>(DEFAULT_BRAND_GUIDELINES);
+  const [hasCustomGuidelines, setHasCustomGuidelines] = useState(false);
+  const [brandLogoUrl, setBrandLogoUrl] = useState('');
+  const [brandGuidelinesUpdatedAt, setBrandGuidelinesUpdatedAt] = useState<Date | null>(null);
   const [projects, setProjects] = useState<any[]>([]);
   const [myRole, setMyRole] = useState<string | null>(null);
   const [isStaff, setIsStaff] = useState<boolean>(false);
@@ -35,10 +39,10 @@ export default function OrgDetailPage() {
   const heroMetrics = useMemo(
     () => [
       { label: 'Members', value: members.length.toString() },
-      { label: 'Brand packs', value: brandPacks.length.toString() },
+      { label: 'Brand guidelines', value: hasCustomGuidelines ? 'Live' : 'Draft' },
       { label: 'Projects', value: projects.length.toString() },
     ],
-    [brandPacks.length, members.length, projects.length]
+    [hasCustomGuidelines, members.length, projects.length]
   );
 
   const handleInviteScroll = useCallback(() => {
@@ -53,9 +57,9 @@ export default function OrgDetailPage() {
     const actions: { label: string; description: string; href?: string; onClick?: () => void }[] = [];
     if (org?.id) {
       actions.push({
-        label: 'New brand pack',
-        description: 'Upload updated guidelines and assets',
-        href: `/orgs/${org.id}/brand-packs/new`,
+        label: 'Manage brand guidelines',
+        description: 'Update fonts, colours, and tone of voice',
+        href: `/orgs/${org.id}/brand-guidelines`,
       });
     }
     if (canInvite) {
@@ -67,6 +71,16 @@ export default function OrgDetailPage() {
     }
     return actions;
   }, [canInvite, handleInviteScroll, org?.id]);
+
+  const colorPreview = useMemo(
+    () =>
+      (['primary', 'secondary', 'accent', 'neutral', 'highlight'] as (keyof BrandGuidelineColors)[]).map((key) => ({
+        key,
+        label: key.charAt(0).toUpperCase() + key.slice(1),
+        value: guidelines.colors[key],
+      })),
+    [guidelines.colors]
+  );
 
   // Invite a new member by email and assign a role. Only client_admin or staff can invite.
   const inviteMember = async (e: React.FormEvent) => {
@@ -131,6 +145,7 @@ export default function OrgDetailPage() {
           throw new Error('Organisation not found');
         }
 
+        const orgData = orgSnap.data();
         const memSnap = await getDocs(query(collection(db, 'memberships'), where('orgId', '==', orgId)));
         const memberships = memSnap.docs.map((d) => ({ id: d.id, ...d.data() })) as any[];
         const userSnaps = await Promise.all(memberships.map((m) => getDoc(doc(db, 'users', m.userId))));
@@ -147,22 +162,24 @@ export default function OrgDetailPage() {
           nextRole = myMembership?.role || null;
           const currentUserSnap = await getDoc(doc(db, 'users', currentUser.uid));
           const roles = extractUserRoles(currentUserSnap.data());
-          nextIsStaff = hasRole(roles, ['admin', 'projects']);
+          nextIsStaff = hasRole(roles, ['admin', 'projects', 'marketing']);
         }
-
-        const brandPackSnap = await getDocs(query(collection(db, 'brandPacks'), where('orgId', '==', orgId)));
-        const loadedBrandPacks = brandPackSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
         const projectSnap = await getDocs(query(collection(db, 'projects'), where('orgId', '==', orgId)));
         const loadedProjects = projectSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
         if (!active) return;
 
-        setOrg({ id: orgSnap.id, ...orgSnap.data() });
+        setOrg({ id: orgSnap.id, ...orgData });
         setMembers(loadedMembers);
         setMyRole(nextRole);
         setIsStaff(nextIsStaff);
-        setBrandPacks(loadedBrandPacks);
+        setGuidelines(parseBrandGuidelines(orgData?.brandGuidelines));
+        setHasCustomGuidelines(Boolean(orgData?.brandGuidelines));
+        setBrandLogoUrl(typeof orgData?.brandLogoUrl === 'string' ? orgData.brandLogoUrl : '');
+        setBrandGuidelinesUpdatedAt(
+          orgData?.brandGuidelinesUpdatedAt?.toDate ? orgData.brandGuidelinesUpdatedAt.toDate() : null
+        );
         setProjects(loadedProjects);
         setLoading(false);
       } catch (error) {
@@ -170,7 +187,10 @@ export default function OrgDetailPage() {
         if (active) {
           setOrg(null);
           setMembers([]);
-          setBrandPacks([]);
+          setGuidelines(DEFAULT_BRAND_GUIDELINES);
+          setHasCustomGuidelines(false);
+          setBrandLogoUrl('');
+          setBrandGuidelinesUpdatedAt(null);
           setProjects([]);
           setMyRole(null);
           setIsStaff(false);
@@ -342,68 +362,123 @@ export default function OrgDetailPage() {
         <section className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h2 className="text-lg font-semibold text-slate-900">Brand packs</h2>
-              <p className="text-sm text-slate-500">Reference the latest logos, typography, and colour palettes before kicking off new work.</p>
+              <h2 className="text-lg font-semibold text-slate-900">Brand guidelines</h2>
+              <p className="text-sm text-slate-500">Keep every brief and deliverable aligned with the latest fonts, colours, and tone of voice.</p>
             </div>
-            <Link href={`/orgs/${org.id}/brand-packs/new`} className="btn btn-outline self-start sm:self-auto">
-              Upload brand pack
+            <Link href={`/orgs/${org.id}/brand-guidelines`} className="btn btn-outline self-start sm:self-auto">
+              Manage brand guidelines
             </Link>
           </div>
 
-          <div className="mt-6 grid gap-3">
-            {brandPacks.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-6 text-sm text-slate-500">
-                No brand packs yet. Add one to centralise your guidelines and share them with the team.
-              </div>
-            ) : (
-              brandPacks.map((pack) => (
-                <div
-                  key={pack.id}
-                  className="flex flex-col gap-4 rounded-2xl border border-slate-200/80 bg-white p-5 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="flex items-center gap-4">
-                    {pack.logoUrl ? (
-                      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100">
-                        <Image
-                          src={pack.logoUrl}
-                          alt={`${pack.name || 'Brand pack'} logo`}
-                          width={48}
-                          height={48}
-                          className="h-12 w-12 rounded-2xl object-contain"
-                        />
-                      </span>
-                    ) : (
-                      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-sm font-semibold text-slate-600">
-                        {pack.name?.slice(0, 2)?.toUpperCase() || 'BP'}
-                      </span>
-                    )}
-                    <div>
-                      <p className="text-sm font-semibold text-slate-900">{pack.name || 'Untitled brand pack'}</p>
-                      <div className="mt-1 flex items-center gap-2">
-                        {pack.primaryColor && (
-                          <span
-                            className="inline-flex h-4 w-4 rounded-full border border-slate-200"
-                            style={{ background: pack.primaryColor }}
-                            aria-label="Primary colour"
+          {hasCustomGuidelines ? (
+            <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+              <div className="space-y-4">
+                <div className="flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-white/90 p-5 shadow-sm">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-center gap-4">
+                      {brandLogoUrl ? (
+                        <span className="flex h-16 w-16 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50">
+                          <Image
+                            src={brandLogoUrl}
+                            alt={`${org.name || 'Organisation'} logo`}
+                            width={64}
+                            height={64}
+                            className="h-16 w-16 rounded-2xl object-contain p-2"
                           />
-                        )}
-                        {pack.secondaryColor && (
-                          <span
-                            className="inline-flex h-4 w-4 rounded-full border border-slate-200"
-                            style={{ background: pack.secondaryColor }}
-                            aria-label="Secondary colour"
-                          />
-                        )}
+                        </span>
+                      ) : (
+                        <span className="flex h-16 w-16 items-center justify-center rounded-2xl border border-dashed border-slate-300 text-sm font-semibold uppercase tracking-wide text-slate-400">
+                          {org.name?.slice(0, 2)?.toUpperCase() || 'BG'}
+                        </span>
+                      )}
+                      <div>
+                        <p className="text-sm font-semibold text-slate-900">Latest update</p>
+                        <p className="text-xs text-slate-500">
+                          {brandGuidelinesUpdatedAt ? `Saved ${brandGuidelinesUpdatedAt.toLocaleDateString()}` : 'Awaiting first update'}
+                        </p>
+                      </div>
+                    </div>
+                    <Link href={`/orgs/${org.id}/brand-guidelines`} className="btn btn-sm">
+                      Review guidelines
+                    </Link>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4">
+                    <h3 className="text-sm font-semibold text-slate-900">Typography</h3>
+                    <dl className="mt-3 space-y-2 text-xs text-slate-600">
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="font-medium uppercase tracking-wide text-slate-500">Primary</dt>
+                        <dd className="text-right text-sm text-slate-700">{guidelines.fonts.primary || '—'}</dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="font-medium uppercase tracking-wide text-slate-500">Secondary</dt>
+                        <dd className="text-right text-sm text-slate-700">{guidelines.fonts.secondary || '—'}</dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="font-medium uppercase tracking-wide text-slate-500">Accent</dt>
+                        <dd className="text-right text-sm text-slate-700">{guidelines.fonts.accent || '—'}</dd>
+                      </div>
+                      <div>
+                        <dt className="font-medium uppercase tracking-wide text-slate-500">Heading style</dt>
+                        <dd className="mt-1 text-sm text-slate-700">{guidelines.fonts.headingStyle || '—'}</dd>
+                      </div>
+                    </dl>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4">
+                    <h3 className="text-sm font-semibold text-slate-900">Voice &amp; tone</h3>
+                    <div className="mt-3 space-y-3 text-sm text-slate-700">
+                      <div>
+                        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Voice</p>
+                        <p className="mt-1 text-sm text-slate-700">{guidelines.voice.voicePrinciples || '—'}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Tone</p>
+                        <p className="mt-1 text-sm text-slate-700">{guidelines.voice.tonePrinciples || '—'}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Elevator pitch</p>
+                        <p className="mt-1 text-sm text-slate-700">{guidelines.voice.elevatorPitch || '—'}</p>
                       </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-3 text-sm text-slate-500">
-                    {pack.updatedAt?.toDate ? `Updated ${pack.updatedAt.toDate().toLocaleDateString()}` : ''}
+                  <div className="md:col-span-2 rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4">
+                    <h3 className="text-sm font-semibold text-slate-900">Imagery guidance</h3>
+                    <p className="mt-2 text-sm text-slate-700">{guidelines.imagery.notes || 'Add notes to guide creative teams.'}</p>
                   </div>
                 </div>
-              ))
-            )}
-          </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4">
+                <h3 className="text-sm font-semibold text-slate-900">Colour palette</h3>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  {colorPreview.map((color) => (
+                    <div
+                      key={color.key}
+                      className="flex flex-col items-start gap-2 rounded-2xl border border-slate-200 bg-white p-4"
+                    >
+                      <span
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200"
+                        style={{ background: color.value || '#FFFFFF' }}
+                        aria-label={`${color.label} colour`}
+                      />
+                      <span className="text-xs font-medium uppercase tracking-wide text-slate-500">{color.label}</span>
+                      <span className="text-sm font-semibold text-slate-900">{color.value || '—'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-6 rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-6 text-sm text-slate-500">
+              No brand guidelines yet.{' '}
+              <Link href={`/orgs/${org.id}/brand-guidelines`} className="text-slate-700 underline decoration-slate-400 decoration-2 underline-offset-4">
+                Create your first guideline set
+              </Link>{' '}
+              to give the team clear direction.
+            </div>
+          )}
         </section>
 
         <section className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm">

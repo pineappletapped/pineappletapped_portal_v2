@@ -6914,6 +6914,8 @@ export const contractor_updateTask = functions.https.onCall(async (data, context
 
 /**
  * Triggered when a logo is uploaded under orgs/{orgId}/brand-packs/{packId}/logo
+ * or orgs/{orgId}/brand-guidelines/logo-*.png. The handler normalises images by
+ * removing simple backgrounds and resizing them for consistent previews.
  * Validates and processes the image: crops to square, resizes to max 512px, removes
  * any alpha channel background (simple white fill) and stores processed version
  * at orgs/{orgId}/brand/logo-prep/{packId}/processed.png. This function
@@ -6924,8 +6926,9 @@ export const onLogoUpload = functions.storage
   .object()
   .onFinalize(async (object) => {
     const filePath = object.name || '';
-    // Only run for brand pack logos
-    if (!filePath.includes('brand-packs') || !filePath.includes('logo')) return;
+    const isBrandPackLogo = filePath.includes('brand-packs');
+    const isGuidelineLogo = filePath.includes('brand-guidelines');
+    if (!filePath.includes('logo') || (!isBrandPackLogo && !isGuidelineLogo)) return;
     const bucket = admin.storage().bucket(object.bucket);
     const tmpFilePath = `/tmp/${uuidv4()}-${object.name?.split('/').pop()}`;
     await bucket.file(filePath).download({ destination: tmpFilePath });
@@ -6942,9 +6945,20 @@ export const onLogoUpload = functions.storage
     const parts = filePath.split('/');
     const orgIdIndex = parts.indexOf('orgs') + 1;
     const orgId = parts[orgIdIndex];
-    const packIndex = parts.indexOf('brand-packs') + 1;
-    const packId = parts[packIndex];
-    const destPath = `orgs/${orgId}/brand/logo-prep/${packId}/processed.png`;
+    if (!orgId) {
+      return;
+    }
+    let destPath = '';
+    if (isBrandPackLogo) {
+      const packIndex = parts.indexOf('brand-packs') + 1;
+      const packId = parts[packIndex] || 'default';
+      destPath = `orgs/${orgId}/brand/logo-prep/${packId}/processed.png`;
+    } else {
+      destPath = `orgs/${orgId}/brand/logo-prep/guidelines/processed.png`;
+    }
+    if (!destPath) {
+      return;
+    }
     await bucket.file(destPath).save(processedBuffer, { contentType: 'image/png' });
     return;
   });

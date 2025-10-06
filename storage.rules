@@ -14,8 +14,13 @@ service firebase.storage {
       allow read, write: if signedIn();
     }
 
-    // Brand pack uploads (logos) stored under orgs/{orgId}/brand-packs/{packId}/...
+    // Legacy brand pack uploads (logos) stored under orgs/{orgId}/brand-packs/{packId}/...
     match /orgs/{orgId}/brand-packs/{packId}/{file=**} {
+      allow read, write: if signedIn();
+    }
+
+    // Organisation brand guideline assets (logos) stored under orgs/{orgId}/brand-guidelines/...
+    match /orgs/{orgId}/brand-guidelines/{file=**} {
       allow read, write: if signedIn();
     }
 

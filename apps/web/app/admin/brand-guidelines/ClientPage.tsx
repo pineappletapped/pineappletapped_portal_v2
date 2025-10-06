@@ -7,67 +7,14 @@ import { deleteObject, getDownloadURL, ref, uploadBytes } from "firebase/storage
 
 import { useRoleGate } from "@/hooks/useRoleGate";
 import { db, storage } from "@/lib/firebase";
+import {
+  BrandGuidelinesState,
+  DEFAULT_BRAND_GUIDELINES,
+  parseBrandGuidelines,
+  sanitiseBrandGuidelines,
+} from "@/lib/brand-guidelines";
 
-interface BrandGuidelineFonts {
-  primary: string;
-  secondary: string;
-  accent: string;
-  headingStyle: string;
-}
-
-interface BrandGuidelineColors {
-  primary: string;
-  secondary: string;
-  accent: string;
-  neutral: string;
-  highlight: string;
-}
-
-interface BrandGuidelineVoice {
-  voicePrinciples: string;
-  tonePrinciples: string;
-  elevatorPitch: string;
-}
-
-interface BrandGuidelineImagery {
-  notes: string;
-}
-
-interface BrandGuidelinesState {
-  fonts: BrandGuidelineFonts;
-  colors: BrandGuidelineColors;
-  voice: BrandGuidelineVoice;
-  imagery: BrandGuidelineImagery;
-}
-
-const defaultGuidelines: BrandGuidelinesState = {
-  fonts: {
-    primary: "Poppins",
-    secondary: "",
-    accent: "",
-    headingStyle: "Poppins Bold for headings, Regular for body copy",
-  },
-  colors: {
-    primary: "#215696",
-    secondary: "#E8793B",
-    accent: "#89CFF0",
-    neutral: "#F0F4F8",
-    highlight: "#FFFFFF",
-  },
-  voice: {
-    voicePrinciples: "Strategic • Professional • Clear",
-    tonePrinciples: "Confident • Approachable • Engaging",
-    elevatorPitch: "We build powerful websites and experiences that signpost, showcase, and engage.",
-  },
-  imagery: {
-    notes:
-      "Bright, collaborative photography with real teams in action. Use geometric graphic accents sparingly to support key messaging.",
-  },
-};
-
-const normalise = (value: string): string => value.trim();
-
-type FeedbackState = { message: string; tone: 'success' | 'error' } | null;
+type FeedbackState = { message: string; tone: "success" | "error" } | null;
 
 export default function BrandGuidelinesPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "marketing"]);
@@ -76,7 +23,7 @@ export default function BrandGuidelinesPage() {
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [removingLogo, setRemovingLogo] = useState(false);
-  const [guidelines, setGuidelines] = useState<BrandGuidelinesState>(defaultGuidelines);
+  const [guidelines, setGuidelines] = useState<BrandGuidelinesState>(DEFAULT_BRAND_GUIDELINES);
   const [savingGuidelines, setSavingGuidelines] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
 
@@ -89,50 +36,13 @@ export default function BrandGuidelinesPage() {
     (async () => {
       try {
         const snap = await getDoc(doc(db, "settings", "branding"));
-        if (snap.exists()) {
-          const data = snap.data() as any;
-          if (typeof data?.logoUrl === "string") {
-            setLogoUrl(data.logoUrl);
+          if (snap.exists()) {
+            const data = snap.data() as any;
+            if (typeof data?.logoUrl === "string") {
+              setLogoUrl(data.logoUrl);
+            }
+            setGuidelines(parseBrandGuidelines(data?.brandGuidelines));
           }
-          const stored = data?.brandGuidelines;
-          if (stored && typeof stored === "object") {
-            setGuidelines((prev) => ({
-              fonts: {
-                primary: normalise(String(stored?.fonts?.primary || prev.fonts.primary)) || prev.fonts.primary,
-                secondary: normalise(String(stored?.fonts?.secondary || prev.fonts.secondary || "")),
-                accent: normalise(String(stored?.fonts?.accent || prev.fonts.accent || "")),
-                headingStyle:
-                  normalise(String(stored?.fonts?.headingStyle || prev.fonts.headingStyle)) ||
-                  prev.fonts.headingStyle,
-              },
-              colors: {
-                primary: String(stored?.colors?.primary || prev.colors.primary || defaultGuidelines.colors.primary),
-                secondary: String(
-                  stored?.colors?.secondary || prev.colors.secondary || defaultGuidelines.colors.secondary,
-                ),
-                accent: String(stored?.colors?.accent || prev.colors.accent || defaultGuidelines.colors.accent),
-                neutral: String(stored?.colors?.neutral || prev.colors.neutral || defaultGuidelines.colors.neutral),
-                highlight: String(
-                  stored?.colors?.highlight || prev.colors.highlight || defaultGuidelines.colors.highlight,
-                ),
-              },
-              voice: {
-                voicePrinciples:
-                  normalise(String(stored?.voice?.voicePrinciples || prev.voice.voicePrinciples)) ||
-                  prev.voice.voicePrinciples,
-                tonePrinciples:
-                  normalise(String(stored?.voice?.tonePrinciples || prev.voice.tonePrinciples)) ||
-                  prev.voice.tonePrinciples,
-                elevatorPitch:
-                  normalise(String(stored?.voice?.elevatorPitch || prev.voice.elevatorPitch)) ||
-                  prev.voice.elevatorPitch,
-              },
-              imagery: {
-                notes: normalise(String(stored?.imagery?.notes || prev.imagery.notes)) || prev.imagery.notes,
-              },
-            }));
-          }
-        }
       } catch (error) {
         console.error("Failed to load brand guidelines", error);
       } finally {
@@ -206,31 +116,7 @@ export default function BrandGuidelinesPage() {
       setFeedback(null);
       await setDoc(
         doc(db, "settings", "branding"),
-        {
-          brandGuidelines: {
-            fonts: {
-              primary: normalise(guidelines.fonts.primary) || null,
-              secondary: normalise(guidelines.fonts.secondary) || null,
-              accent: normalise(guidelines.fonts.accent) || null,
-              headingStyle: normalise(guidelines.fonts.headingStyle) || null,
-            },
-            colors: {
-              primary: guidelines.colors.primary || null,
-              secondary: guidelines.colors.secondary || null,
-              accent: guidelines.colors.accent || null,
-              neutral: guidelines.colors.neutral || null,
-              highlight: guidelines.colors.highlight || null,
-            },
-            voice: {
-              voicePrinciples: normalise(guidelines.voice.voicePrinciples) || null,
-              tonePrinciples: normalise(guidelines.voice.tonePrinciples) || null,
-              elevatorPitch: normalise(guidelines.voice.elevatorPitch) || null,
-            },
-            imagery: {
-              notes: normalise(guidelines.imagery.notes) || null,
-            },
-          },
-        },
+        { brandGuidelines: sanitiseBrandGuidelines(guidelines) },
         { merge: true },
       );
       setFeedback({ message: "Brand guidelines saved.", tone: "success" });
