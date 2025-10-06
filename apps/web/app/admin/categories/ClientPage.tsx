@@ -29,6 +29,8 @@ export default function AdminCategoriesPage() {
   const [headerImagePreview, setHeaderImagePreview] = useState<string | null>(null);
   const [layout, setLayout] = useState("grid");
   const [loading, setLoading] = useState(true);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [parentFilter, setParentFilter] = useState("");
 
   const [editing, setEditing] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -148,6 +150,96 @@ export default function AdminCategoriesPage() {
     [categories]
   );
 
+  const categoryMap = useMemo(() => {
+    const map = new Map<string, Category>();
+    categories.forEach((category) => {
+      map.set(category.id, category);
+    });
+    return map;
+  }, [categories]);
+
+  const childrenByParent = useMemo(() => {
+    const map = new Map<string | null, Category[]>();
+    categories.forEach((category) => {
+      const key = category.parentId ?? null;
+      const group = map.get(key) ?? [];
+      group.push(category);
+      map.set(key, group);
+    });
+    return map;
+  }, [categories]);
+
+  const { topLevelCategories, visibleCategoryIds, hasActiveFilters } = useMemo(() => {
+    const normalizedTerm = searchTerm.trim().toLowerCase();
+
+    const isWithinParentBranch = (category: Category) => {
+      if (!parentFilter) return true;
+      if (category.id === parentFilter) return true;
+
+      let currentParentId = category.parentId ?? null;
+      while (currentParentId) {
+        if (currentParentId === parentFilter) return true;
+        currentParentId = categoryMap.get(currentParentId)?.parentId ?? null;
+      }
+      return false;
+    };
+
+    const matchesSearch = (category: Category) => {
+      if (!normalizedTerm) return true;
+      const haystack = `${category.name} ${(category.slug ?? "")}`.toLowerCase();
+      return haystack.includes(normalizedTerm);
+    };
+
+    const memo = new Map<string, boolean>();
+    const computeVisible = (category: Category): boolean => {
+      const cached = memo.get(category.id);
+      if (cached !== undefined) return cached;
+
+      if (!isWithinParentBranch(category)) {
+        memo.set(category.id, false);
+        return false;
+      }
+
+      const directMatch = matchesSearch(category);
+      if (directMatch) {
+        memo.set(category.id, true);
+        return true;
+      }
+
+      const children = childrenByParent.get(category.id) ?? [];
+      const matchesDescendant = children.some((child) => computeVisible(child));
+      memo.set(category.id, matchesDescendant);
+      return matchesDescendant;
+    };
+
+    const visibleSet = new Set<string>();
+    categories.forEach((category) => {
+      if (computeVisible(category)) {
+        visibleSet.add(category.id);
+      }
+    });
+
+    const roots = childrenByParent.get(null) ?? [];
+    const filteredRoots = roots.filter((category) => visibleSet.has(category.id));
+
+    return {
+      topLevelCategories: filteredRoots,
+      visibleCategoryIds: visibleSet,
+      hasActiveFilters: Boolean(normalizedTerm) || Boolean(parentFilter),
+    };
+  }, [
+    categories,
+    categoryMap,
+    childrenByParent,
+    parentFilter,
+    searchTerm,
+  ]);
+
+  const parentOptions = useMemo(() => {
+    const roots = childrenByParent.get(null) ?? [];
+    return [...roots].sort((a, b) => a.name.localeCompare(b.name));
+  }, [childrenByParent]);
+
   if (guardLoading || loading) {
     return (
       <PortalContainer>
@@ -172,7 +264,9 @@ export default function AdminCategoriesPage() {
     category: Category;
     depth?: number;
   }) => {
-    const children = categories.filter((candidate) => candidate.parentId === category.id);
+    const children = (childrenByParent.get(category.id) ?? []).filter((child) =>
+      visibleCategoryIds.has(child.id)
+    );
     const isEditing = editing === category.id;
     const paddingLeft = depth * 20;
 
@@ -451,13 +545,63 @@ export default function AdminCategoriesPage() {
 
         <section className="rounded-3xl border border-gray-200 bg-white shadow-sm">
           <div className="border-b border-gray-100 px-6 py-4">
-            <h2 className="text-lg font-semibold text-gray-900">Existing categories</h2>
-            <p className="text-sm text-gray-600">
-              Edit nested groupings, review product counts, and remove categories that are no longer in use.
-            </p>
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Existing categories</h2>
+                <p className="text-sm text-gray-600">
+                  Edit nested groupings, review product counts, and remove categories that are no longer in use.
+                </p>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="relative w-full sm:w-64">
+                  <input
+                    type="search"
+                    value={searchTerm}
+                    onChange={(event) => setSearchTerm(event.target.value)}
+                    placeholder="Search by name or slug…"
+                    className="input w-full pr-10"
+                  />
+                  <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-gray-400">
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      strokeWidth={1.5}
+                      stroke="currentColor"
+                      className="h-4 w-4"
+                      aria-hidden="true"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="m21 21-3.8-3.8M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15z"
+                      />
+                    </svg>
+                  </span>
+                </div>
+                <select
+                  className="input w-full sm:w-52"
+                  value={parentFilter}
+                  onChange={(event) => setParentFilter(event.target.value)}
+                >
+                  <option value="">All parent groups</option>
+                  {parentOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
           </div>
           {categories.length === 0 ? (
             <p className="px-6 py-8 text-sm text-gray-500">No categories found yet. Create one to get started.</p>
+          ) : topLevelCategories.length === 0 ? (
+            <p className="px-6 py-8 text-sm text-gray-500">
+              {hasActiveFilters
+                ? "No categories match the current filters. Try updating your search or parent selection."
+                : "No categories available."}
+            </p>
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-100 text-sm">
@@ -469,11 +613,9 @@ export default function AdminCategoriesPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 bg-white">
-                  {categories
-                    .filter((category) => !category.parentId)
-                    .map((category) => (
-                      <CategoryRow key={category.id} category={category} depth={0} />
-                    ))}
+                  {topLevelCategories.map((category) => (
+                    <CategoryRow key={category.id} category={category} depth={0} />
+                  ))}
                 </tbody>
               </table>
             </div>
