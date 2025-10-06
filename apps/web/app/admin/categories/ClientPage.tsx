@@ -28,6 +28,7 @@ export default function AdminCategoriesPage() {
   const [headerImageFile, setHeaderImageFile] = useState<File | null>(null);
   const [headerImagePreview, setHeaderImagePreview] = useState<string | null>(null);
   const [layout, setLayout] = useState("grid");
+  const [order, setOrder] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [parentFilter, setParentFilter] = useState("");
@@ -42,6 +43,7 @@ export default function AdminCategoriesPage() {
   const [editHeaderImageFile, setEditHeaderImageFile] = useState<File | null>(null);
   const [editHeaderImagePreview, setEditHeaderImagePreview] = useState<string | null>(null);
   const [editLayout, setEditLayout] = useState("grid");
+  const [editOrder, setEditOrder] = useState(0);
   const [showCreate, setShowCreate] = useState(false);
 
   useEffect(() => {
@@ -58,7 +60,14 @@ export default function AdminCategoriesPage() {
 
   const refresh = async () => {
     const catSnap = await getDocs(collection(db, "categories"));
-    const cats = catSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+    const cats = catSnap.docs
+      .map((d) => ({ id: d.id, ...(d.data() as any) }))
+      .sort((a, b) => {
+        const orderA = a.order ?? 0;
+        const orderB = b.order ?? 0;
+        if (orderA !== orderB) return orderA - orderB;
+        return a.name.localeCompare(b.name);
+      });
     const prodSnap = await getDocs(collection(db, "products"));
     const map: Record<string, number> = {};
     prodSnap.docs.forEach((p) => {
@@ -85,6 +94,7 @@ export default function AdminCategoriesPage() {
       parentId: parentId || null,
       headerImage: null,
       layout,
+      order,
     });
     if (headerImageFile) {
       const url = await upload(`categories/${docRef.id}/header`, headerImageFile);
@@ -99,6 +109,7 @@ export default function AdminCategoriesPage() {
     setHeaderImageFile(null);
     setHeaderImagePreview(null);
     setLayout("grid");
+    setOrder((value) => value + 1);
   };
 
   const remove = async (id: string) => {
@@ -118,6 +129,7 @@ export default function AdminCategoriesPage() {
     setEditHeaderImageFile(null);
     setEditHeaderImagePreview(null);
     setEditLayout(c.layout || "grid");
+    setEditOrder(c.order ?? 0);
   };
 
   const saveEdit = async (e: React.FormEvent) => {
@@ -132,6 +144,7 @@ export default function AdminCategoriesPage() {
       parentId: editParentId || null,
       headerImage: editHeaderImage || null,
       layout: editLayout,
+      order: editOrder,
     });
     if (editHeaderImageFile) {
       const url = await upload(`categories/${editing}/header`, editHeaderImageFile);
@@ -164,6 +177,15 @@ export default function AdminCategoriesPage() {
       const key = category.parentId ?? null;
       const group = map.get(key) ?? [];
       group.push(category);
+      map.set(key, group);
+    });
+    map.forEach((group, key) => {
+      group.sort((a, b) => {
+        const orderA = a.order ?? 0;
+        const orderB = b.order ?? 0;
+        if (orderA !== orderB) return orderA - orderB;
+        return a.name.localeCompare(b.name);
+      });
       map.set(key, group);
     });
     return map;
@@ -240,6 +262,26 @@ export default function AdminCategoriesPage() {
     return [...roots].sort((a, b) => a.name.localeCompare(b.name));
   }, [childrenByParent]);
 
+  const nextOrder = useMemo(() => {
+    if (categories.length === 0) return 0;
+    return (
+      categories.reduce((max, category) => {
+        const value = category.order ?? 0;
+        return value > max ? value : max;
+      }, 0) + 1
+    );
+  }, [categories]);
+
+  const toggleCreate = () => {
+    setShowCreate((value) => {
+      const next = !value;
+      if (next) {
+        setOrder(nextOrder);
+      }
+      return next;
+    });
+  };
+
   if (guardLoading || loading) {
     return (
       <PortalContainer>
@@ -274,7 +316,7 @@ export default function AdminCategoriesPage() {
       <>
         {isEditing ? (
           <tr className="bg-gray-50/80">
-            <td colSpan={3} className="px-0 py-0">
+            <td colSpan={4} className="px-0 py-0">
               <form onSubmit={saveEdit} className="grid gap-4 px-6 py-5 sm:grid-cols-2">
                 <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                   Name
@@ -324,6 +366,16 @@ export default function AdminCategoriesPage() {
                     <option value="grid">Grid</option>
                     <option value="list">List</option>
                   </select>
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Order
+                  <input
+                    type="number"
+                    min={0}
+                    className="input mt-1"
+                    value={editOrder}
+                    onChange={(event) => setEditOrder(Number(event.target.value))}
+                  />
                 </label>
                 <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                   Parent
@@ -385,6 +437,7 @@ export default function AdminCategoriesPage() {
                 ) : null}
               </div>
             </td>
+            <td className="px-6 py-3 text-sm text-gray-600">{category.order ?? "—"}</td>
             <td className="px-6 py-3 text-sm text-gray-600">{counts[category.id] || 0}</td>
             <td className="px-6 py-3">
               <div className="flex flex-wrap gap-2">
@@ -425,7 +478,7 @@ export default function AdminCategoriesPage() {
             </div>
           </div>
           <div className="flex flex-col gap-3 sm:items-end">
-            <button className="btn" onClick={() => setShowCreate((value) => !value)}>
+            <button className="btn" onClick={toggleCreate}>
               {showCreate ? "Close form" : "Add category"}
             </button>
           </div>
@@ -490,6 +543,16 @@ export default function AdminCategoriesPage() {
                   </select>
                 </label>
                 <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Order
+                  <input
+                    type="number"
+                    min={0}
+                    className="input mt-1"
+                    value={order}
+                    onChange={(event) => setOrder(Number(event.target.value))}
+                  />
+                </label>
+                <label className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                   Description
                   <textarea
                     className="input mt-1 h-24 resize-none"
@@ -532,7 +595,14 @@ export default function AdminCategoriesPage() {
                 </label>
               </div>
               <div className="lg:col-span-2 flex flex-wrap items-center justify-end gap-3">
-                <button type="button" className="btn btn-outline" onClick={() => setShowCreate(false)}>
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => {
+                    setShowCreate(false);
+                    setOrder(nextOrder);
+                  }}
+                >
                   Cancel
                 </button>
                 <button type="submit" className="btn">
@@ -608,6 +678,7 @@ export default function AdminCategoriesPage() {
                 <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
                   <tr>
                     <th scope="col" className="px-6 py-3 text-left font-semibold">Name</th>
+                    <th scope="col" className="px-6 py-3 text-left font-semibold">Order</th>
                     <th scope="col" className="px-6 py-3 text-left font-semibold">Products</th>
                     <th scope="col" className="px-6 py-3 text-left font-semibold">Actions</th>
                   </tr>
