@@ -24,6 +24,11 @@ service firebase.storage {
       allow read, write: if signedIn();
     }
 
+    // Site-level brand guideline assets (logos) stored under site/brand/...
+    match /site/brand/{file=**} {
+      allow read, write: if signedIn();
+    }
+
     // Public client logos for homepage
     match /clientLogos/{file=**} {
       allow read: if true;
