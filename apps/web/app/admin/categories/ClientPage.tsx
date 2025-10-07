@@ -15,6 +15,7 @@ import type { Category } from "@/lib/categories";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { useRoleGate } from "@/hooks/useRoleGate";
 import PortalContainer from "@/components/PortalContainer";
+import PortalHero from "@/components/PortalHero";
 
 const slugify = (value: string) =>
   value
@@ -195,6 +196,8 @@ export default function AdminCategoriesPage() {
     setEditError(null);
     await refresh();
   };
+
+  const countFormatter = useMemo(() => new Intl.NumberFormat("en-GB"), []);
 
   const totalProducts = useMemo(
     () => Object.values(counts).reduce((total, value) => total + value, 0),
@@ -525,25 +528,38 @@ export default function AdminCategoriesPage() {
   return (
     <PortalContainer>
       <div className="grid gap-6">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Catalog</p>
-            <h1 className="text-2xl font-semibold text-gray-900">Manage categories</h1>
-            <p className="max-w-2xl text-sm text-gray-600">
-              Organise the taxonomy that powers product detail pages, control nested groupings, and keep hero imagery aligned with the latest brand look.
-            </p>
-            <div className="flex flex-wrap gap-3 text-xs font-medium uppercase tracking-wide text-gray-500">
-              <span>Total categories · {categories.length}</span>
-              <span>Top level · {topLevelCount}</span>
-              <span>Products mapped · {totalProducts}</span>
-            </div>
-          </div>
-          <div className="flex flex-col gap-3 sm:items-end">
-            <button className="btn" onClick={toggleCreate}>
-              {showCreate ? "Close form" : "Add category"}
-            </button>
-          </div>
-        </header>
+        <PortalHero
+          eyebrow="Catalog"
+          title="Manage categories"
+          description="Organise the taxonomy that powers product detail pages, control nested groupings, and keep hero imagery aligned with the latest brand look."
+          metrics={[
+            {
+              label: "Total categories",
+              value: countFormatter.format(categories.length),
+            },
+            {
+              label: "Top level",
+              value: countFormatter.format(topLevelCount),
+            },
+            {
+              label: "Nested groups",
+              value: countFormatter.format(Math.max(0, categories.length - topLevelCount)),
+            },
+            {
+              label: "Products mapped",
+              value: countFormatter.format(totalProducts),
+            },
+          ]}
+          quickActions={[
+            {
+              label: showCreate ? "Close form" : "Add category",
+              description: showCreate
+                ? "Hide the category creator"
+                : "Create a new storefront grouping",
+              onClick: toggleCreate,
+            },
+          ]}
+        />
 
         {showCreate && (
           <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">

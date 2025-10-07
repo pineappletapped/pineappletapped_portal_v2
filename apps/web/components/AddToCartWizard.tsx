@@ -769,6 +769,7 @@ export default function AddToCartWizard({
   const [campaignSlotStatus, setCampaignSlotStatus] =
     useState<CampaignSlotStatus>("idle");
   const [campaignSlotError, setCampaignSlotError] = useState<string | null>(null);
+  const [overrideLocation, setOverrideLocation] = useState(false);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const [availabilityOverrides, setAvailabilityOverrides] = useState<
     Record<string, ProductAvailabilityStatus>
@@ -825,18 +826,25 @@ export default function AddToCartWizard({
     if (!hasPresetVenue) {
       return;
     }
+    if (overrideLocation) {
+      setCoverage(null);
+      setCoverageStatus("idle");
+      setCoverageError(null);
+      setLiveMessage("Enter the filming location to continue");
+      return;
+    }
     setCoverage(venueCoveragePreset);
     setCoverageStatus(venueCoveragePreset ? "success" : "idle");
     setCoverageError(null);
-    if (venueCoveragePreset?.postalCode) {
-      setPostcodeInput((prev) => prev || venueCoveragePreset.postalCode!);
-    }
+    setPostcodeInput(venueCoveragePreset?.postalCode ?? "");
     if (venueCoveragePreset?.label) {
-      setLocationInput((prev) => (prev.trim().length > 0 ? prev : venueCoveragePreset.label));
+      setLocationInput(venueCoveragePreset.label);
     } else if (product.venue && product.venue.trim().length > 0) {
-      setLocationInput((prev) => (prev.trim().length > 0 ? prev : product.venue!.trim()));
+      setLocationInput(product.venue.trim());
+    } else {
+      setLocationInput("");
     }
-  }, [hasPresetVenue, product.venue, venueCoveragePreset]);
+  }, [hasPresetVenue, overrideLocation, product.venue, venueCoveragePreset]);
   const priceTier: PriceTierLevel = coverage?.priceTier ?? 1;
   const cartSlotHolds = useMemo(() => {
     if (!isCampaignProduct || !product.campaignBooking) {
@@ -1023,7 +1031,7 @@ export default function AddToCartWizard({
     load();
   }, [product]);
 
-  const hasLocationStep = !hasPresetVenue;
+  const hasLocationStep = !hasPresetVenue || overrideLocation;
   const totalSteps = groups.length + (hasLocationStep ? 2 : 1);
   const locationStep = hasLocationStep && step === 0;
   const modifierIndex = step - (hasLocationStep ? 1 : 0);
@@ -1031,12 +1039,18 @@ export default function AddToCartWizard({
     modifierIndex >= 0 && modifierIndex < groups.length ? groups[modifierIndex] : null;
   const dateStep = step === totalSteps - 1;
   const stepLabel = locationStep
-    ? "Confirm the filming location"
+    ? overrideLocation && hasPresetVenue
+      ? "Enter the alternate filming location"
+      : "Confirm the filming location"
     : currentGroup
       ? `Choose ${currentGroup.multiple ? "one or more" : "an"} option for ${currentGroup.name}`
       : isCampaignProduct
         ? "Choose a campaign slot"
         : "Confirm the production date";
+
+  useEffect(() => {
+    setStep(0);
+  }, [hasLocationStep]);
 
   useEffect(() => {
     setLiveMessage(`Step ${step + 1} of ${totalSteps}: ${stepLabel}`);
@@ -1839,10 +1853,36 @@ export default function AddToCartWizard({
             <p className="mt-2 text-xs text-slate-500">
               Location is pre-assigned for this package so we can fast-track scheduling with the on-site team.
             </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="btn btn-xs btn-outline"
+                onClick={() => setOverrideLocation(true)}
+              >
+                Use a different location
+              </button>
+            </div>
           </div>
         )}
         {locationStep ? (
           <div className="space-y-3">
+            {hasPresetVenue && overrideLocation && (
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                <p>
+                  This package is normally fulfilled at {venueCoveragePreset?.label || product.venue || "the booked venue"}.
+                  Provide an alternate filming location below if this booking needs to be routed elsewhere.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-outline"
+                    onClick={() => setOverrideLocation(false)}
+                  >
+                    Use preset venue
+                  </button>
+                </div>
+              </div>
+            )}
             <div>
               <label
                 htmlFor="wizard-location"
