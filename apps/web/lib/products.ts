@@ -94,6 +94,8 @@ export interface ProductDeliverable {
   title: string;
   /** Classification used to show an appropriate icon for the deliverable. */
   type?: DeliverableType;
+  /** Optional quantity label used to communicate how many of the deliverable are included. */
+  quantity?: number | null;
   /** Optional text describing what the customer will receive. */
   description?: string;
   /** Optional thumbnail image for visual deliverable previews. */

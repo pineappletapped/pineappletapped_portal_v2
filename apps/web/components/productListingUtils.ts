@@ -100,7 +100,7 @@ type DeliverableBadge = {
 function normaliseDeliverables(
   rawDeliverables: unknown,
   options: { variationId?: string | null } = {}
-): { title: string; type?: DeliverableType }[] {
+): { title: string; type?: DeliverableType; quantity?: number }[] {
   const variationFilter = options.variationId ?? null;
   if (!rawDeliverables) return [];
 
@@ -114,7 +114,7 @@ function normaliseDeliverables(
     if (!entry) return [];
 
     if (Array.isArray(entry)) {
-      return normaliseDeliverables(entry);
+      return normaliseDeliverables(entry, options);
     }
 
     if (typeof entry === "string") {
@@ -139,6 +139,12 @@ function normaliseDeliverables(
         typeof candidate.type === "string"
           ? (candidate.type as DeliverableType)
           : undefined;
+      const quantity =
+        typeof candidate.quantity === "number" &&
+        Number.isFinite(candidate.quantity) &&
+        candidate.quantity > 0
+          ? Math.round(candidate.quantity)
+          : undefined;
       const restrictedIds = Array.isArray(candidate.variationIds)
         ? candidate.variationIds.filter(
             (id): id is string => typeof id === "string" && id.trim().length > 0
@@ -156,6 +162,7 @@ function normaliseDeliverables(
         {
           title,
           type,
+          quantity,
         },
       ];
     }
@@ -170,8 +177,13 @@ export function getDeliverableSummary(product: Product) {
   const deliverables: DeliverableBadge[] = deliverableEntries.map(
     (deliverable, index) => {
       const title = deliverable.title.trim();
+      const quantity =
+        typeof deliverable.quantity === "number" && deliverable.quantity > 0
+          ? deliverable.quantity
+          : null;
+      const label = quantity ? `${quantity}× ${title}`.trim() : title;
       return {
-        label: title,
+        label,
         type: deliverable.type ?? null,
         key: `${title}-${deliverable.type ?? index}`,
       } as DeliverableBadge;

@@ -47,6 +47,26 @@ const deliverableIcons: Record<DeliverableType, IconType> = {
   document: FiFileText,
 };
 
+function getDeliverableDisplayQuantity(entry: unknown): number | null {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const raw = (entry as { quantity?: unknown }).quantity;
+  if (typeof raw !== "number" || Number.isNaN(raw)) {
+    return null;
+  }
+  const rounded = Math.round(raw);
+  return rounded > 0 ? rounded : null;
+}
+
+function getDeliverableCount(entry: unknown): number {
+  const explicit = getDeliverableDisplayQuantity(entry);
+  if (explicit && explicit > 0) {
+    return explicit;
+  }
+  return 1;
+}
+
 type VideoPlayback =
   | { kind: "iframe"; src: string }
   | { kind: "file"; src: string }
@@ -560,11 +580,16 @@ export default function ProductDetail({
       return true;
     });
 
+    const totalCount = entries.reduce(
+      (count, entry) => count + getDeliverableCount(entry),
+      0
+    );
+
     return {
       visible,
       hasRestricted,
       selectedId,
-      total: entries.length,
+      total: totalCount,
     } as const;
   }, [product.deliverables, availableVariationIds, variation]);
 
@@ -595,6 +620,8 @@ export default function ProductDetail({
         typeof deliverable.title === "string"
           ? deliverable.title.trim()
           : "";
+      const quantity = getDeliverableDisplayQuantity(deliverable);
+      const displayTitle = quantity ? `${quantity}× ${title}`.trim() : title;
       const description =
         typeof deliverable.description === "string"
           ? deliverable.description.trim()
@@ -639,7 +666,7 @@ export default function ProductDetail({
 
       items.push({
         key: `${index}-${title || "deliverable"}`,
-        title,
+        title: displayTitle,
         description,
         thumb: thumb || undefined,
         Icon,
@@ -662,6 +689,9 @@ export default function ProductDetail({
       return null;
     }
     const byId = new Map<string, number>();
+    let fallbackCount = 0;
+    const generalTargets = availableVariationIds;
+
     product.deliverables.forEach((entry) => {
       if (!entry) return;
       const scoped = Array.isArray(entry.variationIds)
@@ -672,17 +702,26 @@ export default function ProductDetail({
                 typeof id === "string" && availableVariationIds.includes(id)
             )
         : [];
-      const targetIds = scoped.length > 0 ? scoped : availableVariationIds;
-      if (targetIds.length === 0) {
+      const quantity = getDeliverableCount(entry);
+      if (scoped.length > 0) {
+        scoped.forEach((id) => {
+          byId.set(id, (byId.get(id) || 0) + quantity);
+        });
         return;
       }
-      targetIds.forEach((id) => {
-        byId.set(id, (byId.get(id) || 0) + 1);
+
+      fallbackCount += quantity;
+      if (generalTargets.length === 0) {
+        return;
+      }
+      generalTargets.forEach((id) => {
+        byId.set(id, (byId.get(id) || 0) + quantity);
       });
     });
+
     return {
       byId,
-      fallback: product.deliverables.length,
+      fallback: fallbackCount,
     } as const;
   }, [product.deliverables, availableVariationIds]);
 
@@ -771,9 +810,18 @@ export default function ProductDetail({
   const deliverableHighlights = useMemo(() => {
     if (!Array.isArray(product.deliverables)) return [] as string[];
     return product.deliverables
-      .map((entry) =>
-        typeof entry?.title === "string" ? entry.title.trim() : ""
-      )
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") {
+          return "";
+        }
+        const title =
+          typeof entry.title === "string" ? entry.title.trim() : "";
+        if (!title) {
+          return "";
+        }
+        const quantity = getDeliverableDisplayQuantity(entry);
+        return quantity ? `${quantity}× ${title}`.trim() : title;
+      })
       .filter((title) => title.length > 0)
       .slice(0, 3);
   }, [product.deliverables]);
@@ -867,11 +915,20 @@ export default function ProductDetail({
       rows.push({
         label: "Deliverables",
         values: variationEntries.map((variationEntry) => {
-          const count =
-            deliverablesByVariation.byId.get(variationEntry.id) ??
-            deliverablesByVariation.fallback;
-          return count > 0
-            ? `${count} included`
+          const rawCount = deliverablesByVariation.byId.get(
+            variationEntry.id
+          );
+          const fallbackCount = deliverablesByVariation.fallback;
+          const resolved =
+            typeof rawCount === "number" && Number.isFinite(rawCount)
+              ? rawCount
+              : fallbackCount;
+          const total =
+            typeof resolved === "number" && Number.isFinite(resolved)
+              ? Math.max(0, Math.round(resolved))
+              : 0;
+          return total > 0
+            ? `${total} included`
             : "Confirmed during scoping";
         }),
       });

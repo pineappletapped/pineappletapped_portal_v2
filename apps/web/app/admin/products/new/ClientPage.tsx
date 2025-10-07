@@ -1581,6 +1581,13 @@ export default function NewProductPage() {
         );
       const item: ProductDeliverable = { title: d.title };
       if (d.type) item.type = d.type;
+      if (
+        typeof d.quantity === "number" &&
+        Number.isFinite(d.quantity) &&
+        d.quantity > 0
+      ) {
+        item.quantity = Math.round(d.quantity);
+      }
       const desc = d.description?.trim();
       if (desc) item.description = desc;
       if (thumb) item.thumbnailUrl = thumb;
@@ -3344,6 +3351,37 @@ export default function NewProductPage() {
                   </option>
                 ))}
               </select>
+              <div className="grid gap-1">
+                <label
+                  htmlFor={`deliverable-${i}-quantity`}
+                  className="text-xs font-medium text-gray-600"
+                >
+                  Quantity (optional)
+                </label>
+                <input
+                  id={`deliverable-${i}-quantity`}
+                  type="number"
+                  min={1}
+                  inputMode="numeric"
+                  className="input"
+                  placeholder="Leave blank to treat as a single deliverable"
+                  value={
+                    typeof d.quantity === "number" &&
+                    Number.isFinite(d.quantity) &&
+                    d.quantity > 0
+                      ? String(Math.round(d.quantity))
+                      : ""
+                  }
+                  onChange={(e) => {
+                    const parsed = Number.parseInt(e.target.value, 10);
+                    if (Number.isNaN(parsed) || parsed <= 0) {
+                      updateDeliverable(i, { quantity: undefined });
+                      return;
+                    }
+                    updateDeliverable(i, { quantity: parsed });
+                  }}
+                />
+              </div>
               <textarea
                 className="input"
                 placeholder="Description"
