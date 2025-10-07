@@ -180,6 +180,22 @@ export interface ProductVariation {
   onsiteTimeWindowEnd?: string | null;
 }
 
+export interface ProductStoryboardScene {
+  id: string;
+  title?: string | null;
+  description?: string | null;
+  startSeconds?: number | null;
+  endSeconds?: number | null;
+  imageUrl?: string | null;
+  /**
+   * Optional storage path reference for the generated or uploaded scene artwork so
+   * admin tooling can locate the original asset if it needs to be refreshed.
+   */
+  storagePath?: string | null;
+  /** Optional list of variation IDs this scene applies to. */
+  variationIds?: string[] | null;
+}
+
 export interface ProductVideoLink {
   url: string;
   title?: string;
@@ -314,6 +330,8 @@ export interface Product {
   /** Modifier group IDs enabled for this product. */
   modifierGroups?: string[];
   variations?: ProductVariation[];
+  storyboardEnabled?: boolean | null;
+  storyboard?: ProductStoryboardScene[] | null;
   storyboardImages?: string[];
   /** @deprecated replaced by exampleVideos */
   exampleWorkUrl?: string | null;

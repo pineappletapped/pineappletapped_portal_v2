@@ -31,6 +31,7 @@ import type {
   ProductCrewRoleOverride,
   ProductModifierSelection,
   ProductOrderFormField,
+  ProductStoryboardScene,
 } from "@/lib/products";
 import type { PriceTiers } from "@/lib/pricing";
 import type { Venue } from "@/lib/venues";
@@ -40,6 +41,12 @@ import { generateFormId } from "@/lib/forms";
 import ProductOrderFieldsEditor, {
   OrderFormFieldFormState,
 } from "@/components/admin/products/ProductOrderFieldsEditor";
+import ProductStoryboardEditor, {
+  STORYBOARD_SCENE_COLOURS,
+  StoryboardSceneFormState,
+  formatStoryboardSeconds,
+  parseStoryboardTimecode,
+} from "@/components/admin/products/ProductStoryboardEditor";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -207,6 +214,49 @@ const createCrewRoleInput = (
     unitRate: defaults?.unitRate ?? "",
     includeInBudget: defaults?.includeInBudget ?? true,
   };
+};
+
+const createStoryboardSceneState = (
+  defaults?: Partial<StoryboardSceneFormState>
+): StoryboardSceneFormState => {
+  const id =
+    typeof defaults?.id === "string" && defaults.id.trim().length > 0
+      ? defaults.id
+      : generateFormId();
+  return {
+    id,
+    title: defaults?.title ?? "",
+    description: defaults?.description ?? "",
+    start: defaults?.start ?? "",
+    end: defaults?.end ?? "",
+    variationIds: Array.isArray(defaults?.variationIds)
+      ? defaults.variationIds.filter(
+          (value): value is string => typeof value === "string" && value.trim().length > 0
+        )
+      : [],
+    imageUrl: defaults?.imageUrl ?? null,
+    previewUrl: defaults?.previewUrl ?? null,
+    imageFile: defaults?.imageFile ?? null,
+    imageStoragePath: defaults?.imageStoragePath ?? null,
+    persistedImage: defaults?.persistedImage ?? false,
+    aiStatus: defaults?.aiStatus ?? "idle",
+    aiError: defaults?.aiError ?? null,
+  };
+};
+
+const resolveImageExtension = (file: File): string => {
+  const name = typeof file.name === "string" ? file.name : "";
+  const match = name.match(/\.([a-zA-Z0-9]{2,5})$/);
+  if (match) {
+    const ext = match[1].toLowerCase();
+    if (["jpg", "jpeg", "png", "webp"].includes(ext)) {
+      return ext === "jpeg" ? "jpg" : ext;
+    }
+  }
+  const type = typeof file.type === "string" ? file.type.toLowerCase() : "";
+  if (type.includes("png")) return "png";
+  if (type.includes("webp")) return "webp";
+  return "jpg";
 };
 
 const normaliseNumberString = (value: unknown, fallback: string): string => {
@@ -690,6 +740,7 @@ export default function EditProductPage() {
     | "spec"
     | "pnl"
     | "variations"
+    | "storyboard"
     | "orderFields"
     | "deliverables"
     | "kit"
@@ -707,6 +758,7 @@ export default function EditProductPage() {
   const [priceTier3, setPriceTier3] = useState("");
   const [galleryImages, setGalleryImages] = useState<GalleryImage[]>([]);
   const imageObjectUrlsRef = useRef<string[]>([]);
+  const storyboardPreviewUrlsRef = useRef<string[]>([]);
   const [requirements, setRequirements] = useState("");
   const [operationsInfo, setOperationsInfo] = useState("");
   const [closingWhyItWorks, setClosingWhyItWorks] = useState("");
@@ -717,6 +769,12 @@ export default function EditProductPage() {
   const [orderFormFields, setOrderFormFields] = useState<
     OrderFormFieldFormState[]
   >([]);
+  const [storyboardEnabled, setStoryboardEnabled] = useState(false);
+  const [storyboardScenes, setStoryboardScenes] = useState<
+    StoryboardSceneFormState[]
+  >([]);
+  const [storyboardGeneratingSceneId, setStoryboardGeneratingSceneId] =
+    useState<string | null>(null);
   const [variations, setVariations] = useState<VariationFormState[]>([]);
   const [organiserEnabled, setOrganiserEnabled] = useState(false);
   const [organiserMinimum, setOrganiserMinimum] = useState("");
@@ -1566,6 +1624,81 @@ export default function EditProductPage() {
                 )
               : []
           );
+          const storyboardSource = Array.isArray((p as any).storyboard)
+            ? ((p as any).storyboard as ProductStoryboardScene[])
+            : [];
+          let storyboardInputs = storyboardSource.map((scene) => {
+            const startSeconds =
+              typeof scene?.startSeconds === "number"
+                ? scene.startSeconds
+                : typeof (scene as any)?.start === "string"
+                ? parseStoryboardTimecode((scene as any).start)
+                : null;
+            const endSeconds =
+              typeof scene?.endSeconds === "number"
+                ? scene.endSeconds
+                : typeof (scene as any)?.end === "string"
+                ? parseStoryboardTimecode((scene as any).end)
+                : null;
+            const startLabel = (() => {
+              const formatted = formatStoryboardSeconds(startSeconds);
+              if (formatted) return formatted;
+              return typeof (scene as any)?.start === "string"
+                ? ((scene as any).start as string)
+                : "";
+            })();
+            const endLabel = (() => {
+              const formatted = formatStoryboardSeconds(endSeconds);
+              if (formatted) return formatted;
+              return typeof (scene as any)?.end === "string"
+                ? ((scene as any).end as string)
+                : "";
+            })();
+            return createStoryboardSceneState({
+              id:
+                typeof scene?.id === "string" && scene.id.length > 0
+                  ? scene.id
+                  : undefined,
+              title: typeof scene?.title === "string" ? scene.title : "",
+              description:
+                typeof scene?.description === "string" ? scene.description : "",
+              start: startLabel,
+              end: endLabel,
+              variationIds: Array.isArray(scene?.variationIds)
+                ? scene.variationIds
+                : [],
+              imageUrl:
+                typeof scene?.imageUrl === "string" && scene.imageUrl.trim().length > 0
+                  ? scene.imageUrl.trim()
+                  : null,
+              imageStoragePath:
+                typeof scene?.storagePath === "string"
+                  ? scene.storagePath
+                  : null,
+              persistedImage:
+                typeof scene?.imageUrl === "string" && scene.imageUrl.trim().length > 0,
+            });
+          });
+          if (
+            storyboardInputs.length === 0 &&
+            Array.isArray((p as any).storyboardImages)
+          ) {
+            storyboardInputs = (p as any).storyboardImages
+              .filter((url: unknown): url is string => typeof url === "string")
+              .map((url, index) =>
+                createStoryboardSceneState({
+                  title: `Scene ${index + 1}`,
+                  imageUrl: url.trim().length > 0 ? url.trim() : null,
+                  persistedImage: url.trim().length > 0,
+                })
+              );
+          }
+          setStoryboardScenes(storyboardInputs);
+          setStoryboardEnabled(
+            (p as any).storyboardEnabled === false
+              ? false
+              : storyboardInputs.length > 0
+          );
         }
         const [
           catSnap,
@@ -1715,6 +1848,14 @@ export default function EditProductPage() {
         }
       });
       imageObjectUrlsRef.current = [];
+      storyboardPreviewUrlsRef.current.forEach((url) => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // Ignore revoke failures during cleanup.
+        }
+      });
+      storyboardPreviewUrlsRef.current = [];
     },
     []
   );
@@ -1830,6 +1971,45 @@ export default function EditProductPage() {
       deliverableData.push(item);
     }
 
+    const storyboardUploads: { sceneId: string; file: File }[] = [];
+    const storyboardData: ProductStoryboardScene[] = [];
+    if (storyboardEnabled) {
+      storyboardScenes.forEach((scene) => {
+        const sceneId = scene.id || generateFormId();
+        const title = scene.title.trim();
+        const description = scene.description.trim();
+        const startSeconds = parseStoryboardTimecode(scene.start);
+        const endSeconds = parseStoryboardTimecode(scene.end);
+        const hasContent =
+          title.length > 0 ||
+          description.length > 0 ||
+          typeof startSeconds === "number" ||
+          typeof endSeconds === "number" ||
+          Boolean(scene.imageUrl) ||
+          Boolean(scene.imageFile);
+        if (!hasContent) {
+          return;
+        }
+        const variationIds = Array.isArray(scene.variationIds)
+          ? scene.variationIds.filter(
+              (value): value is string => typeof value === "string" && value.trim().length > 0
+            )
+          : [];
+        const entry: ProductStoryboardScene = { id: sceneId };
+        if (title.length > 0) entry.title = title;
+        if (description.length > 0) entry.description = description;
+        if (typeof startSeconds === "number") entry.startSeconds = startSeconds;
+        if (typeof endSeconds === "number") entry.endSeconds = endSeconds;
+        if (scene.imageUrl) entry.imageUrl = scene.imageUrl;
+        if (scene.imageStoragePath) entry.storagePath = scene.imageStoragePath;
+        if (variationIds.length > 0) entry.variationIds = variationIds;
+        if (scene.imageFile) {
+          storyboardUploads.push({ sceneId, file: scene.imageFile });
+        }
+        storyboardData.push(entry);
+      });
+    }
+
     const orderFieldData: ProductOrderFormField[] = orderFormFields
       .map((field) => {
         const label = field.label.trim();
@@ -1849,6 +2029,23 @@ export default function EditProductPage() {
         return entry;
       })
       .filter((entry): entry is ProductOrderFormField => entry !== null);
+
+    if (storyboardUploads.length > 0) {
+      for (const uploadEntry of storyboardUploads) {
+        const extension = resolveImageExtension(uploadEntry.file);
+        const storagePath = `${PRODUCT_IMAGE_ROOT}/${id}/storyboard-${uploadEntry.sceneId}.${extension}`;
+        const url = await upload(storagePath, uploadEntry.file);
+        const target = storyboardData.find((entry) => entry.id === uploadEntry.sceneId);
+        if (target) {
+          target.imageUrl = url;
+          target.storagePath = storagePath;
+        }
+      }
+    }
+    const storyboardImages = storyboardData
+      .map((entry) => (entry.imageUrl ? entry.imageUrl : null))
+      .filter((url): url is string => typeof url === "string" && url.trim().length > 0);
+    const storyboardEnabledValue = storyboardEnabled && storyboardData.length > 0;
 
     const variationData: ProductVariation[] = variations.map((variation) => {
       const name = variation.name.trim();
@@ -2105,6 +2302,9 @@ export default function EditProductPage() {
       deliverables: deliverableData,
       variations: variationData,
       orderFormFields: orderFieldData,
+      storyboardEnabled: storyboardEnabledValue ? true : false,
+      storyboard: storyboardEnabledValue ? storyboardData : null,
+      storyboardImages: storyboardEnabledValue ? storyboardImages : [],
       exampleVideos: videoData,
       exampleWorkUrl: primaryExampleVideo,
       modifierGroups: enabledGroups,
@@ -2210,6 +2410,197 @@ export default function EditProductPage() {
 
   const addExampleVideo = () => {
     setExampleVideos((prev) => [...prev, createVideoInput()]);
+  };
+
+  const addStoryboardScene = () => {
+    setStoryboardScenes((prev) => [...prev, createStoryboardSceneState()]);
+    setStoryboardEnabled(true);
+  };
+
+  const updateStoryboardScene = (
+    sceneId: string,
+    patch: Partial<StoryboardSceneFormState>
+  ) => {
+    setStoryboardScenes((prev) =>
+      prev.map((scene) => (scene.id === sceneId ? { ...scene, ...patch } : scene))
+    );
+  };
+
+  const removeStoryboardScene = (sceneId: string) => {
+    setStoryboardScenes((prev) => {
+      const target = prev.find((scene) => scene.id === sceneId);
+      if (target?.previewUrl) {
+        try {
+          URL.revokeObjectURL(target.previewUrl);
+        } catch {
+          // Ignore preview cleanup failures when removing scenes.
+        }
+        storyboardPreviewUrlsRef.current = storyboardPreviewUrlsRef.current.filter(
+          (url) => url !== target.previewUrl
+        );
+      }
+      return prev.filter((scene) => scene.id !== sceneId);
+    });
+  };
+
+  const handleStoryboardSceneImage = (sceneId: string, file: File | null) => {
+    setStoryboardScenes((prev) =>
+      prev.map((scene) => {
+        if (scene.id !== sceneId) return scene;
+        if (scene.previewUrl) {
+          try {
+            URL.revokeObjectURL(scene.previewUrl);
+          } catch {
+            // Ignore preview cleanup failures while swapping images.
+          }
+          storyboardPreviewUrlsRef.current = storyboardPreviewUrlsRef.current.filter(
+            (url) => url !== scene.previewUrl
+          );
+        }
+        if (!file) {
+          return {
+            ...scene,
+            imageFile: null,
+            previewUrl: null,
+            imageUrl: null,
+            persistedImage: false,
+            imageStoragePath: null,
+            aiError: null,
+          };
+        }
+        const previewUrl = URL.createObjectURL(file);
+        storyboardPreviewUrlsRef.current.push(previewUrl);
+        return {
+          ...scene,
+          imageFile: file,
+          previewUrl,
+          imageUrl: null,
+          persistedImage: false,
+          imageStoragePath: null,
+          aiError: null,
+        };
+      })
+    );
+  };
+
+  const handleGenerateStoryboardSceneImage = async (sceneId: string) => {
+    const scene = storyboardScenes.find((entry) => entry.id === sceneId);
+    if (!scene) return;
+    const description = scene.description.trim();
+    if (!description) {
+      setStoryboardScenes((prev) =>
+        prev.map((entry) =>
+          entry.id === sceneId
+            ? {
+                ...entry,
+                aiStatus: "error",
+                aiError: "Add a scene description before generating artwork.",
+              }
+            : entry
+        )
+      );
+      return;
+    }
+    setStoryboardScenes((prev) =>
+      prev.map((entry) =>
+        entry.id === sceneId
+          ? { ...entry, aiStatus: "loading", aiError: null }
+          : entry
+      )
+    );
+    setStoryboardGeneratingSceneId(sceneId);
+    try {
+      const startSeconds = parseStoryboardTimecode(scene.start);
+      const endSeconds = parseStoryboardTimecode(scene.end);
+      const variationNames = scene.variationIds
+        .map((variationId) =>
+          variations.find((variation) => variation.id === variationId)?.name?.trim() || null
+        )
+        .filter((value): value is string => Boolean(value && value.length > 0));
+      const deliverableSummaries = deliverables
+        .map((deliverable) => {
+          const title = (deliverable.title || "").trim();
+          if (!title) return null;
+          const qty =
+            typeof deliverable.quantity === "number" && Number.isFinite(deliverable.quantity)
+              ? Math.max(1, Math.round(deliverable.quantity))
+              : 1;
+          return `${qty > 1 ? `${qty}× ` : ""}${title}`;
+        })
+        .filter((value): value is string => Boolean(value));
+      const sceneIndex = storyboardScenes.findIndex((entry) => entry.id === sceneId);
+      const accentColor =
+        STORYBOARD_SCENE_COLOURS[
+          (sceneIndex >= 0 ? sceneIndex : 0) % STORYBOARD_SCENE_COLOURS.length
+        ];
+      const fn = httpsCallable(functions, "admin_generateStoryboardSceneImage");
+      const response = await fn({
+        productId: id,
+        sceneId,
+        sceneTitle: scene.title,
+        sceneDescription: description,
+        productName: name,
+        productTagline: tagline,
+        productDescription: description,
+        operationsInfo,
+        startSeconds,
+        endSeconds,
+        variationNames,
+        deliverables: deliverableSummaries,
+        accentColor,
+      });
+      const payload = (response?.data ?? {}) as {
+        imageUrl?: string;
+        storagePath?: string;
+        promptSummary?: string;
+      };
+      if (!payload.imageUrl) {
+        throw new Error("Image generation failed");
+      }
+      setStoryboardScenes((prev) =>
+        prev.map((entry) => {
+          if (entry.id !== sceneId) return entry;
+          if (entry.previewUrl) {
+            try {
+              URL.revokeObjectURL(entry.previewUrl);
+            } catch {
+              // Ignore preview cleanup failures after generation.
+            }
+            storyboardPreviewUrlsRef.current = storyboardPreviewUrlsRef.current.filter(
+              (url) => url !== entry.previewUrl
+            );
+          }
+          return {
+            ...entry,
+            imageUrl: payload.imageUrl || null,
+            imageStoragePath: payload.storagePath ?? null,
+            previewUrl: null,
+            imageFile: null,
+            persistedImage: true,
+            aiStatus: "idle",
+            aiError: null,
+          };
+        })
+      );
+    } catch (error) {
+      console.error("Failed to generate storyboard scene image", error);
+      setStoryboardScenes((prev) =>
+        prev.map((entry) =>
+          entry.id === sceneId
+            ? {
+                ...entry,
+                aiStatus: "error",
+                aiError:
+                  error instanceof Error
+                    ? error.message
+                    : "Unable to generate artwork. Please try again.",
+              }
+            : entry
+        )
+      );
+    } finally {
+      setStoryboardGeneratingSceneId(null);
+    }
   };
 
   const updateExampleVideo = (
@@ -2641,6 +3032,7 @@ export default function EditProductPage() {
       { key: "spec", label: "Product Spec" },
       { key: "pnl", label: "P&L" },
       { key: "variations", label: "Variations" },
+      { key: "storyboard", label: "Storyboard" },
       { key: "deliverables", label: "Deliverables" },
       { key: "orderFields", label: "Custom form fields" },
       { key: "kit", label: "Kit" },
@@ -4298,6 +4690,24 @@ export default function EditProductPage() {
             Add variation
           </button>
         </div>
+      )}
+
+      {tab === "storyboard" && (
+        <ProductStoryboardEditor
+          enabled={storyboardEnabled}
+          onToggleEnabled={(value) => setStoryboardEnabled(value)}
+          scenes={storyboardScenes}
+          onSceneChange={updateStoryboardScene}
+          onSceneImageSelect={handleStoryboardSceneImage}
+          onAddScene={addStoryboardScene}
+          onRemoveScene={removeStoryboardScene}
+          onGenerateSceneImage={handleGenerateStoryboardSceneImage}
+          generatingSceneId={storyboardGeneratingSceneId}
+          variationOptions={variations.map((variation) => ({
+            id: variation.id,
+            name: variation.name || variation.id,
+          }))}
+        />
       )}
 
       {tab === "orderFields" && (

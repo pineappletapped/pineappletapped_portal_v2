@@ -985,6 +985,7 @@ export default function ProductDetail({
     organiserContext,
     organiserUpsellIds,
     variationEntries,
+    product,
   ]);
 
   const hasVariations = availableVariationIds.length > 0;
