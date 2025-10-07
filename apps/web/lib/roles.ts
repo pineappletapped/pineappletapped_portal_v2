@@ -5,6 +5,7 @@ export type RoleKey =
   | 'projects'
   | 'sales'
   | 'marketing'
+  | 'organiser'
   | 'affiliate';
 
 export type UserRoles = Partial<Record<RoleKey, boolean>>;
@@ -59,6 +60,12 @@ export const ROLE_DEFINITIONS: RoleDefinition[] = [
     description: 'Control website content, email schedules, analytics, and brand assets.',
   },
   {
+    key: 'organiser',
+    label: 'Event organiser',
+    description:
+      'Unlock the organiser portal to manage exhibitor packages, booking slots, and partner revenue.',
+  },
+  {
     key: 'affiliate',
     label: 'Affiliate',
     description: 'Access the affiliate earnings portal and referral performance dashboards.',
@@ -74,6 +81,17 @@ export const ROLE_LABELS: Record<RoleKey, string> = ROLE_DEFINITIONS.reduce(
 );
 
 export const ROLE_KEYS = ROLE_DEFINITIONS.map((role) => role.key);
+
+export const ADMIN_ROLE_KEYS: RoleKey[] = [
+  'admin',
+  'operations',
+  'finance',
+  'projects',
+  'sales',
+  'marketing',
+];
+
+export const PORTAL_ROLE_KEYS: RoleKey[] = ['affiliate', 'organiser'];
 
 export function isGodAdmin(identity?: IdentityLike | null): boolean {
   if (!identity) {
@@ -170,5 +188,6 @@ export function getDefaultAdminRoute(roles: UserRoles | null | undefined): strin
   if (roles.sales) return '/admin/proposals';
   if (roles.marketing) return '/admin/analytics';
   if (roles.affiliate) return '/affiliate';
+  if (roles.organiser) return '/organiser';
   return '/admin';
 }

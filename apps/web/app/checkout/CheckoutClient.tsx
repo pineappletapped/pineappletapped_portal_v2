@@ -58,6 +58,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const [postalCode, setPostalCode] = useState("");
   const [projectName, setProjectName] = useState("");
   const [voucher, setVoucher] = useState("");
+  const [allowLocationOverride, setAllowLocationOverride] = useState(false);
   const {
     state: leadSourceState,
     setState: setLeadSourceState,
@@ -76,7 +77,66 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const lastIntentPayload = useRef<string | null>(null);
   const loginErrorRef = useRef<HTMLDivElement | null>(null);
   const authEmail = currentUser?.email || "";
+  const venueLocked = useMemo(
+    () =>
+      items.length > 0 &&
+      items.every(
+        (item) =>
+          item.coverage?.matchType === "venue" &&
+          typeof item.location === "string" &&
+          item.location.trim().length > 0
+      ),
+    [items]
+  );
+  const lockedVenueLocation = useMemo(() => {
+    const preset = items.find(
+      (item) => typeof item.location === "string" && item.location.trim().length > 0
+    );
+    return preset ? preset.location!.trim() : "";
+  }, [items]);
+  useEffect(() => {
+    if (!venueLocked) {
+      return;
+    }
+    if (!location.trim().length && lockedVenueLocation) {
+      setLocation(lockedVenueLocation);
+    }
+  }, [venueLocked, lockedVenueLocation, location]);
+  useEffect(() => {
+    if (!venueLocked) {
+      setAllowLocationOverride(false);
+    }
+  }, [venueLocked]);
+  const shouldShowLocationInput = !venueLocked || allowLocationOverride;
   const orderInput = useMemo(() => {
+    type OrganiserLineRole = "organiser" | "exhibitor";
+    type OrganiserAccumulator = {
+      key: string;
+      organiserId: string | null;
+      programEnabled: boolean;
+      programProductIds: Set<string>;
+      commissionRate: number | null;
+      minimumGuarantee: number | null;
+      exhibitorProductId: string | null;
+      exhibitorPrice: number | null;
+      upsellVariationIds: Set<string>;
+      sources: Set<string>;
+      quantity: number;
+      grossSubtotal: number;
+      exhibitorSubtotal: number;
+      organiserSubtotal: number;
+      items: {
+        productId: string;
+        variation: string | null;
+        quantity: number;
+        unitPrice: number;
+        lineTotal: number;
+        role: OrganiserLineRole;
+      }[];
+    };
+
+    const organiserMap = new Map<string, OrganiserAccumulator>();
+
     const itemPayload = items.map((item) => {
       const warnings = Array.isArray(item.kitWarnings)
         ? item.kitWarnings
@@ -95,6 +155,112 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             priceAdjustment: item.campaignBooking.priceAdjustment ?? 0,
           }
         : null;
+      const organiser = item.organiser
+        ? {
+            organiserId: item.organiser.organiserId ?? null,
+            minimumGuarantee: item.organiser.minimumGuarantee ?? null,
+            exhibitorProductId: item.organiser.exhibitorProductId ?? null,
+            exhibitorPrice: item.organiser.exhibitorPrice ?? null,
+            upsellVariationIds: item.organiser.upsellVariationIds ?? [],
+            commissionRate: item.organiser.commissionRate ?? null,
+            programEnabled: item.organiser.programEnabled === true,
+            programKey:
+              typeof item.organiser.programKey === "string" &&
+              item.organiser.programKey.trim().length > 0
+                ? item.organiser.programKey.trim()
+                : item.organiser.organiserId
+                  ? item.organiser.organiserId
+                  : `program:${item.id}`,
+            programProductId:
+              typeof item.organiser.programProductId === "string" &&
+              item.organiser.programProductId.trim().length > 0
+                ? item.organiser.programProductId.trim()
+                : item.id,
+            source: item.organiser.source ?? null,
+            lineRole:
+              item.organiser.exhibitorProductId &&
+              item.organiser.exhibitorProductId === item.id
+                ? ("exhibitor" as OrganiserLineRole)
+                : ("organiser" as OrganiserLineRole),
+          }
+        : null;
+
+      if (organiser) {
+        const quantity = Math.max(1, item.quantity);
+        const lineTotal = item.price * quantity;
+        const organiserKey = organiser.programKey;
+        const existing = organiserMap.get(organiserKey);
+        const accumulator: OrganiserAccumulator = existing ?? {
+          key: organiserKey,
+          organiserId: organiser.organiserId ?? null,
+          programEnabled: organiser.programEnabled,
+          programProductIds: new Set<string>(),
+          commissionRate: organiser.commissionRate ?? null,
+          minimumGuarantee: organiser.minimumGuarantee ?? null,
+          exhibitorProductId: organiser.exhibitorProductId ?? null,
+          exhibitorPrice: organiser.exhibitorPrice ?? null,
+          upsellVariationIds: new Set<string>(),
+          sources: new Set<string>(),
+          quantity: 0,
+          grossSubtotal: 0,
+          exhibitorSubtotal: 0,
+          organiserSubtotal: 0,
+          items: [],
+        };
+
+        if (organiser.organiserId && !accumulator.organiserId) {
+          accumulator.organiserId = organiser.organiserId;
+        }
+        if (organiser.minimumGuarantee != null) {
+          accumulator.minimumGuarantee =
+            accumulator.minimumGuarantee == null
+              ? organiser.minimumGuarantee
+              : Math.max(accumulator.minimumGuarantee, organiser.minimumGuarantee);
+        }
+        if (organiser.exhibitorProductId) {
+          accumulator.exhibitorProductId = organiser.exhibitorProductId;
+        }
+        if (organiser.exhibitorPrice != null) {
+          accumulator.exhibitorPrice = organiser.exhibitorPrice;
+        }
+        if (organiser.commissionRate != null) {
+          accumulator.commissionRate = organiser.commissionRate;
+        }
+        if (organiser.programEnabled) {
+          accumulator.programEnabled = true;
+        }
+        if (organiser.programProductId) {
+          accumulator.programProductIds.add(organiser.programProductId);
+        } else {
+          accumulator.programProductIds.add(item.id);
+        }
+        organiser.upsellVariationIds.forEach((id) => {
+          if (typeof id === "string" && id.trim().length > 0) {
+            accumulator.upsellVariationIds.add(id.trim());
+          }
+        });
+        if (organiser.source) {
+          accumulator.sources.add(organiser.source);
+        }
+
+        accumulator.quantity += quantity;
+        accumulator.grossSubtotal += lineTotal;
+        if (organiser.lineRole === "exhibitor") {
+          accumulator.exhibitorSubtotal += lineTotal;
+        } else {
+          accumulator.organiserSubtotal += lineTotal;
+        }
+        accumulator.items.push({
+          productId: item.id,
+          variation: item.variation ?? null,
+          quantity,
+          unitPrice: item.price,
+          lineTotal,
+          role: organiser.lineRole,
+        });
+
+        organiserMap.set(organiserKey, accumulator);
+      }
       return {
         id: item.id,
         quantity: item.quantity,
@@ -110,8 +276,27 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         timeSlot: item.timeSlot ?? null,
         coverage: item.coverage ?? null,
         campaignBooking,
+        organiser,
       };
     });
+    const organiserSummary = Array.from(organiserMap.values()).map((entry) => ({
+      organiserKey: entry.key,
+      organiserId: entry.organiserId,
+      programEnabled: entry.programEnabled,
+      programProductIds: Array.from(entry.programProductIds),
+      commissionRate: entry.commissionRate,
+      minimumGuarantee: entry.minimumGuarantee,
+      exhibitorProductId: entry.exhibitorProductId,
+      exhibitorPrice: entry.exhibitorPrice,
+      upsellVariationIds: Array.from(entry.upsellVariationIds),
+      sources: Array.from(entry.sources),
+      quantity: entry.quantity,
+      grossSubtotal: entry.grossSubtotal,
+      exhibitorSubtotal: entry.exhibitorSubtotal,
+      organiserSubtotal: entry.organiserSubtotal,
+      items: entry.items,
+    }));
+
     const kitItemsPayload = items.flatMap((item) => item.kitItems || []);
     const kitReservationStatus = items.some((item) => item.kitStatus === "pending")
       ? "pending"
@@ -141,6 +326,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       projectName: projectName || null,
       voucher: voucher || null,
       leadSource: leadSourceValue,
+      organisers: organiserSummary,
     };
   }, [
     items,
@@ -178,6 +364,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           timeSlot: item.timeSlot ?? null,
           exhibition: item.exhibition ?? null,
           campaignBooking: item.campaignBooking,
+          organiser: item.organiser,
         })),
         kitItems: orderInput.kitItems.map((kit) => ({
           id: kit.id,
@@ -188,6 +375,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         })),
         kitReservationStatus: orderInput.kitReservationStatus,
         kitReservationWarnings: orderInput.kitReservationWarnings,
+        organisers: orderInput.organisers,
       }),
     [orderInput]
   );
@@ -540,12 +728,28 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             value={company}
             onChange={(e) => setCompany(e.target.value)}
           />
-          <input
-            className="input input-bordered w-full"
-            placeholder="Shooting Location"
-            value={location}
-            onChange={(e) => setLocation(e.target.value)}
-          />
+          {venueLocked && !allowLocationOverride ? (
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+              <p className="font-medium text-slate-900">
+                Filming at {lockedVenueLocation || "the booked venue"}
+              </p>
+              <button
+                type="button"
+                className="mt-2 text-xs font-semibold text-orange"
+                onClick={() => setAllowLocationOverride(true)}
+              >
+                Use a different location
+              </button>
+            </div>
+          ) : null}
+          {shouldShowLocationInput && (
+            <input
+              className="input input-bordered w-full"
+              placeholder="Shooting Location"
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+            />
+          )}
           <input
             className="input input-bordered w-full"
             placeholder="Postcode"

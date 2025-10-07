@@ -98,6 +98,8 @@ export interface ProductDeliverable {
   description?: string;
   /** Optional thumbnail image for visual deliverable previews. */
   thumbnailUrl?: string;
+  /** Optional runtime label displayed alongside the deliverable title. */
+  runtimeLabel?: string | null;
   /** If provided, limits the deliverable to the matching variation IDs. */
   variationIds?: string[];
 }
@@ -147,11 +149,30 @@ export interface ProductVariation {
   features?: string[];
   budgetOverrides?: ProductBudgetOverride;
   crewOverrides?: ProductCrewRoleOverride[];
+  /** Optional turnaround label specific to the variation. */
+  turnaround?: string | null;
 }
 
 export interface ProductVideoLink {
   url: string;
   title?: string;
+}
+
+export interface ProductOrganiserProgram {
+  /** Indicates whether the organiser workflow is enabled for this product. */
+  enabled?: boolean | null;
+  /** Primary organiser account responsible for this package. */
+  organiserId?: string | null;
+  /** Minimum guarantee collected upfront from the organiser. */
+  minimumGuarantee?: number | null;
+  /** Hidden exhibitor-facing product ID linked to this organiser. */
+  exhibitorProductId?: string | null;
+  /** Discounted partner price shown to exhibitors routed via the organiser. */
+  exhibitorPrice?: number | null;
+  /** Variation identifiers that unlock when an organiser partner link is used. */
+  upsellVariationIds?: string[] | null;
+  /** Optional commission percentage the organiser earns on exhibitor sales. */
+  commissionRate?: number | null;
 }
 
 export interface ProductSpec {
@@ -161,6 +182,24 @@ export interface ProductSpec {
   editing?: string;
   delivery?: string;
   notes?: string;
+}
+
+export interface ProductExampleDaySegment {
+  title: string;
+  startTime?: string | null;
+  endTime?: string | null;
+  deliverableWindow?: string | null;
+  notes?: string | null;
+}
+
+export interface ProductVenueCoverage {
+  franchiseId?: string | null;
+  territoryId?: string | null;
+  territoryLabel?: string | null;
+  label?: string | null;
+  priceTier?: number | null;
+  postalCode?: string | null;
+  hqFallback?: boolean | null;
 }
 
 export interface ProductCampaignBookingDetails {
@@ -291,6 +330,16 @@ export interface Product {
   budget?: ProductBudget;
   productSpec?: ProductSpec;
   crewRoles?: ProductCrewRole[];
+  /** Optional structured example of a filming day. */
+  exampleDaySchedule?: ProductExampleDaySegment[];
+  /** Suggested audiences that benefit most from this product. */
+  idealFor?: string[];
+  /** Optional closing statement displayed above the CTA. */
+  closingWhyItWorks?: string | null;
+  /** Coverage assignment to use when the product is tied to a specific venue. */
+  venueCoverage?: ProductVenueCoverage | null;
+  /** Optional organiser partner configuration for exhibitor programmes. */
+  organiserProgram?: ProductOrganiserProgram | null;
 }
 
 export interface ProductOnsiteTiming {

@@ -19,6 +19,7 @@ import {
 import PortalHero from "@/components/PortalHero";
 import { formatDateTime } from "@/lib/datetime";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
+import { buildAppUrl } from "@/lib/origin";
 import { useRoleGate } from "@/hooks/useRoleGate";
 
 interface HqAccount {
@@ -278,11 +279,14 @@ export default function SocialManagerClientPage() {
         setAccountError("Unsupported platform selected.");
         return;
       }
-      const origin = window.location.origin;
-      const redirectUrl = new URL("/admin/social-manager", origin);
-      redirectUrl.searchParams.set("tab", "accounts");
+      const redirectUrl = buildAppUrl("/admin/social-manager", {
+        allowLocalhost: true,
+        params: { tab: "accounts" },
+      });
 
-      const authUrl = new URL(`/api/social-accounts/${platformKey}`, origin);
+      const authUrl = buildAppUrl(`/api/social-accounts/${platformKey}`, {
+        allowLocalhost: true,
+      });
       const organisationName =
         account?.organisationName ??
         (accountForm.organisationName.trim() || "Pineapple Tapped HQ");
@@ -375,10 +379,10 @@ export default function SocialManagerClientPage() {
   return (
     <div className="grid gap-6">
       <PortalHero
+        eyebrow="Admin portal"
         title="HQ Social Manager"
-        subtitle="Link Pineapple's owned channels, monitor token health, and refresh permissions before scheduled campaigns."
+        description="Link Pineapple's owned channels, monitor token health, and refresh permissions before scheduled campaigns."
         metrics={heroMetrics}
-        actions={[]}
       />
 
       <section className="grid gap-4 rounded border bg-white p-6 shadow-sm">

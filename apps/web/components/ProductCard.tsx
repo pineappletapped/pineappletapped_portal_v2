@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import {
@@ -22,18 +22,93 @@ import {
 import AddToCartWizard from "./AddToCartWizard";
 import ProductQuoteRequestDialog from "./ProductQuoteRequestDialog";
 import ListingPriceNote from "./ListingPriceNote";
+import {
+  normaliseOrganiserId,
+  normaliseOrganiserProgram,
+  type OrganiserAccessContext,
+} from "@/lib/organisers";
 
 export default function ProductCard({ product }: { product: Product }) {
   const [selectedVariation, setSelectedVariation] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
   const [quoteOpen, setQuoteOpen] = useState(false);
-  const variations = product.variations ?? [];
+  const [organiserQuery, setOrganiserQuery] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("organiser") ?? params.get("organiserId");
+    setOrganiserQuery(token);
+  }, []);
+  const organiserProgram = useMemo(
+    () => normaliseOrganiserProgram(product.organiserProgram ?? null),
+    [product.organiserProgram]
+  );
+  const organiserQueryValue = useMemo(
+    () => normaliseOrganiserId(organiserQuery),
+    [organiserQuery]
+  );
+  const organiserContext = useMemo<OrganiserAccessContext | null>(() => {
+    if (!organiserProgram) {
+      return null;
+    }
+    const active = Boolean(
+      organiserQueryValue && organiserQueryValue === organiserProgram.organiserId
+    );
+    return {
+      program: organiserProgram,
+      active,
+      source: "query",
+      token: organiserQueryValue ?? null,
+    } satisfies OrganiserAccessContext;
+  }, [organiserProgram, organiserQueryValue]);
+  const organiserActive = organiserContext?.active ?? false;
+  const variations = useMemo(
+    () => (Array.isArray(product.variations) ? product.variations : []),
+    [product.variations]
+  );
   const requiresVariation = variations.length > 0;
   const isQuoteOnly = (product.salesMode ?? "ecommerce") === "quote";
+  const computePriceForSelection = useCallback(
+    (variationId: string | null) => {
+      const baseProductPrice =
+        typeof product.price === "number" && Number.isFinite(product.price)
+          ? product.price
+          : 0;
+      const selectedVariation = variationId
+        ? variations.find((variation) => variation?.id === variationId) ?? null
+        : null;
+      const variationPrice =
+        typeof selectedVariation?.price === "number" &&
+        Number.isFinite(selectedVariation.price)
+          ? selectedVariation.price
+          : null;
+      if (organiserActive && organiserContext) {
+        const exhibitorBase =
+          typeof organiserContext.program.exhibitorPrice === "number" &&
+          Number.isFinite(organiserContext.program.exhibitorPrice)
+            ? organiserContext.program.exhibitorPrice
+            : baseProductPrice;
+        const delta = (variationPrice ?? baseProductPrice) - baseProductPrice;
+        const adjusted = exhibitorBase + delta;
+        return Math.max(0, Number.isFinite(adjusted) ? adjusted : exhibitorBase);
+      }
+      if (variationPrice != null) {
+        return variationPrice;
+      }
+      return baseProductPrice;
+    },
+    [organiserActive, organiserContext, product.price, variations]
+  );
   const activeVariation = requiresVariation
     ? variations.find((variation) => variation.id === selectedVariation)
     : null;
-  const activePrice = activeVariation?.price;
+  const activePrice = activeVariation
+    ? computePriceForSelection(activeVariation.id ?? null)
+    : organiserActive
+      ? computePriceForSelection(null)
+      : undefined;
   const priceDetails = useMemo(
     () =>
       getListingPriceLabel(product, {
@@ -53,7 +128,9 @@ export default function ProductCard({ product }: { product: Product }) {
     [product]
   );
   const priceHeadline = priceDetails?.headline ?? "Pricing on request";
-  const basePrice = activeVariation?.price ?? product.price;
+  const basePrice = computePriceForSelection(
+    activeVariation ? activeVariation.id ?? null : null
+  );
   const coverImage =
     product.imageUrls?.find(
       (url) => typeof url === "string" && url.trim().length > 0
@@ -217,6 +294,7 @@ export default function ProductCard({ product }: { product: Product }) {
           product={product}
           variationId={selectedVariation || undefined}
           basePrice={basePrice}
+          organiserContext={organiserContext ?? undefined}
           onClose={() => setWizardOpen(false)}
         />
       )}

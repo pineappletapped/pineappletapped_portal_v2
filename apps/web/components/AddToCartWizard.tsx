@@ -16,6 +16,13 @@ import { useCart } from "@/lib/cart";
 import { db, functions } from "@/lib/firebase";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
+import {
+  isOrganiserProgramEnabled,
+  normaliseOrganiserId,
+  normaliseOrganiserProgram,
+  type OrganiserAccessContext,
+} from "@/lib/organisers";
+import clsx from "clsx";
 import ProductDatePicker, {
   type ProductAvailabilityScope,
   type ProductAvailabilityStatus,
@@ -46,9 +53,20 @@ interface Props {
   variationId?: string;
   basePrice: number;
   onClose: () => void;
+  organiserContext?: OrganiserAccessContext;
 }
 
 const DRONE_STANDARD_ID = "drone_compliance";
+const parseOptionalNumber = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
 
 const GBP = new Intl.NumberFormat("en-GB", {
   style: "currency",
@@ -92,7 +110,7 @@ interface CampaignSlotRecord {
   held: number;
 }
 
-type TerritoryMatchType = "exact" | "prefix" | "superset" | "radius";
+type TerritoryMatchType = "exact" | "prefix" | "superset" | "radius" | "venue";
 
 interface TerritoryMatch {
   territoryId: string;
@@ -506,6 +524,7 @@ export default function AddToCartWizard({
   product,
   variationId,
   basePrice,
+  organiserContext,
   onClose,
 }: Props) {
   if ((product.salesMode ?? "ecommerce") === "quote") {
@@ -760,6 +779,52 @@ export default function AddToCartWizard({
   const [conflicts, setConflicts] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [liveMessage, setLiveMessage] = useState("Add this product to your cart");
+  const [organiserQueryToken, setOrganiserQueryToken] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("organiser") ?? params.get("organiserId");
+    setOrganiserQueryToken(token);
+  }, []);
+  const normalisedOrganiserProgram = useMemo(
+    () => normaliseOrganiserProgram(product.organiserProgram ?? null),
+    [product.organiserProgram]
+  );
+  const organiserProgramEnabled = useMemo(
+    () => isOrganiserProgramEnabled(product.organiserProgram ?? null),
+    [product.organiserProgram]
+  );
+  const fallbackOrganiserProgramKey = useMemo(() => {
+    return product?.id ? `program:${product.id}` : "program";
+  }, [product?.id]);
+  const derivedOrganiserId = useMemo(
+    () => normaliseOrganiserId(organiserQueryToken),
+    [organiserQueryToken]
+  );
+  const organiserAccess = useMemo<OrganiserAccessContext | null>(() => {
+    if (organiserContext) {
+      return organiserContext;
+    }
+    if (!normalisedOrganiserProgram) {
+      return null;
+    }
+    const active = Boolean(
+      derivedOrganiserId && derivedOrganiserId === normalisedOrganiserProgram.organiserId
+    );
+    return {
+      program: normalisedOrganiserProgram,
+      active,
+      source: "query",
+      token: derivedOrganiserId ?? null,
+    } satisfies OrganiserAccessContext;
+  }, [
+    derivedOrganiserId,
+    normalisedOrganiserProgram,
+    organiserContext,
+  ]);
+  const organiserActive = organiserAccess?.active ?? false;
   const [locationInput, setLocationInput] = useState("");
   const [postcodeInput, setPostcodeInput] = useState("");
   const [coverage, setCoverage] = useState<CoverageAssignment | null>(null);
@@ -769,6 +834,12 @@ export default function AddToCartWizard({
   const [campaignSlotStatus, setCampaignSlotStatus] =
     useState<CampaignSlotStatus>("idle");
   const [campaignSlotError, setCampaignSlotError] = useState<string | null>(null);
+  const [overrideLocation, setOverrideLocation] = useState(false);
+  useEffect(() => {
+    if (organiserActive) {
+      setOverrideLocation(false);
+    }
+  }, [organiserActive]);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const [availabilityOverrides, setAvailabilityOverrides] = useState<
     Record<string, ProductAvailabilityStatus>
@@ -777,10 +848,76 @@ export default function AddToCartWizard({
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const territoriesRef = useRef<TerritoryRecord[] | null>(null);
   const franchiseMapRef = useRef<Map<string, FranchiseRecord> | null>(null);
+  const hasPresetVenue = Boolean(
+    (product.venueId && product.venueId.trim().length > 0) ||
+      product.venueCoverage ||
+      (product.venue && product.venue.trim().length > 0)
+  );
+  const venueCoveragePreset = useMemo<CoverageAssignment | null>(() => {
+    if (!hasPresetVenue) {
+      return null;
+    }
+    const config = product.venueCoverage ?? null;
+    const label =
+      (config?.label && config.label.trim().length > 0
+        ? config.label.trim()
+        : product.venue && product.venue.trim().length > 0
+          ? product.venue.trim()
+          : "Venue production") || "Venue production";
+    const tier = normalisePriceTierLevel(config?.priceTier ?? 1);
+    const franchiseId = config?.franchiseId?.trim()?.length ? config.franchiseId!.trim() : null;
+    const territoryId = config?.territoryId?.trim()?.length ? config.territoryId!.trim() : null;
+    const territoryLabel =
+      config?.territoryLabel && config.territoryLabel.trim().length > 0
+        ? config.territoryLabel.trim()
+        : null;
+    const postalCode =
+      config?.postalCode && config.postalCode.trim().length > 0
+        ? config.postalCode.trim().toUpperCase()
+        : null;
+    const type: CoverageAssignment["type"] = franchiseId ? "franchise" : "hq";
+    const matchType: CoverageAssignment["matchType"] = franchiseId ? "venue" : "hq";
+    return {
+      type,
+      franchiseId,
+      territoryId,
+      territoryLabel,
+      priceTier: tier,
+      hqFallback: config?.hqFallback ?? !franchiseId,
+      label,
+      postalCode,
+      matchType,
+    } satisfies CoverageAssignment;
+  }, [hasPresetVenue, product.venueCoverage, product.venue]);
   const isCampaignProduct = Boolean(
     product.campaignBooking?.projectId && product.campaignBooking?.bookingId
   );
-  const priceTier: PriceTierLevel = coverage?.priceTier ?? 1;
+  useEffect(() => {
+    if (!hasPresetVenue) {
+      return;
+    }
+    if (overrideLocation) {
+      setCoverage(null);
+      setCoverageStatus("idle");
+      setCoverageError(null);
+      setLiveMessage("Enter the filming location to continue");
+      return;
+    }
+    setCoverage(venueCoveragePreset);
+    setCoverageStatus(venueCoveragePreset ? "success" : "idle");
+    setCoverageError(null);
+    setPostcodeInput(venueCoveragePreset?.postalCode ?? "");
+    if (venueCoveragePreset?.label) {
+      setLocationInput(venueCoveragePreset.label);
+    } else if (product.venue && product.venue.trim().length > 0) {
+      setLocationInput(product.venue.trim());
+    } else {
+      setLocationInput("");
+    }
+  }, [hasPresetVenue, overrideLocation, product.venue, venueCoveragePreset]);
+  const priceTier: PriceTierLevel = organiserActive
+    ? 1
+    : coverage?.priceTier ?? 1;
   const cartSlotHolds = useMemo(() => {
     if (!isCampaignProduct || !product.campaignBooking) {
       return new Map<string, number>();
@@ -966,14 +1103,17 @@ export default function AddToCartWizard({
     load();
   }, [product]);
 
-  const totalSteps = groups.length + 2;
-  const locationStep = step === 0;
-  const modifierIndex = step - 1;
+  const hasLocationStep = !hasPresetVenue || overrideLocation;
+  const totalSteps = groups.length + (hasLocationStep ? 2 : 1);
+  const locationStep = hasLocationStep && step === 0;
+  const modifierIndex = step - (hasLocationStep ? 1 : 0);
   const currentGroup =
     modifierIndex >= 0 && modifierIndex < groups.length ? groups[modifierIndex] : null;
   const dateStep = step === totalSteps - 1;
   const stepLabel = locationStep
-    ? "Confirm the filming location"
+    ? overrideLocation && hasPresetVenue
+      ? "Enter the alternate filming location"
+      : "Confirm the filming location"
     : currentGroup
       ? `Choose ${currentGroup.multiple ? "one or more" : "an"} option for ${currentGroup.name}`
       : isCampaignProduct
@@ -981,10 +1121,17 @@ export default function AddToCartWizard({
         : "Confirm the production date";
 
   useEffect(() => {
+    setStep(0);
+  }, [hasLocationStep]);
+
+  useEffect(() => {
     setLiveMessage(`Step ${step + 1} of ${totalSteps}: ${stepLabel}`);
   }, [step, totalSteps, stepLabel]);
 
   useEffect(() => {
+    if (!hasLocationStep) {
+      return;
+    }
     setCoverage(null);
     setCoverageStatus("idle");
     setCoverageError(null);
@@ -993,7 +1140,7 @@ export default function AddToCartWizard({
     setCampaignSlotError(null);
     setSelectedSlotId(null);
     setAvailabilityOverrides({});
-  }, [locationInput, postcodeInput]);
+  }, [hasLocationStep, locationInput, postcodeInput]);
 
   const loadTerritories = useCallback(async (): Promise<TerritoryRecord[]> => {
     if (territoriesRef.current) {
@@ -1519,6 +1666,9 @@ export default function AddToCartWizard({
               franchiseId: coverage.franchiseId,
               territoryId: coverage.territoryId,
               label: coverage.label,
+              territoryLabel: coverage.territoryLabel,
+              postalCode: coverage.postalCode,
+              matchType: coverage.matchType,
             }
           : null,
       });
@@ -1649,6 +1799,10 @@ export default function AddToCartWizard({
           territoryId: coverage.territoryId,
           priceTier,
           hqFallback: coverage.hqFallback,
+          territoryLabel: coverage.territoryLabel ?? null,
+          label: coverage.label ?? null,
+          postalCode: coverage.postalCode ?? null,
+          matchType: coverage.matchType ?? null,
         },
         campaignBooking: isCampaignProduct && slotSelection && product.campaignBooking
           ? {
@@ -1662,6 +1816,56 @@ export default function AddToCartWizard({
               priceAdjustment: slotSelection.priceAdjustment,
             }
           : null,
+        organiser: (() => {
+          if (organiserAccess && organiserAccess.active) {
+            return {
+              organiserId: organiserAccess.program.organiserId,
+              minimumGuarantee:
+                organiserAccess.program.minimumGuarantee ?? null,
+              exhibitorProductId:
+                organiserAccess.program.exhibitorProductId ?? null,
+              exhibitorPrice:
+                organiserAccess.program.exhibitorPrice ?? basePrice,
+              upsellVariationIds:
+                organiserAccess.program.upsellVariationIds ?? [],
+              commissionRate: organiserAccess.program.commissionRate ?? null,
+              source: organiserAccess.source ?? "query",
+              programEnabled: true,
+              programKey: organiserAccess.program.organiserId,
+              programProductId: product?.id ?? null,
+            };
+          }
+          if (organiserProgramEnabled) {
+            const rawProgram = product.organiserProgram ?? null;
+            const minimum = parseOptionalNumber(rawProgram?.minimumGuarantee);
+            const exhibitorPriceValue =
+              parseOptionalNumber(rawProgram?.exhibitorPrice) ?? null;
+            const commission = parseOptionalNumber(rawProgram?.commissionRate);
+            const upsells = Array.isArray(rawProgram?.upsellVariationIds)
+              ? rawProgram.upsellVariationIds.filter(
+                  (value: unknown): value is string =>
+                    typeof value === "string" && value.trim().length > 0
+                )
+              : [];
+            const exhibitorProductId =
+              typeof rawProgram?.exhibitorProductId === "string"
+                ? rawProgram.exhibitorProductId
+                : null;
+            return {
+              organiserId: null,
+              minimumGuarantee: minimum,
+              exhibitorProductId,
+              exhibitorPrice: exhibitorPriceValue ?? basePrice,
+              upsellVariationIds: upsells,
+              commissionRate: commission,
+              programEnabled: true,
+              programKey: fallbackOrganiserProgramKey,
+              programProductId: product?.id ?? null,
+              source: "product",
+            };
+          }
+          return null;
+        })(),
       });
       setLiveMessage(
         reservationStatus === "pending"
@@ -1742,6 +1946,18 @@ export default function AddToCartWizard({
             <p id="wizard-description" className="mt-1 text-sm text-gray-600">
               Step {step + 1} of {totalSteps}. {stepLabel}
             </p>
+            {organiserAccess && (
+              <p
+                className={clsx(
+                  "mt-2 text-xs",
+                  organiserActive ? "text-emerald-600" : "text-slate-500"
+                )}
+              >
+                {organiserActive
+                  ? "Partner organiser pricing is applied automatically for this booking."
+                  : "Partner organiser pricing is available when booking through the event organiser link."}
+              </p>
+            )}
           </div>
           <button
             type="button"
@@ -1752,8 +1968,57 @@ export default function AddToCartWizard({
             Close
           </button>
         </div>
-        {locationStep ? (
-          <div className="space-y-3">
+        {!hasLocationStep && (coverage || venueCoveragePreset) && (
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+            <p className="font-semibold text-slate-900">
+              Filming at {locationInput || venueCoveragePreset?.label || product.venue || "the booked venue"}
+            </p>
+            {coverage?.type === "franchise" && coverage.label && (
+              <p className="mt-1">
+                Local franchise partner: <span className="font-medium">{coverage.label}</span>
+              </p>
+            )}
+            {coverage?.territoryLabel && (
+              <p className="mt-1">Territory: {coverage.territoryLabel}</p>
+            )}
+            <p className="mt-2 text-sm font-medium text-slate-900">
+              Base price for this venue: {GBP.format(effectiveBasePrice)}
+            </p>
+            <p className="mt-2 text-xs text-slate-500">
+              Location is pre-assigned for this package so we can fast-track scheduling with the on-site team.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {!organiserActive && (
+                <button
+                  type="button"
+                  className="btn btn-xs btn-outline"
+                  onClick={() => setOverrideLocation(true)}
+                >
+                  Use a different location
+                </button>
+              )}
+            </div>
+        </div>
+      )}
+      {locationStep ? (
+        <div className="space-y-3">
+          {hasPresetVenue && overrideLocation && !organiserActive && (
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              <p>
+                This package is normally fulfilled at {venueCoveragePreset?.label || product.venue || "the booked venue"}.
+                Provide an alternate filming location below if this booking needs to be routed elsewhere.
+              </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-outline"
+                    onClick={() => setOverrideLocation(false)}
+                  >
+                    Use preset venue
+                  </button>
+                </div>
+              </div>
+            )}
             <div>
               <label
                 htmlFor="wizard-location"
