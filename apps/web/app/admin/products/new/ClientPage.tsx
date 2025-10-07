@@ -445,6 +445,12 @@ type VariationFormState = {
   tier2Price: string;
   tier3Price: string;
   featuresText: string;
+  onsiteDays: string;
+  onsiteSetupMinutes: string;
+  onsiteShootMinutes: string;
+  onsiteBreakdownMinutes: string;
+  onsiteWindowStart: string;
+  onsiteWindowEnd: string;
   budgetOverrides: BudgetOverrideFormState;
   crewOverrides: Record<string, CrewOverrideFormState>;
 };
@@ -634,6 +640,11 @@ export default function NewProductPage() {
     if (!value || value.trim().length === 0) return null;
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+  const parseOptionalDays = (value: string): number | null => {
+    if (!value || value.trim().length === 0) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   };
   const normaliseTimeOfDay = (value: string): string | null => {
     if (!value) return null;
@@ -1097,6 +1108,42 @@ export default function NewProductPage() {
         tier3Price:
           typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
         featuresText: features.join("\n"),
+        onsiteDays:
+          typeof variation?.onsiteDays === "number" &&
+          Number.isFinite(variation.onsiteDays)
+            ? String(variation.onsiteDays)
+            : typeof variation?.onsiteDays === "string"
+              ? variation.onsiteDays
+              : "",
+        onsiteSetupMinutes:
+          typeof variation?.onsiteSetupMinutes === "number" &&
+          Number.isFinite(variation.onsiteSetupMinutes)
+            ? String(variation.onsiteSetupMinutes)
+            : typeof variation?.onsiteSetupMinutes === "string"
+              ? variation.onsiteSetupMinutes
+              : "",
+        onsiteShootMinutes:
+          typeof variation?.onsiteShootMinutes === "number" &&
+          Number.isFinite(variation.onsiteShootMinutes)
+            ? String(variation.onsiteShootMinutes)
+            : typeof variation?.onsiteShootMinutes === "string"
+              ? variation.onsiteShootMinutes
+              : "",
+        onsiteBreakdownMinutes:
+          typeof variation?.onsiteBreakdownMinutes === "number" &&
+          Number.isFinite(variation.onsiteBreakdownMinutes)
+            ? String(variation.onsiteBreakdownMinutes)
+            : typeof variation?.onsiteBreakdownMinutes === "string"
+              ? variation.onsiteBreakdownMinutes
+              : "",
+        onsiteWindowStart:
+          typeof variation?.onsiteTimeWindowStart === "string"
+            ? variation.onsiteTimeWindowStart
+            : "",
+        onsiteWindowEnd:
+          typeof variation?.onsiteTimeWindowEnd === "string"
+            ? variation.onsiteTimeWindowEnd
+            : "",
         budgetOverrides: createBudgetForm(variation?.budgetOverrides ?? null),
         crewOverrides: createCrewOverrideMap(
           crewRoleState,
@@ -1329,6 +1376,30 @@ export default function NewProductPage() {
         ),
       };
       if (features.length) entry.features = features;
+      const onsiteDaysOverride = parseOptionalDays(variation.onsiteDays);
+      if (onsiteDaysOverride !== null) entry.onsiteDays = onsiteDaysOverride;
+      const onsiteSetupOverride = parseOptionalMinutes(
+        variation.onsiteSetupMinutes
+      );
+      if (onsiteSetupOverride !== null)
+        entry.onsiteSetupMinutes = onsiteSetupOverride;
+      const onsiteShootOverride = parseOptionalMinutes(
+        variation.onsiteShootMinutes
+      );
+      if (onsiteShootOverride !== null)
+        entry.onsiteShootMinutes = onsiteShootOverride;
+      const onsiteBreakdownOverride = parseOptionalMinutes(
+        variation.onsiteBreakdownMinutes
+      );
+      if (onsiteBreakdownOverride !== null)
+        entry.onsiteBreakdownMinutes = onsiteBreakdownOverride;
+      const onsiteStartOverride = normaliseTimeOfDay(
+        variation.onsiteWindowStart
+      );
+      if (onsiteStartOverride)
+        entry.onsiteTimeWindowStart = onsiteStartOverride;
+      const onsiteEndOverride = normaliseTimeOfDay(variation.onsiteWindowEnd);
+      if (onsiteEndOverride) entry.onsiteTimeWindowEnd = onsiteEndOverride;
       const budgetOverrides = parseBudgetFormToOverride(
         variation.budgetOverrides
       );
@@ -3047,6 +3118,128 @@ export default function NewProductPage() {
                       placeholder="List the differentiators for this package (one per line)."
                     />
                   </label>
+                  <details className="rounded border border-dashed p-3">
+                    <summary className="cursor-pointer text-sm font-medium">
+                      On-site schedule overrides
+                    </summary>
+                    <div className="mt-3 grid gap-3">
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          On-site duration (days)
+                        </span>
+                        <input
+                          type="number"
+                          min="0.25"
+                          step="0.25"
+                          className="input"
+                          value={variation.onsiteDays}
+                          onChange={(e) =>
+                            updateVariation(index, { onsiteDays: e.target.value })
+                          }
+                          placeholder="Inherit"
+                        />
+                        <span className="text-[11px] text-gray-500">
+                          Leave blank to inherit the base product duration.
+                        </span>
+                      </label>
+                      <div className="grid gap-3 md:grid-cols-3">
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            Setup minutes
+                          </span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="15"
+                            className="input"
+                            value={variation.onsiteSetupMinutes}
+                            onChange={(e) =>
+                              updateVariation(index, {
+                                onsiteSetupMinutes: e.target.value,
+                              })
+                            }
+                            placeholder="Inherit"
+                          />
+                        </label>
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            Filming minutes
+                          </span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="15"
+                            className="input"
+                            value={variation.onsiteShootMinutes}
+                            onChange={(e) =>
+                              updateVariation(index, {
+                                onsiteShootMinutes: e.target.value,
+                              })
+                            }
+                            placeholder="Inherit"
+                          />
+                        </label>
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            Breakdown minutes
+                          </span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="15"
+                            className="input"
+                            value={variation.onsiteBreakdownMinutes}
+                            onChange={(e) =>
+                              updateVariation(index, {
+                                onsiteBreakdownMinutes: e.target.value,
+                              })
+                            }
+                            placeholder="Inherit"
+                          />
+                        </label>
+                      </div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            Earliest arrival
+                          </span>
+                          <input
+                            type="time"
+                            step={900}
+                            className="input"
+                            value={variation.onsiteWindowStart}
+                            onChange={(e) =>
+                              updateVariation(index, {
+                                onsiteWindowStart: e.target.value,
+                              })
+                            }
+                            placeholder="Inherit"
+                          />
+                        </label>
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            Latest finish
+                          </span>
+                          <input
+                            type="time"
+                            step={900}
+                            className="input"
+                            value={variation.onsiteWindowEnd}
+                            onChange={(e) =>
+                              updateVariation(index, {
+                                onsiteWindowEnd: e.target.value,
+                              })
+                            }
+                            placeholder="Inherit"
+                          />
+                        </label>
+                      </div>
+                      <p className="text-[11px] text-gray-500">
+                        Overrides update the booking span and time slots for this variation
+                        while leaving other packages untouched.
+                      </p>
+                    </div>
+                  </details>
                   <details
                     className="rounded border border-dashed p-3"
                     open={budgetHasValues}

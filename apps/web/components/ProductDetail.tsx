@@ -314,14 +314,22 @@ export default function ProductDetail({
     () => getProductEventRangeLabel(product),
     [product]
   );
-  const onsiteSummary = useMemo(
-    () => formatProductOnsiteDuration(product),
-    [product]
-  );
 
   const variationEntries = useMemo(
     () => (Array.isArray(product.variations) ? product.variations : []),
     [product.variations]
+  );
+
+  const activeVariation = useMemo(() => {
+    if (!variation) {
+      return null;
+    }
+    return variationEntries.find((entry) => entry?.id === variation) ?? null;
+  }, [variationEntries, variation]);
+
+  const onsiteSummary = useMemo(
+    () => formatProductOnsiteDuration(product, undefined, activeVariation),
+    [product, activeVariation]
   );
 
   const computePriceForSelection = useCallback(
@@ -534,13 +542,6 @@ export default function ProductDetail({
       ])
     );
   }, [variationEntries]);
-
-  const activeVariation = useMemo(() => {
-    if (!variation) {
-      return null;
-    }
-    return variationEntries.find((entry) => entry?.id === variation) ?? null;
-  }, [variationEntries, variation]);
 
   const selectedVariationSummary = useMemo(() => {
     if (!variation) return null;
@@ -931,6 +932,15 @@ export default function ProductDetail({
             ? `${total} included`
             : "Confirmed during scoping";
         }),
+      });
+    }
+    const onsiteValues = variationEntries.map((variationEntry) =>
+      formatProductOnsiteDuration(product, undefined, variationEntry) || ""
+    );
+    if (onsiteValues.some((value) => value.length > 0)) {
+      rows.push({
+        label: "On-site",
+        values: onsiteValues.map((value) => value || "—"),
       });
     }
     const variationTurnarounds = variationEntries.map((variationEntry) =>

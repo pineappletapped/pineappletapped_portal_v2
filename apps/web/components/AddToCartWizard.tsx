@@ -533,25 +533,34 @@ export default function AddToCartWizard({
   const { items, add } = useCart();
   const [groups, setGroups] = useState<ModifierGroup[]>([]);
   const eventWindow = useMemo(() => getProductEventWindow(product), [product]);
+  const selectedVariation = useMemo(() => {
+    if (!variationId) {
+      return null;
+    }
+    const entries = Array.isArray(product.variations)
+      ? product.variations
+      : [];
+    return entries.find((entry) => entry?.id === variationId) ?? null;
+  }, [product.variations, variationId]);
   const onsiteDaysConfigured = useMemo(
-    () => resolveProductOnsiteDays(product) ?? 1,
-    [product]
+    () => resolveProductOnsiteDays(product, selectedVariation) ?? 1,
+    [product, selectedVariation]
   );
   const onsiteBlockingDays = useMemo(
     () => Math.max(1, Math.ceil(onsiteDaysConfigured)),
     [onsiteDaysConfigured]
   );
   const onsiteTiming = useMemo(
-    () => resolveProductOnsiteTiming(product),
-    [product]
+    () => resolveProductOnsiteTiming(product, selectedVariation),
+    [product, selectedVariation]
   );
   const timeSlotRequired = useMemo(
     () => onsiteTiming !== null && onsiteBlockingDays <= 1,
     [onsiteTiming, onsiteBlockingDays]
   );
   const onsiteSummary = useMemo(
-    () => formatProductOnsiteDuration(product),
-    [product]
+    () => formatProductOnsiteDuration(product, undefined, selectedVariation),
+    [product, selectedVariation]
   );
   const eventRangeLabel = useMemo(
     () => getProductEventRangeLabel(product),

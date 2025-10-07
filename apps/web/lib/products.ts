@@ -153,6 +153,18 @@ export interface ProductVariation {
   crewOverrides?: ProductCrewRoleOverride[];
   /** Optional turnaround label specific to the variation. */
   turnaround?: string | null;
+  /** Optional override for the total on-site span, measured in days. */
+  onsiteDays?: number | null;
+  /** Optional override for minutes spent setting up on site. */
+  onsiteSetupMinutes?: number | null;
+  /** Optional override for minutes allocated to filming. */
+  onsiteShootMinutes?: number | null;
+  /** Optional override for minutes spent breaking down kit. */
+  onsiteBreakdownMinutes?: number | null;
+  /** Optional override for the earliest bookable arrival window. */
+  onsiteTimeWindowStart?: string | null;
+  /** Optional override for the latest bookable departure window. */
+  onsiteTimeWindowEnd?: string | null;
 }
 
 export interface ProductVideoLink {
@@ -452,10 +464,27 @@ export const getProductEventMonthKeys = (product: Product): string[] => {
   return Array.from(months);
 };
 
+const resolveSchedulingOverride = <T>(
+  variationValue: T | null | undefined,
+  productValue: T | null | undefined
+): T | null | undefined => {
+  if (variationValue !== null && variationValue !== undefined) {
+    return variationValue;
+  }
+  if (productValue !== null && productValue !== undefined) {
+    return productValue;
+  }
+  return null;
+};
+
 export const resolveProductOnsiteDays = (
-  product: Product
+  product: Product,
+  variation?: ProductVariation | null
 ): number | null => {
-  const raw = (product as any)?.onsiteDays;
+  const raw = resolveSchedulingOverride(
+    variation?.onsiteDays,
+    (product as any)?.onsiteDays ?? null
+  );
   if (typeof raw === "number") {
     return Number.isFinite(raw) && raw > 0 ? raw : null;
   }
@@ -463,7 +492,7 @@ export const resolveProductOnsiteDays = (
     const parsed = Number(raw);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   }
-  const timing = resolveProductOnsiteTiming(product);
+  const timing = resolveProductOnsiteTiming(product, variation ?? null);
   if (timing) {
     const days = timing.totalMinutes / (24 * 60);
     return days > 0 ? days : null;
@@ -513,11 +542,27 @@ const parseWindowTime = (value: unknown): number | null => {
 };
 
 export const resolveProductOnsiteTiming = (
-  product: Product
+  product: Product,
+  variation?: ProductVariation | null
 ): ProductOnsiteTiming | null => {
-  const setup = parseMinutes((product as any)?.onsiteSetupMinutes);
-  const shoot = parseMinutes((product as any)?.onsiteShootMinutes);
-  const breakdown = parseMinutes((product as any)?.onsiteBreakdownMinutes);
+  const setup = parseMinutes(
+    resolveSchedulingOverride(
+      variation?.onsiteSetupMinutes,
+      (product as any)?.onsiteSetupMinutes ?? null
+    )
+  );
+  const shoot = parseMinutes(
+    resolveSchedulingOverride(
+      variation?.onsiteShootMinutes,
+      (product as any)?.onsiteShootMinutes ?? null
+    )
+  );
+  const breakdown = parseMinutes(
+    resolveSchedulingOverride(
+      variation?.onsiteBreakdownMinutes,
+      (product as any)?.onsiteBreakdownMinutes ?? null
+    )
+  );
   const total = setup + shoot + breakdown;
   if (total <= 0) {
     return null;
@@ -525,9 +570,19 @@ export const resolveProductOnsiteTiming = (
   const defaultStart = 8 * 60;
   const defaultEnd = 18 * 60;
   const startMinutes =
-    parseWindowTime((product as any)?.onsiteTimeWindowStart) ?? defaultStart;
+    parseWindowTime(
+      resolveSchedulingOverride(
+        variation?.onsiteTimeWindowStart,
+        (product as any)?.onsiteTimeWindowStart ?? null
+      )
+    ) ?? defaultStart;
   let endMinutes =
-    parseWindowTime((product as any)?.onsiteTimeWindowEnd) ?? defaultEnd;
+    parseWindowTime(
+      resolveSchedulingOverride(
+        variation?.onsiteTimeWindowEnd,
+        (product as any)?.onsiteTimeWindowEnd ?? null
+      )
+    ) ?? defaultEnd;
   if (endMinutes <= startMinutes) {
     endMinutes = startMinutes + total;
   }
@@ -592,9 +647,10 @@ const formatCompactMinutes = (minutes: number): string => {
 
 export const formatProductOnsiteDuration = (
   product: Product,
-  locale?: string
+  locale?: string,
+  variation?: ProductVariation | null
 ): string | null => {
-  const timing = resolveProductOnsiteTiming(product);
+  const timing = resolveProductOnsiteTiming(product, variation ?? null);
   if (timing) {
     const totalLabel = formatMinutesSummary(timing.totalMinutes, locale);
     const breakdownParts: string[] = [];
@@ -613,7 +669,7 @@ export const formatProductOnsiteDuration = (
       breakdownParts.length > 0 ? ` (${breakdownParts.join(" · ")})` : "";
     return `${totalLabel} on site${breakdown}`;
   }
-  const days = resolveProductOnsiteDays(product);
+  const days = resolveProductOnsiteDays(product, variation ?? null);
   if (!days) {
     return null;
   }
