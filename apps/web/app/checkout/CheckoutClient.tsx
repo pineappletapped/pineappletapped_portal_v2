@@ -127,6 +127,16 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             priceAdjustment: item.campaignBooking.priceAdjustment ?? 0,
           }
         : null;
+      const organiser = item.organiser
+        ? {
+            organiserId: item.organiser.organiserId,
+            minimumGuarantee: item.organiser.minimumGuarantee ?? null,
+            exhibitorProductId: item.organiser.exhibitorProductId ?? null,
+            exhibitorPrice: item.organiser.exhibitorPrice ?? null,
+            upsellVariationIds: item.organiser.upsellVariationIds ?? [],
+            source: item.organiser.source ?? null,
+          }
+        : null;
       return {
         id: item.id,
         quantity: item.quantity,
@@ -142,6 +152,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         timeSlot: item.timeSlot ?? null,
         coverage: item.coverage ?? null,
         campaignBooking,
+        organiser,
       };
     });
     const kitItemsPayload = items.flatMap((item) => item.kitItems || []);
@@ -210,6 +221,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           timeSlot: item.timeSlot ?? null,
           exhibition: item.exhibition ?? null,
           campaignBooking: item.campaignBooking,
+          organiser: item.organiser,
         })),
         kitItems: orderInput.kitItems.map((kit) => ({
           id: kit.id,

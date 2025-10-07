@@ -32,6 +32,15 @@ export interface CartTimeSlot {
   breakdownMinutes?: number | null;
 }
 
+export interface CartOrganiserInfo {
+  organiserId: string;
+  minimumGuarantee?: number | null;
+  exhibitorProductId?: string | null;
+  exhibitorPrice?: number | null;
+  upsellVariationIds?: string[];
+  source?: string | null;
+}
+
 export interface CartItem {
   id: string;
   name: string;
@@ -70,6 +79,7 @@ export interface CartItem {
   kitStatus?: "confirmed" | "pending";
   kitWarnings?: string[];
   campaignBooking?: CartCampaignBooking | null;
+  organiser?: CartOrganiserInfo | null;
 }
 
 interface ProductInput {
@@ -109,6 +119,7 @@ interface ProductInput {
   kitStatus?: "confirmed" | "pending";
   kitWarnings?: string[];
   campaignBooking?: CartCampaignBooking | null;
+  organiser?: CartOrganiserInfo | null;
 }
 
 interface CartContextProps {
@@ -210,6 +221,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
             JSON.stringify(product.coverage || null) &&
           JSON.stringify(i.campaignBooking || null) ===
             JSON.stringify(product.campaignBooking || null) &&
+          JSON.stringify(i.organiser || null) ===
+            JSON.stringify(product.organiser || null) &&
           (i.kitStatus || "confirmed") === (product.kitStatus || "confirmed") &&
           JSON.stringify(i.kitWarnings || []) ===
             JSON.stringify(product.kitWarnings || [])

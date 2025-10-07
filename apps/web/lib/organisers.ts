@@ -1,4 +1,20 @@
 import type { DocumentData, DocumentSnapshot, Timestamp } from 'firebase/firestore';
+import type { ProductOrganiserProgram } from './products';
+
+export interface NormalisedOrganiserProgram {
+  organiserId: string;
+  minimumGuarantee: number | null;
+  exhibitorProductId: string | null;
+  exhibitorPrice: number | null;
+  upsellVariationIds: string[];
+}
+
+export interface OrganiserAccessContext {
+  program: NormalisedOrganiserProgram;
+  active: boolean;
+  source?: 'query' | 'prop';
+  token?: string | null;
+}
 
 export interface EventOrganiserProfile {
   id: string;
@@ -23,6 +39,11 @@ const normaliseString = (value: unknown): string | null => {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+};
+
+export const normaliseOrganiserId = (value: unknown): string | null => {
+  const str = normaliseString(value);
+  return str ? str.toLowerCase() : null;
 };
 
 const normaliseNumber = (value: unknown): number | null => {
@@ -81,3 +102,47 @@ export function parseEventOrganiserSnapshot(
     updatedAt: (data?.updatedAt as Timestamp) ?? null,
   } satisfies EventOrganiserProfile;
 }
+
+export const normaliseOrganiserProgram = (
+  input?: ProductOrganiserProgram | null
+): NormalisedOrganiserProgram | null => {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+  const organiserId = normaliseOrganiserId((input as ProductOrganiserProgram).organiserId);
+  if (!organiserId) {
+    return null;
+  }
+  const minimumGuarantee = normaliseNumber((input as ProductOrganiserProgram).minimumGuarantee);
+  const exhibitorProductId = normaliseString((input as ProductOrganiserProgram).exhibitorProductId);
+  const exhibitorPrice = normaliseNumber((input as ProductOrganiserProgram).exhibitorPrice);
+  const upsellVariationIds = normaliseStringList(
+    (input as ProductOrganiserProgram).upsellVariationIds
+  );
+  return {
+    organiserId,
+    minimumGuarantee,
+    exhibitorProductId,
+    exhibitorPrice,
+    upsellVariationIds,
+  } satisfies NormalisedOrganiserProgram;
+};
+
+export const resolveOrganiserAccessContext = (
+  program: ProductOrganiserProgram | null | undefined,
+  candidate?: string | null,
+  source: OrganiserAccessContext['source'] = 'query'
+): OrganiserAccessContext | null => {
+  const normalised = normaliseOrganiserProgram(program);
+  if (!normalised) {
+    return null;
+  }
+  const candidateId = normaliseOrganiserId(candidate);
+  const active = Boolean(candidateId && candidateId === normalised.organiserId);
+  return {
+    program: normalised,
+    active,
+    source,
+    token: candidateId,
+  } satisfies OrganiserAccessContext;
+};

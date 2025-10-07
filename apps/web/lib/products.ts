@@ -158,6 +158,19 @@ export interface ProductVideoLink {
   title?: string;
 }
 
+export interface ProductOrganiserProgram {
+  /** Primary organiser account responsible for this package. */
+  organiserId?: string | null;
+  /** Minimum guarantee collected upfront from the organiser. */
+  minimumGuarantee?: number | null;
+  /** Hidden exhibitor-facing product ID linked to this organiser. */
+  exhibitorProductId?: string | null;
+  /** Discounted partner price shown to exhibitors routed via the organiser. */
+  exhibitorPrice?: number | null;
+  /** Variation identifiers that unlock when an organiser partner link is used. */
+  upsellVariationIds?: string[] | null;
+}
+
 export interface ProductSpec {
   overview?: string;
   preparation?: string;
@@ -321,6 +334,8 @@ export interface Product {
   closingWhyItWorks?: string | null;
   /** Coverage assignment to use when the product is tied to a specific venue. */
   venueCoverage?: ProductVenueCoverage | null;
+  /** Optional organiser partner configuration for exhibitor programmes. */
+  organiserProgram?: ProductOrganiserProgram | null;
 }
 
 export interface ProductOnsiteTiming {

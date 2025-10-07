@@ -7,7 +7,7 @@ import {
   formatProductOnsiteDuration,
 } from "@/lib/products";
 import type { Venue } from "@/lib/venues";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import ProductFeatureCard from "./ProductFeatureCard";
@@ -31,6 +31,11 @@ import {
 } from "react-icons/fi";
 import { getListingPriceLabel } from "./productListingUtils";
 import ListingPriceNote from "./ListingPriceNote";
+import {
+  normaliseOrganiserId,
+  normaliseOrganiserProgram,
+  type OrganiserAccessContext,
+} from "@/lib/organisers";
 
 const deliverableIcons: Record<DeliverableType, IconType> = {
   "long-form-video": FiFilm,
@@ -243,6 +248,38 @@ export default function ProductDetail({
   const [variation, setVariation] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
   const [quoteOpen, setQuoteOpen] = useState(false);
+  const [organiserQuery, setOrganiserQuery] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("organiser") ?? params.get("organiserId");
+    setOrganiserQuery(token);
+  }, []);
+  const organiserProgram = useMemo(
+    () => normaliseOrganiserProgram(product.organiserProgram ?? null),
+    [product.organiserProgram]
+  );
+  const organiserQueryValue = useMemo(
+    () => normaliseOrganiserId(organiserQuery),
+    [organiserQuery]
+  );
+  const organiserContext = useMemo<OrganiserAccessContext | null>(() => {
+    if (!organiserProgram) {
+      return null;
+    }
+    const active = Boolean(
+      organiserQueryValue && organiserQueryValue === organiserProgram.organiserId
+    );
+    return {
+      program: organiserProgram,
+      active,
+      source: "query",
+      token: organiserQueryValue ?? null,
+    } satisfies OrganiserAccessContext;
+  }, [organiserProgram, organiserQueryValue]);
+  const organiserActive = organiserContext?.active ?? false;
   const listingPriceDetails = useMemo(
     () =>
       getListingPriceLabel(product, {
@@ -266,6 +303,39 @@ export default function ProductDetail({
     () => (Array.isArray(product.variations) ? product.variations : []),
     [product.variations]
   );
+
+  const computePriceForSelection = useCallback(
+    (variationId: string | null) => {
+      const baseProductPrice =
+        typeof product.price === "number" && Number.isFinite(product.price)
+          ? product.price
+          : 0;
+      const selectedVariation = variationId
+        ? variationEntries.find((entry) => entry?.id === variationId) ?? null
+        : null;
+      const variationPrice = selectedVariation?.price;
+      const resolvedVariationPrice =
+        typeof variationPrice === "number" && Number.isFinite(variationPrice)
+          ? variationPrice
+          : baseProductPrice;
+      if (organiserActive && organiserContext) {
+        const exhibitorBase =
+          typeof organiserContext.program.exhibitorPrice === "number" &&
+          Number.isFinite(organiserContext.program.exhibitorPrice)
+            ? organiserContext.program.exhibitorPrice
+            : baseProductPrice;
+        const delta = resolvedVariationPrice - baseProductPrice;
+        const adjusted = exhibitorBase + delta;
+        return Math.max(0, Number.isFinite(adjusted) ? adjusted : exhibitorBase);
+      }
+      return resolvedVariationPrice;
+    },
+    [organiserActive, organiserContext, product.price, variationEntries]
+  );
+
+  useEffect(() => {
+    setBasePrice(computePriceForSelection(variation || null));
+  }, [computePriceForSelection, variation]);
 
   const availableVariationIds = useMemo(
     () =>
@@ -412,12 +482,11 @@ export default function ProductDetail({
   const handleVariation = (id: string) => {
     if (id === CUSTOM_VARIATION_ID) {
       setVariation(CUSTOM_VARIATION_ID);
-      setBasePrice(product.price);
+      setBasePrice(computePriceForSelection(null));
       return;
     }
-    const v = variationEntries.find((va) => va.id === id);
     setVariation(id);
-    setBasePrice(v?.price ?? product.price);
+    setBasePrice(computePriceForSelection(id));
   };
 
   const price = basePrice;
@@ -499,6 +568,17 @@ export default function ProductDetail({
     } as const;
   }, [product.deliverables, availableVariationIds, variation]);
 
+  const organiserUpsellIds = useMemo(() => {
+    if (!organiserContext) {
+      return new Set<string>();
+    }
+    return new Set(
+      (organiserContext.program.upsellVariationIds ?? []).filter(
+        (id): id is string => typeof id === "string" && id.trim().length > 0
+      )
+    );
+  }, [organiserContext]);
+
   const deliverableSummaries = useMemo(() => {
     const items: {
       key: string;
@@ -540,6 +620,22 @@ export default function ProductDetail({
             )
             .map((id) => variationNameById.get(id) || id)
         : [];
+      if (organiserContext && Array.isArray(deliverable.variationIds)) {
+        const organiserScoped = deliverable.variationIds.some((id) => {
+          if (typeof id !== "string") {
+            return false;
+          }
+          const trimmed = id.trim();
+          return trimmed.length > 0 && organiserUpsellIds.has(trimmed);
+        });
+        if (organiserScoped) {
+          scopeLabels.push(
+            organiserActive
+              ? "Unlocked via organiser link"
+              : "Organiser-exclusive add-on"
+          );
+        }
+      }
 
       items.push({
         key: `${index}-${title || "deliverable"}`,
@@ -553,7 +649,13 @@ export default function ProductDetail({
     });
 
     return items;
-  }, [deliverableDisplay.visible, variationNameById]);
+  }, [
+    deliverableDisplay.visible,
+    organiserActive,
+    organiserContext,
+    organiserUpsellIds,
+    variationNameById,
+  ]);
 
   const deliverablesByVariation = useMemo(() => {
     if (!Array.isArray(product.deliverables) || product.deliverables.length === 0) {
@@ -678,6 +780,13 @@ export default function ProductDetail({
 
   const heroBadges = useMemo(() => {
     const badges = [...deliverableHighlights];
+    if (organiserContext) {
+      badges.unshift(
+        organiserActive
+          ? "Organiser partner rate unlocked"
+          : "Partner organiser programme"
+      );
+    }
     if (badges.length < 3 && onsiteSummary) {
       badges.push(onsiteSummary);
     }
@@ -685,7 +794,13 @@ export default function ProductDetail({
       badges.push(`Event window ${eventRangeLabel}`);
     }
     return badges.slice(0, 3);
-  }, [deliverableHighlights, onsiteSummary, eventRangeLabel]);
+  }, [
+    deliverableHighlights,
+    organiserContext,
+    organiserActive,
+    onsiteSummary,
+    eventRangeLabel,
+  ]);
 
   const shouldShowOperationsCard = useMemo(
     () => !hasExampleDay && (deliverySummary.length > 0 || operationsSummary.length > 0),
@@ -779,8 +894,31 @@ export default function ProductDetail({
         ),
       });
     }
+    if (organiserContext && organiserUpsellIds.size > 0) {
+      rows.push({
+        label: "Organiser access",
+        values: variationEntries.map((variationEntry) => {
+          const trimmedId =
+            typeof variationEntry.id === "string"
+              ? variationEntry.id.trim()
+              : variationEntry.id;
+          const isUpsell =
+            typeof trimmedId === "string" && organiserUpsellIds.has(trimmedId);
+          if (isUpsell) {
+            return organiserActive ? "Exhibitor upgrade" : "Partner exclusive";
+          }
+          return "Standard";
+        }),
+      });
+    }
     return rows;
-  }, [variationEntries, deliverablesByVariation]);
+  }, [
+    deliverablesByVariation,
+    organiserActive,
+    organiserContext,
+    organiserUpsellIds,
+    variationEntries,
+  ]);
 
   const hasVariations = availableVariationIds.length > 0;
   const shouldRenderFeatureSection = Boolean(
@@ -837,6 +975,13 @@ export default function ProductDetail({
                   note={listingPriceDetails?.note}
                   rangeNote={listingPriceDetails?.rangeNote}
                 />
+                {organiserContext && (
+                  <p className="text-xs text-slate-500">
+                    {organiserActive
+                      ? "Partner exhibitor pricing applied via organiser link."
+                      : "Partner exhibitor pricing unlocks when booking through your event organiser."}
+                  </p>
+                )}
               </div>
               {heroFacts.length > 0 && (
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -973,14 +1118,40 @@ export default function ProductDetail({
                   onChange={(event) => handleVariation(event.target.value)}
                 >
                   <option value="">Select a package</option>
-                  {variationEntries.map((entry) => (
-                    <option key={entry.id} value={entry.id}>
-                      {entry.name}
-                      {entry.price > 0 ? ` — £${entry.price.toFixed(2)}` : ""}
-                    </option>
-                  ))}
+                  {variationEntries.map((entry) => {
+                    const trimmedId =
+                      typeof entry.id === "string" ? entry.id.trim() : entry.id;
+                    const organiserExclusive =
+                      organiserContext &&
+                      typeof trimmedId === "string" &&
+                      organiserUpsellIds.has(trimmedId);
+                    const priceSuffix =
+                      entry.price > 0 ? ` — £${entry.price.toFixed(2)}` : "";
+                    const organiserSuffix = organiserExclusive
+                      ? organiserActive
+                        ? " — Exhibitor upgrade"
+                        : " — Partner exclusive"
+                      : "";
+                    return (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.name}
+                        {priceSuffix}
+                        {organiserSuffix}
+                      </option>
+                    );
+                  })}
                   <option value={CUSTOM_VARIATION_ID}>Request a custom package</option>
                 </select>
+              {organiserContext && organiserUpsellIds.size > 0 && !organiserActive && (
+                <p className="text-xs text-slate-500">
+                  Event exhibitors unlock partner-only upgrades when booking via the organiser link.
+                </p>
+              )}
+              {organiserContext && organiserUpsellIds.size > 0 && organiserActive && (
+                <p className="text-xs text-emerald-600">
+                  Exhibitor upgrades from your organiser partnership are unlocked on this page.
+                </p>
+              )}
               </label>
               {activeVariation?.features && activeVariation.features.length > 0 && (
                 <div className="rounded-2xl border border-orange/20 bg-white px-4 py-4 text-sm text-slate-700 shadow-sm">
@@ -1199,6 +1370,16 @@ export default function ProductDetail({
                   : "Deliverables will be confirmed during scoping."}
               </p>
             )}
+          {organiserContext && organiserUpsellIds.size > 0 && !organiserActive && (
+            <p className="mt-4 rounded-2xl border border-dashed border-orange-300 bg-orange-50 px-4 py-3 text-xs text-orange-700">
+              Exhibitor bookings through the organiser unlock additional deliverables and partner upgrades.
+            </p>
+          )}
+          {organiserContext && organiserUpsellIds.size > 0 && organiserActive && (
+            <p className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-700">
+              These deliverables include organiser-exclusive upgrades available for your event partnership.
+            </p>
+          )}
         </section>
       )}
 
@@ -1347,6 +1528,7 @@ export default function ProductDetail({
               : undefined
           }
           basePrice={basePrice}
+          organiserContext={organiserContext ?? undefined}
           onClose={() => setWizardOpen(false)}
         />
       )}

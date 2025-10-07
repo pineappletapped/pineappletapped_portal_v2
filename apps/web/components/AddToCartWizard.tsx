@@ -16,6 +16,12 @@ import { useCart } from "@/lib/cart";
 import { db, functions } from "@/lib/firebase";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
+import {
+  normaliseOrganiserId,
+  normaliseOrganiserProgram,
+  type OrganiserAccessContext,
+} from "@/lib/organisers";
+import clsx from "clsx";
 import ProductDatePicker, {
   type ProductAvailabilityScope,
   type ProductAvailabilityStatus,
@@ -46,6 +52,7 @@ interface Props {
   variationId?: string;
   basePrice: number;
   onClose: () => void;
+  organiserContext?: OrganiserAccessContext;
 }
 
 const DRONE_STANDARD_ID = "drone_compliance";
@@ -506,6 +513,7 @@ export default function AddToCartWizard({
   product,
   variationId,
   basePrice,
+  organiserContext,
   onClose,
 }: Props) {
   if ((product.salesMode ?? "ecommerce") === "quote") {
@@ -760,6 +768,45 @@ export default function AddToCartWizard({
   const [conflicts, setConflicts] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [liveMessage, setLiveMessage] = useState("Add this product to your cart");
+  const [organiserQueryToken, setOrganiserQueryToken] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("organiser") ?? params.get("organiserId");
+    setOrganiserQueryToken(token);
+  }, []);
+  const normalisedOrganiserProgram = useMemo(
+    () => normaliseOrganiserProgram(product.organiserProgram ?? null),
+    [product.organiserProgram]
+  );
+  const derivedOrganiserId = useMemo(
+    () => normaliseOrganiserId(organiserQueryToken),
+    [organiserQueryToken]
+  );
+  const organiserAccess = useMemo<OrganiserAccessContext | null>(() => {
+    if (organiserContext) {
+      return organiserContext;
+    }
+    if (!normalisedOrganiserProgram) {
+      return null;
+    }
+    const active = Boolean(
+      derivedOrganiserId && derivedOrganiserId === normalisedOrganiserProgram.organiserId
+    );
+    return {
+      program: normalisedOrganiserProgram,
+      active,
+      source: "query",
+      token: derivedOrganiserId ?? null,
+    } satisfies OrganiserAccessContext;
+  }, [
+    derivedOrganiserId,
+    normalisedOrganiserProgram,
+    organiserContext,
+  ]);
+  const organiserActive = organiserAccess?.active ?? false;
   const [locationInput, setLocationInput] = useState("");
   const [postcodeInput, setPostcodeInput] = useState("");
   const [coverage, setCoverage] = useState<CoverageAssignment | null>(null);
@@ -770,6 +817,11 @@ export default function AddToCartWizard({
     useState<CampaignSlotStatus>("idle");
   const [campaignSlotError, setCampaignSlotError] = useState<string | null>(null);
   const [overrideLocation, setOverrideLocation] = useState(false);
+  useEffect(() => {
+    if (organiserActive) {
+      setOverrideLocation(false);
+    }
+  }, [organiserActive]);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const [availabilityOverrides, setAvailabilityOverrides] = useState<
     Record<string, ProductAvailabilityStatus>
@@ -845,7 +897,9 @@ export default function AddToCartWizard({
       setLocationInput("");
     }
   }, [hasPresetVenue, overrideLocation, product.venue, venueCoveragePreset]);
-  const priceTier: PriceTierLevel = coverage?.priceTier ?? 1;
+  const priceTier: PriceTierLevel = organiserActive
+    ? 1
+    : coverage?.priceTier ?? 1;
   const cartSlotHolds = useMemo(() => {
     if (!isCampaignProduct || !product.campaignBooking) {
       return new Map<string, number>();
@@ -1744,6 +1798,21 @@ export default function AddToCartWizard({
               priceAdjustment: slotSelection.priceAdjustment,
             }
           : null,
+        organiser:
+          organiserAccess && organiserAccess.active
+            ? {
+                organiserId: organiserAccess.program.organiserId,
+                minimumGuarantee:
+                  organiserAccess.program.minimumGuarantee ?? null,
+                exhibitorProductId:
+                  organiserAccess.program.exhibitorProductId ?? null,
+                exhibitorPrice:
+                  organiserAccess.program.exhibitorPrice ?? basePrice,
+                upsellVariationIds:
+                  organiserAccess.program.upsellVariationIds ?? [],
+                source: organiserAccess.source ?? "query",
+              }
+            : null,
       });
       setLiveMessage(
         reservationStatus === "pending"
@@ -1824,6 +1893,18 @@ export default function AddToCartWizard({
             <p id="wizard-description" className="mt-1 text-sm text-gray-600">
               Step {step + 1} of {totalSteps}. {stepLabel}
             </p>
+            {organiserAccess && (
+              <p
+                className={clsx(
+                  "mt-2 text-xs",
+                  organiserActive ? "text-emerald-600" : "text-slate-500"
+                )}
+              >
+                {organiserActive
+                  ? "Partner organiser pricing is applied automatically for this booking."
+                  : "Partner organiser pricing is available when booking through the event organiser link."}
+              </p>
+            )}
           </div>
           <button
             type="button"
@@ -1854,24 +1935,26 @@ export default function AddToCartWizard({
               Location is pre-assigned for this package so we can fast-track scheduling with the on-site team.
             </p>
             <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="btn btn-xs btn-outline"
-                onClick={() => setOverrideLocation(true)}
-              >
-                Use a different location
-              </button>
+              {!organiserActive && (
+                <button
+                  type="button"
+                  className="btn btn-xs btn-outline"
+                  onClick={() => setOverrideLocation(true)}
+                >
+                  Use a different location
+                </button>
+              )}
             </div>
-          </div>
-        )}
-        {locationStep ? (
-          <div className="space-y-3">
-            {hasPresetVenue && overrideLocation && (
-              <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-                <p>
-                  This package is normally fulfilled at {venueCoveragePreset?.label || product.venue || "the booked venue"}.
-                  Provide an alternate filming location below if this booking needs to be routed elsewhere.
-                </p>
+        </div>
+      )}
+      {locationStep ? (
+        <div className="space-y-3">
+          {hasPresetVenue && overrideLocation && !organiserActive && (
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              <p>
+                This package is normally fulfilled at {venueCoveragePreset?.label || product.venue || "the booked venue"}.
+                Provide an alternate filming location below if this booking needs to be routed elsewhere.
+              </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
                     type="button"
