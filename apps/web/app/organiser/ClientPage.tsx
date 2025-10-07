@@ -108,6 +108,16 @@ interface OrganiserOrderRecord {
   settlementStatus: string | null;
 }
 
+type StripeActionMessage = { tone: "success" | "error" | "info"; text: string };
+
+type ShareFeedbackMessage = { productId: string; tone: "success" | "error"; message: string };
+
+const STRIPE_MESSAGE_CLASSES: Record<StripeActionMessage["tone"], string> = {
+  success: "text-emerald-600",
+  error: "text-red-600",
+  info: "text-slate-600",
+};
+
 function formatCurrency(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) {
     return "—";
@@ -387,11 +397,15 @@ export default function OrganiserClientPage() {
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [origin, setOrigin] = useState("https://pineappletapped.com");
+  const [stripeActionLoading, setStripeActionLoading] = useState(false);
+  const [stripeActionMessage, setStripeActionMessage] = useState<StripeActionMessage | null>(null);
+  const [shareFeedback, setShareFeedback] = useState<ShareFeedbackMessage | null>(null);
   const dbRef = useRef<Firestore | null>(null);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      setOrigin(window.location.origin);
+      const currentOrigin = window.location.origin.replace(/\/$/, "");
+      setOrigin(currentOrigin);
     }
   }, []);
 
@@ -439,6 +453,130 @@ export default function OrganiserClientPage() {
   }, [allowed]);
 
   const organiserId = useMemo(() => normaliseOrganiserId(profile?.id ?? null), [profile?.id]);
+
+  useEffect(() => {
+    if (!stripeActionMessage) {
+      return;
+    }
+    const timeout = window.setTimeout(() => setStripeActionMessage(null), 8000);
+    return () => window.clearTimeout(timeout);
+  }, [stripeActionMessage]);
+
+  useEffect(() => {
+    if (!shareFeedback) {
+      return;
+    }
+    const timeout = window.setTimeout(() => setShareFeedback(null), 6000);
+    return () => window.clearTimeout(timeout);
+  }, [shareFeedback]);
+
+  const launchStripeConnect = useCallback(
+    async (mode: "onboarding" | "login" = "onboarding") => {
+      if (!organiserId) {
+        setStripeActionMessage({
+          tone: "error",
+          text: "Your organiser profile hasn’t finished loading yet. Refresh the page and try again.",
+        });
+        return;
+      }
+      setStripeActionLoading(true);
+      setStripeActionMessage(null);
+      try {
+        const response = await fetch("/api/organisers/stripe/connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode, organiserId }),
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          const message =
+            typeof payload?.error === "string"
+              ? payload.error
+              : "We couldn’t prepare Stripe Connect right now. Please try again.";
+          throw new Error(message);
+        }
+        const payload = await response.json();
+        const linkUrl =
+          typeof payload?.linkUrl === "string" && payload.linkUrl.trim().length > 0
+            ? payload.linkUrl.trim()
+            : null;
+        const linkType: "onboarding" | "login" =
+          payload?.linkType === "login" || payload?.linkType === "onboarding" ? payload.linkType : mode;
+        const accountId =
+          typeof payload?.accountId === "string" && payload.accountId.trim().length > 0
+            ? payload.accountId.trim()
+            : null;
+        const nextStatus =
+          typeof payload?.status === "string" && payload.status.trim().length > 0
+            ? payload.status.trim()
+            : linkType === "login"
+            ? profile?.stripeStatus ?? null
+            : "in_progress";
+        if (accountId) {
+          setProfile((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  stripeAccountId: accountId,
+                  stripeStatus: nextStatus ?? prev.stripeStatus ?? null,
+                }
+              : prev
+          );
+        }
+        if (linkUrl && typeof window !== "undefined") {
+          window.open(linkUrl, "_blank", "noopener,noreferrer");
+        }
+        setStripeActionMessage({
+          tone: "success",
+          text:
+            linkType === "login"
+              ? "Stripe Express dashboard opened in a new tab."
+              : "Stripe Connect onboarding launched in a new tab.",
+        });
+      } catch (error) {
+        console.error("Failed to launch organiser Stripe Connect", error);
+        setStripeActionMessage({
+          tone: "error",
+          text:
+            error instanceof Error
+              ? error.message
+              : "We couldn’t connect to Stripe right now. Please try again shortly.",
+        });
+      } finally {
+        setStripeActionLoading(false);
+      }
+    },
+    [organiserId, profile?.stripeStatus]
+  );
+
+  const handleCopyShareLink = useCallback(async (productId: string, url: string | null) => {
+    if (!url) {
+      setShareFeedback({
+        productId,
+        tone: "error",
+        message: "Share link unavailable until your organiser profile finishes loading.",
+      });
+      return;
+    }
+    try {
+      if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+        throw new Error("clipboard-unavailable");
+      }
+      await navigator.clipboard.writeText(url);
+      setShareFeedback({
+        productId,
+        tone: "success",
+        message: "Link copied to clipboard. Share it with your exhibitors.",
+      });
+    } catch (error) {
+      console.error("Failed to copy organiser share link", error);
+      setShareFeedback({
+        productId,
+        tone: "error",
+        message: "Unable to copy automatically. Highlight the link above and copy it manually.",
+      });
+    }
+  }, []);
 
   const initialiseProductForm = useCallback((product: Product) => {
     setProductForms((prev) => {
@@ -1151,7 +1289,7 @@ export default function OrganiserClientPage() {
 
         {profile ? (
           <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Programme overview</h2>
                 <p className="text-sm text-gray-600">
@@ -1159,9 +1297,50 @@ export default function OrganiserClientPage() {
                   booking through your link.
                 </p>
               </div>
-              <span className="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-600">
-                {profile.active ? "Active" : "Paused"}
-              </span>
+              <div className="flex flex-col items-stretch gap-2 sm:items-end">
+                <span className="inline-flex items-center justify-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-600">
+                  {profile.active ? "Active" : "Paused"}
+                </span>
+                <div className="flex flex-wrap justify-end gap-2">
+                  {profile.stripeAccountId ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => launchStripeConnect("login")}
+                        className="inline-flex items-center justify-center rounded-full border border-emerald-500 px-4 py-2 text-xs font-semibold text-emerald-600 transition hover:bg-emerald-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={stripeActionLoading}
+                      >
+                        Open Stripe dashboard
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => launchStripeConnect("onboarding")}
+                        className="inline-flex items-center justify-center rounded-full bg-emerald-500 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={stripeActionLoading}
+                      >
+                        Update payout details
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => launchStripeConnect("onboarding")}
+                      className="inline-flex items-center justify-center rounded-full bg-emerald-500 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={stripeActionLoading}
+                    >
+                      Connect Stripe payouts
+                    </button>
+                  )}
+                </div>
+                {stripeActionMessage ? (
+                  <p
+                    className={`text-xs ${STRIPE_MESSAGE_CLASSES[stripeActionMessage.tone]}`}
+                    aria-live="polite"
+                  >
+                    {stripeActionMessage.text}
+                  </p>
+                ) : null}
+              </div>
             </div>
 
             <dl className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -1217,6 +1396,11 @@ export default function OrganiserClientPage() {
               const form = productForms[product.id];
               const summary = slotSummaries[product.id] ?? null;
               const slots = slotDrafts[product.id] ?? [];
+              const shareBase = origin.endsWith("/") ? origin.slice(0, -1) : origin;
+              const shareUrl =
+                organiserId && shareBase
+                  ? `${shareBase}/products/${product.id}?organiser=${organiserId}`
+                  : null;
               return (
                 <section key={product.id} className="rounded-2xl border border-gray-200 p-4 shadow-sm">
                   <div className="flex flex-col gap-2 border-b border-gray-100 pb-4 sm:flex-row sm:items-start sm:justify-between">
@@ -1233,6 +1417,65 @@ export default function OrganiserClientPage() {
                         <span>No slots configured</span>
                       )}
                     </div>
+                  </div>
+                  <div className="mt-4 rounded-2xl border border-dashed border-amber-200 bg-amber-50 p-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <h4 className="text-sm font-semibold text-amber-900">Share with exhibitors</h4>
+                        <p className="text-xs text-amber-700">
+                          Send this link so exhibitors see your organiser pricing, upsells, and available slots.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleCopyShareLink(product.id, shareUrl)}
+                          className="inline-flex items-center justify-center rounded-full bg-amber-500 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-amber-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={!shareUrl}
+                        >
+                          Copy share link
+                        </button>
+                        {shareUrl ? (
+                          <Link
+                            href={shareUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center justify-center rounded-full border border-amber-500 px-4 py-2 text-xs font-semibold text-amber-700 transition hover:bg-amber-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500"
+                          >
+                            Open listing
+                          </Link>
+                        ) : (
+                          <button
+                            type="button"
+                            className="inline-flex items-center justify-center rounded-full border border-amber-200 px-4 py-2 text-xs font-semibold text-amber-500/70"
+                            disabled
+                          >
+                            Open listing
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-3">
+                      <input
+                        type="text"
+                        readOnly
+                        value={
+                          shareUrl ??
+                          "Share link will appear once your organiser profile finishes loading."
+                        }
+                        className="w-full cursor-text select-all rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs text-amber-800 shadow-sm focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-200"
+                      />
+                    </div>
+                    {shareFeedback?.productId === product.id ? (
+                      <p
+                        className={`mt-2 text-xs ${
+                          shareFeedback.tone === "success" ? "text-emerald-700" : "text-red-600"
+                        }`}
+                        aria-live="polite"
+                      >
+                        {shareFeedback.message}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="mt-4 grid gap-6 lg:grid-cols-2">
                     <div>
