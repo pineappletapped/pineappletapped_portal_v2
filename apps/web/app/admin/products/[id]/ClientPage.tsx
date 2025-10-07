@@ -662,6 +662,7 @@ export default function EditProductPage() {
   const imageObjectUrlsRef = useRef<string[]>([]);
   const [requirements, setRequirements] = useState("");
   const [operationsInfo, setOperationsInfo] = useState("");
+  const [closingWhyItWorks, setClosingWhyItWorks] = useState("");
   const [deliveryIndex, setDeliveryIndex] = useState(0);
   const [deliverables, setDeliverables] = useState<
     (ProductDeliverable & { file?: File })[]
@@ -1228,6 +1229,9 @@ export default function EditProductPage() {
           );
           setRequirements(p.requirements || "");
           setOperationsInfo(p.operationsInfo || "");
+          setClosingWhyItWorks(
+            typeof p.closingWhyItWorks === "string" ? p.closingWhyItWorks : ""
+          );
           const idx = deliveryOptions.indexOf(p.deliveryTime || "");
           setDeliveryIndex(idx >= 0 ? idx : 0);
           setDeliverables((p.deliverables || []) as any);
@@ -1977,6 +1981,8 @@ export default function EditProductPage() {
       imageUrls: finalImageUrls,
       requirements: requirements || null,
       operationsInfo: operationsInfo || null,
+      closingWhyItWorks:
+        closingWhyItWorks.trim().length > 0 ? closingWhyItWorks.trim() : null,
       deliveryTime: deliveryOptions[deliveryIndex],
       deliverables: deliverableData,
       variations: variationData,
@@ -2938,6 +2944,13 @@ export default function EditProductPage() {
           </label>
           <label className="text-sm font-medium">Requirements</label>
           <textarea className="input" value={requirements} onChange={(e) => setRequirements(e.target.value)} />
+          <label className="text-sm font-medium">Why it works summary</label>
+          <textarea
+            className="input"
+            value={closingWhyItWorks}
+            onChange={(e) => setClosingWhyItWorks(e.target.value)}
+            placeholder="Optional closing statement shown on the product page CTA"
+          />
           <label className="text-sm font-medium">
             Delivery Time: {deliveryOptions[deliveryIndex]}
           </label>

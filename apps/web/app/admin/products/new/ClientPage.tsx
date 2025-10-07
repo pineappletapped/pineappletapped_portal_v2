@@ -494,6 +494,7 @@ export default function NewProductPage() {
   const imageObjectUrlsRef = useRef<string[]>([]);
   const [requirements, setRequirements] = useState("");
   const [operationsInfo, setOperationsInfo] = useState("");
+  const [closingWhyItWorks, setClosingWhyItWorks] = useState("");
   const [deliveryIndex, setDeliveryIndex] = useState(0);
   const [deliverables, setDeliverables] = useState<
     (ProductDeliverable & { file?: File })[]
@@ -1514,6 +1515,8 @@ export default function NewProductPage() {
       },
       requirements: requirements || null,
       operationsInfo: operationsInfo || null,
+      closingWhyItWorks:
+        closingWhyItWorks.trim().length > 0 ? closingWhyItWorks.trim() : null,
       deliveryTime: deliveryOptions[deliveryIndex],
       category: category || null,
       eventDate: eventStartDate || null,
@@ -2260,6 +2263,13 @@ export default function NewProductPage() {
           </label>
           <label className="text-sm font-medium">Requirements</label>
           <textarea className="input" value={requirements} onChange={(e) => setRequirements(e.target.value)} />
+          <label className="text-sm font-medium">Why it works summary</label>
+          <textarea
+            className="input"
+            value={closingWhyItWorks}
+            onChange={(e) => setClosingWhyItWorks(e.target.value)}
+            placeholder="Optional closing statement shown on the product page CTA"
+          />
           <label className="text-sm font-medium">
             Delivery Time: {deliveryOptions[deliveryIndex]}
           </label>
