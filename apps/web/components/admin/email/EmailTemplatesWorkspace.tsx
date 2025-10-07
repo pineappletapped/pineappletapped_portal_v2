@@ -472,6 +472,7 @@ export default function EmailTemplatesWorkspace() {
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
+  const [removingSenderId, setRemovingSenderId] = useState<string | null>(null);
 
   const dbRef = useRef<any>(null);
   const authUnsubscribeRef = useRef<() => void>();
@@ -658,6 +659,20 @@ export default function EmailTemplatesWorkspace() {
     () => senders.filter((sender) => sender.status === "connected"),
     [senders]
   );
+
+  useEffect(() => {
+    if (!formState.sendFromAccountId) return;
+    const senderExists = senders.some((sender) => sender.id === formState.sendFromAccountId);
+    if (senderExists) return;
+    setFormState((prev) => ({ ...prev, sendFromAccountId: "" }));
+  }, [formState.sendFromAccountId, senders]);
+
+  useEffect(() => {
+    if (!globalForm.defaultSenderId) return;
+    const senderExists = senders.some((sender) => sender.id === globalForm.defaultSenderId);
+    if (senderExists) return;
+    setGlobalForm((prev) => ({ ...prev, defaultSenderId: "" }));
+  }, [globalForm.defaultSenderId, senders]);
 
   const inboxMessagesThisWeek = useMemo(() => {
     const now = new Date();
@@ -856,6 +871,79 @@ export default function EmailTemplatesWorkspace() {
       );
     } finally {
       setSavingGlobal(false);
+    }
+  };
+
+  const handleRemoveSender = async (sender: EmailSenderRecord) => {
+    const confirmed = window.confirm(
+      `Remove ${sender.displayName || sender.email} from the connected accounts? Templates using this inbox will fall back to the global default.`
+    );
+    if (!confirmed) return;
+
+    setRemovingSenderId(sender.id);
+    setErrorMessage(null);
+    setStatusMessage(null);
+
+    try {
+      if (!dbRef.current) {
+        const { db } = await ensureFirebase();
+        dbRef.current = db;
+      }
+
+      const db = dbRef.current;
+
+      const updates: Promise<unknown>[] = [];
+
+      if (globalSettings?.defaultSenderId === sender.id) {
+        updates.push(
+          setDoc(
+            doc(db, "emailSettings", "global"),
+            {
+              defaultSenderId: null,
+              updatedAt: serverTimestamp(),
+              updatedBy: currentUser?.uid ?? null,
+              updatedByName:
+                (currentUser?.displayName as string | undefined) ||
+                (currentUser?.email as string | undefined) ||
+                null,
+              updatedByEmail: currentUser?.email ?? null,
+            },
+            { merge: true }
+          )
+        );
+      }
+
+      const impactedScenarios = scenarios.filter((scenario) => scenario.sendFromAccountId === sender.id);
+      impactedScenarios.forEach((scenario) => {
+        updates.push(
+          setDoc(
+            doc(db, "emailTemplates", scenario.id),
+            {
+              sendFromAccountId: null,
+              updatedAt: serverTimestamp(),
+              updatedBy: currentUser?.uid ?? null,
+              updatedByName:
+                (currentUser?.displayName as string | undefined) ||
+                (currentUser?.email as string | undefined) ||
+                null,
+              updatedByEmail: currentUser?.email ?? null,
+            },
+            { merge: true }
+          )
+        );
+      });
+
+      await Promise.all([
+        deleteDoc(doc(db, "emailSenders", sender.id)),
+        ...updates,
+      ]);
+
+      setStatusMessage("Sender removed. Any automations using it now inherit the default configuration.");
+    } catch (error) {
+      console.error("Failed to remove email sender", error);
+      setErrorMessage(error instanceof Error ? error.message : "Unable to remove sender. Try again.");
+    } finally {
+      setRemovingSenderId(null);
     }
   };
 
@@ -1152,6 +1240,15 @@ export default function EmailTemplatesWorkspace() {
                 Link shared Gmail inboxes to power automated sending. Once authorised, the account can be selected per template or set as the global default.
               </p>
 
+              <div className="mt-4 rounded-2xl bg-slate-50 p-4 text-xs text-slate-600">
+                <h3 className="text-sm font-semibold text-slate-900">Connection checklist</h3>
+                <ol className="mt-2 list-decimal space-y-1 pl-5">
+                  <li>Request access with the shared Gmail address so we create a pending record.</li>
+                  <li>Approve the OAuth prompt from the generated Cloud Functions link or Google Cloud console.</li>
+                  <li>Return here to confirm the status shows <span className="font-semibold text-emerald-700">connected</span> and assign it to templates or the global default.</li>
+                </ol>
+              </div>
+
               <form className="mt-4 space-y-3" onSubmit={handleRequestGmailConnection}>
                 <label className="space-y-1 text-sm text-slate-700">
                   <span className="font-medium">Connect new Gmail address</span>
@@ -1191,17 +1288,27 @@ export default function EmailTemplatesWorkspace() {
                             <p className="font-semibold text-slate-900">{sender.displayName}</p>
                             <p className="text-xs text-slate-500">{sender.email}</p>
                           </div>
-                          <span
-                            className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide ${
-                              sender.status === "connected"
-                                ? "bg-emerald-100 text-emerald-700"
-                                : sender.status === "error"
-                                ? "bg-rose-100 text-rose-700"
-                                : "bg-amber-100 text-amber-700"
-                            }`}
-                          >
-                            {sender.status}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide ${
+                                sender.status === "connected"
+                                  ? "bg-emerald-100 text-emerald-700"
+                                  : sender.status === "error"
+                                  ? "bg-rose-100 text-rose-700"
+                                  : "bg-amber-100 text-amber-700"
+                              }`}
+                            >
+                              {sender.status}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveSender(sender)}
+                              disabled={removingSenderId === sender.id}
+                              className="rounded-full border border-rose-200 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-rose-700 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-rose-100 disabled:text-rose-300"
+                            >
+                              {removingSenderId === sender.id ? "Removing…" : "Remove"}
+                            </button>
+                          </div>
                         </div>
                         <dl className="mt-2 grid gap-2 text-xs text-slate-500">
                           <div className="flex items-center justify-between">
