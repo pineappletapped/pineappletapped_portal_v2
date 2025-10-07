@@ -8765,6 +8765,60 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             };
           })()
         : null;
+    const rawOrderResponses = Array.isArray(items[idx]?.orderFormResponses)
+      ? (items[idx].orderFormResponses as any[])
+      : [];
+    const orderFormResponses = rawOrderResponses
+      .map((response, responseIndex) => {
+        if (!response || typeof response !== 'object') {
+          return null;
+        }
+        const rawFieldId =
+          typeof (response as any).fieldId === 'string' && (response as any).fieldId.trim().length > 0
+            ? (response as any).fieldId.trim()
+            : '';
+        const rawLabel =
+          typeof (response as any).label === 'string' && (response as any).label.trim().length > 0
+            ? (response as any).label.trim()
+            : '';
+        if (!rawFieldId && !rawLabel) {
+          return null;
+        }
+        const value =
+          typeof (response as any).value === 'string'
+            ? (response as any).value
+            : (response as any).value != null
+              ? String((response as any).value)
+              : '';
+        const description =
+          typeof (response as any).description === 'string' &&
+          (response as any).description.trim().length > 0
+            ? (response as any).description.trim()
+            : null;
+        const typeValue =
+          typeof (response as any).type === 'string' && (response as any).type === 'long-text'
+            ? 'long-text'
+            : 'short-text';
+        const resolvedFieldId = rawFieldId || `field-${responseIndex}`;
+        return {
+          fieldId: resolvedFieldId,
+          label: rawLabel || rawFieldId || resolvedFieldId,
+          value,
+          description,
+          required: (response as any).required === true,
+          type: typeValue,
+        };
+      })
+      .filter(
+        (entry): entry is {
+          fieldId: string;
+          label: string;
+          value: string;
+          description: string | null;
+          required: boolean;
+          type: 'short-text' | 'long-text';
+        } => entry !== null
+      );
     const rawOrganiser = items[idx]?.organiser;
     let organiserPayload: Record<string, any> | null = null;
     if (rawOrganiser && typeof rawOrganiser === 'object') {
@@ -8936,6 +8990,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       postalCode: itemPostalCode,
       exhibition: exhibitionDetails,
       coverage: coveragePayload,
+      orderFormResponses,
       timeSlot: timeSlotDetails,
       campaignBooking,
       organiser: organiserPayload,

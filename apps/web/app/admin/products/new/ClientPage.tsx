@@ -21,11 +21,15 @@ import type {
   ProductBudgetOverride,
   ProductCrewRoleOverride,
   ProductModifierSelection,
+  ProductOrderFormField,
 } from "@/lib/products";
 import type { PriceTiers } from "@/lib/pricing";
 import type { Venue } from "@/lib/venues";
 import { defaultFranchiseRoyaltyConfig } from "@/lib/franchises";
 import { generateFormId } from "@/lib/forms";
+import ProductOrderFieldsEditor, {
+  OrderFormFieldFormState,
+} from "@/components/admin/products/ProductOrderFieldsEditor";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -482,6 +486,7 @@ export default function NewProductPage() {
     | "spec"
     | "pnl"
     | "variations"
+    | "orderFields"
     | "deliverables"
     | "kit"
     | "tasks"
@@ -504,6 +509,9 @@ export default function NewProductPage() {
   const [deliveryIndex, setDeliveryIndex] = useState(0);
   const [deliverables, setDeliverables] = useState<
     (ProductDeliverable & { file?: File })[]
+  >([]);
+  const [orderFormFields, setOrderFormFields] = useState<
+    OrderFormFieldFormState[]
   >([]);
   const [variations, setVariations] = useState<VariationFormState[]>([]);
   const [organiserEnabled, setOrganiserEnabled] = useState(false);
@@ -1563,6 +1571,25 @@ export default function NewProductPage() {
           commissionRate: organiserCommissionValue,
         }
       : null;
+    const orderFieldData: ProductOrderFormField[] = orderFormFields
+      .map((field) => {
+        const label = field.label.trim();
+        if (!label) return null;
+        const idValue = field.id && field.id.trim().length > 0
+          ? field.id
+          : generateFormId();
+        const description = field.description.trim();
+        const type = field.type === "long-text" ? "long-text" : "short-text";
+        const entry: ProductOrderFormField = {
+          id: idValue,
+          label,
+          type,
+        };
+        if (description) entry.description = description;
+        if (field.required) entry.required = true;
+        return entry;
+      })
+      .filter((entry): entry is ProductOrderFormField => entry !== null);
     const docRef = await addDoc(collection(db, "products"), {
       name,
       description,
@@ -1619,6 +1646,7 @@ export default function NewProductPage() {
       productSpec: specPayload,
       crewRoles: crewRoleData,
       organiserProgram: organiserProgramPayload,
+      orderFormFields: orderFieldData,
     });
     const uploadedGalleryUrls = new Map<string, string>();
     const uploadBatchId = Date.now();
@@ -1905,6 +1933,7 @@ export default function NewProductPage() {
       { key: "pnl", label: "P&L" },
       { key: "variations", label: "Variations" },
       { key: "deliverables", label: "Deliverables" },
+      { key: "orderFields", label: "Custom form fields" },
       { key: "tasks", label: "Default Tasks" },
       { key: "seo", label: "SEO" },
       { key: "modifiers", label: "Modifiers" }
@@ -3517,6 +3546,24 @@ export default function NewProductPage() {
           >
             Add variation
           </button>
+        </div>
+      )}
+
+      {tab === "orderFields" && (
+        <div className="space-y-4">
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+            <p className="font-medium text-slate-900">
+              Collect extra details when customers add this product to their cart.
+            </p>
+            <p className="mt-2">
+              Configure optional or required questions for project information such as stand numbers,
+              campaign goals, or billing references.
+            </p>
+          </div>
+          <ProductOrderFieldsEditor
+            fields={orderFormFields}
+            onChange={setOrderFormFields}
+          />
         </div>
       )}
 

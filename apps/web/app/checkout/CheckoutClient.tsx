@@ -261,6 +261,30 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
 
         organiserMap.set(organiserKey, accumulator);
       }
+      const orderFormResponses = Array.isArray(item.orderFormResponses)
+        ? item.orderFormResponses.map((response) => ({
+            fieldId:
+              typeof response.fieldId === "string" && response.fieldId.trim().length > 0
+                ? response.fieldId.trim()
+                : "",
+            label:
+              typeof response.label === "string" && response.label.trim().length > 0
+                ? response.label.trim()
+                : "",
+            value:
+              typeof response.value === "string"
+                ? response.value
+                : response.value != null
+                  ? String(response.value)
+                  : "",
+            required: response.required === true,
+            type: response.type === "long-text" ? "long-text" : "short-text",
+            description:
+              typeof response.description === "string" && response.description.trim().length > 0
+                ? response.description.trim()
+                : null,
+          }))
+        : [];
       return {
         id: item.id,
         quantity: item.quantity,
@@ -273,6 +297,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         location: item.location ?? null,
         postalCode: item.postalCode ?? null,
         exhibition: item.exhibition ?? null,
+        orderFormResponses,
         timeSlot: item.timeSlot ?? null,
         coverage: item.coverage ?? null,
         campaignBooking,
@@ -360,6 +385,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           date: item.date,
           location: item.location,
           postalCode: item.postalCode,
+          orderFormResponses: item.orderFormResponses,
           coverage: item.coverage,
           timeSlot: item.timeSlot ?? null,
           exhibition: item.exhibition ?? null,

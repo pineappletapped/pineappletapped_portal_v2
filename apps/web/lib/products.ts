@@ -111,6 +111,19 @@ export interface ProductModifierDeliverable {
   label?: string | null;
 }
 
+export type ProductOrderFieldType = "short-text" | "long-text";
+
+export interface ProductOrderFormField {
+  id: string;
+  label: string;
+  /** Optional helper copy displayed with the question. */
+  description?: string | null;
+  /** Whether the customer must answer the question before checkout. */
+  required?: boolean;
+  /** Controls how the response is collected in the add to cart wizard. */
+  type?: ProductOrderFieldType | null;
+}
+
 export interface ProductBudgetOverride {
   labourFilming?: number | null;
   labourEditing?: number | null;
@@ -354,6 +367,8 @@ export interface Product {
   venueCoverage?: ProductVenueCoverage | null;
   /** Optional organiser partner configuration for exhibitor programmes. */
   organiserProgram?: ProductOrganiserProgram | null;
+  /** Custom questions shown during checkout when customers add this product. */
+  orderFormFields?: ProductOrderFormField[];
 }
 
 export interface ProductOnsiteTiming {

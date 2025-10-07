@@ -30,12 +30,16 @@ import type {
   ProductBudgetOverride,
   ProductCrewRoleOverride,
   ProductModifierSelection,
+  ProductOrderFormField,
 } from "@/lib/products";
 import type { PriceTiers } from "@/lib/pricing";
 import type { Venue } from "@/lib/venues";
 import type { KitBag, EquipmentStandard } from "@/lib/equipment";
 import { defaultFranchiseRoyaltyConfig } from "@/lib/franchises";
 import { generateFormId } from "@/lib/forms";
+import ProductOrderFieldsEditor, {
+  OrderFormFieldFormState,
+} from "@/components/admin/products/ProductOrderFieldsEditor";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -686,6 +690,7 @@ export default function EditProductPage() {
     | "spec"
     | "pnl"
     | "variations"
+    | "orderFields"
     | "deliverables"
     | "kit"
     | "tasks"
@@ -708,6 +713,9 @@ export default function EditProductPage() {
   const [deliveryIndex, setDeliveryIndex] = useState(0);
   const [deliverables, setDeliverables] = useState<
     (ProductDeliverable & { file?: File })[]
+  >([]);
+  const [orderFormFields, setOrderFormFields] = useState<
+    OrderFormFieldFormState[]
   >([]);
   const [variations, setVariations] = useState<VariationFormState[]>([]);
   const [organiserEnabled, setOrganiserEnabled] = useState(false);
@@ -1282,6 +1290,25 @@ export default function EditProductPage() {
           const idx = deliveryOptions.indexOf(p.deliveryTime || "");
           setDeliveryIndex(idx >= 0 ? idx : 0);
           setDeliverables((p.deliverables || []) as any);
+          const initialOrderFields = Array.isArray(p.orderFormFields)
+            ? (p.orderFormFields as ProductOrderFormField[])
+            : [];
+          setOrderFormFields(
+            initialOrderFields.map((field) => ({
+              id:
+                typeof field.id === "string" && field.id.trim().length > 0
+                  ? field.id
+                  : generateFormId(),
+              label:
+                typeof field.label === "string" ? field.label : "",
+              description:
+                typeof field.description === "string"
+                  ? field.description
+                  : "",
+              required: field.required === true,
+              type: field.type === "long-text" ? "long-text" : "short-text",
+            }))
+          );
           variationEntries = Array.isArray(p.variations)
             ? (p.variations as ProductVariation[])
             : [];
@@ -1803,6 +1830,26 @@ export default function EditProductPage() {
       deliverableData.push(item);
     }
 
+    const orderFieldData: ProductOrderFormField[] = orderFormFields
+      .map((field) => {
+        const label = field.label.trim();
+        if (!label) return null;
+        const idValue = field.id && field.id.trim().length > 0
+          ? field.id
+          : generateFormId();
+        const description = field.description.trim();
+        const type = field.type === "long-text" ? "long-text" : "short-text";
+        const entry: ProductOrderFormField = {
+          id: idValue,
+          label,
+          type,
+        };
+        if (description) entry.description = description;
+        if (field.required) entry.required = true;
+        return entry;
+      })
+      .filter((entry): entry is ProductOrderFormField => entry !== null);
+
     const variationData: ProductVariation[] = variations.map((variation) => {
       const name = variation.name.trim();
       const features = variation.featuresText
@@ -2057,6 +2104,7 @@ export default function EditProductPage() {
       deliveryTime: deliveryOptions[deliveryIndex],
       deliverables: deliverableData,
       variations: variationData,
+      orderFormFields: orderFieldData,
       exampleVideos: videoData,
       exampleWorkUrl: primaryExampleVideo,
       modifierGroups: enabledGroups,
@@ -2091,6 +2139,15 @@ export default function EditProductPage() {
         socialImageUrl: seoImage || null,
       },
     });
+    setOrderFormFields(
+      orderFieldData.map((field) => ({
+        id: field.id,
+        label: field.label,
+        description: field.description ?? "",
+        required: field.required === true,
+        type: field.type === "long-text" ? "long-text" : "short-text",
+      }))
+    );
     setGalleryImages(
       finalImageUrls.map((url) => ({
         id: generateFormId(),
@@ -2585,6 +2642,7 @@ export default function EditProductPage() {
       { key: "pnl", label: "P&L" },
       { key: "variations", label: "Variations" },
       { key: "deliverables", label: "Deliverables" },
+      { key: "orderFields", label: "Custom form fields" },
       { key: "kit", label: "Kit" },
       { key: "tasks", label: "Default Tasks" },
       { key: "seo", label: "SEO" },
@@ -4239,6 +4297,24 @@ export default function EditProductPage() {
           >
             Add variation
           </button>
+        </div>
+      )}
+
+      {tab === "orderFields" && (
+        <div className="space-y-4">
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+            <p className="font-medium text-slate-900">
+              Collect extra details when customers add this product to their cart.
+            </p>
+            <p className="mt-2">
+              Configure optional or required questions for project information such as stand numbers,
+              campaign goals, or billing references.
+            </p>
+          </div>
+          <ProductOrderFieldsEditor
+            fields={orderFormFields}
+            onChange={setOrderFormFields}
+          />
         </div>
       )}
 
