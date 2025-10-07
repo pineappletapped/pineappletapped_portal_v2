@@ -1,0 +1,83 @@
+import type { DocumentData, DocumentSnapshot, Timestamp } from 'firebase/firestore';
+
+export interface EventOrganiserProfile {
+  id: string;
+  userId: string;
+  active: boolean;
+  name: string | null;
+  minimumGuarantee: number | null;
+  hiddenProductIds: string[];
+  linkedProjectIds: string[];
+  exhibitorProductId: string | null;
+  upsellVariationIds: string[];
+  stripeAccountId: string | null;
+  stripeStatus: string | null;
+  commissionRate: number | null;
+  createdAt?: Timestamp | null;
+  updatedAt?: Timestamp | null;
+}
+
+const normaliseString = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const normaliseNumber = (value: unknown): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
+
+const normaliseStringList = (value: unknown): string[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const result: string[] = [];
+  value.forEach((entry) => {
+    if (typeof entry === 'string') {
+      const trimmed = entry.trim();
+      if (trimmed) {
+        result.push(trimmed);
+      }
+    }
+  });
+  return result;
+};
+
+export function parseEventOrganiserSnapshot(
+  snapshot: DocumentSnapshot<DocumentData>
+): EventOrganiserProfile | null {
+  if (!snapshot.exists()) {
+    return null;
+  }
+
+  const data = snapshot.data() ?? {};
+  const active = data?.active === true;
+  const minimumGuarantee = normaliseNumber(data?.minimumGuarantee);
+  const commissionRate = normaliseNumber(data?.commissionRate);
+
+  return {
+    id: snapshot.id,
+    userId: normaliseString(data?.userId) ?? snapshot.id,
+    active,
+    name: normaliseString(data?.name),
+    minimumGuarantee,
+    hiddenProductIds: normaliseStringList(data?.hiddenProductIds),
+    linkedProjectIds: normaliseStringList(data?.linkedProjectIds),
+    exhibitorProductId: normaliseString(data?.exhibitorProductId),
+    upsellVariationIds: normaliseStringList(data?.upsellVariationIds),
+    stripeAccountId: normaliseString(data?.stripeAccountId),
+    stripeStatus: normaliseString(data?.stripeStatus),
+    commissionRate,
+    createdAt: (data?.createdAt as Timestamp) ?? null,
+    updatedAt: (data?.updatedAt as Timestamp) ?? null,
+  } satisfies EventOrganiserProfile;
+}

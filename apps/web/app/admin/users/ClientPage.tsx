@@ -42,6 +42,7 @@ import {
 } from '@/lib/crm';
 import { ensureFirebase } from '@/lib/firebase';
 import { coerceDate, formatDateTime } from '@/lib/datetime';
+import { parseEventOrganiserSnapshot, type EventOrganiserProfile } from '@/lib/organisers';
 
 interface ProductSummary {
   id: string;
@@ -71,6 +72,19 @@ interface AdminUser {
   lastContactedAt?: unknown;
   createdAt?: unknown;
   memberships?: Array<{ orgId: string; orgName?: string | null; role?: string | null }>;
+  roles?: Record<string, boolean>;
+  organiserProfile?: {
+    active?: boolean | null;
+    name?: string | null;
+    stripeStatus?: string | null;
+    stripeAccountId?: string | null;
+    minimumGuarantee?: number | null;
+    hiddenProductIds?: string[] | null;
+    linkedProjectIds?: string[] | null;
+    exhibitorProductId?: string | null;
+    upsellVariationIds?: string[] | null;
+    commissionRate?: number | null;
+  } | null;
   [key: string]: any;
 }
 
@@ -88,6 +102,85 @@ interface OrganisationSummary {
   id: string;
   name: string;
 }
+
+type OrganiserFormState = {
+  active: boolean;
+  name: string;
+  minimumGuarantee: string;
+  hiddenProductIds: string;
+  linkedProjectIds: string;
+  exhibitorProductId: string;
+  upsellVariationIds: string;
+  stripeAccountId: string;
+  stripeStatus: string;
+  commissionRate: string;
+};
+
+const ORGANISER_FORM_DEFAULT: OrganiserFormState = {
+  active: false,
+  name: '',
+  minimumGuarantee: '',
+  hiddenProductIds: '',
+  linkedProjectIds: '',
+  exhibitorProductId: '',
+  upsellVariationIds: '',
+  stripeAccountId: '',
+  stripeStatus: '',
+  commissionRate: '',
+};
+
+const parseListInput = (value: string): string[] => {
+  if (!value || !value.trim()) {
+    return [];
+  }
+  const parts = value
+    .split(/[\n,]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return Array.from(new Set(parts));
+};
+
+const formatListInput = (values: string[] | null | undefined): string => {
+  if (!values || values.length === 0) {
+    return '';
+  }
+
+  const normalised = values
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim());
+
+  return Array.from(new Set(normalised)).join('\n');
+};
+
+const sanitiseCurrencyInput = (value: string): number | null => {
+  const cleaned = value.replace(/[^0-9.,-]/g, '').replace(/,/g, '').trim();
+  if (!cleaned) {
+    return null;
+  }
+  const parsed = Number(cleaned);
+  if (!Number.isFinite(parsed)) {
+    throw new Error('Minimum guarantee must be a numeric value.');
+  }
+  if (parsed < 0) {
+    throw new Error('Minimum guarantee cannot be negative.');
+  }
+  return parsed;
+};
+
+const sanitisePercentageInput = (value: string): number | null => {
+  const cleaned = value.replace(/[^0-9.,-]/g, '').replace(/,/g, '').trim();
+  if (!cleaned) {
+    return null;
+  }
+  const parsed = Number(cleaned);
+  if (!Number.isFinite(parsed)) {
+    throw new Error('Commission rate must be a numeric value.');
+  }
+  if (parsed < 0 || parsed > 100) {
+    throw new Error('Commission rate must be between 0% and 100%.');
+  }
+  return parsed;
+};
 
 async function findOrganisationByName(db: Firestore, name: string): Promise<OrganisationSummary | null> {
   const trimmed = name.trim();
@@ -334,6 +427,13 @@ export default function AdminUsersPage() {
   const [auditLoading, setAuditLoading] = useState(true);
   const [auditError, setAuditError] = useState<string | null>(null);
   const [auditExpanded, setAuditExpanded] = useState(false);
+  const [organiserDialogUser, setOrganiserDialogUser] = useState<AdminUser | null>(null);
+  const [organiserDraft, setOrganiserDraft] = useState<OrganiserFormState>(ORGANISER_FORM_DEFAULT);
+  const [organiserProfile, setOrganiserProfile] = useState<EventOrganiserProfile | null>(null);
+  const [organiserLoading, setOrganiserLoading] = useState(false);
+  const [organiserSaving, setOrganiserSaving] = useState(false);
+  const [organiserError, setOrganiserError] = useState<string | null>(null);
+  const [organiserNotice, setOrganiserNotice] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -597,6 +697,95 @@ export default function AdminUsersPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!organiserDialogUser) {
+      return;
+    }
+
+    let cancelled = false;
+    setOrganiserLoading(true);
+    setOrganiserError(null);
+    setOrganiserNotice(null);
+    setOrganiserProfile(null);
+
+    (async () => {
+      try {
+        const { db } = await ensureFirebase();
+        if (!db) {
+          throw new Error('Firestore is unavailable.');
+        }
+
+        const organiserSnap = await getDoc(doc(db, 'eventOrganisers', organiserDialogUser.id));
+        if (cancelled) {
+          return;
+        }
+
+        const profile = parseEventOrganiserSnapshot(organiserSnap);
+        const userProfile = organiserDialogUser.organiserProfile ?? null;
+        const activeFromRole =
+          Boolean(profile?.active) || Boolean(organiserDialogUser.roles?.organiser);
+        const minimumGuarantee =
+          profile?.minimumGuarantee ??
+          (typeof userProfile?.minimumGuarantee === 'number' ? userProfile.minimumGuarantee : null);
+        const commissionRate =
+          profile?.commissionRate ??
+          (typeof userProfile?.commissionRate === 'number' ? userProfile.commissionRate : null);
+
+        setOrganiserProfile(profile);
+        setOrganiserDraft({
+          active: activeFromRole,
+          name:
+            profile?.name ??
+            (typeof userProfile?.name === 'string' && userProfile.name?.trim()
+              ? userProfile.name.trim()
+              : organiserDialogUser.organisation || organiserDialogUser.fullName || ''),
+          minimumGuarantee: minimumGuarantee != null ? String(minimumGuarantee) : '',
+          hiddenProductIds: formatListInput(
+            profile?.hiddenProductIds ??
+              (Array.isArray(userProfile?.hiddenProductIds) ? userProfile.hiddenProductIds ?? [] : [])
+          ),
+          linkedProjectIds: formatListInput(
+            profile?.linkedProjectIds ??
+              (Array.isArray(userProfile?.linkedProjectIds) ? userProfile.linkedProjectIds ?? [] : [])
+          ),
+          exhibitorProductId:
+            profile?.exhibitorProductId ??
+            (typeof userProfile?.exhibitorProductId === 'string' && userProfile.exhibitorProductId?.trim()
+              ? userProfile.exhibitorProductId.trim()
+              : ''),
+          upsellVariationIds: formatListInput(
+            profile?.upsellVariationIds ??
+              (Array.isArray(userProfile?.upsellVariationIds) ? userProfile.upsellVariationIds ?? [] : [])
+          ),
+          stripeAccountId:
+            profile?.stripeAccountId ??
+            (typeof userProfile?.stripeAccountId === 'string' && userProfile.stripeAccountId?.trim()
+              ? userProfile.stripeAccountId.trim()
+              : ''),
+          stripeStatus:
+            profile?.stripeStatus ??
+            (typeof userProfile?.stripeStatus === 'string' && userProfile.stripeStatus?.trim()
+              ? userProfile.stripeStatus.trim()
+              : ''),
+          commissionRate: commissionRate != null ? String(commissionRate) : '',
+        });
+      } catch (error) {
+        console.error('Failed to load organiser programme details', error);
+        if (!cancelled) {
+          setOrganiserError('Unable to load organiser programme details.');
+        }
+      } finally {
+        if (!cancelled) {
+          setOrganiserLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [organiserDialogUser]);
+
   const productById = useMemo(() => {
     const map = new Map<string, ProductSummary>();
     products.forEach((product) => map.set(product.id, product));
@@ -747,6 +936,169 @@ export default function AdminUsersPage() {
       return String(value);
     }
   }, []);
+
+  const openOrganiserPanel = useCallback((user: AdminUser) => {
+    setOrganiserDialogUser(user);
+  }, []);
+
+  const closeOrganiserPanel = useCallback(() => {
+    setOrganiserDialogUser(null);
+    setOrganiserDraft(ORGANISER_FORM_DEFAULT);
+    setOrganiserProfile(null);
+    setOrganiserError(null);
+    setOrganiserNotice(null);
+  }, []);
+
+  const updateOrganiserDraft = useCallback((updates: Partial<OrganiserFormState>) => {
+    setOrganiserDraft((prev) => ({ ...prev, ...updates }));
+  }, []);
+
+  const handleOrganiserSave = useCallback(async () => {
+    if (!organiserDialogUser) {
+      return;
+    }
+
+    setOrganiserSaving(true);
+    setOrganiserError(null);
+    setOrganiserNotice(null);
+
+    try {
+      const trimmedName = organiserDraft.name.trim();
+      const hiddenProductIds = parseListInput(organiserDraft.hiddenProductIds);
+      const linkedProjectIds = parseListInput(organiserDraft.linkedProjectIds);
+      const upsellVariationIds = parseListInput(organiserDraft.upsellVariationIds);
+      const exhibitorProductId = organiserDraft.exhibitorProductId.trim();
+      const stripeAccountId = organiserDraft.stripeAccountId.trim();
+      const stripeStatus = organiserDraft.stripeStatus.trim();
+      const minimumGuarantee = sanitiseCurrencyInput(organiserDraft.minimumGuarantee);
+      const commissionRate = sanitisePercentageInput(organiserDraft.commissionRate);
+      const active = organiserDraft.active;
+
+      const { db } = await ensureFirebase();
+      if (!db) {
+        throw new Error('Firestore is unavailable.');
+      }
+
+      const organiserRef = doc(db, 'eventOrganisers', organiserDialogUser.id);
+      const payload: Record<string, unknown> = {
+        userId: organiserDialogUser.id,
+        active,
+        name: trimmedName || null,
+        minimumGuarantee,
+        hiddenProductIds,
+        linkedProjectIds,
+        exhibitorProductId: exhibitorProductId || null,
+        upsellVariationIds,
+        stripeAccountId: stripeAccountId || null,
+        stripeStatus: stripeStatus || null,
+        commissionRate,
+        updatedAt: serverTimestamp(),
+      };
+
+      if (!organiserProfile) {
+        payload.createdAt = serverTimestamp();
+      }
+
+      await setDoc(organiserRef, payload, { merge: true });
+
+      const organiserProfileForUser = active
+        ? {
+            active: true,
+            name: trimmedName || null,
+            stripeStatus: stripeStatus || null,
+            stripeAccountId: stripeAccountId || null,
+            minimumGuarantee,
+            hiddenProductIds,
+            linkedProjectIds,
+            exhibitorProductId: exhibitorProductId || null,
+            upsellVariationIds,
+            commissionRate,
+          }
+        : null;
+
+      await adminUpdateUser({
+        userId: organiserDialogUser.id,
+        updates: {
+          roles: { organiser: active },
+          organiserProfile: organiserProfileForUser,
+        },
+      });
+
+      setUsers((prev) =>
+        prev.map((entry) => {
+          if (entry.id !== organiserDialogUser.id) {
+            return entry;
+          }
+          const nextRoles = { ...(entry.roles ?? {}) };
+          if (active) {
+            nextRoles.organiser = true;
+          } else {
+            delete nextRoles.organiser;
+          }
+          const nextRecord = {
+            ...entry,
+            roles: nextRoles,
+            organiserProfile: organiserProfileForUser,
+          } as AdminUser;
+          return nextRecord;
+        })
+      );
+
+      setOrganiserDialogUser((prev) => {
+        if (!prev || prev.id !== organiserDialogUser.id) {
+          return prev;
+        }
+        const nextRoles = { ...(prev.roles ?? {}) };
+        if (active) {
+          nextRoles.organiser = true;
+        } else {
+          delete nextRoles.organiser;
+        }
+        return {
+          ...prev,
+          roles: nextRoles,
+          organiserProfile: organiserProfileForUser,
+        } as AdminUser;
+      });
+
+      setOrganiserProfile((previous) => ({
+        id: organiserDialogUser.id,
+        userId: organiserDialogUser.id,
+        active,
+        name: trimmedName || null,
+        minimumGuarantee: minimumGuarantee ?? null,
+        hiddenProductIds,
+        linkedProjectIds,
+        exhibitorProductId: exhibitorProductId || null,
+        upsellVariationIds,
+        stripeAccountId: stripeAccountId || null,
+        stripeStatus: stripeStatus || null,
+        commissionRate: commissionRate ?? null,
+        createdAt: previous?.createdAt ?? organiserProfile?.createdAt ?? null,
+        updatedAt: previous?.updatedAt ?? null,
+      }));
+
+      updateOrganiserDraft({
+        active,
+        name: trimmedName,
+        minimumGuarantee: minimumGuarantee != null ? String(minimumGuarantee) : '',
+        hiddenProductIds: formatListInput(hiddenProductIds),
+        linkedProjectIds: formatListInput(linkedProjectIds),
+        exhibitorProductId,
+        upsellVariationIds: formatListInput(upsellVariationIds),
+        stripeAccountId,
+        stripeStatus,
+        commissionRate: commissionRate != null ? String(commissionRate) : '',
+      });
+
+      setOrganiserNotice('Organiser settings saved successfully.');
+    } catch (error: any) {
+      console.error('Failed to update organiser settings', error);
+      setOrganiserError(error?.message || 'Failed to update organiser settings.');
+    } finally {
+      setOrganiserSaving(false);
+    }
+  }, [organiserDialogUser, organiserDraft, organiserProfile, updateOrganiserDraft, setUsers]);
 
   const recordCrmAuditEvent = useCallback(
     async (
@@ -1126,6 +1478,13 @@ export default function AdminUsersPage() {
                   </td>
                 ) : null}
                 <td className="p-2 flex gap-2">
+                  <button
+                    type="button"
+                    className="btn-outline btn-sm"
+                    onClick={() => openOrganiserPanel(user)}
+                  >
+                    Organiser
+                  </button>
                   <Link className="btn-sm" href={`/admin/users/${user.id}`}>
                     View
                   </Link>
@@ -1580,6 +1939,276 @@ export default function AdminUsersPage() {
           )}
         </section>
       )}
+      {organiserDialogUser && (
+        <OrganiserDialog
+          user={organiserDialogUser}
+          draft={organiserDraft}
+          loading={organiserLoading}
+          saving={organiserSaving}
+          error={organiserError}
+          notice={organiserNotice}
+          profile={organiserProfile}
+          onClose={closeOrganiserPanel}
+          onChange={updateOrganiserDraft}
+          onSave={handleOrganiserSave}
+        />
+      )}
+    </div>
+  );
+}
+
+function OrganiserDialog({
+  user,
+  draft,
+  loading,
+  saving,
+  error,
+  notice,
+  profile,
+  onClose,
+  onChange,
+  onSave,
+}: {
+  user: AdminUser;
+  draft: OrganiserFormState;
+  loading: boolean;
+  saving: boolean;
+  error: string | null;
+  notice: string | null;
+  profile: EventOrganiserProfile | null;
+  onClose: () => void;
+  onChange: (updates: Partial<OrganiserFormState>) => void;
+  onSave: () => void;
+}) {
+  const disabled = loading || saving;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="relative flex w-full max-w-3xl flex-col overflow-hidden rounded-3xl bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-gray-500">
+              Event organiser programme
+            </p>
+            <h2 className="text-lg font-semibold text-gray-900">
+              {user.fullName || user.organisation || user.email || 'Organiser'}
+            </h2>
+            <p className="text-xs text-gray-500">
+              Configure organiser access, pricing commitments, and exhibitor packages for this client.
+            </p>
+          </div>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={saving}>
+            Close
+          </button>
+        </div>
+        <form
+          className="grid max-h-[75vh] gap-4 overflow-y-auto px-6 py-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSave();
+          }}
+        >
+          {loading ? (
+            <p className="text-sm text-gray-600">Loading organiser settings…</p>
+          ) : null}
+          {error ? (
+            <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>
+          ) : null}
+          {notice ? (
+            <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              {notice}
+            </p>
+          ) : null}
+          <label className="flex items-start gap-3 text-sm font-medium text-gray-700">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={draft.active}
+              onChange={(event) => onChange({ active: event.target.checked })}
+              disabled={disabled}
+            />
+            <span>
+              Enable organiser portal access
+              <span className="block text-xs font-normal text-gray-500">
+                When enabled the client can access the organiser workspace, book exhibitor slots, and view partner pricing.
+              </span>
+            </span>
+          </label>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              Programme name
+              <input
+                type="text"
+                className="input input-bordered w-full"
+                value={draft.name}
+                onChange={(event) => onChange({ name: event.target.value })}
+                disabled={disabled}
+                placeholder="e.g. Closer Still Exhibitor Programme"
+              />
+              <span className="text-xs font-normal text-gray-500">
+                Used across internal reports and the organiser portal header.
+              </span>
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              Minimum guarantee (£)
+              <input
+                type="text"
+                className="input input-bordered w-full"
+                value={draft.minimumGuarantee}
+                onChange={(event) => onChange({ minimumGuarantee: event.target.value })}
+                disabled={disabled}
+                placeholder="e.g. 500"
+              />
+              <span className="text-xs font-normal text-gray-500">
+                Total amount invoiced upfront to secure filming for the event organiser.
+              </span>
+            </label>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              Hidden product IDs
+              <textarea
+                className="textarea textarea-bordered h-24 w-full"
+                value={draft.hiddenProductIds}
+                onChange={(event) => onChange({ hiddenProductIds: event.target.value })}
+                disabled={disabled}
+                placeholder="product_exhibitor_package"
+              />
+              <span className="text-xs font-normal text-gray-500">
+                One product ID per line. These packages surface to exhibitors joining via the organiser link.
+              </span>
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              Linked project IDs
+              <textarea
+                className="textarea textarea-bordered h-24 w-full"
+                value={draft.linkedProjectIds}
+                onChange={(event) => onChange({ linkedProjectIds: event.target.value })}
+                disabled={disabled}
+                placeholder="project_abc123"
+              />
+              <span className="text-xs font-normal text-gray-500">
+                Optional projects or campaigns that should inherit exhibitor bookings for this organiser.
+              </span>
+            </label>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              Exhibitor product ID
+              <input
+                type="text"
+                className="input input-bordered w-full"
+                value={draft.exhibitorProductId}
+                onChange={(event) => onChange({ exhibitorProductId: event.target.value })}
+                disabled={disabled}
+                placeholder="product_hidden_exhibitor"
+              />
+              <span className="text-xs font-normal text-gray-500">
+                Primary hidden product shared with exhibitors by default.
+              </span>
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              Upsell variation IDs
+              <textarea
+                className="textarea textarea-bordered h-24 w-full"
+                value={draft.upsellVariationIds}
+                onChange={(event) => onChange({ upsellVariationIds: event.target.value })}
+                disabled={disabled}
+                placeholder="variation_walkthrough"
+              />
+              <span className="text-xs font-normal text-gray-500">
+                Optional variation IDs (one per line) that unlock when exhibitors choose the organiser package.
+              </span>
+            </label>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              Stripe account ID
+              <input
+                type="text"
+                className="input input-bordered w-full"
+                value={draft.stripeAccountId}
+                onChange={(event) => onChange({ stripeAccountId: event.target.value })}
+                disabled={disabled}
+                placeholder="acct_1234"
+              />
+              <span className="text-xs font-normal text-gray-500">
+                Connect account used for organiser payouts.
+              </span>
+            </label>
+            <label className="grid gap-1 text-sm font-medium text-gray-700">
+              Stripe status
+              <input
+                type="text"
+                className="input input-bordered w-full"
+                value={draft.stripeStatus}
+                onChange={(event) => onChange({ stripeStatus: event.target.value })}
+                disabled={disabled}
+                placeholder="pending"
+              />
+              <span className="text-xs font-normal text-gray-500">
+                Track the Stripe Connect onboarding state (e.g. pending, active, requirements_due).
+              </span>
+            </label>
+          </div>
+          <label className="grid gap-1 text-sm font-medium text-gray-700">
+            Commission rate (%)
+            <input
+              type="text"
+              className="input input-bordered w-full"
+              value={draft.commissionRate}
+              onChange={(event) => onChange({ commissionRate: event.target.value })}
+              disabled={disabled}
+              placeholder="e.g. 20"
+            />
+            <span className="text-xs font-normal text-gray-500">
+              Percentage of exhibitor revenue allocated to the organiser once the minimum guarantee is covered.
+            </span>
+          </label>
+          {profile ? (
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-600">
+              <p className="font-medium text-gray-900">Current configuration</p>
+              <div className="mt-2 grid gap-1 sm:grid-cols-2">
+                <p>
+                  Minimum guarantee:{' '}
+                  <span className="font-medium text-gray-900">
+                    {profile.minimumGuarantee != null
+                      ? `£${profile.minimumGuarantee.toFixed(2)}`
+                      : '—'}
+                  </span>
+                </p>
+                <p>
+                  Commission rate:{' '}
+                  <span className="font-medium text-gray-900">
+                    {profile.commissionRate != null ? `${profile.commissionRate}%` : '—'}
+                  </span>
+                </p>
+                <p>
+                  Hidden products:{' '}
+                  <span className="font-medium text-gray-900">{profile.hiddenProductIds.length}</span>
+                </p>
+                <p>
+                  Linked projects:{' '}
+                  <span className="font-medium text-gray-900">{profile.linkedProjectIds.length}</span>
+                </p>
+              </div>
+            </div>
+          ) : null}
+          <div className="flex items-center justify-end gap-2 border-t border-gray-200 pt-4">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={onClose}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={disabled}>
+              {saving ? 'Saving…' : 'Save organiser settings'}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

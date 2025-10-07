@@ -15,7 +15,7 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
-import { ROLE_KEYS, extractUserRoles, getDefaultAdminRoute, hasRole, UserRoles } from '@/lib/roles';
+import { ADMIN_ROLE_KEYS, extractUserRoles, getDefaultAdminRoute, hasRole, UserRoles } from '@/lib/roles';
 
 type AuthLinksProps = {
   size?: 'xs' | 'sm' | 'md';
@@ -340,7 +340,7 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
   if (!checked) return null;
 
   if (user) {
-    const canAccessAdmin = hasRole(roles, ROLE_KEYS);
+    const canAccessAdmin = hasRole(roles, ADMIN_ROLE_KEYS);
     const isGodAdmin = hasRole(roles, 'admin');
     const isContractor = isProfileContractor;
     const clientStatus = (profile?.crmStatus || 'client') === 'client';
@@ -350,6 +350,8 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
       (isContractor && clientStatus && (hasClientMembership || hasClientOrders));
     const showFranchisePortal = isGodAdmin || hasFranchiseMembership;
     const showTeamPortal = isGodAdmin || isContractor;
+    const showAffiliatePortal = hasRole(roles, 'affiliate');
+    const showOrganiserPortal = hasRole(roles, 'organiser');
     const adminHref = getDefaultAdminRoute(roles);
     return (
       <div className={wrapperClass}>
@@ -361,6 +363,16 @@ export default function AuthLinks({ size = 'sm', className }: AuthLinksProps = {
         {showFranchisePortal && (
           <Link href="/franchise" className={makeButtonClass('outline')}>
             Franchise Portal
+          </Link>
+        )}
+        {showOrganiserPortal && (
+          <Link href="/organiser" className={makeButtonClass('outline')}>
+            Organiser Portal
+          </Link>
+        )}
+        {showAffiliatePortal && (
+          <Link href="/affiliate" className={makeButtonClass('outline')}>
+            Affiliate Portal
           </Link>
         )}
         {canAccessAdmin && (
