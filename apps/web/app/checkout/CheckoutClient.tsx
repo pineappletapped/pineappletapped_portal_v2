@@ -111,7 +111,11 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const orderInput = useMemo(() => {
     type OrganiserLineRole = "organiser" | "exhibitor";
     type OrganiserAccumulator = {
-      organiserId: string;
+      key: string;
+      organiserId: string | null;
+      programEnabled: boolean;
+      programProductIds: Set<string>;
+      commissionRate: number | null;
       minimumGuarantee: number | null;
       exhibitorProductId: string | null;
       exhibitorPrice: number | null;
@@ -153,11 +157,25 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         : null;
       const organiser = item.organiser
         ? {
-            organiserId: item.organiser.organiserId,
+            organiserId: item.organiser.organiserId ?? null,
             minimumGuarantee: item.organiser.minimumGuarantee ?? null,
             exhibitorProductId: item.organiser.exhibitorProductId ?? null,
             exhibitorPrice: item.organiser.exhibitorPrice ?? null,
             upsellVariationIds: item.organiser.upsellVariationIds ?? [],
+            commissionRate: item.organiser.commissionRate ?? null,
+            programEnabled: item.organiser.programEnabled === true,
+            programKey:
+              typeof item.organiser.programKey === "string" &&
+              item.organiser.programKey.trim().length > 0
+                ? item.organiser.programKey.trim()
+                : item.organiser.organiserId
+                  ? item.organiser.organiserId
+                  : `program:${item.id}`,
+            programProductId:
+              typeof item.organiser.programProductId === "string" &&
+              item.organiser.programProductId.trim().length > 0
+                ? item.organiser.programProductId.trim()
+                : item.id,
             source: item.organiser.source ?? null,
             lineRole:
               item.organiser.exhibitorProductId &&
@@ -170,9 +188,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       if (organiser) {
         const quantity = Math.max(1, item.quantity);
         const lineTotal = item.price * quantity;
-        const existing = organiserMap.get(organiser.organiserId);
+        const organiserKey = organiser.programKey;
+        const existing = organiserMap.get(organiserKey);
         const accumulator: OrganiserAccumulator = existing ?? {
-          organiserId: organiser.organiserId,
+          key: organiserKey,
+          organiserId: organiser.organiserId ?? null,
+          programEnabled: organiser.programEnabled,
+          programProductIds: new Set<string>(),
+          commissionRate: organiser.commissionRate ?? null,
           minimumGuarantee: organiser.minimumGuarantee ?? null,
           exhibitorProductId: organiser.exhibitorProductId ?? null,
           exhibitorPrice: organiser.exhibitorPrice ?? null,
@@ -185,6 +208,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           items: [],
         };
 
+        if (organiser.organiserId && !accumulator.organiserId) {
+          accumulator.organiserId = organiser.organiserId;
+        }
         if (organiser.minimumGuarantee != null) {
           accumulator.minimumGuarantee =
             accumulator.minimumGuarantee == null
@@ -196,6 +222,17 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         }
         if (organiser.exhibitorPrice != null) {
           accumulator.exhibitorPrice = organiser.exhibitorPrice;
+        }
+        if (organiser.commissionRate != null) {
+          accumulator.commissionRate = organiser.commissionRate;
+        }
+        if (organiser.programEnabled) {
+          accumulator.programEnabled = true;
+        }
+        if (organiser.programProductId) {
+          accumulator.programProductIds.add(organiser.programProductId);
+        } else {
+          accumulator.programProductIds.add(item.id);
         }
         organiser.upsellVariationIds.forEach((id) => {
           if (typeof id === "string" && id.trim().length > 0) {
@@ -222,7 +259,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           role: organiser.lineRole,
         });
 
-        organiserMap.set(organiser.organiserId, accumulator);
+        organiserMap.set(organiserKey, accumulator);
       }
       return {
         id: item.id,
@@ -243,7 +280,11 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       };
     });
     const organiserSummary = Array.from(organiserMap.values()).map((entry) => ({
+      organiserKey: entry.key,
       organiserId: entry.organiserId,
+      programEnabled: entry.programEnabled,
+      programProductIds: Array.from(entry.programProductIds),
+      commissionRate: entry.commissionRate,
       minimumGuarantee: entry.minimumGuarantee,
       exhibitorProductId: entry.exhibitorProductId,
       exhibitorPrice: entry.exhibitorPrice,

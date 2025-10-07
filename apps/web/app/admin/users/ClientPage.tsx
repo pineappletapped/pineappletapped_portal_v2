@@ -987,6 +987,7 @@ export default function AdminUsersPage() {
         minimumGuarantee,
         hiddenProductIds,
         linkedProjectIds,
+        programProductIds: organiserProfile?.programProductIds ?? [],
         exhibitorProductId: exhibitorProductId || null,
         upsellVariationIds,
         stripeAccountId: stripeAccountId || null,
@@ -1013,6 +1014,7 @@ export default function AdminUsersPage() {
             exhibitorProductId: exhibitorProductId || null,
             upsellVariationIds,
             commissionRate,
+            programProductIds: organiserProfile?.programProductIds ?? [],
           }
         : null;
 
@@ -1074,6 +1076,7 @@ export default function AdminUsersPage() {
         stripeAccountId: stripeAccountId || null,
         stripeStatus: stripeStatus || null,
         commissionRate: commissionRate ?? null,
+        programProductIds: previous?.programProductIds ?? organiserProfile?.programProductIds ?? [],
         createdAt: previous?.createdAt ?? organiserProfile?.createdAt ?? null,
         updatedAt: previous?.updatedAt ?? null,
       }));

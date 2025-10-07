@@ -7198,7 +7198,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     let aggregatedKitReservationStatus = kitReservationStatusInitial;
     const aggregatedKitWarnings = new Set(kitReservationWarningsInitial);
     const driveProducts = [];
-    const organiserAggregates = new Map();
+    let organiserAggregates = new Map();
     let productSubtotal = 0;
     let labourSubtotal = 0;
     let kitSubtotal = 0;
@@ -7413,104 +7413,126 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         const rawOrganiser = items[idx]?.organiser;
         let organiserPayload = null;
         if (rawOrganiser && typeof rawOrganiser === 'object') {
-            const organiserId = normaliseOrganiserId(rawOrganiser.organiserId ?? rawOrganiser.id ?? null);
-            if (organiserId) {
-                const minimumGuarantee = parseNumber(rawOrganiser.minimumGuarantee);
-                const exhibitorProductId = normaliseString(rawOrganiser.exhibitorProductId);
-                const exhibitorPrice = parseNumber(rawOrganiser.exhibitorPrice);
-                const upsellIds = normaliseStringList(rawOrganiser.upsellVariationIds);
-                const sourceValue = normaliseString(rawOrganiser.source);
-                const lineRole = exhibitorProductId && exhibitorProductId === snap.id ? 'exhibitor' : 'organiser';
-                organiserPayload = {
-                    organiserId,
-                    minimumGuarantee: minimumGuarantee ?? null,
-                    exhibitorProductId: exhibitorProductId ?? null,
-                    exhibitorPrice: exhibitorPrice ?? null,
-                    upsellVariationIds: upsellIds,
-                    source: sourceValue ?? null,
-                    lineRole,
-                };
-                const aggregate = organiserAggregates.get(organiserId) ?? {
-                    organiserId,
-                    minimumGuarantee: minimumGuarantee ?? null,
-                    exhibitorProductId: exhibitorProductId ?? null,
-                    exhibitorPrice: exhibitorPrice ?? null,
-                    upsellVariationIds: new Set(),
-                    sources: new Set(),
-                    quantity: 0,
-                    grossSubtotal: 0,
-                    exhibitorSubtotal: 0,
-                    organiserSubtotal: 0,
-                    items: [],
-                    latestEventDate: null,
-                };
-                if (minimumGuarantee !== null) {
-                    aggregate.minimumGuarantee =
-                        aggregate.minimumGuarantee === null
-                            ? minimumGuarantee
-                            : Math.max(aggregate.minimumGuarantee, minimumGuarantee);
-                }
-                if (exhibitorProductId) {
-                    aggregate.exhibitorProductId = exhibitorProductId;
-                }
-                if (exhibitorPrice !== null) {
-                    aggregate.exhibitorPrice = exhibitorPrice;
-                }
-                upsellIds.forEach((id) => aggregate.upsellVariationIds.add(id));
-                if (sourceValue) {
-                    aggregate.sources.add(sourceValue);
-                }
-                aggregate.quantity += qty;
-                const lineTotal = price * qty;
-                aggregate.grossSubtotal += lineTotal;
-                if (lineRole === 'exhibitor') {
-                    aggregate.exhibitorSubtotal += lineTotal;
-                }
-                else {
-                    aggregate.organiserSubtotal += lineTotal;
-                }
-                aggregate.items.push({
-                    productId: snap.id,
-                    variationId: variationId ?? null,
-                    quantity: qty,
-                    unitPrice: price,
-                    lineTotal,
-                    role: lineRole,
-                });
-                const updateLatestEventDate = (candidate) => {
-                    if (!candidate || Number.isNaN(candidate.getTime())) {
-                        return;
-                    }
-                    if (!aggregate.latestEventDate ||
-                        candidate.getTime() > aggregate.latestEventDate.getTime()) {
-                        aggregate.latestEventDate = candidate;
-                    }
-                };
-                updateLatestEventDate(parseDateValue(itemDate));
-                if (timeSlotDetails?.start) {
-                    updateLatestEventDate(parseDateValue(timeSlotDetails.start));
-                }
-                if (timeSlotDetails?.end) {
-                    updateLatestEventDate(parseDateValue(timeSlotDetails.end));
-                }
-                if (campaignBooking?.slotStartAt) {
-                    updateLatestEventDate(parseDateValue(campaignBooking.slotStartAt));
-                }
-                if (campaignBooking?.slotEndAt) {
-                    updateLatestEventDate(parseDateValue(campaignBooking.slotEndAt));
-                }
-                if (exhibitionDetails?.showDate) {
-                    updateLatestEventDate(parseDateValue(exhibitionDetails.showDate));
-                }
-                if (exhibitionDetails?.setupDate) {
-                    updateLatestEventDate(parseDateValue(exhibitionDetails.setupDate));
-                }
-                updateLatestEventDate(parseDateValue(prod.eventEndDate ?? null));
-                updateLatestEventDate(parseDateValue(prod.eventDate ?? null));
-                updateLatestEventDate(parseDateValue(prod.eventStartDate ?? null));
-                updateLatestEventDate(parseDateValue(prod.eventSetupDate ?? null));
-                organiserAggregates.set(organiserId, aggregate);
+            const organiserIdRaw = rawOrganiser.organiserId ?? rawOrganiser.id ?? null;
+            const organiserId = organiserIdRaw ? String(organiserIdRaw).trim() : null;
+            const programEnabled = rawOrganiser.programEnabled === true;
+            const programKeyRaw = normaliseString(rawOrganiser.programKey);
+            const programProductId = normaliseString(rawOrganiser.programProductId) ?? snap.id;
+            const aggregateKey = organiserId || programKeyRaw || `program:${snap.id}`;
+            const minimumGuarantee = parseNumber(rawOrganiser.minimumGuarantee);
+            const exhibitorProductId = normaliseString(rawOrganiser.exhibitorProductId);
+            const exhibitorPrice = parseNumber(rawOrganiser.exhibitorPrice);
+            const upsellIds = normaliseStringList(rawOrganiser.upsellVariationIds);
+            const sourceValue = normaliseString(rawOrganiser.source);
+            const commissionRate = parseNumber(rawOrganiser.commissionRate);
+            const lineRole = exhibitorProductId && exhibitorProductId === snap.id ? 'exhibitor' : 'organiser';
+            organiserPayload = {
+                organiserId: organiserId ?? null,
+                minimumGuarantee: minimumGuarantee ?? null,
+                exhibitorProductId: exhibitorProductId ?? null,
+                exhibitorPrice: exhibitorPrice ?? null,
+                upsellVariationIds: upsellIds,
+                source: sourceValue ?? null,
+                lineRole,
+                programEnabled,
+                programKey: aggregateKey,
+                programProductId,
+                commissionRate: commissionRate ?? null,
+            };
+            const aggregate = organiserAggregates.get(aggregateKey) ?? {
+                key: aggregateKey,
+                organiserId: organiserId ?? null,
+                programEnabled,
+                programProductIds: new Set(),
+                commissionRate: commissionRate ?? null,
+                minimumGuarantee: minimumGuarantee ?? null,
+                exhibitorProductId: exhibitorProductId ?? null,
+                exhibitorPrice: exhibitorPrice ?? null,
+                upsellVariationIds: new Set(),
+                sources: new Set(),
+                quantity: 0,
+                grossSubtotal: 0,
+                exhibitorSubtotal: 0,
+                organiserSubtotal: 0,
+                items: [],
+                latestEventDate: null,
+            };
+            if (organiserId && !aggregate.organiserId) {
+                aggregate.organiserId = organiserId;
             }
+            if (programEnabled) {
+                aggregate.programEnabled = true;
+            }
+            if (commissionRate !== null) {
+                aggregate.commissionRate = commissionRate;
+            }
+            aggregate.programProductIds.add(programProductId);
+            if (minimumGuarantee !== null) {
+                aggregate.minimumGuarantee =
+                    aggregate.minimumGuarantee === null
+                        ? minimumGuarantee
+                        : Math.max(aggregate.minimumGuarantee, minimumGuarantee);
+            }
+            if (exhibitorProductId) {
+                aggregate.exhibitorProductId = exhibitorProductId;
+            }
+            if (exhibitorPrice !== null) {
+                aggregate.exhibitorPrice = exhibitorPrice;
+            }
+            upsellIds.forEach((id) => aggregate.upsellVariationIds.add(id));
+            if (sourceValue) {
+                aggregate.sources.add(sourceValue);
+            }
+            aggregate.quantity += qty;
+            const lineTotal = price * qty;
+            aggregate.grossSubtotal += lineTotal;
+            if (lineRole === 'exhibitor') {
+                aggregate.exhibitorSubtotal += lineTotal;
+            }
+            else {
+                aggregate.organiserSubtotal += lineTotal;
+            }
+            aggregate.items.push({
+                productId: snap.id,
+                variationId: variationId ?? null,
+                quantity: qty,
+                unitPrice: price,
+                lineTotal,
+                role: lineRole,
+            });
+            const updateLatestEventDate = (candidate) => {
+                if (!candidate || Number.isNaN(candidate.getTime())) {
+                    return;
+                }
+                if (!aggregate.latestEventDate ||
+                    candidate.getTime() > aggregate.latestEventDate.getTime()) {
+                    aggregate.latestEventDate = candidate;
+                }
+            };
+            updateLatestEventDate(parseDateValue(itemDate));
+            if (timeSlotDetails?.start) {
+                updateLatestEventDate(parseDateValue(timeSlotDetails.start));
+            }
+            if (timeSlotDetails?.end) {
+                updateLatestEventDate(parseDateValue(timeSlotDetails.end));
+            }
+            if (campaignBooking?.slotStartAt) {
+                updateLatestEventDate(parseDateValue(campaignBooking.slotStartAt));
+            }
+            if (campaignBooking?.slotEndAt) {
+                updateLatestEventDate(parseDateValue(campaignBooking.slotEndAt));
+            }
+            if (exhibitionDetails?.showDate) {
+                updateLatestEventDate(parseDateValue(exhibitionDetails.showDate));
+            }
+            if (exhibitionDetails?.setupDate) {
+                updateLatestEventDate(parseDateValue(exhibitionDetails.setupDate));
+            }
+            updateLatestEventDate(parseDateValue(prod.eventEndDate ?? null));
+            updateLatestEventDate(parseDateValue(prod.eventDate ?? null));
+            updateLatestEventDate(parseDateValue(prod.eventStartDate ?? null));
+            updateLatestEventDate(parseDateValue(prod.eventSetupDate ?? null));
+            organiserAggregates.set(aggregateKey, aggregate);
         }
         const budget = prod.budget || {};
         const labourFilming = parseOptional(budget.labourFilming);
@@ -7612,6 +7634,134 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         travelSubtotal += travelCost * qty;
         parkingSubtotal += parking * qty;
     });
+    const organiserProgramsRecords = [];
+    if (organiserAggregates.size > 0) {
+        const nextAggregates = new Map();
+        const resolvedEntries = [];
+        const unresolvedEntries = [];
+        organiserAggregates.forEach((aggregate, key) => {
+            let resolvedId = aggregate.organiserId && aggregate.organiserId.trim().length > 0
+                ? aggregate.organiserId.trim()
+                : null;
+            if (!resolvedId && aggregate.programEnabled && context.auth?.uid) {
+                resolvedId = String(context.auth.uid);
+                aggregate.organiserId = resolvedId;
+                aggregate.key = resolvedId;
+            }
+            if (resolvedId) {
+                aggregate.organiserId = resolvedId;
+                aggregate.key = resolvedId;
+                nextAggregates.set(resolvedId, aggregate);
+                resolvedEntries.push({ organiserId: resolvedId, aggregate });
+            }
+            else {
+                nextAggregates.set(key, aggregate);
+                unresolvedEntries.push({ key, aggregate });
+            }
+        });
+        organiserAggregates = nextAggregates;
+        const organiserUpdatePromises = [];
+        resolvedEntries.forEach(({ organiserId, aggregate }) => {
+            const programProductIds = Array.from(aggregate.programProductIds);
+            const upsellIds = Array.from(aggregate.upsellVariationIds);
+            organiserProgramsRecords.push({
+                organiserKey: aggregate.key,
+                organiserId,
+                programEnabled: aggregate.programEnabled,
+                programProductIds,
+                commissionRate: aggregate.commissionRate,
+                minimumGuarantee: aggregate.minimumGuarantee,
+                exhibitorProductId: aggregate.exhibitorProductId,
+                exhibitorPrice: aggregate.exhibitorPrice,
+                upsellVariationIds: upsellIds,
+            });
+            if (!aggregate.programEnabled) {
+                return;
+            }
+            organiserUpdatePromises.push((async () => {
+                const organiserRef = db.collection('eventOrganisers').doc(organiserId);
+                let organiserSnap = null;
+                try {
+                    organiserSnap = await organiserRef.get();
+                }
+                catch (error) {
+                    console.error('Failed to load organiser profile during order creation', organiserId, error);
+                }
+                const now = admin.firestore.FieldValue.serverTimestamp();
+                const organiserUpdate = {
+                    userId: organiserId,
+                    active: true,
+                    updatedAt: now,
+                };
+                if (!organiserSnap || !organiserSnap.exists) {
+                    organiserUpdate.createdAt = now;
+                }
+                if (customerName) {
+                    organiserUpdate.name = customerName;
+                }
+                if (aggregate.minimumGuarantee !== null) {
+                    organiserUpdate.minimumGuarantee = aggregate.minimumGuarantee;
+                }
+                if (aggregate.commissionRate !== null) {
+                    organiserUpdate.commissionRate = aggregate.commissionRate;
+                }
+                if (aggregate.exhibitorProductId) {
+                    organiserUpdate.exhibitorProductId = aggregate.exhibitorProductId;
+                }
+                if (programProductIds.length > 0) {
+                    organiserUpdate.programProductIds = admin.firestore.FieldValue.arrayUnion(...programProductIds);
+                }
+                if (upsellIds.length > 0) {
+                    organiserUpdate.upsellVariationIds = admin.firestore.FieldValue.arrayUnion(...upsellIds);
+                }
+                try {
+                    await organiserRef.set(organiserUpdate, { merge: true });
+                }
+                catch (error) {
+                    console.error('Failed to persist organiser program update', organiserId, error);
+                }
+                if (context.auth?.uid) {
+                    const userRef = db.collection('users').doc(context.auth.uid);
+                    const userUpdate = {
+                        'roles.organiser': true,
+                        updatedAt: now,
+                        'organiser.active': true,
+                    };
+                    if (aggregate.commissionRate !== null) {
+                        userUpdate['organiser.commissionRate'] = aggregate.commissionRate;
+                    }
+                    if (aggregate.minimumGuarantee !== null) {
+                        userUpdate['organiser.minimumGuarantee'] = aggregate.minimumGuarantee;
+                    }
+                    if (programProductIds.length > 0) {
+                        userUpdate['organiser.programProductIds'] = admin.firestore.FieldValue.arrayUnion(...programProductIds);
+                    }
+                    try {
+                        await userRef.set(userUpdate, { merge: true });
+                    }
+                    catch (error) {
+                        console.error('Failed to tag organiser role on user profile', context.auth.uid, error);
+                    }
+                }
+            })());
+        });
+        unresolvedEntries.forEach(({ aggregate, key }) => {
+            organiserProgramsRecords.push({
+                organiserKey: key,
+                organiserId: aggregate.organiserId ?? null,
+                programEnabled: aggregate.programEnabled,
+                programProductIds: Array.from(aggregate.programProductIds),
+                commissionRate: aggregate.commissionRate,
+                minimumGuarantee: aggregate.minimumGuarantee,
+                exhibitorProductId: aggregate.exhibitorProductId,
+                exhibitorPrice: aggregate.exhibitorPrice,
+                upsellVariationIds: Array.from(aggregate.upsellVariationIds),
+            });
+        });
+        if (organiserUpdatePromises.length > 0) {
+            await Promise.all(organiserUpdatePromises);
+        }
+    }
     const organiserCommitments = [];
     let organiserTotalsMinimum = 0;
     let organiserTotalsExhibitor = 0;
@@ -7622,8 +7772,12 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     let organiserTotalsDepositRefundable = 0;
     let organiserEligibleDate = null;
     if (organiserAggregates.size > 0) {
-        const organiserIds = Array.from(organiserAggregates.keys());
-        const organiserRefs = organiserIds.map((organiserId) => db.collection('eventOrganisers').doc(organiserId));
+        const resolvedOrganiserIds = Array.from(organiserAggregates.values())
+            .map((aggregate) => aggregate.organiserId && aggregate.organiserId.trim().length > 0
+            ? aggregate.organiserId.trim()
+            : null)
+            .filter((value, index, array) => !!value && array.indexOf(value) === index);
+        const organiserRefs = resolvedOrganiserIds.map((organiserId) => db.collection('eventOrganisers').doc(organiserId));
         let organiserSnaps = [];
         if (organiserRefs.length > 0) {
             try {
@@ -7639,8 +7793,18 @@ export const createOrder = functions.https.onCall(async (data, context) => {
                 organiserProfileMap.set(snap.id, snap.data() ?? {});
             }
         });
-        organiserAggregates.forEach((aggregate, organiserId) => {
-            const profileData = organiserProfileMap.get(organiserId) ?? {};
+        organiserAggregates.forEach((aggregate, organiserKey) => {
+            let resolvedOrganiserId = aggregate.organiserId && aggregate.organiserId.trim().length > 0
+                ? aggregate.organiserId.trim()
+                : null;
+            if (!resolvedOrganiserId && aggregate.programEnabled && context.auth?.uid) {
+                resolvedOrganiserId = String(context.auth.uid);
+                aggregate.organiserId = resolvedOrganiserId;
+                aggregate.key = resolvedOrganiserId;
+            }
+            const profileData = resolvedOrganiserId
+                ? organiserProfileMap.get(resolvedOrganiserId) ?? {}
+                : {};
             const profileName = normaliseString(profileData.name);
             const profileActive = profileData.active === true;
             const profileMinimum = parseNumber(profileData.minimumGuarantee);
@@ -7658,7 +7822,12 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             const guaranteeMinimum = minimumGuarantee ?? 0;
             const guaranteeShortfall = roundCurrency(Math.max(guaranteeMinimum - exhibitorSubtotal, 0));
             const commissionBase = Math.max(exhibitorSubtotal - guaranteeMinimum, 0);
-            const commissionRate = profileCommissionRate !== null ? profileCommissionRate : null;
+            const commissionRateCandidate = aggregate.commissionRate !== null
+                ? aggregate.commissionRate
+                : profileCommissionRate !== null
+                    ? profileCommissionRate
+                    : null;
+            const commissionRate = commissionRateCandidate;
             const commissionDue = commissionRate !== null ? roundCurrency((commissionBase * commissionRate) / 100) : 0;
             const depositRefundable = roundCurrency(Math.max(organiserSubtotal - guaranteeShortfall, 0));
             const items = aggregate.items.map((entry) => ({
@@ -7682,7 +7851,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
                 organiserEligibleDate = entryEligibleDate;
             }
             organiserCommitments.push({
-                organiserId,
+                organiserId: resolvedOrganiserId ?? organiserKey,
                 organiserName: profileName ?? null,
                 active: profileActive,
                 stripeAccountId: profileStripeAccountId ?? null,
@@ -7722,6 +7891,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         const eligibleTimestamp = admin.firestore.Timestamp.fromDate(eligibleDate);
         organiserSnapshot = {
             commitments: organiserCommitments,
+            programs: organiserProgramsRecords,
             totals: {
                 minimumGuarantee: roundCurrency(organiserTotalsMinimum),
                 grossSubtotal: roundCurrency(organiserTotalsGross),
@@ -7910,6 +8080,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         price,
         profit,
         organiser: organiserSnapshot,
+        organiserPrograms: organiserProgramsRecords,
         organiserSettlementStatus,
         status: 'pending',
         createdAt,

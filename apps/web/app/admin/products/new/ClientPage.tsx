@@ -470,8 +470,9 @@ export default function NewProductPage() {
   const [workflows, setWorkflows] = useState<{ id: string; name: string }[]>([]);
   const [venues, setVenues] = useState<Venue[]>([]);
 
-  const [tab, setTab] = useState<
+  type ProductTabKey =
     | "info"
+    | "organiser"
     | "spec"
     | "pnl"
     | "variations"
@@ -480,8 +481,8 @@ export default function NewProductPage() {
     | "tasks"
     | "seo"
     | "modifiers"
-    | "drive"
-  >("info");
+    | "drive";
+  const [tab, setTab] = useState<ProductTabKey>("info");
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -498,6 +499,27 @@ export default function NewProductPage() {
     (ProductDeliverable & { file?: File })[]
   >([]);
   const [variations, setVariations] = useState<VariationFormState[]>([]);
+  const [organiserEnabled, setOrganiserEnabled] = useState(false);
+  const [organiserMinimum, setOrganiserMinimum] = useState("");
+  const [organiserExhibitorProductId, setOrganiserExhibitorProductId] =
+    useState("");
+  const [organiserExhibitorPrice, setOrganiserExhibitorPrice] = useState("");
+  const [organiserUpsellIds, setOrganiserUpsellIds] = useState<string[]>([]);
+  const [organiserCommissionRate, setOrganiserCommissionRate] = useState("");
+  const toggleOrganiserUpsell = useCallback(
+    (variationId: string, enabled: boolean) => {
+      setOrganiserUpsellIds((prev) => {
+        const next = new Set(prev);
+        if (enabled) {
+          next.add(variationId);
+        } else {
+          next.delete(variationId);
+        }
+        return Array.from(next);
+      });
+    },
+    []
+  );
   useEffect(() => {
     setDeliverables((prev) => {
       if (prev.length === 0) return prev;
@@ -522,6 +544,33 @@ export default function NewProductPage() {
       return changed ? next : prev;
     });
   }, [variations]);
+  useEffect(() => {
+    setOrganiserUpsellIds((prev) => {
+      if (prev.length === 0) {
+        return prev;
+      }
+      const allowed = new Set(
+        variations
+          .map((variation) => variation.id)
+          .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+      );
+      const filtered = prev.filter((id) => allowed.has(id));
+      return filtered.length === prev.length ? prev : filtered;
+    });
+  }, [variations]);
+  useEffect(() => {
+    if (!organiserEnabled) {
+      return;
+    }
+    if (organiserExhibitorPrice.trim().length === 0 && price.trim().length > 0) {
+      setOrganiserExhibitorPrice(price);
+    }
+  }, [organiserEnabled, organiserExhibitorPrice, price]);
+  useEffect(() => {
+    if (!organiserEnabled && tab === "organiser") {
+      setTab("info");
+    }
+  }, [organiserEnabled, tab]);
   const [modifiers, setModifiers] = useState<ModifierSelectionFormState[]>([]);
   const [enabledModifierGroups, setEnabledModifierGroups] = useState<string[]>([]);
   const [seo, setSeo] = useState<ProductSEO>({});
@@ -1423,6 +1472,25 @@ export default function NewProductPage() {
     const onsiteBreakdownValue = parseOptionalMinutes(onsiteBreakdownMinutes);
     const onsiteWindowStartValue = normaliseTimeOfDay(onsiteWindowStart);
     const onsiteWindowEndValue = normaliseTimeOfDay(onsiteWindowEnd);
+    const organiserMinimumValue = parseOptionalPrice(organiserMinimum);
+    const organiserExhibitorPriceValue = parseOptionalPrice(organiserExhibitorPrice);
+    const organiserCommissionValue = parseOptionalPrice(organiserCommissionRate);
+    const organiserUpsells = organiserUpsellIds
+      .map((id) => (typeof id === "string" ? id.trim() : ""))
+      .filter((id) => id.length > 0);
+    const organiserProgramPayload = organiserEnabled
+      ? {
+          enabled: true,
+          minimumGuarantee: organiserMinimumValue,
+          exhibitorProductId:
+            organiserExhibitorProductId.trim().length > 0
+              ? organiserExhibitorProductId.trim()
+              : null,
+          exhibitorPrice: organiserExhibitorPriceValue,
+          upsellVariationIds: organiserUpsells,
+          commissionRate: organiserCommissionValue,
+        }
+      : null;
     const docRef = await addDoc(collection(db, "products"), {
       name,
       description,
@@ -1476,6 +1544,7 @@ export default function NewProductPage() {
       modifierGroups: enabledGroups,
       productSpec: specPayload,
       crewRoles: crewRoleData,
+      organiserProgram: organiserProgramPayload,
     });
     const uploadedGalleryUrls = new Map<string, string>();
     const uploadBatchId = Date.now();
@@ -1742,6 +1811,25 @@ export default function NewProductPage() {
   );
   const budgetTotal = labourValue + kitValue + travelCostValue + parkingValue;
   const profitValue = priceValue - budgetTotal;
+  const navItems = useMemo(() => {
+    const items: { key: ProductTabKey; label: string }[] = [
+      { key: "info", label: "Info" },
+    ];
+    if (organiserEnabled) {
+      items.push({ key: "organiser", label: "Organiser programme" });
+    }
+    items.push(
+      { key: "drive", label: "Drive & Folders" },
+      { key: "spec", label: "Product Spec" },
+      { key: "pnl", label: "P&L" },
+      { key: "variations", label: "Variations" },
+      { key: "deliverables", label: "Deliverables" },
+      { key: "tasks", label: "Default Tasks" },
+      { key: "seo", label: "SEO" },
+      { key: "modifiers", label: "Modifiers" }
+    );
+    return items;
+  }, [organiserEnabled]);
 
   if (guardLoading || loading) return <p>Loading…</p>;
   if (!allowed) return <p>You do not have permission to create products.</p>;
@@ -1759,21 +1847,11 @@ export default function NewProductPage() {
       <form onSubmit={save} className="grid w-full gap-6">
       <h1 className="text-xl font-semibold">Create Product</h1>
       <nav className="flex gap-4 border-b">
-        {[ 
-          ["info", "Info"],
-          ["drive", "Drive & Folders"],
-          ["spec", "Product Spec"],
-          ["pnl", "P&L"],
-          ["variations", "Variations"],
-          ["deliverables", "Deliverables"],
-          ["tasks", "Default Tasks"],
-          ["seo", "SEO"],
-          ["modifiers", "Modifiers"],
-        ].map(([key, label]) => (
+        {navItems.map(({ key, label }) => (
           <button
             key={key}
             type="button"
-            onClick={() => setTab(key as any)}
+            onClick={() => setTab(key)}
             className={`pb-2 ${tab === key ? "border-b-2 border-black" : ""}`}
           >
             {label}
@@ -1870,6 +1948,37 @@ export default function NewProductPage() {
               {salesMode === "quote"
                 ? "Clients will submit their requirements, venue details and timeline for a tailored estimate."
                 : "Clients can add the product to their cart and complete checkout online."}
+            </p>
+          </div>
+          <div className="rounded border bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">Organiser programme</p>
+                <p className="text-xs text-gray-600">
+                  Enable this product to unlock the organiser portal workflow, reseller pricing and upsell controls.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={organiserEnabled}
+                onClick={() => setOrganiserEnabled((current) => !current)}
+                className={`relative inline-flex h-6 w-12 items-center rounded-full transition ${
+                  organiserEnabled ? "bg-emerald-500" : "bg-gray-300"
+                }`}
+              >
+                <span className="sr-only">Toggle organiser programme</span>
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+                    organiserEnabled ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+            <p className="mt-3 text-xs text-gray-600">
+              {organiserEnabled
+                ? "An organiser setup tab has been added so you can connect exhibitor products, partner pricing, and commission."
+                : "Leave this off for standard services that clients purchase directly without organiser resale."}
             </p>
           </div>
           <label className="text-sm font-medium">Name</label>
@@ -2252,7 +2361,114 @@ export default function NewProductPage() {
           <p className="text-xs text-gray-500 -mt-1">
             Shown beneath Delivery Time on the customer product page.
           </p>
-    </div>
+        </div>
+      )}
+
+      {tab === "organiser" && (
+        <div className="grid gap-4">
+          <div className="rounded border bg-white p-4">
+            <h2 className="text-sm font-semibold">Partner pricing & commission</h2>
+            <p className="mt-1 text-xs text-gray-600">
+              These defaults populate the organiser portal when a client purchases this package. Values can still be
+              customised per organiser afterwards.
+            </p>
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div className="grid gap-1">
+                <label className="text-sm font-medium">Minimum guarantee (£)</label>
+                <input
+                  className="input"
+                  inputMode="decimal"
+                  placeholder="500"
+                  value={organiserMinimum}
+                  onChange={(event) => setOrganiserMinimum(event.target.value)}
+                />
+                <p className="text-xs text-gray-500">
+                  Held against the organiser’s upfront payment before exhibitor sales are reconciled.
+                </p>
+              </div>
+              <div className="grid gap-1">
+                <label className="text-sm font-medium">Exhibitor partner price (£)</label>
+                <input
+                  className="input"
+                  inputMode="decimal"
+                  placeholder={price || "150"}
+                  value={organiserExhibitorPrice}
+                  onChange={(event) => setOrganiserExhibitorPrice(event.target.value)}
+                />
+                <p className="text-xs text-gray-500">
+                  Base price exhibitors see when booking through the organiser link.
+                </p>
+              </div>
+              <div className="grid gap-1">
+                <label className="text-sm font-medium">Hidden exhibitor product ID</label>
+                <input
+                  className="input"
+                  placeholder="exhibitor-product-id"
+                  value={organiserExhibitorProductId}
+                  onChange={(event) => setOrganiserExhibitorProductId(event.target.value)}
+                />
+                <p className="text-xs text-gray-500">
+                  Link a hidden product that exhibitors purchase after receiving the organiser invite.
+                </p>
+              </div>
+              <div className="grid gap-1">
+                <label className="text-sm font-medium">Organiser commission (%)</label>
+                <input
+                  className="input"
+                  inputMode="decimal"
+                  placeholder="20"
+                  value={organiserCommissionRate}
+                  onChange={(event) => setOrganiserCommissionRate(event.target.value)}
+                />
+                <p className="text-xs text-gray-500">
+                  Percentage of exhibitor revenue released to the organiser once the guarantee is met.
+                </p>
+              </div>
+            </div>
+          </div>
+          <div className="rounded border bg-white p-4">
+            <h2 className="text-sm font-semibold">Upsell variations for exhibitors</h2>
+            <p className="mt-1 text-xs text-gray-600">
+              Choose which variations or bundles unlock when exhibitors book through the organiser link.
+            </p>
+            {variations.length === 0 ? (
+              <p className="mt-3 text-xs text-gray-500">
+                Add product variations to surface upsell options in the organiser portal.
+              </p>
+            ) : (
+              <div className="mt-3 grid gap-2">
+                {variations.map((variation) => {
+                  const variationId = variation.id;
+                  if (!variationId) {
+                    return null;
+                  }
+                  const checked = organiserUpsellIds.includes(variationId);
+                  return (
+                    <label
+                      key={variationId}
+                      className="flex items-start gap-2 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-1 h-4 w-4 rounded border-gray-300"
+                        checked={checked}
+                        onChange={(event) => toggleOrganiserUpsell(variationId, event.target.checked)}
+                      />
+                      <span className="grid gap-0.5">
+                        <span className="font-medium text-gray-900">{variation.name || variationId}</span>
+                        <span className="text-xs text-gray-600">
+                          {variation.price
+                            ? `Partner price: £${Number(variation.price).toFixed(2)}`
+                            : "Uses organiser base price"}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       {tab === "spec" && (

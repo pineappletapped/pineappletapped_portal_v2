@@ -33,11 +33,15 @@ export interface CartTimeSlot {
 }
 
 export interface CartOrganiserInfo {
-  organiserId: string;
+  organiserId: string | null;
   minimumGuarantee?: number | null;
   exhibitorProductId?: string | null;
   exhibitorPrice?: number | null;
   upsellVariationIds?: string[];
+  commissionRate?: number | null;
+  programEnabled?: boolean | null;
+  programKey?: string | null;
+  programProductId?: string | null;
   source?: string | null;
 }
 

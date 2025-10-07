@@ -7,6 +7,7 @@ export interface NormalisedOrganiserProgram {
   exhibitorProductId: string | null;
   exhibitorPrice: number | null;
   upsellVariationIds: string[];
+  commissionRate: number | null;
 }
 
 export interface OrganiserAccessContext {
@@ -23,6 +24,7 @@ export interface EventOrganiserProfile {
   name: string | null;
   minimumGuarantee: number | null;
   hiddenProductIds: string[];
+  programProductIds: string[];
   linkedProjectIds: string[];
   exhibitorProductId: string | null;
   upsellVariationIds: string[];
@@ -92,6 +94,7 @@ export function parseEventOrganiserSnapshot(
     name: normaliseString(data?.name),
     minimumGuarantee,
     hiddenProductIds: normaliseStringList(data?.hiddenProductIds),
+    programProductIds: normaliseStringList(data?.programProductIds),
     linkedProjectIds: normaliseStringList(data?.linkedProjectIds),
     exhibitorProductId: normaliseString(data?.exhibitorProductId),
     upsellVariationIds: normaliseStringList(data?.upsellVariationIds),
@@ -103,10 +106,25 @@ export function parseEventOrganiserSnapshot(
   } satisfies EventOrganiserProfile;
 }
 
+export const isOrganiserProgramEnabled = (
+  input?: ProductOrganiserProgram | null
+): boolean => {
+  if (!input || typeof input !== 'object') {
+    return false;
+  }
+  if ((input as ProductOrganiserProgram).enabled === false) {
+    return false;
+  }
+  return true;
+};
+
 export const normaliseOrganiserProgram = (
   input?: ProductOrganiserProgram | null
 ): NormalisedOrganiserProgram | null => {
   if (!input || typeof input !== 'object') {
+    return null;
+  }
+  if ((input as ProductOrganiserProgram).enabled === false) {
     return null;
   }
   const organiserId = normaliseOrganiserId((input as ProductOrganiserProgram).organiserId);
@@ -119,12 +137,14 @@ export const normaliseOrganiserProgram = (
   const upsellVariationIds = normaliseStringList(
     (input as ProductOrganiserProgram).upsellVariationIds
   );
+  const commissionRate = normaliseNumber((input as ProductOrganiserProgram).commissionRate);
   return {
     organiserId,
     minimumGuarantee,
     exhibitorProductId,
     exhibitorPrice,
     upsellVariationIds,
+    commissionRate,
   } satisfies NormalisedOrganiserProgram;
 };
 

@@ -467,8 +467,14 @@ export default function OrganiserClientPage() {
   }, []);
 
   const loadProducts = useCallback(
-    async (database: Firestore, organiserKey: string | null) => {
-      if (!organiserKey) {
+    async (database: Firestore, organiserProfile: EventOrganiserProfile | null) => {
+      const organiserKey = organiserProfile ? normaliseOrganiserId(organiserProfile.id) : null;
+      const programProductIds = Array.isArray(organiserProfile?.programProductIds)
+        ? organiserProfile.programProductIds.filter((value): value is string =>
+            typeof value === "string" && value.trim().length > 0
+          )
+        : [];
+      if (!organiserKey && programProductIds.length === 0) {
         setProducts([]);
         setSlotSummaries({});
         setSlotDrafts({});
@@ -477,12 +483,32 @@ export default function OrganiserClientPage() {
       setProductsLoading(true);
       setProductsError(null);
       try {
-        const productsQuery = query(
-          collection(database, "products"),
-          where("organiserProgram.organiserId", "==", organiserKey)
-        );
-        const snap = await getDocs(productsQuery);
-        const loaded = snap.docs.map((docSnap) => parseProductDoc(docSnap.id, docSnap.data()));
+        let loaded: Product[] = [];
+        if (programProductIds.length > 0) {
+          const snapshots = await Promise.all(
+            programProductIds.map(async (productId) => {
+              try {
+                const productSnap = await getDoc(doc(database, "products", productId));
+                if (!productSnap.exists()) {
+                  return null;
+                }
+                return parseProductDoc(productSnap.id, productSnap.data());
+              } catch (error) {
+                console.warn("Failed to load organiser program product", productId, error);
+                return null;
+              }
+            })
+          );
+          loaded = snapshots.filter((product): product is Product => Boolean(product));
+        }
+        if (loaded.length === 0 && organiserKey) {
+          const productsQuery = query(
+            collection(database, "products"),
+            where("organiserProgram.organiserId", "==", organiserKey)
+          );
+          const snap = await getDocs(productsQuery);
+          loaded = snap.docs.map((docSnap) => parseProductDoc(docSnap.id, docSnap.data()));
+        }
         setProducts(loaded);
         loaded.forEach((product) => initialiseProductForm(product));
         const summaryEntries = await Promise.all(
@@ -724,7 +750,7 @@ export default function OrganiserClientPage() {
     if (!allowed || !db || !organiserId) {
       return;
     }
-    void loadProducts(db, organiserId);
+    void loadProducts(db, profile ?? null);
     void loadLeadCapturePages(db, organiserId, profile);
     void loadOrdersForOrganiser(db, organiserId);
   }, [allowed, organiserId, loadLeadCapturePages, loadOrdersForOrganiser, loadProducts, profile]);

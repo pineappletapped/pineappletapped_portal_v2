@@ -17,6 +17,7 @@ import { db, functions } from "@/lib/firebase";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import {
+  isOrganiserProgramEnabled,
   normaliseOrganiserId,
   normaliseOrganiserProgram,
   type OrganiserAccessContext,
@@ -56,6 +57,16 @@ interface Props {
 }
 
 const DRONE_STANDARD_ID = "drone_compliance";
+const parseOptionalNumber = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+};
 
 const GBP = new Intl.NumberFormat("en-GB", {
   style: "currency",
@@ -781,6 +792,13 @@ export default function AddToCartWizard({
     () => normaliseOrganiserProgram(product.organiserProgram ?? null),
     [product.organiserProgram]
   );
+  const organiserProgramEnabled = useMemo(
+    () => isOrganiserProgramEnabled(product.organiserProgram ?? null),
+    [product.organiserProgram]
+  );
+  const fallbackOrganiserProgramKey = useMemo(() => {
+    return product?.id ? `program:${product.id}` : "program";
+  }, [product?.id]);
   const derivedOrganiserId = useMemo(
     () => normaliseOrganiserId(organiserQueryToken),
     [organiserQueryToken]
@@ -1798,21 +1816,56 @@ export default function AddToCartWizard({
               priceAdjustment: slotSelection.priceAdjustment,
             }
           : null,
-        organiser:
-          organiserAccess && organiserAccess.active
-            ? {
-                organiserId: organiserAccess.program.organiserId,
-                minimumGuarantee:
-                  organiserAccess.program.minimumGuarantee ?? null,
-                exhibitorProductId:
-                  organiserAccess.program.exhibitorProductId ?? null,
-                exhibitorPrice:
-                  organiserAccess.program.exhibitorPrice ?? basePrice,
-                upsellVariationIds:
-                  organiserAccess.program.upsellVariationIds ?? [],
-                source: organiserAccess.source ?? "query",
-              }
-            : null,
+        organiser: (() => {
+          if (organiserAccess && organiserAccess.active) {
+            return {
+              organiserId: organiserAccess.program.organiserId,
+              minimumGuarantee:
+                organiserAccess.program.minimumGuarantee ?? null,
+              exhibitorProductId:
+                organiserAccess.program.exhibitorProductId ?? null,
+              exhibitorPrice:
+                organiserAccess.program.exhibitorPrice ?? basePrice,
+              upsellVariationIds:
+                organiserAccess.program.upsellVariationIds ?? [],
+              commissionRate: organiserAccess.program.commissionRate ?? null,
+              source: organiserAccess.source ?? "query",
+              programEnabled: true,
+              programKey: organiserAccess.program.organiserId,
+              programProductId: product?.id ?? null,
+            };
+          }
+          if (organiserProgramEnabled) {
+            const rawProgram = product.organiserProgram ?? null;
+            const minimum = parseOptionalNumber(rawProgram?.minimumGuarantee);
+            const exhibitorPriceValue =
+              parseOptionalNumber(rawProgram?.exhibitorPrice) ?? null;
+            const commission = parseOptionalNumber(rawProgram?.commissionRate);
+            const upsells = Array.isArray(rawProgram?.upsellVariationIds)
+              ? rawProgram.upsellVariationIds.filter(
+                  (value: unknown): value is string =>
+                    typeof value === "string" && value.trim().length > 0
+                )
+              : [];
+            const exhibitorProductId =
+              typeof rawProgram?.exhibitorProductId === "string"
+                ? rawProgram.exhibitorProductId
+                : null;
+            return {
+              organiserId: null,
+              minimumGuarantee: minimum,
+              exhibitorProductId,
+              exhibitorPrice: exhibitorPriceValue ?? basePrice,
+              upsellVariationIds: upsells,
+              commissionRate: commission,
+              programEnabled: true,
+              programKey: fallbackOrganiserProgramKey,
+              programProductId: product?.id ?? null,
+              source: "product",
+            };
+          }
+          return null;
+        })(),
       });
       setLiveMessage(
         reservationStatus === "pending"

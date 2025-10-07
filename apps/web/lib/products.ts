@@ -159,6 +159,8 @@ export interface ProductVideoLink {
 }
 
 export interface ProductOrganiserProgram {
+  /** Indicates whether the organiser workflow is enabled for this product. */
+  enabled?: boolean | null;
   /** Primary organiser account responsible for this package. */
   organiserId?: string | null;
   /** Minimum guarantee collected upfront from the organiser. */
@@ -169,6 +171,8 @@ export interface ProductOrganiserProgram {
   exhibitorPrice?: number | null;
   /** Variation identifiers that unlock when an organiser partner link is used. */
   upsellVariationIds?: string[] | null;
+  /** Optional commission percentage the organiser earns on exhibitor sales. */
+  commissionRate?: number | null;
 }
 
 export interface ProductSpec {
