@@ -27,6 +27,7 @@ import {
   FiFileText,
   FiPlay,
   FiExternalLink,
+  FiUsers,
 } from "react-icons/fi";
 import { getListingPriceLabel } from "./productListingUtils";
 import ListingPriceNote from "./ListingPriceNote";
@@ -65,6 +66,47 @@ function extractPoints(value?: string | null): string[] {
     .split(/\r?\n+/)
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+function formatScheduleTime(value?: string | null): string {
+  if (!value || typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const isoMatch = trimmed.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (isoMatch) {
+    let hours = Number.parseInt(isoMatch[1], 10);
+    const minutes = isoMatch[2];
+    const period = hours >= 12 ? "pm" : "am";
+    hours = hours % 12;
+    if (hours === 0) {
+      hours = 12;
+    }
+    return `${hours}:${minutes}${period}`;
+  }
+  const simpleMatch = trimmed.match(/^([01]?\d|2[0-3])$/);
+  if (simpleMatch) {
+    let hours = Number.parseInt(simpleMatch[1], 10);
+    const period = hours >= 12 ? "pm" : "am";
+    hours = hours % 12;
+    if (hours === 0) {
+      hours = 12;
+    }
+    return `${hours}${period}`;
+  }
+  return trimmed;
+}
+
+function formatScheduleRange(start?: string | null, end?: string | null): string {
+  const startLabel = formatScheduleTime(start);
+  const endLabel = formatScheduleTime(end);
+  if (startLabel && endLabel) {
+    return `${startLabel} – ${endLabel}`;
+  }
+  return startLabel || endLabel || "";
 }
 
 function resolveVideoPlayback(input: string): VideoPlayback | null {
@@ -465,6 +507,7 @@ export default function ProductDetail({
       thumb?: string;
       Icon: IconType;
       scopeLabels: string[];
+      runtime?: string;
     }[] = [];
 
     deliverableDisplay.visible.forEach((deliverable, index) => {
@@ -480,7 +523,11 @@ export default function ProductDetail({
         typeof deliverable.thumbnailUrl === "string"
           ? deliverable.thumbnailUrl.trim()
           : "";
-      if (!title && !description && !thumb) {
+      const runtime =
+        typeof deliverable.runtimeLabel === "string"
+          ? deliverable.runtimeLabel.trim()
+          : "";
+      if (!title && !description && !thumb && !runtime) {
         return;
       }
       const Icon =
@@ -501,6 +548,7 @@ export default function ProductDetail({
         thumb: thumb || undefined,
         Icon,
         scopeLabels,
+        runtime: runtime || undefined,
       });
     });
 
@@ -536,6 +584,88 @@ export default function ProductDetail({
     } as const;
   }, [product.deliverables, availableVariationIds]);
 
+  const exampleDaySegments = useMemo(() => {
+    if (!Array.isArray(product.exampleDaySchedule)) {
+      return [] as {
+        key: string;
+        title: string;
+        notes: string;
+        deliverable: string;
+        timeRange: string;
+      }[];
+    }
+    return product.exampleDaySchedule
+      .map((segment, index) => {
+        if (!segment || typeof segment !== "object") {
+          return null;
+        }
+        const title =
+          typeof segment.title === "string" ? segment.title.trim() : "";
+        const notes =
+          typeof segment.notes === "string" ? segment.notes.trim() : "";
+        const deliverable =
+          typeof segment.deliverableWindow === "string"
+            ? segment.deliverableWindow.trim()
+            : "";
+        const timeRange = formatScheduleRange(segment.startTime, segment.endTime);
+        if (!title && !notes && !deliverable && !timeRange) {
+          return null;
+        }
+        return {
+          key: `schedule-${index}-${title || timeRange || deliverable || "segment"}`,
+          title,
+          notes,
+          deliverable,
+          timeRange,
+        };
+      })
+      .filter((segment): segment is {
+        key: string;
+        title: string;
+        notes: string;
+        deliverable: string;
+        timeRange: string;
+      } => Boolean(segment));
+  }, [product.exampleDaySchedule]);
+
+  const hasExampleDay = exampleDaySegments.length > 0;
+
+  const idealForList = useMemo(() => {
+    if (!Array.isArray(product.idealFor)) {
+      return [] as string[];
+    }
+    return product.idealFor
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter((entry) => entry.length > 0);
+  }, [product.idealFor]);
+
+  const operationsSummary = useMemo(
+    () => (typeof product.operationsInfo === "string" ? product.operationsInfo.trim() : ""),
+    [product.operationsInfo]
+  );
+  const deliverySummary = useMemo(
+    () => (typeof product.deliveryTime === "string" ? product.deliveryTime.trim() : ""),
+    [product.deliveryTime]
+  );
+  const clientRequirements = useMemo(
+    () => (typeof product.requirements === "string" ? product.requirements.trim() : ""),
+    [product.requirements]
+  );
+  const productionNotes = useMemo(
+    () =>
+      typeof product.productSpec?.notes === "string"
+        ? product.productSpec.notes.trim()
+        : "",
+    [product.productSpec?.notes]
+  );
+  const closingWhyItWorks = useMemo(
+    () =>
+      typeof product.closingWhyItWorks === "string"
+        ? product.closingWhyItWorks.trim()
+        : "",
+    [product.closingWhyItWorks]
+  );
+
   const deliverableHighlights = useMemo(() => {
     if (!Array.isArray(product.deliverables)) return [] as string[];
     return product.deliverables
@@ -551,22 +681,24 @@ export default function ProductDetail({
     if (badges.length < 3 && onsiteSummary) {
       badges.push(onsiteSummary);
     }
-    if (badges.length < 3 && product.deliveryTime) {
-      badges.push(product.deliveryTime);
-    }
     if (badges.length < 3 && eventRangeLabel) {
       badges.push(`Event window ${eventRangeLabel}`);
     }
     return badges.slice(0, 3);
-  }, [deliverableHighlights, onsiteSummary, product.deliveryTime, eventRangeLabel]);
+  }, [deliverableHighlights, onsiteSummary, eventRangeLabel]);
+
+  const shouldShowOperationsCard = useMemo(
+    () => !hasExampleDay && (deliverySummary.length > 0 || operationsSummary.length > 0),
+    [hasExampleDay, deliverySummary, operationsSummary]
+  );
 
   const heroFacts = useMemo(() => {
     const facts: { label: string; value: string }[] = [];
     if (onsiteSummary) {
       facts.push({ label: "On-site", value: onsiteSummary });
     }
-    if (product.deliveryTime) {
-      facts.push({ label: "Delivery", value: product.deliveryTime });
+    if (deliverySummary && !shouldShowOperationsCard) {
+      facts.push({ label: "Delivery", value: deliverySummary });
     }
     if (eventRangeLabel) {
       facts.push({ label: "Schedule", value: eventRangeLabel });
@@ -585,10 +717,11 @@ export default function ProductDetail({
     return facts.slice(0, 4);
   }, [
     onsiteSummary,
-    product.deliveryTime,
+    deliverySummary,
     eventRangeLabel,
     deliverablesByVariation,
     variationEntries,
+    shouldShowOperationsCard,
   ]);
 
   const variationComparison = useMemo(() => {
@@ -628,16 +761,35 @@ export default function ProductDetail({
         }),
       });
     }
-    if (product.deliveryTime) {
+    const variationTurnarounds = variationEntries.map((variationEntry) =>
+      typeof variationEntry.turnaround === "string"
+        ? variationEntry.turnaround.trim()
+        : ""
+    );
+    const uniqueTurnaroundValues = new Set(
+      variationTurnarounds.filter((value) => value.length > 0)
+    );
+    if (uniqueTurnaroundValues.size > 0) {
       rows.push({
         label: "Turnaround",
-        values: variationEntries.map(() => product.deliveryTime!),
+        values: variationEntries.map((variationEntry, index) =>
+          variationTurnarounds[index] && variationTurnarounds[index].length > 0
+            ? variationTurnarounds[index]
+            : "—"
+        ),
       });
     }
     return rows;
-  }, [variationEntries, deliverablesByVariation, product.deliveryTime]);
+  }, [variationEntries, deliverablesByVariation]);
 
   const hasVariations = availableVariationIds.length > 0;
+  const shouldRenderFeatureSection = Boolean(
+    clientRequirements ||
+      hasExampleDay ||
+      shouldShowOperationsCard ||
+      idealForList.length > 0 ||
+      productionNotes
+  );
 
   return (
     <div className="space-y-16">
@@ -996,7 +1148,7 @@ export default function ProductDetail({
               </p>
             ) : deliverableSummaries.length > 0 ? (
               <ul className="grid gap-4 md:grid-cols-2">
-                {deliverableSummaries.map(({ key, title, description, thumb, Icon, scopeLabels }, index) => (
+                {deliverableSummaries.map(({ key, title, description, thumb, Icon, scopeLabels, runtime }, index) => (
                   <li
                     key={key}
                     className="flex gap-4 rounded-2xl border border-white/60 bg-white px-4 py-4 shadow-sm ring-1 ring-slate-100"
@@ -1005,10 +1157,19 @@ export default function ProductDetail({
                       <Icon className="h-5 w-5" aria-hidden />
                     </div>
                     <div className="min-w-0 space-y-2">
-                      {title && (
-                        <p className="text-base font-semibold text-slate-900">
-                          {title}
-                        </p>
+                      {(title || runtime) && (
+                        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                          {title && (
+                            <p className="text-base font-semibold text-slate-900">
+                              {title}
+                            </p>
+                          )}
+                          {runtime && (
+                            <span className="text-xs font-medium text-slate-500">
+                              {title ? `(${runtime})` : runtime}
+                            </span>
+                          )}
+                        </div>
                       )}
                       {description && (
                         <p className="text-sm text-slate-700">{description}</p>
@@ -1041,27 +1202,78 @@ export default function ProductDetail({
         </section>
       )}
 
-      {(product.requirements || product.operationsInfo || product.deliveryTime || product.productSpec?.notes) && (
+      {shouldRenderFeatureSection && (
         <section className="grid gap-4 rounded-3xl bg-white p-6 shadow-lg ring-1 ring-gray-100 md:grid-cols-3 md:p-10">
-          {product.requirements && (
+          {hasExampleDay && (
+            <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50 p-5 shadow-sm md:col-span-2">
+              <h3 className="text-lg font-semibold text-slate-900">Example filming day</h3>
+              <ul className="space-y-4">
+                {exampleDaySegments.map((segment) => (
+                  <li key={segment.key} className="flex gap-3">
+                    <div className="w-24 flex-none text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      {segment.timeRange || "—"}
+                    </div>
+                    <div className="min-w-0 space-y-1">
+                      {segment.title && (
+                        <p className="font-medium text-slate-900">{segment.title}</p>
+                      )}
+                      {segment.notes && (
+                        <p className="text-sm text-slate-600">{segment.notes}</p>
+                      )}
+                      {segment.deliverable && (
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          {segment.deliverable}
+                        </p>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              {(deliverySummary || operationsSummary) && (
+                <div className="space-y-1 border-t border-slate-200 pt-4 text-sm text-slate-700">
+                  {deliverySummary && (
+                    <p>
+                      <span className="font-semibold text-slate-900">Typical delivery:</span> {deliverySummary}
+                    </p>
+                  )}
+                  {operationsSummary && (
+                    <p className="whitespace-pre-line">{operationsSummary}</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+          {clientRequirements && (
             <ProductFeatureCard title="Client requirements" icon={FiClipboard}>
-              <p className="whitespace-pre-line">{product.requirements}</p>
+              <p className="whitespace-pre-line">{clientRequirements}</p>
             </ProductFeatureCard>
           )}
-          {(product.deliveryTime || product.operationsInfo) && (
+          {shouldShowOperationsCard && (
             <ProductFeatureCard title="Timeline" icon={FiClock}>
-              {product.deliveryTime && <p>{product.deliveryTime}</p>}
-              {product.operationsInfo && (
-                <div className={`grid gap-1${product.deliveryTime ? ' mt-3' : ''}`}>
+              {deliverySummary && <p>{deliverySummary}</p>}
+              {operationsSummary && (
+                <div className={`grid gap-1${deliverySummary ? " mt-3" : ""}`}>
                   <p className="font-semibold text-slate-900">Operations detail</p>
-                  <p className="whitespace-pre-line">{product.operationsInfo}</p>
+                  <p className="whitespace-pre-line">{operationsSummary}</p>
                 </div>
               )}
             </ProductFeatureCard>
           )}
-          {product.productSpec?.notes && (
+          {idealForList.length > 0 && (
+            <ProductFeatureCard title="Ideal for" icon={FiUsers}>
+              <ul className="space-y-1">
+                {idealForList.map((item, index) => (
+                  <li key={`ideal-${index}`} className="flex items-start gap-2">
+                    <span className="mt-1 h-2 w-2 rounded-full bg-orange" aria-hidden />
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+            </ProductFeatureCard>
+          )}
+          {productionNotes && (
             <ProductFeatureCard title="Production notes" icon={FiGift}>
-              <p className="whitespace-pre-line">{product.productSpec.notes}</p>
+              <p className="whitespace-pre-line">{productionNotes}</p>
             </ProductFeatureCard>
           )}
         </section>
@@ -1092,6 +1304,13 @@ export default function ProductDetail({
       )}
 
       <ProductModifierSummary product={product} />
+
+      {closingWhyItWorks && (
+        <section className="rounded-3xl bg-white p-6 shadow-lg ring-1 ring-gray-100 md:p-10">
+          <h2 className="text-2xl font-semibold text-slate-900">Why it Works</h2>
+          <p className="mt-3 text-base text-slate-600">{closingWhyItWorks}</p>
+        </section>
+      )}
 
       <section className="rounded-3xl bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-10 text-white shadow-xl">
         <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center">

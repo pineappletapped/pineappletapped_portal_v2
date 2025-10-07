@@ -58,6 +58,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const [postalCode, setPostalCode] = useState("");
   const [projectName, setProjectName] = useState("");
   const [voucher, setVoucher] = useState("");
+  const [allowLocationOverride, setAllowLocationOverride] = useState(false);
   const {
     state: leadSourceState,
     setState: setLeadSourceState,
@@ -76,6 +77,37 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const lastIntentPayload = useRef<string | null>(null);
   const loginErrorRef = useRef<HTMLDivElement | null>(null);
   const authEmail = currentUser?.email || "";
+  const venueLocked = useMemo(
+    () =>
+      items.length > 0 &&
+      items.every(
+        (item) =>
+          item.coverage?.matchType === "venue" &&
+          typeof item.location === "string" &&
+          item.location.trim().length > 0
+      ),
+    [items]
+  );
+  const lockedVenueLocation = useMemo(() => {
+    const preset = items.find(
+      (item) => typeof item.location === "string" && item.location.trim().length > 0
+    );
+    return preset ? preset.location!.trim() : "";
+  }, [items]);
+  useEffect(() => {
+    if (!venueLocked) {
+      return;
+    }
+    if (!location.trim().length && lockedVenueLocation) {
+      setLocation(lockedVenueLocation);
+    }
+  }, [venueLocked, lockedVenueLocation, location]);
+  useEffect(() => {
+    if (!venueLocked) {
+      setAllowLocationOverride(false);
+    }
+  }, [venueLocked]);
+  const shouldShowLocationInput = !venueLocked || allowLocationOverride;
   const orderInput = useMemo(() => {
     const itemPayload = items.map((item) => {
       const warnings = Array.isArray(item.kitWarnings)
@@ -540,12 +572,28 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             value={company}
             onChange={(e) => setCompany(e.target.value)}
           />
-          <input
-            className="input input-bordered w-full"
-            placeholder="Shooting Location"
-            value={location}
-            onChange={(e) => setLocation(e.target.value)}
-          />
+          {venueLocked && !allowLocationOverride ? (
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+              <p className="font-medium text-slate-900">
+                Filming at {lockedVenueLocation || "the booked venue"}
+              </p>
+              <button
+                type="button"
+                className="mt-2 text-xs font-semibold text-orange"
+                onClick={() => setAllowLocationOverride(true)}
+              >
+                Use a different location
+              </button>
+            </div>
+          ) : null}
+          {shouldShowLocationInput && (
+            <input
+              className="input input-bordered w-full"
+              placeholder="Shooting Location"
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+            />
+          )}
           <input
             className="input input-bordered w-full"
             placeholder="Postcode"

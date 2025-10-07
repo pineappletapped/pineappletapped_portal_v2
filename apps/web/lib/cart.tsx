@@ -52,8 +52,12 @@ export interface CartItem {
     type: "hq" | "franchise";
     franchiseId?: string | null;
     territoryId?: string | null;
+    territoryLabel?: string | null;
+    label?: string | null;
     priceTier?: number | null;
     hqFallback?: boolean;
+    postalCode?: string | null;
+    matchType?: string | null;
   } | null;
   kitItems?: {
     id: string;
@@ -87,8 +91,12 @@ interface ProductInput {
     type: "hq" | "franchise";
     franchiseId?: string | null;
     territoryId?: string | null;
+    territoryLabel?: string | null;
+    label?: string | null;
     priceTier?: number | null;
     hqFallback?: boolean;
+    postalCode?: string | null;
+    matchType?: string | null;
   } | null;
   kitItems?: {
     id: string;
