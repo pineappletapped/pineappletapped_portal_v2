@@ -133,6 +133,34 @@ function normaliseEmailAddress(value: unknown): string | null {
   return emailPattern.test(trimmed) ? trimmed : null;
 }
 
+function normaliseOrganiserId(value: unknown): string | null {
+  const str = normaliseString(value);
+  return str ? str.toLowerCase() : null;
+}
+
+function normaliseStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const result: string[] = [];
+  value.forEach((entry) => {
+    if (typeof entry === 'string') {
+      const trimmed = entry.trim();
+      if (trimmed.length > 0) {
+        result.push(trimmed);
+      }
+    }
+  });
+  return Array.from(new Set(result));
+}
+
+function roundCurrency(value: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Number(value.toFixed(2));
+}
+
 function buildBookingInviteUrl(token: string): string {
   const base = BOOKING_INVITE_BASE_URL || 'https://portal.pineappletapped.com';
   return `${base.replace(/\/$/, '')}/bookings/invite/${token}`;
@@ -8312,6 +8340,42 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     value === undefined || value === null ? undefined : toNumber(value);
   const DEFAULT_TRAVEL_MILES = 100;
   const DEFAULT_TRAVEL_RATE = 0.3;
+  const requestStartedAt = new Date();
+  const parseDateValue = (input: any): Date | null => {
+    if (!input) {
+      return null;
+    }
+    if (input instanceof Date) {
+      return Number.isNaN(input.getTime()) ? null : input;
+    }
+    if (input instanceof admin.firestore.Timestamp) {
+      try {
+        const converted = input.toDate();
+        return Number.isNaN(converted.getTime()) ? null : converted;
+      } catch {
+        return null;
+      }
+    }
+    if (typeof input === 'string') {
+      const trimmed = input.trim();
+      if (!trimmed) {
+        return null;
+      }
+      const parsed = new Date(trimmed);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+    if (typeof input === 'object' && input !== null && typeof (input as any).toDate === 'function') {
+      try {
+        const converted = (input as any).toDate();
+        if (converted instanceof Date && !Number.isNaN(converted.getTime())) {
+          return converted;
+        }
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
   const {
     items,
     userEmail,
@@ -8420,6 +8484,30 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   let aggregatedKitReservationStatus: 'confirmed' | 'pending' = kitReservationStatusInitial;
   const aggregatedKitWarnings = new Set<string>(kitReservationWarningsInitial);
   const driveProducts: DriveOrderProductContext[] = [];
+  const organiserAggregates = new Map<
+    string,
+    {
+      organiserId: string;
+      minimumGuarantee: number | null;
+      exhibitorProductId: string | null;
+      exhibitorPrice: number | null;
+      upsellVariationIds: Set<string>;
+      sources: Set<string>;
+      quantity: number;
+      grossSubtotal: number;
+      exhibitorSubtotal: number;
+      organiserSubtotal: number;
+      items: {
+        productId: string;
+        variationId: string | null;
+        quantity: number;
+        unitPrice: number;
+        lineTotal: number;
+        role: 'organiser' | 'exhibitor';
+      }[];
+      latestEventDate: Date | null;
+    }
+  >();
   let productSubtotal = 0;
   let labourSubtotal = 0;
   let kitSubtotal = 0;
@@ -8675,6 +8763,112 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             };
           })()
         : null;
+    const rawOrganiser = items[idx]?.organiser;
+    let organiserPayload: Record<string, any> | null = null;
+    if (rawOrganiser && typeof rawOrganiser === 'object') {
+      const organiserId = normaliseOrganiserId(
+        (rawOrganiser as any).organiserId ?? (rawOrganiser as any).id ?? null
+      );
+      if (organiserId) {
+        const minimumGuarantee = parseNumber((rawOrganiser as any).minimumGuarantee);
+        const exhibitorProductId = normaliseString((rawOrganiser as any).exhibitorProductId);
+        const exhibitorPrice = parseNumber((rawOrganiser as any).exhibitorPrice);
+        const upsellIds = normaliseStringList((rawOrganiser as any).upsellVariationIds);
+        const sourceValue = normaliseString((rawOrganiser as any).source);
+        const lineRole: 'organiser' | 'exhibitor' =
+          exhibitorProductId && exhibitorProductId === snap.id ? 'exhibitor' : 'organiser';
+        organiserPayload = {
+          organiserId,
+          minimumGuarantee: minimumGuarantee ?? null,
+          exhibitorProductId: exhibitorProductId ?? null,
+          exhibitorPrice: exhibitorPrice ?? null,
+          upsellVariationIds: upsellIds,
+          source: sourceValue ?? null,
+          lineRole,
+        };
+        const aggregate = organiserAggregates.get(organiserId) ?? {
+          organiserId,
+          minimumGuarantee: minimumGuarantee ?? null,
+          exhibitorProductId: exhibitorProductId ?? null,
+          exhibitorPrice: exhibitorPrice ?? null,
+          upsellVariationIds: new Set<string>(),
+          sources: new Set<string>(),
+          quantity: 0,
+          grossSubtotal: 0,
+          exhibitorSubtotal: 0,
+          organiserSubtotal: 0,
+          items: [],
+          latestEventDate: null,
+        };
+        if (minimumGuarantee !== null) {
+          aggregate.minimumGuarantee =
+            aggregate.minimumGuarantee === null
+              ? minimumGuarantee
+              : Math.max(aggregate.minimumGuarantee, minimumGuarantee);
+        }
+        if (exhibitorProductId) {
+          aggregate.exhibitorProductId = exhibitorProductId;
+        }
+        if (exhibitorPrice !== null) {
+          aggregate.exhibitorPrice = exhibitorPrice;
+        }
+        upsellIds.forEach((id) => aggregate.upsellVariationIds.add(id));
+        if (sourceValue) {
+          aggregate.sources.add(sourceValue);
+        }
+        aggregate.quantity += qty;
+        const lineTotal = price * qty;
+        aggregate.grossSubtotal += lineTotal;
+        if (lineRole === 'exhibitor') {
+          aggregate.exhibitorSubtotal += lineTotal;
+        } else {
+          aggregate.organiserSubtotal += lineTotal;
+        }
+        aggregate.items.push({
+          productId: snap.id,
+          variationId: variationId ?? null,
+          quantity: qty,
+          unitPrice: price,
+          lineTotal,
+          role: lineRole,
+        });
+        const updateLatestEventDate = (candidate: Date | null) => {
+          if (!candidate || Number.isNaN(candidate.getTime())) {
+            return;
+          }
+          if (
+            !aggregate.latestEventDate ||
+            candidate.getTime() > aggregate.latestEventDate.getTime()
+          ) {
+            aggregate.latestEventDate = candidate;
+          }
+        };
+        updateLatestEventDate(parseDateValue(itemDate));
+        if (timeSlotDetails?.start) {
+          updateLatestEventDate(parseDateValue(timeSlotDetails.start));
+        }
+        if (timeSlotDetails?.end) {
+          updateLatestEventDate(parseDateValue(timeSlotDetails.end));
+        }
+        if (campaignBooking?.slotStartAt) {
+          updateLatestEventDate(parseDateValue(campaignBooking.slotStartAt));
+        }
+        if (campaignBooking?.slotEndAt) {
+          updateLatestEventDate(parseDateValue(campaignBooking.slotEndAt));
+        }
+        if (exhibitionDetails?.showDate) {
+          updateLatestEventDate(parseDateValue(exhibitionDetails.showDate));
+        }
+        if (exhibitionDetails?.setupDate) {
+          updateLatestEventDate(parseDateValue(exhibitionDetails.setupDate));
+        }
+        updateLatestEventDate(parseDateValue((prod as any).eventEndDate ?? null));
+        updateLatestEventDate(parseDateValue((prod as any).eventDate ?? null));
+        updateLatestEventDate(parseDateValue((prod as any).eventStartDate ?? null));
+        updateLatestEventDate(parseDateValue((prod as any).eventSetupDate ?? null));
+        organiserAggregates.set(organiserId, aggregate);
+      }
+    }
     const budget = (prod as any).budget || {};
     const labourFilming = parseOptional(budget.labourFilming);
     const labourEditing = parseOptional(budget.labourEditing);
@@ -8722,6 +8916,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       coverage: coveragePayload,
       timeSlot: timeSlotDetails,
       campaignBooking,
+      organiser: organiserPayload,
       budget: {
         perUnit: {
           labour,
@@ -8784,6 +8979,183 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     travelSubtotal += travelCost * qty;
     parkingSubtotal += parking * qty;
   });
+
+  const organiserCommitments: Record<string, any>[] = [];
+  let organiserTotalsMinimum = 0;
+  let organiserTotalsExhibitor = 0;
+  let organiserTotalsOrganiser = 0;
+  let organiserTotalsGross = 0;
+  let organiserTotalsCommission = 0;
+  let organiserTotalsShortfall = 0;
+  let organiserTotalsDepositRefundable = 0;
+  let organiserEligibleDate: Date | null = null;
+
+  if (organiserAggregates.size > 0) {
+    const organiserIds = Array.from(organiserAggregates.keys());
+    const organiserRefs = organiserIds.map((organiserId) =>
+      db.collection('eventOrganisers').doc(organiserId)
+    );
+    let organiserSnaps: FirebaseFirestore.DocumentSnapshot[] = [];
+    if (organiserRefs.length > 0) {
+      try {
+        organiserSnaps = await db.getAll(...organiserRefs);
+      } catch (error) {
+        console.warn('Failed to load organiser profiles', error);
+      }
+    }
+    const organiserProfileMap = new Map<string, Record<string, any>>();
+    organiserSnaps.forEach((snap) => {
+      if (snap && snap.exists) {
+        organiserProfileMap.set(snap.id, (snap.data() as Record<string, any>) ?? {});
+      }
+    });
+    organiserAggregates.forEach((aggregate, organiserId) => {
+      const profileData = organiserProfileMap.get(organiserId) ?? {};
+      const profileName = normaliseString(profileData.name);
+      const profileActive = profileData.active === true;
+      const profileMinimum = parseNumber(profileData.minimumGuarantee);
+      const profileCommissionRate = parseNumber(profileData.commissionRate);
+      const profileStripeAccountId = normaliseString(
+        profileData.stripeAccountId ?? profileData.connectAccountId
+      );
+      const profileStripeStatus = normaliseString(profileData.stripeStatus);
+      const profileExhibitorProductId = normaliseString(profileData.exhibitorProductId);
+      const profileUpsellIds = normaliseStringList(profileData.upsellVariationIds);
+      const minimumGuarantee =
+        aggregate.minimumGuarantee !== null
+          ? aggregate.minimumGuarantee
+          : profileMinimum ?? null;
+      const exhibitorSubtotal = roundCurrency(aggregate.exhibitorSubtotal);
+      const organiserSubtotal = roundCurrency(aggregate.organiserSubtotal);
+      const grossSubtotal = roundCurrency(aggregate.grossSubtotal);
+      const guaranteeMinimum = minimumGuarantee ?? 0;
+      const guaranteeShortfall = roundCurrency(
+        Math.max(guaranteeMinimum - exhibitorSubtotal, 0)
+      );
+      const commissionBase = Math.max(exhibitorSubtotal - guaranteeMinimum, 0);
+      const commissionRate = profileCommissionRate !== null ? profileCommissionRate : null;
+      const commissionDue =
+        commissionRate !== null ? roundCurrency((commissionBase * commissionRate) / 100) : 0;
+      const depositRefundable = roundCurrency(
+        Math.max(organiserSubtotal - guaranteeShortfall, 0)
+      );
+      const items = aggregate.items.map((entry) => ({
+        productId: entry.productId,
+        variationId: entry.variationId ?? null,
+        quantity: entry.quantity,
+        unitPrice: roundCurrency(entry.unitPrice),
+        lineTotal: roundCurrency(entry.lineTotal),
+        role: entry.role,
+      }));
+      const sources = Array.from(aggregate.sources);
+      const upsellVariationIds = Array.from(aggregate.upsellVariationIds);
+      const profileUpsellIdsUnique = profileUpsellIds.filter((id) => !upsellVariationIds.includes(id));
+      profileUpsellIdsUnique.forEach((id) => upsellVariationIds.push(id));
+      const eventWindowEnd = aggregate.latestEventDate
+        ? admin.firestore.Timestamp.fromDate(aggregate.latestEventDate)
+        : null;
+      const entryBaseDate = aggregate.latestEventDate ?? requestStartedAt;
+      const entryEligibleDate = new Date(entryBaseDate.getTime() + 7 * DAY_IN_MS);
+      if (!organiserEligibleDate || entryEligibleDate.getTime() > organiserEligibleDate.getTime()) {
+        organiserEligibleDate = entryEligibleDate;
+      }
+      organiserCommitments.push({
+        organiserId,
+        organiserName: profileName ?? null,
+        active: profileActive,
+        stripeAccountId: profileStripeAccountId ?? null,
+        stripeStatus: profileStripeStatus ?? null,
+        minimumGuarantee:
+          minimumGuarantee !== null ? roundCurrency(minimumGuarantee) : null,
+        exhibitorProductId:
+          aggregate.exhibitorProductId ?? profileExhibitorProductId ?? null,
+        exhibitorPrice:
+          aggregate.exhibitorPrice !== null ? roundCurrency(aggregate.exhibitorPrice) : null,
+        upsellVariationIds,
+        sources,
+        quantity: aggregate.quantity,
+        grossSubtotal,
+        exhibitorSubtotal,
+        organiserSubtotal,
+        guaranteeShortfall,
+        commissionRate: commissionRate !== null ? commissionRate : null,
+        commissionBase: roundCurrency(commissionBase),
+        commissionDue,
+        depositSubtotal: organiserSubtotal,
+        depositRefundable,
+        items,
+        eventWindowEnd,
+        settlementEligibleAt: admin.firestore.Timestamp.fromDate(entryEligibleDate),
+      });
+      organiserTotalsMinimum += minimumGuarantee !== null ? minimumGuarantee : 0;
+      organiserTotalsGross += grossSubtotal;
+      organiserTotalsExhibitor += exhibitorSubtotal;
+      organiserTotalsOrganiser += organiserSubtotal;
+      organiserTotalsCommission += commissionDue;
+      organiserTotalsShortfall += guaranteeShortfall;
+      organiserTotalsDepositRefundable += depositRefundable;
+    });
+  }
+
+  let organiserSnapshot: {
+    commitments: any[];
+    totals: {
+      minimumGuarantee: number;
+      grossSubtotal: number;
+      exhibitorSubtotal: number;
+      organiserSubtotal: number;
+      commissionDue: number;
+      guaranteeShortfall: number;
+      depositRefundable: number;
+    };
+    guaranteeSatisfied: boolean;
+    calculatedAt: admin.firestore.FieldValue;
+    settlement: {
+      status: 'pending';
+      eligibleAt: admin.firestore.Timestamp;
+      nextReviewAt: admin.firestore.Timestamp;
+      lastRunAt: admin.firestore.Timestamp | null;
+      completedAt: admin.firestore.Timestamp | null;
+      depositRefunded: number;
+      commissionTransferred: number;
+      transferIds: string[];
+      refundIds: string[];
+      notes: string | null;
+    };
+  } | null = null;
+  let organiserSettlementStatus: 'pending' | null = null;
+
+  if (organiserCommitments.length > 0) {
+    const eligibleDate = organiserEligibleDate ?? new Date(requestStartedAt.getTime() + 7 * DAY_IN_MS);
+    const eligibleTimestamp = admin.firestore.Timestamp.fromDate(eligibleDate);
+    organiserSnapshot = {
+      commitments: organiserCommitments,
+      totals: {
+        minimumGuarantee: roundCurrency(organiserTotalsMinimum),
+        grossSubtotal: roundCurrency(organiserTotalsGross),
+        exhibitorSubtotal: roundCurrency(organiserTotalsExhibitor),
+        organiserSubtotal: roundCurrency(organiserTotalsOrganiser),
+        commissionDue: roundCurrency(organiserTotalsCommission),
+        guaranteeShortfall: roundCurrency(organiserTotalsShortfall),
+        depositRefundable: roundCurrency(organiserTotalsDepositRefundable),
+      },
+      guaranteeSatisfied: roundCurrency(organiserTotalsShortfall) <= 0,
+      calculatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      settlement: {
+        status: 'pending',
+        eligibleAt: eligibleTimestamp,
+        nextReviewAt: eligibleTimestamp,
+        lastRunAt: null,
+        completedAt: null,
+        depositRefunded: 0,
+        commissionTransferred: 0,
+        transferIds: [],
+        refundIds: [],
+        notes: null,
+      },
+    };
+    organiserSettlementStatus = 'pending';
+  }
 
 
   // Apply voucher discount if provided
@@ -8951,6 +9323,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     vat,
     price,
     profit,
+    organiser: organiserSnapshot,
+    organiserSettlementStatus,
     status: 'pending',
     createdAt,
     franchiseAssignment: assignmentMeta,
@@ -10061,6 +10435,52 @@ export const stripe_createPaymentIntent = functions.https.onCall(async (data, co
     }
   }
 
+  let organiserShortfallCents = 0;
+  let organiserCommissionCents = 0;
+  let organiserHoldCents = 0;
+  let organiserStripeAccountId: string | null = null;
+  const organiserInfo = order.organiser && typeof order.organiser === 'object' ? order.organiser : null;
+  if (organiserInfo) {
+    const commitmentsRaw = Array.isArray(organiserInfo.commitments)
+      ? (organiserInfo.commitments as Record<string, any>[])
+      : [];
+    commitmentsRaw.forEach((commitment) => {
+      const minimumValue = parseNumber(commitment?.minimumGuarantee) ?? 0;
+      const exhibitorSubtotalValue = parseNumber(commitment?.exhibitorSubtotal) ?? 0;
+      const shortfallValue =
+        parseNumber(commitment?.guaranteeShortfall) ?? Math.max(minimumValue - exhibitorSubtotalValue, 0);
+      const commissionValue = parseNumber(commitment?.commissionDue) ?? 0;
+      organiserShortfallCents += Math.max(0, Math.round(shortfallValue * 100));
+      organiserCommissionCents += Math.max(0, Math.round(commissionValue * 100));
+      if (!organiserStripeAccountId) {
+        const candidate = normaliseString(
+          commitment?.stripeAccountId ??
+            commitment?.organiserStripeAccountId ??
+            commitment?.accountId ??
+            organiserInfo.stripeAccountId ??
+            organiserInfo?.settlement?.stripeAccountId ??
+            null
+        );
+        if (candidate) {
+          organiserStripeAccountId = candidate;
+        }
+      }
+    });
+    const calculatedHold = organiserShortfallCents + organiserCommissionCents;
+    if (calculatedHold > 0) {
+      organiserHoldCents = Math.min(Math.max(calculatedHold, 0), amountCents);
+    }
+  }
+
+  if (organiserHoldCents > 0 && destinationAccountId) {
+    const baseFee = applicationFeeAmount ?? 0;
+    let nextFee = baseFee + organiserHoldCents;
+    if (nextFee > amountCents) {
+      nextFee = amountCents;
+    }
+    applicationFeeAmount = nextFee;
+  }
+
   const metadata: Record<string, string> = {
     orderId: String(orderId),
     type: String(type),
@@ -10073,6 +10493,18 @@ export const stripe_createPaymentIntent = functions.https.onCall(async (data, co
   }
   if (destinationAccountId) {
     metadata.destinationAccountId = destinationAccountId;
+  }
+  if (organiserHoldCents > 0) {
+    metadata.organiserHoldCents = String(organiserHoldCents);
+  }
+  if (organiserShortfallCents > 0) {
+    metadata.organiserGuaranteeShortfallCents = String(organiserShortfallCents);
+  }
+  if (organiserCommissionCents > 0) {
+    metadata.organiserCommissionCents = String(organiserCommissionCents);
+  }
+  if (organiserStripeAccountId) {
+    metadata.organiserStripeAccountId = organiserStripeAccountId;
   }
 
   const paymentIntent = await stripe.paymentIntents.create({
@@ -10393,6 +10825,286 @@ async function reconcileInvoiceStripePayment(
 
   await ref.set(updates, { merge: true });
   return true;
+}
+
+async function processOrganiserSettlement(options: {
+  orderId: string;
+  orderData: Record<string, any>;
+  stripe: Stripe;
+}): Promise<Record<string, any> | null> {
+  const { orderId, orderData, stripe } = options;
+  const organiserData = orderData.organiser && typeof orderData.organiser === 'object'
+    ? (orderData.organiser as Record<string, any>)
+    : null;
+  if (!organiserData) {
+    return {
+      organiserSettlementStatus: 'completed',
+      'organiser.settlement.status': 'completed',
+      'organiser.settlement.completedAt': admin.firestore.FieldValue.serverTimestamp(),
+      'organiser.settlement.lastRunAt': admin.firestore.FieldValue.serverTimestamp(),
+    };
+  }
+
+  const settlementData =
+    organiserData.settlement && typeof organiserData.settlement === 'object'
+      ? ((organiserData.settlement as Record<string, any>) ?? {})
+      : {};
+  const currentStatus = normaliseString(settlementData.status);
+  if (currentStatus && currentStatus !== 'pending' && currentStatus !== 'processing') {
+    return null;
+  }
+
+  const commitmentsRaw = Array.isArray(organiserData.commitments)
+    ? (organiserData.commitments as Record<string, any>[])
+    : [];
+  if (commitmentsRaw.length === 0) {
+    return {
+      organiserSettlementStatus: 'completed',
+      'organiser.settlement.status': 'completed',
+      'organiser.settlement.completedAt': admin.firestore.FieldValue.serverTimestamp(),
+      'organiser.settlement.lastRunAt': admin.firestore.FieldValue.serverTimestamp(),
+    };
+  }
+
+  const paymentsRaw = Array.isArray(orderData.stripePayments)
+    ? (orderData.stripePayments as Record<string, any>[])
+    : [];
+  const depositPayments = paymentsRaw.filter((payment) =>
+    normaliseString(payment?.type) === 'deposit'
+  );
+
+  const existingRefundRecords = Array.isArray(settlementData.refundIds)
+    ? (settlementData.refundIds as Record<string, any>[])
+    : [];
+  const existingTransferRecords = Array.isArray(settlementData.transferIds)
+    ? (settlementData.transferIds as Record<string, any>[])
+    : [];
+
+  const previouslyRefundedCents = toCurrencyCents(settlementData.depositRefunded);
+  const previouslyTransferredCents = toCurrencyCents(settlementData.commissionTransferred);
+
+  let totalDepositRefundableCents = 0;
+  let totalCommissionDueCents = 0;
+
+  const transferredByOrganiser = new Map<string, number>();
+  existingTransferRecords.forEach((entry) => {
+    const organiserId = normaliseOrganiserId(entry?.organiserId);
+    if (!organiserId) {
+      return;
+    }
+    const amountCents = toCurrencyCents(entry?.amount);
+    transferredByOrganiser.set(
+      organiserId,
+      (transferredByOrganiser.get(organiserId) ?? 0) + amountCents
+    );
+  });
+
+  const transferPlansMap = new Map<string, { accountId: string; amountCents: number }>();
+
+  commitmentsRaw.forEach((commitment) => {
+    const organiserId = normaliseOrganiserId(commitment?.organiserId ?? commitment?.organiserID);
+    const depositRefundable = parseNumber(commitment?.depositRefundable) ?? 0;
+    const commissionDue = parseNumber(commitment?.commissionDue) ?? 0;
+    totalDepositRefundableCents += Math.max(0, Math.round(depositRefundable * 100));
+    totalCommissionDueCents += Math.max(0, Math.round(commissionDue * 100));
+    if (!organiserId) {
+      return;
+    }
+    const accountId = normaliseString(
+      commitment?.stripeAccountId ??
+        commitment?.organiserStripeAccountId ??
+        commitment?.accountId ??
+        organiserData.stripeAccountId ??
+        null
+    );
+    if (!accountId) {
+      return;
+    }
+    const alreadyTransferredForOrganiser = transferredByOrganiser.get(organiserId) ?? 0;
+    const remainingForOrganiserCents = Math.max(
+      Math.round(commissionDue * 100) - alreadyTransferredForOrganiser,
+      0
+    );
+    if (remainingForOrganiserCents <= 0) {
+      return;
+    }
+    const existingPlan = transferPlansMap.get(organiserId);
+    if (existingPlan) {
+      existingPlan.amountCents += remainingForOrganiserCents;
+    } else {
+      transferPlansMap.set(organiserId, {
+        accountId,
+        amountCents: remainingForOrganiserCents,
+      });
+    }
+  });
+
+  const transferPlans = Array.from(transferPlansMap.entries()).map(([organiserId, plan]) => ({
+    organiserId,
+    accountId: plan.accountId,
+    amountCents: plan.amountCents,
+  }));
+
+  const refundedByPaymentIntent = new Map<string, number>();
+  existingRefundRecords.forEach((entry) => {
+    const intentId = normaliseString(entry?.paymentIntentId ?? entry?.intentId);
+    if (!intentId) {
+      return;
+    }
+    const amountCents = toCurrencyCents(entry?.amount);
+    refundedByPaymentIntent.set(
+      intentId,
+      (refundedByPaymentIntent.get(intentId) ?? 0) + amountCents
+    );
+  });
+
+  let remainingDepositRefundCents = Math.max(
+    totalDepositRefundableCents - previouslyRefundedCents,
+    0
+  );
+  let remainingCommissionCents = Math.max(
+    totalCommissionDueCents - previouslyTransferredCents,
+    0
+  );
+
+  const updatedRefunds = existingRefundRecords.map((entry) => ({ ...entry }));
+  const updatedTransfers = existingTransferRecords.map((entry) => ({ ...entry }));
+
+  let refundedThisRunCents = 0;
+  let commissionTransferredThisRunCents = 0;
+
+  if (remainingDepositRefundCents > 0 && depositPayments.length > 0) {
+    for (const payment of depositPayments) {
+      if (remainingDepositRefundCents <= 0) {
+        break;
+      }
+      const intentId = normaliseString(payment?.intentId ?? payment?.paymentIntentId);
+      if (!intentId) {
+        continue;
+      }
+      const paymentAmountCents =
+        typeof payment?.amountCents === 'number'
+          ? Math.max(0, Math.round(payment.amountCents))
+          : Math.max(0, Math.round((payment?.amount ?? 0) * 100));
+      if (paymentAmountCents <= 0) {
+        continue;
+      }
+      const alreadyRefundedForPayment = refundedByPaymentIntent.get(intentId) ?? 0;
+      const refundableForPayment = Math.max(paymentAmountCents - alreadyRefundedForPayment, 0);
+      if (refundableForPayment <= 0) {
+        continue;
+      }
+      const refundAmountCents = Math.min(remainingDepositRefundCents, refundableForPayment);
+      if (refundAmountCents <= 0) {
+        continue;
+      }
+      const refund = await stripe.refunds.create({
+        payment_intent: intentId,
+        amount: refundAmountCents,
+        reason: 'requested_by_customer',
+        metadata: {
+          orderId,
+          organiserSettlement: 'true',
+        },
+      });
+      refundedThisRunCents += refundAmountCents;
+      refundedByPaymentIntent.set(intentId, alreadyRefundedForPayment + refundAmountCents);
+      remainingDepositRefundCents = Math.max(remainingDepositRefundCents - refundAmountCents, 0);
+      updatedRefunds.push({
+        id: refund.id,
+        paymentIntentId: intentId,
+        amount: fromCurrencyCents(refundAmountCents),
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  if (remainingCommissionCents > 0 && transferPlans.length > 0) {
+    for (const plan of transferPlans) {
+      if (plan.amountCents <= 0) {
+        continue;
+      }
+      if (remainingCommissionCents <= 0) {
+        break;
+      }
+      const transferAmountCents = Math.min(plan.amountCents, remainingCommissionCents);
+      if (transferAmountCents <= 0) {
+        continue;
+      }
+      const transfer = await stripe.transfers.create({
+        amount: transferAmountCents,
+        currency: 'gbp',
+        destination: plan.accountId,
+        description: `Organiser commission for order ${orderId}`,
+        metadata: {
+          orderId,
+          organiserId: plan.organiserId,
+        },
+      });
+      commissionTransferredThisRunCents += transferAmountCents;
+      remainingCommissionCents = Math.max(remainingCommissionCents - transferAmountCents, 0);
+      updatedTransfers.push({
+        id: transfer.id,
+        organiserId: plan.organiserId,
+        accountId: plan.accountId,
+        amount: fromCurrencyCents(transferAmountCents),
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  const finalDepositRefundedCents = Math.min(
+    previouslyRefundedCents + refundedThisRunCents,
+    totalDepositRefundableCents
+  );
+  const finalCommissionTransferredCents = Math.min(
+    previouslyTransferredCents + commissionTransferredThisRunCents,
+    totalCommissionDueCents
+  );
+
+  const outstandingDepositCents = Math.max(
+    totalDepositRefundableCents - finalDepositRefundedCents,
+    0
+  );
+  const outstandingCommissionCents = Math.max(
+    totalCommissionDueCents - finalCommissionTransferredCents,
+    0
+  );
+
+  let nextStatus: 'pending' | 'completed' | 'action_required' = 'completed';
+  let nextReviewAt: admin.firestore.Timestamp | null = null;
+  let note: string | null = null;
+
+  if (outstandingDepositCents > 0 || outstandingCommissionCents > 0) {
+    if (outstandingDepositCents > 0 && depositPayments.length === 0) {
+      nextStatus = 'action_required';
+      note = 'No deposit payments available for organiser refund.';
+    } else if (outstandingCommissionCents > 0 && transferPlans.length === 0) {
+      nextStatus = 'action_required';
+      note = 'Missing Stripe account for organiser commission transfer.';
+    } else {
+      nextStatus = 'pending';
+      nextReviewAt = admin.firestore.Timestamp.fromDate(
+        new Date(Date.now() + DAY_IN_MS)
+      );
+    }
+  }
+
+  return {
+    organiserSettlementStatus: nextStatus,
+    'organiser.settlement.status': nextStatus,
+    'organiser.settlement.lastRunAt': admin.firestore.FieldValue.serverTimestamp(),
+    'organiser.settlement.completedAt':
+      nextStatus === 'completed'
+        ? admin.firestore.FieldValue.serverTimestamp()
+        : settlementData.completedAt ?? null,
+    'organiser.settlement.nextReviewAt': nextReviewAt ?? null,
+    'organiser.settlement.notes': note ?? null,
+    'organiser.settlement.depositRefunded': fromCurrencyCents(finalDepositRefundedCents),
+    'organiser.settlement.commissionTransferred': fromCurrencyCents(finalCommissionTransferredCents),
+    'organiser.settlement.refundIds': updatedRefunds,
+    'organiser.settlement.transferIds': updatedTransfers,
+  };
 }
 
 type OrderStripePaymentType = 'deposit' | 'balance' | 'custom' | 'other';
@@ -11956,6 +12668,66 @@ export const emailSchedules_send = functions.pubsub.schedule('every 5 minutes').
   }
   return null;
 });
+
+export const organiser_settlement_reconcile = functions.pubsub
+  .schedule('every 12 hours')
+  .onRun(async () => {
+    const now = admin.firestore.Timestamp.now();
+    let stripe: Stripe;
+    try {
+      stripe = await getStripeClient();
+    } catch (error) {
+      console.error('Failed to load Stripe client for organiser settlement reconciliation', error);
+      return null;
+    }
+
+    const snapshot = await db
+      .collection('orders')
+      .where('organiserSettlementStatus', '==', 'pending')
+      .where('organiser.settlement.eligibleAt', '<=', now)
+      .limit(20)
+      .get();
+
+    if (snapshot.empty) {
+      console.log('No organiser settlements ready for reconciliation');
+      return null;
+    }
+
+    for (const docSnap of snapshot.docs) {
+      const orderId = docSnap.id;
+      try {
+        await docSnap.ref.update({
+          organiserSettlementStatus: 'processing',
+          'organiser.settlement.status': 'processing',
+        });
+      } catch (statusError) {
+        console.warn('Skipping organiser settlement due to status lock failure', orderId, statusError);
+        continue;
+      }
+
+      try {
+        const updates = await processOrganiserSettlement({
+          orderId,
+          orderData: docSnap.data() as Record<string, any>,
+          stripe,
+        });
+        if (updates) {
+          await docSnap.ref.update(updates);
+        }
+      } catch (error) {
+        console.error('Organiser settlement reconciliation failed', orderId, error);
+        await docSnap.ref.update({
+          organiserSettlementStatus: 'action_required',
+          'organiser.settlement.status': 'action_required',
+          'organiser.settlement.lastRunAt': admin.firestore.FieldValue.serverTimestamp(),
+          'organiser.settlement.notes':
+            error instanceof Error ? error.message : 'Organiser settlement failed',
+        });
+      }
+    }
+
+    return null;
+  });
 
 /**
  * Record a user login event via HTTPS callable. Stores loginHistory for the current user.

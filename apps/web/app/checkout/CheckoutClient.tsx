@@ -109,6 +109,30 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   }, [venueLocked]);
   const shouldShowLocationInput = !venueLocked || allowLocationOverride;
   const orderInput = useMemo(() => {
+    type OrganiserLineRole = "organiser" | "exhibitor";
+    type OrganiserAccumulator = {
+      organiserId: string;
+      minimumGuarantee: number | null;
+      exhibitorProductId: string | null;
+      exhibitorPrice: number | null;
+      upsellVariationIds: Set<string>;
+      sources: Set<string>;
+      quantity: number;
+      grossSubtotal: number;
+      exhibitorSubtotal: number;
+      organiserSubtotal: number;
+      items: {
+        productId: string;
+        variation: string | null;
+        quantity: number;
+        unitPrice: number;
+        lineTotal: number;
+        role: OrganiserLineRole;
+      }[];
+    };
+
+    const organiserMap = new Map<string, OrganiserAccumulator>();
+
     const itemPayload = items.map((item) => {
       const warnings = Array.isArray(item.kitWarnings)
         ? item.kitWarnings
@@ -135,8 +159,71 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             exhibitorPrice: item.organiser.exhibitorPrice ?? null,
             upsellVariationIds: item.organiser.upsellVariationIds ?? [],
             source: item.organiser.source ?? null,
+            lineRole:
+              item.organiser.exhibitorProductId &&
+              item.organiser.exhibitorProductId === item.id
+                ? ("exhibitor" as OrganiserLineRole)
+                : ("organiser" as OrganiserLineRole),
           }
         : null;
+
+      if (organiser) {
+        const quantity = Math.max(1, item.quantity);
+        const lineTotal = item.price * quantity;
+        const existing = organiserMap.get(organiser.organiserId);
+        const accumulator: OrganiserAccumulator = existing ?? {
+          organiserId: organiser.organiserId,
+          minimumGuarantee: organiser.minimumGuarantee ?? null,
+          exhibitorProductId: organiser.exhibitorProductId ?? null,
+          exhibitorPrice: organiser.exhibitorPrice ?? null,
+          upsellVariationIds: new Set<string>(),
+          sources: new Set<string>(),
+          quantity: 0,
+          grossSubtotal: 0,
+          exhibitorSubtotal: 0,
+          organiserSubtotal: 0,
+          items: [],
+        };
+
+        if (organiser.minimumGuarantee != null) {
+          accumulator.minimumGuarantee =
+            accumulator.minimumGuarantee == null
+              ? organiser.minimumGuarantee
+              : Math.max(accumulator.minimumGuarantee, organiser.minimumGuarantee);
+        }
+        if (organiser.exhibitorProductId) {
+          accumulator.exhibitorProductId = organiser.exhibitorProductId;
+        }
+        if (organiser.exhibitorPrice != null) {
+          accumulator.exhibitorPrice = organiser.exhibitorPrice;
+        }
+        organiser.upsellVariationIds.forEach((id) => {
+          if (typeof id === "string" && id.trim().length > 0) {
+            accumulator.upsellVariationIds.add(id.trim());
+          }
+        });
+        if (organiser.source) {
+          accumulator.sources.add(organiser.source);
+        }
+
+        accumulator.quantity += quantity;
+        accumulator.grossSubtotal += lineTotal;
+        if (organiser.lineRole === "exhibitor") {
+          accumulator.exhibitorSubtotal += lineTotal;
+        } else {
+          accumulator.organiserSubtotal += lineTotal;
+        }
+        accumulator.items.push({
+          productId: item.id,
+          variation: item.variation ?? null,
+          quantity,
+          unitPrice: item.price,
+          lineTotal,
+          role: organiser.lineRole,
+        });
+
+        organiserMap.set(organiser.organiserId, accumulator);
+      }
       return {
         id: item.id,
         quantity: item.quantity,
@@ -155,6 +242,20 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         organiser,
       };
     });
+    const organiserSummary = Array.from(organiserMap.values()).map((entry) => ({
+      organiserId: entry.organiserId,
+      minimumGuarantee: entry.minimumGuarantee,
+      exhibitorProductId: entry.exhibitorProductId,
+      exhibitorPrice: entry.exhibitorPrice,
+      upsellVariationIds: Array.from(entry.upsellVariationIds),
+      sources: Array.from(entry.sources),
+      quantity: entry.quantity,
+      grossSubtotal: entry.grossSubtotal,
+      exhibitorSubtotal: entry.exhibitorSubtotal,
+      organiserSubtotal: entry.organiserSubtotal,
+      items: entry.items,
+    }));
+
     const kitItemsPayload = items.flatMap((item) => item.kitItems || []);
     const kitReservationStatus = items.some((item) => item.kitStatus === "pending")
       ? "pending"
@@ -184,6 +285,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       projectName: projectName || null,
       voucher: voucher || null,
       leadSource: leadSourceValue,
+      organisers: organiserSummary,
     };
   }, [
     items,
@@ -232,6 +334,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         })),
         kitReservationStatus: orderInput.kitReservationStatus,
         kitReservationWarnings: orderInput.kitReservationWarnings,
+        organisers: orderInput.organisers,
       }),
     [orderInput]
   );
