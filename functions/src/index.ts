@@ -13074,6 +13074,59 @@ export const organiser_settlement_reconcile = functions.pubsub
     return null;
   });
 
+async function recordLoginForUid(uid: string, timestampValue: unknown): Promise<void> {
+  let timestamp: admin.firestore.Timestamp | admin.firestore.FieldValue =
+    admin.firestore.FieldValue.serverTimestamp();
+
+  if (typeof timestampValue === 'string') {
+    const parsed = new Date(timestampValue);
+    if (!Number.isNaN(parsed.getTime())) {
+      timestamp = admin.firestore.Timestamp.fromDate(parsed);
+    }
+  }
+
+  await db.collection('loginHistory').add({
+    uid,
+    timestamp,
+  });
+}
+
+function parseRequestBody(req: functions.Request): Record<string, unknown> {
+  const rawBody = req.body;
+
+  if (typeof rawBody === 'string') {
+    const trimmed = rawBody.trim();
+    if (!trimmed) {
+      return {};
+    }
+    try {
+      return JSON.parse(trimmed) as Record<string, unknown>;
+    } catch (error) {
+      console.warn('recordLoginEvent invalid JSON body', error);
+      return {};
+    }
+  }
+
+  if (Buffer.isBuffer(rawBody)) {
+    const text = rawBody.toString('utf8').trim();
+    if (!text) {
+      return {};
+    }
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch (error) {
+      console.warn('recordLoginEvent invalid buffer body', error);
+      return {};
+    }
+  }
+
+  if (rawBody && typeof rawBody === 'object') {
+    return rawBody as Record<string, unknown>;
+  }
+
+  return {};
+}
+
 /**
  * Record a user login event via HTTPS callable. Stores loginHistory for the current user.
  */
@@ -13081,13 +13134,59 @@ export const recordLogin = functions.https.onCall(async (data, context) => {
   if (!context.auth?.uid) {
     throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
   }
-  await db.collection('loginHistory').add({
-    uid: context.auth.uid,
-    timestamp: data?.timestamp
-      ? admin.firestore.Timestamp.fromDate(new Date(data.timestamp))
-      : admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await recordLoginForUid(context.auth.uid, data?.timestamp);
   return { ok: true };
+});
+
+export const recordLoginEvent = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
+  if (req.method === 'OPTIONS') {
+    res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  const authHeader = req.get('authorization') || '';
+  if (!authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Sign in required' });
+    return;
+  }
+
+  const token = authHeader.split('Bearer ')[1]?.trim();
+  if (!token) {
+    res.status(401).json({ error: 'Sign in required' });
+    return;
+  }
+
+  let uid: string | null = null;
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    uid = decoded.uid;
+  } catch (error) {
+    console.error('recordLoginEvent verifyIdToken failed', error);
+    res.status(401).json({ error: 'Invalid token' });
+    return;
+  }
+
+  if (!uid) {
+    res.status(401).json({ error: 'Invalid token' });
+    return;
+  }
+
+  const body = parseRequestBody(req);
+
+  try {
+    await recordLoginForUid(uid, body.timestamp);
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('recordLoginEvent failed', error);
+    res.status(500).json({ error: 'Failed to record login' });
+  }
 });
 
 /**
