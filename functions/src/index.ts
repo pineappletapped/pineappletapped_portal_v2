@@ -5088,16 +5088,51 @@ export const reserveKit = functions.https.onCall(async (data) => {
       });
     };
 
-    configuredFlow
-      .filter((stage) => stage.enabled !== false)
-      .forEach((stage) => addStage(stage));
+    const activeStages = configuredFlow.filter((stage) => stage.enabled !== false);
+    activeStages.forEach((stage) => addStage(stage));
 
     if (attempts.length === 0) {
-      const fallbackFlow =
-        flowKey === 'franchiseFlow'
-          ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
-          : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
-      fallbackFlow.forEach((stage) => addStage(stage));
+      const allDisabled = configuredFlow.length > 0 && configuredFlow.every((stage) => stage.enabled === false);
+      if (allDisabled) {
+        const fallbackKey: RoutingStageKey =
+          coverage.type === 'franchise' && coverage.franchiseId ? 'franchise_primary' : 'hq';
+        const fallbackFlow =
+          flowKey === 'franchiseFlow'
+            ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
+            : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
+        const fallbackStage =
+          fallbackFlow.find((stage) => stage.key === fallbackKey) ||
+          ({
+            key: fallbackKey,
+            label: ROUTING_STAGE_META[fallbackKey].defaultLabel,
+            description: ROUTING_STAGE_META[fallbackKey].defaultDescription,
+            requiresKit: false,
+            autoConfirm: true,
+            enabled: true,
+          } satisfies RoutingStageConfig);
+        const fallbackLabel = resolveRoutingStageLabel(fallbackStage, {
+          coverageLabel: coverage.label,
+          fallback: ROUTING_STAGE_META[fallbackKey].defaultLabel,
+        });
+        const ownerType = ROUTING_STAGE_META[fallbackKey].ownerType;
+        const fallbackInitialStatus: ReservationStatus = fallbackStage.autoConfirm === true ? 'confirmed' : 'pending';
+        attempts.push({
+          key: fallbackKey,
+          ownerType,
+          initialStatus: fallbackInitialStatus,
+          franchiseId: ownerType === 'company' ? null : coverage.franchiseId,
+          label: fallbackLabel,
+          requiresKit: false,
+          description: fallbackStage.description ?? null,
+          autoConfirm: fallbackStage.autoConfirm === true,
+        });
+      } else {
+        const fallbackFlow =
+          flowKey === 'franchiseFlow'
+            ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
+            : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
+        fallbackFlow.forEach((stage) => addStage(stage));
+      }
     }
 
     return attempts;

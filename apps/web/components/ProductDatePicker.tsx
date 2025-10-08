@@ -236,7 +236,7 @@ export default function ProductDatePicker({
   };
 
   const indicatorPalette: Record<ProductAvailabilityStatus, string> = {
-    available: "bg-green-500",
+    available: "bg-emerald-500",
     pending: "bg-amber-500",
     booked: "bg-red-500",
     unavailable: "bg-gray-400",
@@ -252,7 +252,8 @@ export default function ProductDatePicker({
     const base =
       "relative flex min-h-[4.5rem] flex-col items-center justify-center rounded-md border px-2 py-2 text-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange";
     const palette: Record<ProductAvailabilityStatus, string> = {
-      available: "border-green-500 text-green-700 bg-green-50 hover:bg-green-100",
+      available:
+        "border-emerald-500 text-emerald-700 bg-emerald-50 hover:bg-emerald-100",
       pending: "border-amber-500 text-amber-700 bg-amber-50 hover:bg-amber-100",
       booked: "border-red-400 text-red-600 bg-red-50",
       unavailable: "border-gray-300 text-gray-500 bg-gray-100",
@@ -275,7 +276,11 @@ export default function ProductDatePicker({
   };
 
   return (
-    <div className="max-w-sm text-xs" role="group" aria-label="Select a production date">
+    <div
+      className="w-full max-w-[22rem] text-xs"
+      role="group"
+      aria-label="Select a production date"
+    >
       <div className="mb-1 flex items-center justify-between">
         <button
           className="btn btn-xs"
