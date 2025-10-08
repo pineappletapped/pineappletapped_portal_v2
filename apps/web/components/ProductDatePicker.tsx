@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { db } from "@/lib/firebase";
-import { collection, getDocs } from "firebase/firestore";
+import { collection, getDocs, query, where } from "firebase/firestore";
 
 export type ProductAvailabilityStatus =
   | "available"
@@ -42,6 +42,9 @@ export default function ProductDatePicker({
     Array<{ id: string; data: Record<string, unknown> }>
   >([]);
   const [availability, setAvailability] = useState<
+    Record<string, ProductAvailabilityStatus>
+  >({});
+  const [rosterAvailability, setRosterAvailability] = useState<
     Record<string, ProductAvailabilityStatus>
   >({});
 
@@ -181,6 +184,31 @@ export default function ProductDatePicker({
     setAvailability(next);
   }, [entries, scope]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!scope) {
+      setRosterAvailability({});
+      return () => {
+        cancelled = true;
+      };
+    }
+    loadAvailabilityForScope(scope)
+      .then((data) => {
+        if (!cancelled) {
+          setRosterAvailability(data);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to load routing availability", error);
+        if (!cancelled) {
+          setRosterAvailability({});
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [scope]);
+
   const y = view.getFullYear();
   const m = view.getMonth();
   const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -283,8 +311,13 @@ export default function ProductDatePicker({
           )}`;
           const isAllowed =
             !allowedInfo.hasAllowed || allowedInfo.allowedSet.has(date);
-          const statusSource = overrides?.[date] ?? availability[date];
-          let status: ProductAvailabilityStatus = statusSource ?? "available";
+          const statusSource =
+            overrides?.[date] ?? availability[date] ?? rosterAvailability[date];
+          const fallbackStatus: ProductAvailabilityStatus = scope
+            ? "pending"
+            : "available";
+          let status: ProductAvailabilityStatus =
+            statusSource ?? fallbackStatus;
           let statusLabel = statusText[status];
           if (!isAllowed) {
             status = "unavailable";
@@ -467,6 +500,263 @@ const evaluateScopeMatch = (
     return { match: true, priority: 5 };
   }
   return { match: appliesGlobally, priority: appliesGlobally ? 0 : -1 };
+};
+
+const ROUTING_AVAILABILITY_CACHE_TTL = 5 * 60 * 1000;
+
+type RoutingStageKey = "franchise" | "hq";
+
+interface RoutingStageRoster {
+  members: Record<string, RoutingStageKey[]>;
+}
+
+const rosterCache = new Map<string, { fetchedAt: number; roster: RoutingStageRoster }>();
+const availabilityCache = new Map<
+  string,
+  { fetchedAt: number; data: Record<string, ProductAvailabilityStatus> }
+>();
+
+const mapTeamAvailabilityToProduct = (
+  value: unknown
+): ProductAvailabilityStatus | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim().toLowerCase();
+  switch (trimmed) {
+    case "available":
+      return "available";
+    case "partial":
+    case "limited":
+      return "pending";
+    case "booked":
+      return "booked";
+    case "unavailable":
+      return "unavailable";
+    default:
+      return null;
+  }
+};
+
+const summariseStageStatuses = (
+  statuses: ProductAvailabilityStatus[]
+): ProductAvailabilityStatus | null => {
+  if (!statuses || statuses.length === 0) {
+    return null;
+  }
+  if (statuses.some((status) => status === "unavailable")) {
+    return "unavailable";
+  }
+  if (statuses.some((status) => status === "booked")) {
+    return "booked";
+  }
+  if (statuses.some((status) => status === "pending")) {
+    return "pending";
+  }
+  return "available";
+};
+
+const resolveFinalStatusForScope = (
+  scope: ProductAvailabilityScope,
+  franchiseStatus: ProductAvailabilityStatus | null,
+  hqStatus: ProductAvailabilityStatus | null,
+  options: { hasFranchiseMembers: boolean; hasHqMembers: boolean }
+): ProductAvailabilityStatus => {
+  const { hasFranchiseMembers, hasHqMembers } = options;
+  if (scope.type === "franchise") {
+    if (franchiseStatus === "available") {
+      return "available";
+    }
+    if (franchiseStatus === "pending") {
+      return "pending";
+    }
+    if (franchiseStatus === "booked" || franchiseStatus === "unavailable") {
+      if (!hqStatus) {
+        return hasHqMembers ? "pending" : franchiseStatus;
+      }
+      if (hqStatus === "available" || hqStatus === "pending") {
+        return "pending";
+      }
+      if (hqStatus === "booked") {
+        return "booked";
+      }
+      return "unavailable";
+    }
+    if (franchiseStatus == null) {
+      if (hasFranchiseMembers) {
+        if (!hqStatus) {
+          return hasHqMembers ? "pending" : "pending";
+        }
+        if (hqStatus === "available") {
+          return "pending";
+        }
+        return hqStatus;
+      }
+      if (!hqStatus) {
+        return hasHqMembers ? "pending" : "pending";
+      }
+      if (hqStatus === "available") {
+        return "pending";
+      }
+      return hqStatus;
+    }
+    return franchiseStatus;
+  }
+  if (!hqStatus) {
+    return hasHqMembers ? "pending" : "pending";
+  }
+  return hqStatus;
+};
+
+const loadRosterForScope = async (
+  scope: ProductAvailabilityScope
+): Promise<RoutingStageRoster> => {
+  const cacheKey = JSON.stringify(scope);
+  const now = Date.now();
+  const cached = rosterCache.get(cacheKey);
+  if (cached && now - cached.fetchedAt < ROUTING_AVAILABILITY_CACHE_TTL) {
+    return cached.roster;
+  }
+
+  const membership = new Map<string, Set<RoutingStageKey>>();
+  const addMember = (uid: string | null | undefined, stage: RoutingStageKey) => {
+    if (!uid) {
+      return;
+    }
+    const trimmed = uid.trim();
+    if (!trimmed) {
+      return;
+    }
+    let stages = membership.get(trimmed);
+    if (!stages) {
+      stages = new Set<RoutingStageKey>();
+      membership.set(trimmed, stages);
+    }
+    stages.add(stage);
+  };
+
+  try {
+    const userCollection = collection(db, "users");
+    if (scope.type === "franchise" && scope.franchiseId) {
+      const franchiseId = scope.franchiseId;
+      const [franchiseSnap, primarySnap] = await Promise.all([
+        getDocs(
+          query(userCollection, where("franchiseIds", "array-contains", franchiseId))
+        ),
+        getDocs(query(userCollection, where("primaryFranchiseId", "==", franchiseId))),
+      ]);
+      [franchiseSnap, primarySnap].forEach((snap) => {
+        snap.docs.forEach((docSnap) => {
+          addMember(docSnap.id, "franchise");
+        });
+      });
+    }
+
+    const hqQueries = [
+      query(userCollection, where("isStaff", "==", true)),
+      query(userCollection, where("roles.admin", "==", true)),
+      query(userCollection, where("roles.operations", "==", true)),
+      query(userCollection, where("roles.projects", "==", true)),
+    ];
+
+    await Promise.all(
+      hqQueries.map((hqQuery) =>
+        getDocs(hqQuery)
+          .then((snap) => {
+            snap.docs.forEach((docSnap) => {
+              addMember(docSnap.id, "hq");
+            });
+          })
+          .catch((error) => {
+            console.error("Failed to load HQ availability roster", error);
+            return null;
+          })
+      )
+    );
+  } catch (error) {
+    console.error("Failed to load availability roster", error);
+  }
+
+  const members: Record<string, RoutingStageKey[]> = {};
+  membership.forEach((stages, uid) => {
+    members[uid] = Array.from(stages);
+  });
+
+  const roster: RoutingStageRoster = { members };
+  rosterCache.set(cacheKey, { fetchedAt: now, roster });
+  return roster;
+};
+
+const loadAvailabilityForScope = async (
+  scope: ProductAvailabilityScope
+): Promise<Record<string, ProductAvailabilityStatus>> => {
+  const cacheKey = JSON.stringify(scope);
+  const now = Date.now();
+  const cached = availabilityCache.get(cacheKey);
+  if (cached && now - cached.fetchedAt < ROUTING_AVAILABILITY_CACHE_TTL) {
+    return cached.data;
+  }
+
+  const roster = await loadRosterForScope(scope);
+  const membershipEntries = Object.entries(roster.members);
+  if (membershipEntries.length === 0) {
+    availabilityCache.set(cacheKey, { fetchedAt: now, data: {} });
+    return {};
+  }
+
+  const stageMap = new Map<
+    string,
+    { franchise: ProductAvailabilityStatus[]; hq: ProductAvailabilityStatus[] }
+  >();
+
+  const tasks = membershipEntries.map(async ([uid, stages]) => {
+    try {
+      const availabilitySnap = await getDocs(
+        query(collection(db, "availability"), where("uid", "==", uid))
+      );
+      availabilitySnap.docs.forEach((docSnap) => {
+        const data = docSnap.data() as Record<string, unknown>;
+        const dateKey =
+          typeof data.date === "string" ? normaliseDateKey(data.date) : null;
+        const status = mapTeamAvailabilityToProduct(data.status);
+        if (!dateKey || !status) {
+          return;
+        }
+        let entry = stageMap.get(dateKey);
+        if (!entry) {
+          entry = { franchise: [], hq: [] };
+          stageMap.set(dateKey, entry);
+        }
+        stages.forEach((stage) => {
+          entry![stage].push(status);
+        });
+      });
+    } catch (error) {
+      console.error("Failed to load team availability", error);
+    }
+  });
+
+  await Promise.all(tasks);
+
+  const hasFranchiseMembers = membershipEntries.some(([, stages]) =>
+    stages.includes("franchise")
+  );
+  const hasHqMembers = membershipEntries.some(([, stages]) =>
+    stages.includes("hq")
+  );
+
+  const aggregated: Record<string, ProductAvailabilityStatus> = {};
+  stageMap.forEach((stageStatuses, dateKey) => {
+    const franchiseStatus = summariseStageStatuses(stageStatuses.franchise);
+    const hqStatus = summariseStageStatuses(stageStatuses.hq);
+    aggregated[dateKey] = resolveFinalStatusForScope(scope, franchiseStatus, hqStatus, {
+      hasFranchiseMembers,
+      hasHqMembers,
+    });
+  });
+
+  availabilityCache.set(cacheKey, { fetchedAt: now, data: aggregated });
+  return aggregated;
 };
 
 const normaliseDateKey = (value: string | null | undefined): string | null => {
