@@ -38,6 +38,15 @@ const ANALYTICS_ALLOWED_ORIGINS = [
   'http://localhost:3000',
 ];
 
+function applyRecordLoginCors(req: functions.Request, res: functions.Response) {
+  const origin = req.get('origin');
+  const allowedOrigin = origin && ANALYTICS_ALLOWED_ORIGINS.includes(origin) ? origin : '*';
+  res.set('Access-Control-Allow-Origin', allowedOrigin);
+  res.set('Vary', 'Origin');
+  res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+}
+
 // TODO: wrap all http functions with the cors handler, for example:
 // exports.myFunction = functions.https.onRequest((req, res) => {
 //   corsHandler(req, res, () => {
@@ -457,6 +466,22 @@ function decodeEncryptionKey(raw: string): Buffer {
   throw new Error('Encryption key must decode to 32 bytes for AES-256-GCM.');
 }
 
+function hashStateSecret(secret: string): string {
+  return crypto.createHash('sha256').update(secret, 'utf8').digest('hex');
+}
+
+function timingSafeEqualHex(expected: string, actual: string): boolean {
+  if (expected.length !== actual.length) {
+    return false;
+  }
+  const expectedBuf = Buffer.from(expected, 'hex');
+  const actualBuf = Buffer.from(actual, 'hex');
+  if (expectedBuf.length !== actualBuf.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(expectedBuf, actualBuf);
+}
+
 async function getSocialAccountEncryptionKey(): Promise<Buffer> {
   if (cachedSocialAccountEncryptionKey) {
     return cachedSocialAccountEncryptionKey;
@@ -502,6 +527,7 @@ type SocialAccountProviderInput = {
 
 type StoreSocialAccountCredentialRequest = {
   stateId?: string | null;
+  stateSecret?: string | null;
   accountId?: string | null;
   platform?: string | null;
   organisationId?: string | null;
@@ -747,8 +773,31 @@ async function storeSocialAccountCredentials(
   const initiatorEmail = normaliseString(payload.initiator?.email);
   const requestedBy = normaliseString(payload.requestedBy);
   const stateId = normaliseString(payload.stateId);
+  const stateSecret = normaliseString(payload.stateSecret);
   const providerAccountId = normaliseString(payload.provider?.accountId);
   const providerAccountName = normaliseString(payload.provider?.accountName);
+
+  let stateRef: DocumentReference<DocumentData> | null = null;
+  let stateSecretHash: string | null = null;
+  if (stateId) {
+    stateRef = db.collection('socialAccountAuthStates').doc(stateId);
+    const stateSnap = await stateRef.get();
+    if (!stateSnap.exists) {
+      throw new Error('OAuth session has expired or is invalid.');
+    }
+    const stateData = stateSnap.data() as Record<string, unknown> | null;
+    const expectedHash = normaliseString(stateData?.stateSecretHash);
+    if (expectedHash) {
+      if (!stateSecret) {
+        throw new Error('OAuth session verification secret is missing.');
+      }
+      const providedHash = hashStateSecret(stateSecret);
+      if (!timingSafeEqualHex(expectedHash, providedHash)) {
+        throw new Error('OAuth session verification failed.');
+      }
+      stateSecretHash = expectedHash;
+    }
+  }
 
   const sanitizedAccessToken = tokens.accessToken.trim();
   const sanitizedRefreshToken =
@@ -874,6 +923,17 @@ async function storeSocialAccountCredentials(
     }
 
     transaction.set(secretRef, secretData, { merge: true });
+
+    if (stateRef && stateSecretHash) {
+      transaction.set(
+        stateRef,
+        {
+          stateSecretHash: admin.firestore.FieldValue.delete(),
+          verifiedAt: nowTimestamp,
+        },
+        { merge: true }
+      );
+    }
   });
 
   return {
@@ -903,13 +963,6 @@ export const socialAccountsStoreCredentials = onRequest(async (req, res) => {
   }
 
   try {
-    const expectedKey = await getSocialAccountServiceKey();
-    const providedKey = req.get('x-service-key') ?? req.get('X-Service-Key') ?? null;
-    if (!providedKey || providedKey.trim() !== expectedKey) {
-      res.status(401).json({ error: 'Invalid service key.' });
-      return;
-    }
-
     let body: unknown = req.body;
     if (typeof body === 'string') {
       try {
@@ -930,6 +983,23 @@ export const socialAccountsStoreCredentials = onRequest(async (req, res) => {
           return;
         }
       }
+    }
+
+    let expectedKey: string | null = null;
+    try {
+      expectedKey = await getSocialAccountServiceKey();
+    } catch (error) {
+      console.warn('Social account service key unavailable, relying on OAuth state verification.', error);
+    }
+
+    const providedKey = req.get('x-service-key') ?? req.get('X-Service-Key') ?? null;
+    if (expectedKey) {
+      if (!providedKey || providedKey.trim() !== expectedKey) {
+        res.status(401).json({ error: 'Invalid service key.' });
+        return;
+      }
+    } else if (providedKey && providedKey.trim().length > 0) {
+      console.warn('Ignoring provided social account service key because none is configured.');
     }
 
     const result = await storeSocialAccountCredentials(body as StoreSocialAccountCredentialRequest);
@@ -13139,8 +13209,8 @@ export const recordLogin = functions.https.onCall(async (data, context) => {
 });
 
 export const recordLoginEvent = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
+  applyRecordLoginCors(req, res);
   if (req.method === 'OPTIONS') {
-    res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
     res.status(204).send('');
     return;
   }
