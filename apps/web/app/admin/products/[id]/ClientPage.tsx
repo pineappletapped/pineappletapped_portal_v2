@@ -1685,7 +1685,7 @@ export default function EditProductPage() {
           ) {
             storyboardInputs = (p as any).storyboardImages
               .filter((url: unknown): url is string => typeof url === "string")
-              .map((url: string, index) =>
+              .map((url: string, index: number) =>
                 createStoryboardSceneState({
                   title: `Scene ${index + 1}`,
                   imageUrl: url.trim().length > 0 ? url.trim() : null,
