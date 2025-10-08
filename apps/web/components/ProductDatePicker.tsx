@@ -228,6 +228,13 @@ export default function ProductDatePicker({
     unavailable: "Unavailable",
   };
 
+  const statusDisplayText: Record<ProductAvailabilityStatus, string> = {
+    available: "Available",
+    pending: "",
+    booked: "Booked",
+    unavailable: "Unavailable",
+  };
+
   const indicatorPalette: Record<ProductAvailabilityStatus, string> = {
     available: "bg-green-500",
     pending: "bg-amber-500",
@@ -313,15 +320,17 @@ export default function ProductDatePicker({
             !allowedInfo.hasAllowed || allowedInfo.allowedSet.has(date);
           const statusSource =
             overrides?.[date] ?? availability[date] ?? rosterAvailability[date];
-          const fallbackStatus: ProductAvailabilityStatus = scope
-            ? "pending"
-            : "available";
+          const fallbackStatus: ProductAvailabilityStatus = "available";
           let status: ProductAvailabilityStatus =
             statusSource ?? fallbackStatus;
-          let statusLabel = statusText[status];
           if (!isAllowed) {
             status = "unavailable";
-            statusLabel = "Not in schedule";
+          }
+          let accessibleStatusLabel = statusText[status];
+          let visualStatusLabel = statusDisplayText[status];
+          if (!isAllowed) {
+            visualStatusLabel = "Not in schedule";
+            accessibleStatusLabel = "Not in schedule";
           }
           const isDisabled =
             status === "booked" || status === "unavailable" || !isAllowed;
@@ -343,7 +352,7 @@ export default function ProductDatePicker({
               aria-disabled={isDisabled}
               disabled={isDisabled}
               aria-pressed={selected === date ? true : undefined}
-              aria-label={`${formattedDate} – ${statusLabel}`}
+              aria-label={`${formattedDate} – ${accessibleStatusLabel}`}
             >
               <span
                 aria-hidden
@@ -355,9 +364,11 @@ export default function ProductDatePicker({
                   {helperLabel}
                 </span>
               ) : null}
-              <span className="mt-0.5 text-[0.6rem] font-semibold">
-                {statusLabel}
-              </span>
+              {visualStatusLabel ? (
+                <span className="mt-0.5 text-[0.6rem] font-semibold">
+                  {visualStatusLabel}
+                </span>
+              ) : null}
             </button>
           );
         })}
@@ -560,9 +571,8 @@ const resolveFinalStatusForScope = (
   scope: ProductAvailabilityScope,
   franchiseStatus: ProductAvailabilityStatus | null,
   hqStatus: ProductAvailabilityStatus | null,
-  options: { hasFranchiseMembers: boolean; hasHqMembers: boolean }
+  _options: { hasFranchiseMembers: boolean; hasHqMembers: boolean }
 ): ProductAvailabilityStatus => {
-  const { hasFranchiseMembers, hasHqMembers } = options;
   if (scope.type === "franchise") {
     if (franchiseStatus === "available") {
       return "available";
@@ -572,7 +582,7 @@ const resolveFinalStatusForScope = (
     }
     if (franchiseStatus === "booked" || franchiseStatus === "unavailable") {
       if (!hqStatus) {
-        return hasHqMembers ? "pending" : franchiseStatus;
+        return franchiseStatus;
       }
       if (hqStatus === "available" || hqStatus === "pending") {
         return "pending";
@@ -583,27 +593,21 @@ const resolveFinalStatusForScope = (
       return "unavailable";
     }
     if (franchiseStatus == null) {
-      if (hasFranchiseMembers) {
-        if (!hqStatus) {
-          return hasHqMembers ? "pending" : "pending";
-        }
-        if (hqStatus === "available") {
-          return "pending";
-        }
+      if (hqStatus === "booked" || hqStatus === "unavailable") {
         return hqStatus;
       }
-      if (!hqStatus) {
-        return hasHqMembers ? "pending" : "pending";
-      }
-      if (hqStatus === "available") {
+      if (hqStatus === "pending") {
         return "pending";
       }
-      return hqStatus;
+      return "available";
     }
     return franchiseStatus;
   }
   if (!hqStatus) {
-    return hasHqMembers ? "pending" : "pending";
+    return "available";
+  }
+  if (hqStatus === "pending") {
+    return "pending";
   }
   return hqStatus;
 };

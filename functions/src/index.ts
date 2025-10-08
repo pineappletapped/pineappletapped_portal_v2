@@ -5117,6 +5117,38 @@ export const reserveKit = functions.https.onCall(async (data) => {
     });
   }
 
+  const anyKitAttempt = attempts.some((attempt) => attempt.requiresKit);
+  const selectBypassAttempt = (): ReservationAttempt | null => {
+    if (attempts.length === 0) {
+      return null;
+    }
+    const nonKitAttempt = attempts.find((attempt) => !attempt.requiresKit);
+    return nonKitAttempt ?? attempts[0];
+  };
+
+  if (!anyKitAttempt || eqIds.length === 0) {
+    const attempt = selectBypassAttempt();
+    if (attempt) {
+      return {
+        conflicts: [],
+        kitItems: [],
+        rentalTotal: 0,
+        status: attempt.initialStatus,
+        missingStandards: [],
+        provider: {
+          level: attempt.key,
+          status: attempt.initialStatus,
+          label: attempt.label,
+          franchiseId: attempt.franchiseId,
+          territoryId: coverageInfo.territoryId,
+          requiresKit: false,
+          autoConfirm: attempt.autoConfirm,
+          description: attempt.description ?? null,
+        },
+      } satisfies ReservationResponse;
+    }
+  }
+
   const deriveOwnerInfo = (eq: any): {
     ownerType: 'company' | 'franchise' | 'user';
     ownerId: string | null;
@@ -5150,69 +5182,71 @@ export const reserveKit = functions.https.onCall(async (data) => {
   };
 
   const equipmentRecords: EquipmentRecord[] = [];
-  for (const id of eqIds) {
-    const eqRef = db.collection('equipment').doc(id);
-    const eqSnap = await eqRef.get();
-    if (!eqSnap.exists) {
+  if (anyKitAttempt) {
+    for (const id of eqIds) {
+      const eqRef = db.collection('equipment').doc(id);
+      const eqSnap = await eqRef.get();
+      if (!eqSnap.exists) {
+        equipmentRecords.push({
+          id,
+          name: id,
+          category: null,
+          ownerType: 'company',
+          ownerId: null,
+          franchiseId: null,
+          availableFlag: false,
+          booked: false,
+          meetsStandards: [],
+          rentalPrice: 0,
+          exists: false,
+        });
+        continue;
+      }
+      const eq = eqSnap.data() as any;
+      const ownerInfo = deriveOwnerInfo(eq);
+      const category =
+        typeof eq.category === 'string' && eq.category.trim().length > 0
+          ? eq.category.trim()
+          : typeof eq.type === 'string' && eq.type.trim().length > 0
+            ? eq.type.trim()
+            : null;
+      const bookingsSnap = await eqRef
+        .collection('bookings')
+        .where('start', '<', reservationEnd)
+        .where('end', '>', start)
+        .get();
+      const conflictingBookings = bookingsSnap.docs.filter((bookingDoc) =>
+        bookingConflictsWithRange(
+          (bookingDoc.data() as { start?: unknown; end?: unknown }) ?? null,
+          start,
+          reservationEnd,
+        ),
+      );
+      const meetsStandards = Array.isArray(eq.meetsStandards)
+        ? (eq.meetsStandards as unknown[])
+            .map((value) => (typeof value === 'string' ? value.trim() : ''))
+            .filter((value): value is string => value.length > 0)
+        : [];
+      const equipmentName =
+        typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : eqSnap.id;
+      const rentalPrice =
+        typeof eq.rentalPrice === 'number' && Number.isFinite(eq.rentalPrice)
+          ? eq.rentalPrice
+          : 0;
       equipmentRecords.push({
-        id,
-        name: id,
-        category: null,
-        ownerType: 'company',
-        ownerId: null,
-        franchiseId: null,
-        availableFlag: false,
-        booked: false,
-        meetsStandards: [],
-        rentalPrice: 0,
-        exists: false,
+        id: eqSnap.id,
+        name: equipmentName,
+        category,
+        ownerType: ownerInfo.ownerType,
+        ownerId: ownerInfo.ownerId,
+        franchiseId: ownerInfo.franchiseId,
+        availableFlag: eq.available !== false,
+        booked: conflictingBookings.length > 0,
+        meetsStandards,
+        rentalPrice,
+        exists: true,
       });
-      continue;
     }
-    const eq = eqSnap.data() as any;
-    const ownerInfo = deriveOwnerInfo(eq);
-    const category =
-      typeof eq.category === 'string' && eq.category.trim().length > 0
-        ? eq.category.trim()
-        : typeof eq.type === 'string' && eq.type.trim().length > 0
-          ? eq.type.trim()
-          : null;
-    const bookingsSnap = await eqRef
-      .collection('bookings')
-      .where('start', '<', reservationEnd)
-      .where('end', '>', start)
-      .get();
-    const conflictingBookings = bookingsSnap.docs.filter((bookingDoc) =>
-      bookingConflictsWithRange(
-        (bookingDoc.data() as { start?: unknown; end?: unknown }) ?? null,
-        start,
-        reservationEnd,
-      ),
-    );
-    const meetsStandards = Array.isArray(eq.meetsStandards)
-      ? (eq.meetsStandards as unknown[])
-          .map((value) => (typeof value === 'string' ? value.trim() : ''))
-          .filter((value): value is string => value.length > 0)
-      : [];
-    const equipmentName =
-      typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : eqSnap.id;
-    const rentalPrice =
-      typeof eq.rentalPrice === 'number' && Number.isFinite(eq.rentalPrice)
-        ? eq.rentalPrice
-        : 0;
-    equipmentRecords.push({
-      id: eqSnap.id,
-      name: equipmentName,
-      category,
-      ownerType: ownerInfo.ownerType,
-      ownerId: ownerInfo.ownerId,
-      franchiseId: ownerInfo.franchiseId,
-      availableFlag: eq.available !== false,
-      booked: conflictingBookings.length > 0,
-      meetsStandards,
-      rentalPrice,
-      exists: true,
-    });
   }
 
   const matchesOwnerForAttempt = (
