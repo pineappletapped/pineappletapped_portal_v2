@@ -277,7 +277,9 @@ export default function ProjectTasksPage() {
     [tasks]
   );
 
-  const brandGuidelinesComplete = Boolean(project?.brandGuidelinesCompleted);
+  const brandGuidelinesComplete = project?.orgId
+    ? orgBrandInfo.hasGuidelines || Boolean(project?.brandGuidelinesCompleted)
+    : Boolean(project?.brandGuidelinesCompleted);
 
   useEffect(() => {
     let active = true;
@@ -317,7 +319,7 @@ export default function ProjectTasksPage() {
   useEffect(() => {
     if (!projectId) return;
     if (!brandTasks.length) return;
-    const shouldComplete = brandGuidelinesComplete || orgBrandInfo.hasGuidelines;
+    const shouldComplete = brandGuidelinesComplete;
     if (!shouldComplete) return;
     const pending = brandTasks.filter((task) => task.status !== 'done');
     if (pending.length === 0) return;
@@ -343,7 +345,7 @@ export default function ProjectTasksPage() {
     return () => {
       cancelled = true;
     };
-  }, [brandTasks, brandGuidelinesComplete, orgBrandInfo.hasGuidelines, projectId, reloadTasks]);
+  }, [brandTasks, brandGuidelinesComplete, projectId, reloadTasks]);
 
   const loadTaskComments = useCallback(
     async (taskId: string) => {
@@ -942,7 +944,7 @@ export default function ProjectTasksPage() {
                                   Choose organisation
                                 </Link>
                               </>
-                            ) : brandGuidelinesComplete || orgBrandInfo.hasGuidelines ? (
+                            ) : brandGuidelinesComplete ? (
                               <p>
                                 We already have the brand guidelines
                                 {orgBrandInfo.orgName ? ` for ${orgBrandInfo.orgName}` : ''}, so this task has been marked as
@@ -951,14 +953,14 @@ export default function ProjectTasksPage() {
                             ) : (
                               <>
                                 <p>
-                                  Open the brand guidelines form to upload your logo, fonts, and brand colours so production can
-                                  stay on-brand from the first draft.
+                                  Open the organisation’s brand workspace to upload logos, fonts, and colours before production
+                                  begins.
                                 </p>
                                 <Link
-                                  href={`/projects/${projectId}/brand-wizard`}
+                                  href={project?.orgId ? `/orgs/${project.orgId}/brand-guidelines?project=${projectId}` : `/projects/${projectId}/brand-wizard`}
                                   className={brandTaskCtaClasses}
                                 >
-                                  Open brand guidelines form
+                                  Open brand guidelines workspace
                                 </Link>
                               </>
                             )}
