@@ -30,12 +30,23 @@ import type {
   ProductBudgetOverride,
   ProductCrewRoleOverride,
   ProductModifierSelection,
+  ProductOrderFormField,
+  ProductStoryboardScene,
 } from "@/lib/products";
 import type { PriceTiers } from "@/lib/pricing";
 import type { Venue } from "@/lib/venues";
 import type { KitBag, EquipmentStandard } from "@/lib/equipment";
 import { defaultFranchiseRoyaltyConfig } from "@/lib/franchises";
 import { generateFormId } from "@/lib/forms";
+import ProductOrderFieldsEditor, {
+  OrderFormFieldFormState,
+} from "@/components/admin/products/ProductOrderFieldsEditor";
+import ProductStoryboardEditor, {
+  STORYBOARD_SCENE_COLOURS,
+  StoryboardSceneFormState,
+  formatStoryboardSeconds,
+  parseStoryboardTimecode,
+} from "@/components/admin/products/ProductStoryboardEditor";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -203,6 +214,49 @@ const createCrewRoleInput = (
     unitRate: defaults?.unitRate ?? "",
     includeInBudget: defaults?.includeInBudget ?? true,
   };
+};
+
+const createStoryboardSceneState = (
+  defaults?: Partial<StoryboardSceneFormState>
+): StoryboardSceneFormState => {
+  const id =
+    typeof defaults?.id === "string" && defaults.id.trim().length > 0
+      ? defaults.id
+      : generateFormId();
+  return {
+    id,
+    title: defaults?.title ?? "",
+    description: defaults?.description ?? "",
+    start: defaults?.start ?? "",
+    end: defaults?.end ?? "",
+    variationIds: Array.isArray(defaults?.variationIds)
+      ? defaults.variationIds.filter(
+          (value): value is string => typeof value === "string" && value.trim().length > 0
+        )
+      : [],
+    imageUrl: defaults?.imageUrl ?? null,
+    previewUrl: defaults?.previewUrl ?? null,
+    imageFile: defaults?.imageFile ?? null,
+    imageStoragePath: defaults?.imageStoragePath ?? null,
+    persistedImage: defaults?.persistedImage ?? false,
+    aiStatus: defaults?.aiStatus ?? "idle",
+    aiError: defaults?.aiError ?? null,
+  };
+};
+
+const resolveImageExtension = (file: File): string => {
+  const name = typeof file.name === "string" ? file.name : "";
+  const match = name.match(/\.([a-zA-Z0-9]{2,5})$/);
+  if (match) {
+    const ext = match[1].toLowerCase();
+    if (["jpg", "jpeg", "png", "webp"].includes(ext)) {
+      return ext === "jpeg" ? "jpg" : ext;
+    }
+  }
+  const type = typeof file.type === "string" ? file.type.toLowerCase() : "";
+  if (type.includes("png")) return "png";
+  if (type.includes("webp")) return "webp";
+  return "jpg";
 };
 
 const normaliseNumberString = (value: unknown, fallback: string): string => {
@@ -469,6 +523,12 @@ type VariationFormState = {
   tier2Price: string;
   tier3Price: string;
   featuresText: string;
+  onsiteDays: string;
+  onsiteSetupMinutes: string;
+  onsiteShootMinutes: string;
+  onsiteBreakdownMinutes: string;
+  onsiteWindowStart: string;
+  onsiteWindowEnd: string;
   budgetOverrides: BudgetOverrideFormState;
   crewOverrides: Record<string, CrewOverrideFormState>;
 };
@@ -516,6 +576,42 @@ const buildVariationFormState = (
     tier3Price:
       typeof tier3 === "number" && Number.isFinite(tier3) ? String(tier3) : "",
     featuresText: features.join("\n"),
+    onsiteDays:
+      typeof variation?.onsiteDays === "number" &&
+      Number.isFinite(variation.onsiteDays)
+        ? String(variation.onsiteDays)
+        : typeof variation?.onsiteDays === "string"
+          ? variation.onsiteDays
+          : "",
+    onsiteSetupMinutes:
+      typeof variation?.onsiteSetupMinutes === "number" &&
+      Number.isFinite(variation.onsiteSetupMinutes)
+        ? String(variation.onsiteSetupMinutes)
+        : typeof variation?.onsiteSetupMinutes === "string"
+          ? variation.onsiteSetupMinutes
+          : "",
+    onsiteShootMinutes:
+      typeof variation?.onsiteShootMinutes === "number" &&
+      Number.isFinite(variation.onsiteShootMinutes)
+        ? String(variation.onsiteShootMinutes)
+        : typeof variation?.onsiteShootMinutes === "string"
+          ? variation.onsiteShootMinutes
+          : "",
+    onsiteBreakdownMinutes:
+      typeof variation?.onsiteBreakdownMinutes === "number" &&
+      Number.isFinite(variation.onsiteBreakdownMinutes)
+        ? String(variation.onsiteBreakdownMinutes)
+        : typeof variation?.onsiteBreakdownMinutes === "string"
+          ? variation.onsiteBreakdownMinutes
+          : "",
+    onsiteWindowStart:
+      typeof variation?.onsiteTimeWindowStart === "string"
+        ? variation.onsiteTimeWindowStart
+        : "",
+    onsiteWindowEnd:
+      typeof variation?.onsiteTimeWindowEnd === "string"
+        ? variation.onsiteTimeWindowEnd
+        : "",
     budgetOverrides: createBudgetForm(variation?.budgetOverrides ?? null),
     crewOverrides: createCrewOverrideMap(
       crewRoleState,
@@ -644,6 +740,8 @@ export default function EditProductPage() {
     | "spec"
     | "pnl"
     | "variations"
+    | "storyboard"
+    | "orderFields"
     | "deliverables"
     | "kit"
     | "tasks"
@@ -660,12 +758,23 @@ export default function EditProductPage() {
   const [priceTier3, setPriceTier3] = useState("");
   const [galleryImages, setGalleryImages] = useState<GalleryImage[]>([]);
   const imageObjectUrlsRef = useRef<string[]>([]);
+  const storyboardPreviewUrlsRef = useRef<string[]>([]);
   const [requirements, setRequirements] = useState("");
   const [operationsInfo, setOperationsInfo] = useState("");
+  const [closingWhyItWorks, setClosingWhyItWorks] = useState("");
   const [deliveryIndex, setDeliveryIndex] = useState(0);
   const [deliverables, setDeliverables] = useState<
     (ProductDeliverable & { file?: File })[]
   >([]);
+  const [orderFormFields, setOrderFormFields] = useState<
+    OrderFormFieldFormState[]
+  >([]);
+  const [storyboardEnabled, setStoryboardEnabled] = useState(false);
+  const [storyboardScenes, setStoryboardScenes] = useState<
+    StoryboardSceneFormState[]
+  >([]);
+  const [storyboardGeneratingSceneId, setStoryboardGeneratingSceneId] =
+    useState<string | null>(null);
   const [variations, setVariations] = useState<VariationFormState[]>([]);
   const [organiserEnabled, setOrganiserEnabled] = useState(false);
   const [organiserMinimum, setOrganiserMinimum] = useState("");
@@ -828,6 +937,11 @@ export default function EditProductPage() {
     if (!value || value.trim().length === 0) return null;
     const parsed = Number(value);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+  const parseOptionalDays = (value: string): number | null => {
+    if (!value || value.trim().length === 0) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   };
   const normaliseTimeOfDay = (value: string): string | null => {
     if (!value) return null;
@@ -1228,9 +1342,31 @@ export default function EditProductPage() {
           );
           setRequirements(p.requirements || "");
           setOperationsInfo(p.operationsInfo || "");
+          setClosingWhyItWorks(
+            typeof p.closingWhyItWorks === "string" ? p.closingWhyItWorks : ""
+          );
           const idx = deliveryOptions.indexOf(p.deliveryTime || "");
           setDeliveryIndex(idx >= 0 ? idx : 0);
           setDeliverables((p.deliverables || []) as any);
+          const initialOrderFields = Array.isArray(p.orderFormFields)
+            ? (p.orderFormFields as ProductOrderFormField[])
+            : [];
+          setOrderFormFields(
+            initialOrderFields.map((field) => ({
+              id:
+                typeof field.id === "string" && field.id.trim().length > 0
+                  ? field.id
+                  : generateFormId(),
+              label:
+                typeof field.label === "string" ? field.label : "",
+              description:
+                typeof field.description === "string"
+                  ? field.description
+                  : "",
+              required: field.required === true,
+              type: field.type === "long-text" ? "long-text" : "short-text",
+            }))
+          );
           variationEntries = Array.isArray(p.variations)
             ? (p.variations as ProductVariation[])
             : [];
@@ -1488,6 +1624,81 @@ export default function EditProductPage() {
                 )
               : []
           );
+          const storyboardSource = Array.isArray((p as any).storyboard)
+            ? ((p as any).storyboard as ProductStoryboardScene[])
+            : [];
+          let storyboardInputs = storyboardSource.map((scene) => {
+            const startSeconds =
+              typeof scene?.startSeconds === "number"
+                ? scene.startSeconds
+                : typeof (scene as any)?.start === "string"
+                ? parseStoryboardTimecode((scene as any).start)
+                : null;
+            const endSeconds =
+              typeof scene?.endSeconds === "number"
+                ? scene.endSeconds
+                : typeof (scene as any)?.end === "string"
+                ? parseStoryboardTimecode((scene as any).end)
+                : null;
+            const startLabel = (() => {
+              const formatted = formatStoryboardSeconds(startSeconds);
+              if (formatted) return formatted;
+              return typeof (scene as any)?.start === "string"
+                ? ((scene as any).start as string)
+                : "";
+            })();
+            const endLabel = (() => {
+              const formatted = formatStoryboardSeconds(endSeconds);
+              if (formatted) return formatted;
+              return typeof (scene as any)?.end === "string"
+                ? ((scene as any).end as string)
+                : "";
+            })();
+            return createStoryboardSceneState({
+              id:
+                typeof scene?.id === "string" && scene.id.length > 0
+                  ? scene.id
+                  : undefined,
+              title: typeof scene?.title === "string" ? scene.title : "",
+              description:
+                typeof scene?.description === "string" ? scene.description : "",
+              start: startLabel,
+              end: endLabel,
+              variationIds: Array.isArray(scene?.variationIds)
+                ? scene.variationIds
+                : [],
+              imageUrl:
+                typeof scene?.imageUrl === "string" && scene.imageUrl.trim().length > 0
+                  ? scene.imageUrl.trim()
+                  : null,
+              imageStoragePath:
+                typeof scene?.storagePath === "string"
+                  ? scene.storagePath
+                  : null,
+              persistedImage:
+                typeof scene?.imageUrl === "string" && scene.imageUrl.trim().length > 0,
+            });
+          });
+          if (
+            storyboardInputs.length === 0 &&
+            Array.isArray((p as any).storyboardImages)
+          ) {
+            storyboardInputs = (p as any).storyboardImages
+              .filter((url: unknown): url is string => typeof url === "string")
+              .map((url: string, index: number) =>
+                createStoryboardSceneState({
+                  title: `Scene ${index + 1}`,
+                  imageUrl: url.trim().length > 0 ? url.trim() : null,
+                  persistedImage: url.trim().length > 0,
+                })
+              );
+          }
+          setStoryboardScenes(storyboardInputs);
+          setStoryboardEnabled(
+            (p as any).storyboardEnabled === false
+              ? false
+              : storyboardInputs.length > 0
+          );
         }
         const [
           catSnap,
@@ -1637,6 +1848,14 @@ export default function EditProductPage() {
         }
       });
       imageObjectUrlsRef.current = [];
+      storyboardPreviewUrlsRef.current.forEach((url) => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // Ignore revoke failures during cleanup.
+        }
+      });
+      storyboardPreviewUrlsRef.current = [];
     },
     []
   );
@@ -1732,6 +1951,13 @@ export default function EditProductPage() {
         );
       const item: ProductDeliverable = { title: d.title };
       if (d.type) item.type = d.type;
+      if (
+        typeof d.quantity === "number" &&
+        Number.isFinite(d.quantity) &&
+        d.quantity > 0
+      ) {
+        item.quantity = Math.round(d.quantity);
+      }
       const desc = d.description?.trim();
       if (desc) item.description = desc;
       if (thumb) item.thumbnailUrl = thumb;
@@ -1744,6 +1970,82 @@ export default function EditProductPage() {
       if (scopedIds.length > 0) item.variationIds = scopedIds;
       deliverableData.push(item);
     }
+
+    const storyboardUploads: { sceneId: string; file: File }[] = [];
+    const storyboardData: ProductStoryboardScene[] = [];
+    if (storyboardEnabled) {
+      storyboardScenes.forEach((scene) => {
+        const sceneId = scene.id || generateFormId();
+        const title = scene.title.trim();
+        const description = scene.description.trim();
+        const startSeconds = parseStoryboardTimecode(scene.start);
+        const endSeconds = parseStoryboardTimecode(scene.end);
+        const hasContent =
+          title.length > 0 ||
+          description.length > 0 ||
+          typeof startSeconds === "number" ||
+          typeof endSeconds === "number" ||
+          Boolean(scene.imageUrl) ||
+          Boolean(scene.imageFile);
+        if (!hasContent) {
+          return;
+        }
+        const variationIds = Array.isArray(scene.variationIds)
+          ? scene.variationIds.filter(
+              (value): value is string => typeof value === "string" && value.trim().length > 0
+            )
+          : [];
+        const entry: ProductStoryboardScene = { id: sceneId };
+        if (title.length > 0) entry.title = title;
+        if (description.length > 0) entry.description = description;
+        if (typeof startSeconds === "number") entry.startSeconds = startSeconds;
+        if (typeof endSeconds === "number") entry.endSeconds = endSeconds;
+        if (scene.imageUrl) entry.imageUrl = scene.imageUrl;
+        if (scene.imageStoragePath) entry.storagePath = scene.imageStoragePath;
+        if (variationIds.length > 0) entry.variationIds = variationIds;
+        if (scene.imageFile) {
+          storyboardUploads.push({ sceneId, file: scene.imageFile });
+        }
+        storyboardData.push(entry);
+      });
+    }
+
+    const orderFieldData: ProductOrderFormField[] = orderFormFields
+      .map((field) => {
+        const label = field.label.trim();
+        if (!label) return null;
+        const idValue = field.id && field.id.trim().length > 0
+          ? field.id
+          : generateFormId();
+        const description = field.description.trim();
+        const type = field.type === "long-text" ? "long-text" : "short-text";
+        const entry: ProductOrderFormField = {
+          id: idValue,
+          label,
+          type,
+        };
+        if (description) entry.description = description;
+        if (field.required) entry.required = true;
+        return entry;
+      })
+      .filter((entry): entry is ProductOrderFormField => entry !== null);
+
+    if (storyboardUploads.length > 0) {
+      for (const uploadEntry of storyboardUploads) {
+        const extension = resolveImageExtension(uploadEntry.file);
+        const storagePath = `${PRODUCT_IMAGE_ROOT}/${id}/storyboard-${uploadEntry.sceneId}.${extension}`;
+        const url = await upload(storagePath, uploadEntry.file);
+        const target = storyboardData.find((entry) => entry.id === uploadEntry.sceneId);
+        if (target) {
+          target.imageUrl = url;
+          target.storagePath = storagePath;
+        }
+      }
+    }
+    const storyboardImages = storyboardData
+      .map((entry) => (entry.imageUrl ? entry.imageUrl : null))
+      .filter((url): url is string => typeof url === "string" && url.trim().length > 0);
+    const storyboardEnabledValue = storyboardEnabled && storyboardData.length > 0;
 
     const variationData: ProductVariation[] = variations.map((variation) => {
       const name = variation.name.trim();
@@ -1765,6 +2067,30 @@ export default function EditProductPage() {
         ),
       };
       if (features.length) entry.features = features;
+      const onsiteDaysOverride = parseOptionalDays(variation.onsiteDays);
+      if (onsiteDaysOverride !== null) entry.onsiteDays = onsiteDaysOverride;
+      const onsiteSetupOverride = parseOptionalMinutes(
+        variation.onsiteSetupMinutes
+      );
+      if (onsiteSetupOverride !== null)
+        entry.onsiteSetupMinutes = onsiteSetupOverride;
+      const onsiteShootOverride = parseOptionalMinutes(
+        variation.onsiteShootMinutes
+      );
+      if (onsiteShootOverride !== null)
+        entry.onsiteShootMinutes = onsiteShootOverride;
+      const onsiteBreakdownOverride = parseOptionalMinutes(
+        variation.onsiteBreakdownMinutes
+      );
+      if (onsiteBreakdownOverride !== null)
+        entry.onsiteBreakdownMinutes = onsiteBreakdownOverride;
+      const onsiteStartOverride = normaliseTimeOfDay(
+        variation.onsiteWindowStart
+      );
+      if (onsiteStartOverride)
+        entry.onsiteTimeWindowStart = onsiteStartOverride;
+      const onsiteEndOverride = normaliseTimeOfDay(variation.onsiteWindowEnd);
+      if (onsiteEndOverride) entry.onsiteTimeWindowEnd = onsiteEndOverride;
       const budgetOverrides = parseBudgetFormToOverride(
         variation.budgetOverrides
       );
@@ -1970,9 +2296,15 @@ export default function EditProductPage() {
       imageUrls: finalImageUrls,
       requirements: requirements || null,
       operationsInfo: operationsInfo || null,
+      closingWhyItWorks:
+        closingWhyItWorks.trim().length > 0 ? closingWhyItWorks.trim() : null,
       deliveryTime: deliveryOptions[deliveryIndex],
       deliverables: deliverableData,
       variations: variationData,
+      orderFormFields: orderFieldData,
+      storyboardEnabled: storyboardEnabledValue ? true : false,
+      storyboard: storyboardEnabledValue ? storyboardData : null,
+      storyboardImages: storyboardEnabledValue ? storyboardImages : [],
       exampleVideos: videoData,
       exampleWorkUrl: primaryExampleVideo,
       modifierGroups: enabledGroups,
@@ -2007,6 +2339,15 @@ export default function EditProductPage() {
         socialImageUrl: seoImage || null,
       },
     });
+    setOrderFormFields(
+      orderFieldData.map((field) => ({
+        id: field.id,
+        label: field.label,
+        description: field.description ?? "",
+        required: field.required === true,
+        type: field.type === "long-text" ? "long-text" : "short-text",
+      }))
+    );
     setGalleryImages(
       finalImageUrls.map((url) => ({
         id: generateFormId(),
@@ -2069,6 +2410,197 @@ export default function EditProductPage() {
 
   const addExampleVideo = () => {
     setExampleVideos((prev) => [...prev, createVideoInput()]);
+  };
+
+  const addStoryboardScene = () => {
+    setStoryboardScenes((prev) => [...prev, createStoryboardSceneState()]);
+    setStoryboardEnabled(true);
+  };
+
+  const updateStoryboardScene = (
+    sceneId: string,
+    patch: Partial<StoryboardSceneFormState>
+  ) => {
+    setStoryboardScenes((prev) =>
+      prev.map((scene) => (scene.id === sceneId ? { ...scene, ...patch } : scene))
+    );
+  };
+
+  const removeStoryboardScene = (sceneId: string) => {
+    setStoryboardScenes((prev) => {
+      const target = prev.find((scene) => scene.id === sceneId);
+      if (target?.previewUrl) {
+        try {
+          URL.revokeObjectURL(target.previewUrl);
+        } catch {
+          // Ignore preview cleanup failures when removing scenes.
+        }
+        storyboardPreviewUrlsRef.current = storyboardPreviewUrlsRef.current.filter(
+          (url) => url !== target.previewUrl
+        );
+      }
+      return prev.filter((scene) => scene.id !== sceneId);
+    });
+  };
+
+  const handleStoryboardSceneImage = (sceneId: string, file: File | null) => {
+    setStoryboardScenes((prev) =>
+      prev.map((scene) => {
+        if (scene.id !== sceneId) return scene;
+        if (scene.previewUrl) {
+          try {
+            URL.revokeObjectURL(scene.previewUrl);
+          } catch {
+            // Ignore preview cleanup failures while swapping images.
+          }
+          storyboardPreviewUrlsRef.current = storyboardPreviewUrlsRef.current.filter(
+            (url) => url !== scene.previewUrl
+          );
+        }
+        if (!file) {
+          return {
+            ...scene,
+            imageFile: null,
+            previewUrl: null,
+            imageUrl: null,
+            persistedImage: false,
+            imageStoragePath: null,
+            aiError: null,
+          };
+        }
+        const previewUrl = URL.createObjectURL(file);
+        storyboardPreviewUrlsRef.current.push(previewUrl);
+        return {
+          ...scene,
+          imageFile: file,
+          previewUrl,
+          imageUrl: null,
+          persistedImage: false,
+          imageStoragePath: null,
+          aiError: null,
+        };
+      })
+    );
+  };
+
+  const handleGenerateStoryboardSceneImage = async (sceneId: string) => {
+    const scene = storyboardScenes.find((entry) => entry.id === sceneId);
+    if (!scene) return;
+    const description = scene.description.trim();
+    if (!description) {
+      setStoryboardScenes((prev) =>
+        prev.map((entry) =>
+          entry.id === sceneId
+            ? {
+                ...entry,
+                aiStatus: "error",
+                aiError: "Add a scene description before generating artwork.",
+              }
+            : entry
+        )
+      );
+      return;
+    }
+    setStoryboardScenes((prev) =>
+      prev.map((entry) =>
+        entry.id === sceneId
+          ? { ...entry, aiStatus: "loading", aiError: null }
+          : entry
+      )
+    );
+    setStoryboardGeneratingSceneId(sceneId);
+    try {
+      const startSeconds = parseStoryboardTimecode(scene.start);
+      const endSeconds = parseStoryboardTimecode(scene.end);
+      const variationNames = scene.variationIds
+        .map((variationId) =>
+          variations.find((variation) => variation.id === variationId)?.name?.trim() || null
+        )
+        .filter((value): value is string => Boolean(value && value.length > 0));
+      const deliverableSummaries = deliverables
+        .map((deliverable) => {
+          const title = (deliverable.title || "").trim();
+          if (!title) return null;
+          const qty =
+            typeof deliverable.quantity === "number" && Number.isFinite(deliverable.quantity)
+              ? Math.max(1, Math.round(deliverable.quantity))
+              : 1;
+          return `${qty > 1 ? `${qty}× ` : ""}${title}`;
+        })
+        .filter((value): value is string => Boolean(value));
+      const sceneIndex = storyboardScenes.findIndex((entry) => entry.id === sceneId);
+      const accentColor =
+        STORYBOARD_SCENE_COLOURS[
+          (sceneIndex >= 0 ? sceneIndex : 0) % STORYBOARD_SCENE_COLOURS.length
+        ];
+      const fn = httpsCallable(functions, "admin_generateStoryboardSceneImage");
+      const response = await fn({
+        productId: id,
+        sceneId,
+        sceneTitle: scene.title,
+        sceneDescription: description,
+        productName: name,
+        productTagline: tagline,
+        productDescription: description,
+        operationsInfo,
+        startSeconds,
+        endSeconds,
+        variationNames,
+        deliverables: deliverableSummaries,
+        accentColor,
+      });
+      const payload = (response?.data ?? {}) as {
+        imageUrl?: string;
+        storagePath?: string;
+        promptSummary?: string;
+      };
+      if (!payload.imageUrl) {
+        throw new Error("Image generation failed");
+      }
+      setStoryboardScenes((prev) =>
+        prev.map((entry) => {
+          if (entry.id !== sceneId) return entry;
+          if (entry.previewUrl) {
+            try {
+              URL.revokeObjectURL(entry.previewUrl);
+            } catch {
+              // Ignore preview cleanup failures after generation.
+            }
+            storyboardPreviewUrlsRef.current = storyboardPreviewUrlsRef.current.filter(
+              (url) => url !== entry.previewUrl
+            );
+          }
+          return {
+            ...entry,
+            imageUrl: payload.imageUrl || null,
+            imageStoragePath: payload.storagePath ?? null,
+            previewUrl: null,
+            imageFile: null,
+            persistedImage: true,
+            aiStatus: "idle",
+            aiError: null,
+          };
+        })
+      );
+    } catch (error) {
+      console.error("Failed to generate storyboard scene image", error);
+      setStoryboardScenes((prev) =>
+        prev.map((entry) =>
+          entry.id === sceneId
+            ? {
+                ...entry,
+                aiStatus: "error",
+                aiError:
+                  error instanceof Error
+                    ? error.message
+                    : "Unable to generate artwork. Please try again.",
+              }
+            : entry
+        )
+      );
+    } finally {
+      setStoryboardGeneratingSceneId(null);
+    }
   };
 
   const updateExampleVideo = (
@@ -2500,7 +3032,9 @@ export default function EditProductPage() {
       { key: "spec", label: "Product Spec" },
       { key: "pnl", label: "P&L" },
       { key: "variations", label: "Variations" },
+      { key: "storyboard", label: "Storyboard" },
       { key: "deliverables", label: "Deliverables" },
+      { key: "orderFields", label: "Custom form fields" },
       { key: "kit", label: "Kit" },
       { key: "tasks", label: "Default Tasks" },
       { key: "seo", label: "SEO" },
@@ -2931,6 +3465,13 @@ export default function EditProductPage() {
           </label>
           <label className="text-sm font-medium">Requirements</label>
           <textarea className="input" value={requirements} onChange={(e) => setRequirements(e.target.value)} />
+          <label className="text-sm font-medium">Why it works summary</label>
+          <textarea
+            className="input"
+            value={closingWhyItWorks}
+            onChange={(e) => setClosingWhyItWorks(e.target.value)}
+            placeholder="Optional closing statement shown on the product page CTA"
+          />
           <label className="text-sm font-medium">
             Delivery Time: {deliveryOptions[deliveryIndex]}
           </label>
@@ -3748,6 +4289,128 @@ export default function EditProductPage() {
                       placeholder="List the differentiators for this package (one per line)."
                     />
                   </label>
+                  <details className="rounded border border-dashed p-3">
+                    <summary className="cursor-pointer text-sm font-medium">
+                      On-site schedule overrides
+                    </summary>
+                    <div className="mt-3 grid gap-3">
+                      <label className="grid gap-1">
+                        <span className="text-xs font-medium text-gray-600">
+                          On-site duration (days)
+                        </span>
+                        <input
+                          type="number"
+                          min="0.25"
+                          step="0.25"
+                          className="input"
+                          value={variation.onsiteDays}
+                          onChange={(e) =>
+                            updateVariation(index, { onsiteDays: e.target.value })
+                          }
+                          placeholder="Inherit"
+                        />
+                        <span className="text-[11px] text-gray-500">
+                          Leave blank to inherit the base product duration.
+                        </span>
+                      </label>
+                      <div className="grid gap-3 md:grid-cols-3">
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            Setup minutes
+                          </span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="15"
+                            className="input"
+                            value={variation.onsiteSetupMinutes}
+                            onChange={(e) =>
+                              updateVariation(index, {
+                                onsiteSetupMinutes: e.target.value,
+                              })
+                            }
+                            placeholder="Inherit"
+                          />
+                        </label>
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            Filming minutes
+                          </span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="15"
+                            className="input"
+                            value={variation.onsiteShootMinutes}
+                            onChange={(e) =>
+                              updateVariation(index, {
+                                onsiteShootMinutes: e.target.value,
+                              })
+                            }
+                            placeholder="Inherit"
+                          />
+                        </label>
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            Breakdown minutes
+                          </span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="15"
+                            className="input"
+                            value={variation.onsiteBreakdownMinutes}
+                            onChange={(e) =>
+                              updateVariation(index, {
+                                onsiteBreakdownMinutes: e.target.value,
+                              })
+                            }
+                            placeholder="Inherit"
+                          />
+                        </label>
+                      </div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            Earliest arrival
+                          </span>
+                          <input
+                            type="time"
+                            step={900}
+                            className="input"
+                            value={variation.onsiteWindowStart}
+                            onChange={(e) =>
+                              updateVariation(index, {
+                                onsiteWindowStart: e.target.value,
+                              })
+                            }
+                            placeholder="Inherit"
+                          />
+                        </label>
+                        <label className="grid gap-1">
+                          <span className="text-xs font-medium text-gray-600">
+                            Latest finish
+                          </span>
+                          <input
+                            type="time"
+                            step={900}
+                            className="input"
+                            value={variation.onsiteWindowEnd}
+                            onChange={(e) =>
+                              updateVariation(index, {
+                                onsiteWindowEnd: e.target.value,
+                              })
+                            }
+                            placeholder="Inherit"
+                          />
+                        </label>
+                      </div>
+                      <p className="text-[11px] text-gray-500">
+                        These overrides adjust booking spans and time slots for this variation
+                        without changing the base product configuration.
+                      </p>
+                    </div>
+                  </details>
                   <details
                     className="rounded border border-dashed p-3"
                     open={budgetHasValues}
@@ -4029,6 +4692,42 @@ export default function EditProductPage() {
         </div>
       )}
 
+      {tab === "storyboard" && (
+        <ProductStoryboardEditor
+          enabled={storyboardEnabled}
+          onToggleEnabled={(value) => setStoryboardEnabled(value)}
+          scenes={storyboardScenes}
+          onSceneChange={updateStoryboardScene}
+          onSceneImageSelect={handleStoryboardSceneImage}
+          onAddScene={addStoryboardScene}
+          onRemoveScene={removeStoryboardScene}
+          onGenerateSceneImage={handleGenerateStoryboardSceneImage}
+          generatingSceneId={storyboardGeneratingSceneId}
+          variationOptions={variations.map((variation) => ({
+            id: variation.id,
+            name: variation.name || variation.id,
+          }))}
+        />
+      )}
+
+      {tab === "orderFields" && (
+        <div className="space-y-4">
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+            <p className="font-medium text-slate-900">
+              Collect extra details when customers add this product to their cart.
+            </p>
+            <p className="mt-2">
+              Configure optional or required questions for project information such as stand numbers,
+              campaign goals, or billing references.
+            </p>
+          </div>
+          <ProductOrderFieldsEditor
+            fields={orderFormFields}
+            onChange={setOrderFormFields}
+          />
+        </div>
+      )}
+
       {tab === "deliverables" && (
         <div className="grid gap-4">
           {deliverables.map((d, i) => (
@@ -4063,6 +4762,37 @@ export default function EditProductPage() {
                   </option>
                 ))}
               </select>
+              <div className="grid gap-1">
+                <label
+                  htmlFor={`deliverable-${i}-quantity`}
+                  className="text-xs font-medium text-gray-600"
+                >
+                  Quantity (optional)
+                </label>
+                <input
+                  id={`deliverable-${i}-quantity`}
+                  type="number"
+                  min={1}
+                  inputMode="numeric"
+                  className="input"
+                  placeholder="Leave blank to treat as a single deliverable"
+                  value={
+                    typeof d.quantity === "number" &&
+                    Number.isFinite(d.quantity) &&
+                    d.quantity > 0
+                      ? String(Math.round(d.quantity))
+                      : ""
+                  }
+                  onChange={(e) => {
+                    const parsed = Number.parseInt(e.target.value, 10);
+                    if (Number.isNaN(parsed) || parsed <= 0) {
+                      updateDeliverable(i, { quantity: undefined });
+                      return;
+                    }
+                    updateDeliverable(i, { quantity: parsed });
+                  }}
+                />
+              </div>
               <textarea
                 className="input"
                 placeholder="Description"

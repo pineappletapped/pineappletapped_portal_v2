@@ -8765,6 +8765,60 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             };
           })()
         : null;
+    const rawOrderResponses = Array.isArray(items[idx]?.orderFormResponses)
+      ? (items[idx].orderFormResponses as any[])
+      : [];
+    const orderFormResponses = rawOrderResponses
+      .map((response, responseIndex) => {
+        if (!response || typeof response !== 'object') {
+          return null;
+        }
+        const rawFieldId =
+          typeof (response as any).fieldId === 'string' && (response as any).fieldId.trim().length > 0
+            ? (response as any).fieldId.trim()
+            : '';
+        const rawLabel =
+          typeof (response as any).label === 'string' && (response as any).label.trim().length > 0
+            ? (response as any).label.trim()
+            : '';
+        if (!rawFieldId && !rawLabel) {
+          return null;
+        }
+        const value =
+          typeof (response as any).value === 'string'
+            ? (response as any).value
+            : (response as any).value != null
+              ? String((response as any).value)
+              : '';
+        const description =
+          typeof (response as any).description === 'string' &&
+          (response as any).description.trim().length > 0
+            ? (response as any).description.trim()
+            : null;
+        const typeValue =
+          typeof (response as any).type === 'string' && (response as any).type === 'long-text'
+            ? 'long-text'
+            : 'short-text';
+        const resolvedFieldId = rawFieldId || `field-${responseIndex}`;
+        return {
+          fieldId: resolvedFieldId,
+          label: rawLabel || rawFieldId || resolvedFieldId,
+          value,
+          description,
+          required: (response as any).required === true,
+          type: typeValue,
+        };
+      })
+      .filter(
+        (entry): entry is {
+          fieldId: string;
+          label: string;
+          value: string;
+          description: string | null;
+          required: boolean;
+          type: 'short-text' | 'long-text';
+        } => entry !== null
+      );
     const rawOrganiser = items[idx]?.organiser;
     let organiserPayload: Record<string, any> | null = null;
     if (rawOrganiser && typeof rawOrganiser === 'object') {
@@ -8936,6 +8990,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       postalCode: itemPostalCode,
       exhibition: exhibitionDetails,
       coverage: coveragePayload,
+      orderFormResponses,
       timeSlot: timeSlotDetails,
       campaignBooking,
       organiser: organiserPayload,
@@ -13885,6 +13940,141 @@ export const admin_assignWorkflow = functions.https.onCall(async (data: any, con
     });
   }
   return { ok: true };
+});
+
+const STORYBOARD_IMAGE_ROOT = 'Product_Images';
+
+function escapeForSvg(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function formatStoryboardLabel(seconds: number | null): string {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) {
+    return '';
+  }
+  const clamped = Math.max(0, Math.round(seconds));
+  const hrs = Math.floor(clamped / 3600);
+  const mins = Math.floor((clamped % 3600) / 60);
+  const secs = clamped % 60;
+  if (hrs > 0) {
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+export const admin_generateStoryboardSceneImage = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
+  await assertStaff(context, ['admin', 'operations']);
+  const rawProductId = typeof data?.productId === 'string' ? data.productId.trim() : '';
+  const rawSceneId = typeof data?.sceneId === 'string' ? data.sceneId.trim() : '';
+  const sceneDescription = typeof data?.sceneDescription === 'string' ? data.sceneDescription.trim() : '';
+  if (!rawProductId || !rawSceneId) {
+    throw new functions.https.HttpsError('invalid-argument', 'productId and sceneId are required.');
+  }
+  if (!sceneDescription) {
+    throw new functions.https.HttpsError('invalid-argument', 'sceneDescription is required.');
+  }
+  const safeId = (value: string, fallback: string) => {
+    const normalised = value.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/-{2,}/g, '-').replace(/^-+|-+$/g, '');
+    return normalised.length > 0 ? normalised.slice(0, 80) : fallback;
+  };
+  const productId = safeId(rawProductId, 'product');
+  const sceneId = safeId(rawSceneId, 'scene');
+  const productName = typeof data?.productName === 'string' ? data.productName.trim() : '';
+  const sceneTitle = typeof data?.sceneTitle === 'string' ? data.sceneTitle.trim() : '';
+  const productTagline = typeof data?.productTagline === 'string' ? data.productTagline.trim() : '';
+  const variationNames = Array.isArray(data?.variationNames)
+    ? (data.variationNames as unknown[])
+        .map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .filter((value) => value.length > 0)
+    : [];
+  const deliverableSummaries = Array.isArray(data?.deliverables)
+    ? (data.deliverables as unknown[])
+        .map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .filter((value) => value.length > 0)
+    : [];
+  const startSeconds =
+    typeof data?.startSeconds === 'number' && Number.isFinite(data.startSeconds) && data.startSeconds >= 0
+      ? Math.round(data.startSeconds)
+      : null;
+  const endSeconds =
+    typeof data?.endSeconds === 'number' && Number.isFinite(data.endSeconds) && data.endSeconds >= 0
+      ? Math.round(data.endSeconds)
+      : null;
+  const accentInput = typeof data?.accentColor === 'string' ? data.accentColor.trim() : '';
+  const accentColor = /^#[0-9a-fA-F]{6}$/.test(accentInput) ? accentInput : '#0ea5e9';
+  const startLabel = formatStoryboardLabel(startSeconds);
+  const endLabel = formatStoryboardLabel(endSeconds);
+  let durationLabel = 'Scene timing TBC';
+  if (startLabel && endLabel) {
+    durationLabel = `${startLabel} – ${endLabel}`;
+  } else if (startLabel) {
+    durationLabel = `${startLabel} onwards`;
+  } else if (endLabel) {
+    durationLabel = `0:00 – ${endLabel}`;
+  }
+
+  const width = 1280;
+  const height = 720;
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="scene-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="${accentColor}" stop-opacity="0.85" />
+      <stop offset="100%" stop-color="#111827" stop-opacity="0.95" />
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="${width}" height="${height}" fill="#0f172a" />
+  <rect x="0" y="0" width="${width}" height="${height}" fill="url(#scene-bg)" />
+  <rect x="0" y="${height - 160}" width="${width}" height="160" fill="#0f172a" opacity="0.65" />
+  <text x="60" y="120" fill="#ffffff" font-family="'Helvetica Neue', 'Segoe UI', Arial" font-size="44" font-weight="600">
+    ${escapeForSvg(sceneTitle || productName || 'Storyboard scene')}
+  </text>
+  <text x="60" y="190" fill="#e2e8f0" font-family="'Helvetica Neue', 'Segoe UI', Arial" font-size="24" font-weight="400">
+    ${escapeForSvg(sceneDescription)}
+  </text>
+  <text x="60" y="${height - 115}" fill="#f8fafc" font-family="'Helvetica Neue', 'Segoe UI', Arial" font-size="24" font-weight="500">
+    ${escapeForSvg(durationLabel)}
+  </text>
+  <text x="60" y="${height - 75}" fill="#cbd5f5" font-family="'Helvetica Neue', 'Segoe UI', Arial" font-size="18" font-weight="400">
+    ${escapeForSvg(variationNames.length ? `Variations: ${variationNames.join(', ')}` : productTagline || productName || '')}
+  </text>
+  <text x="60" y="${height - 40}" fill="#a5b4fc" font-family="'Helvetica Neue', 'Segoe UI', Arial" font-size="18" font-weight="400">
+    ${escapeForSvg(deliverableSummaries.length ? `Deliverables: ${deliverableSummaries.join(', ')}` : 'Creative direction locked in by Pineapple')}
+  </text>
+</svg>`;
+
+  const imageBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
+  const storagePath = `${STORYBOARD_IMAGE_ROOT}/${productId}/storyboard-${sceneId}-${Date.now()}.png`;
+  const bucket = admin.storage().bucket();
+  const file = bucket.file(storagePath);
+  await file.save(imageBuffer, {
+    contentType: 'image/png',
+    metadata: { cacheControl: 'public,max-age=31536000' },
+  });
+  const [signedUrl] = await file.getSignedUrl({ action: 'read', expires: '2500-01-01' });
+  if (context.auth?.uid) {
+    await writeAuditLog({
+      actorUid: context.auth.uid,
+      action: 'admin_generate_storyboard_scene_image',
+      entityType: 'product',
+      entityId: productId,
+      metadata: {
+        sceneId,
+        accentColor,
+        startSeconds,
+        endSeconds,
+      },
+    });
+  }
+  return {
+    imageUrl: signedUrl,
+    storagePath,
+  };
 });
 
 /**

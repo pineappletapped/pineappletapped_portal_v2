@@ -11,6 +11,7 @@ import {
   getProductEventMonthKeys,
   resolveProductOnsiteTiming,
   type ProductOnsiteTiming,
+  type ProductOrderFieldType,
 } from "@/lib/products";
 import { useCart } from "@/lib/cart";
 import { db, functions } from "@/lib/firebase";
@@ -143,6 +144,14 @@ interface PostcodeLookupResult {
   lat: number | null;
   lng: number | null;
 }
+
+type OrderFormQuestion = {
+  id: string;
+  label: string;
+  description: string | null;
+  required: boolean;
+  type: ProductOrderFieldType;
+};
 
 const normalisePostalCode = (value: string): string | null => {
   if (typeof value !== "string") return null;
@@ -533,25 +542,34 @@ export default function AddToCartWizard({
   const { items, add } = useCart();
   const [groups, setGroups] = useState<ModifierGroup[]>([]);
   const eventWindow = useMemo(() => getProductEventWindow(product), [product]);
+  const selectedVariation = useMemo(() => {
+    if (!variationId) {
+      return null;
+    }
+    const entries = Array.isArray(product.variations)
+      ? product.variations
+      : [];
+    return entries.find((entry) => entry?.id === variationId) ?? null;
+  }, [product.variations, variationId]);
   const onsiteDaysConfigured = useMemo(
-    () => resolveProductOnsiteDays(product) ?? 1,
-    [product]
+    () => resolveProductOnsiteDays(product, selectedVariation) ?? 1,
+    [product, selectedVariation]
   );
   const onsiteBlockingDays = useMemo(
     () => Math.max(1, Math.ceil(onsiteDaysConfigured)),
     [onsiteDaysConfigured]
   );
   const onsiteTiming = useMemo(
-    () => resolveProductOnsiteTiming(product),
-    [product]
+    () => resolveProductOnsiteTiming(product, selectedVariation),
+    [product, selectedVariation]
   );
   const timeSlotRequired = useMemo(
     () => onsiteTiming !== null && onsiteBlockingDays <= 1,
     [onsiteTiming, onsiteBlockingDays]
   );
   const onsiteSummary = useMemo(
-    () => formatProductOnsiteDuration(product),
-    [product]
+    () => formatProductOnsiteDuration(product, undefined, selectedVariation),
+    [product, selectedVariation]
   );
   const eventRangeLabel = useMemo(
     () => getProductEventRangeLabel(product),
@@ -844,6 +862,94 @@ export default function AddToCartWizard({
   const [availabilityOverrides, setAvailabilityOverrides] = useState<
     Record<string, ProductAvailabilityStatus>
   >({});
+  const orderFormQuestions = useMemo<OrderFormQuestion[]>(() => {
+    const fields = Array.isArray(product.orderFormFields)
+      ? (product.orderFormFields as any[])
+      : [];
+    return fields
+      .map((raw, index) => {
+        if (!raw || typeof raw !== "object") {
+          return null;
+        }
+        const label =
+          typeof raw.label === "string" && raw.label.trim().length > 0
+            ? raw.label.trim()
+            : "";
+        if (!label) {
+          return null;
+        }
+        const id =
+          typeof raw.id === "string" && raw.id.trim().length > 0
+            ? raw.id.trim()
+            : `order-field-${index}`;
+        const description =
+          typeof raw.description === "string" && raw.description.trim().length > 0
+            ? raw.description.trim()
+            : null;
+        const typeValue =
+          typeof raw.type === "string" && raw.type === "long-text"
+            ? "long-text"
+            : "short-text";
+        const required = raw.required === true;
+        return {
+          id,
+          label,
+          description,
+          required,
+          type: typeValue as ProductOrderFieldType,
+        } satisfies OrderFormQuestion;
+      })
+      .filter((entry): entry is OrderFormQuestion => entry !== null);
+  }, [product.orderFormFields]);
+  const [orderFormValues, setOrderFormValues] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {};
+    orderFormQuestions.forEach((question) => {
+      initial[question.id] = "";
+    });
+    return initial;
+  });
+  const [orderFormErrors, setOrderFormErrors] = useState<Record<string, string>>({});
+  useEffect(() => {
+    setOrderFormValues((prev) => {
+      const next: Record<string, string> = {};
+      orderFormQuestions.forEach((question) => {
+        next[question.id] = prev[question.id] ?? "";
+      });
+      return next;
+    });
+    setOrderFormErrors({});
+  }, [orderFormQuestions]);
+  const handleOrderFieldChange = useCallback((id: string, value: string) => {
+    setOrderFormValues((prev) => ({ ...prev, [id]: value }));
+    setOrderFormErrors((prev) => {
+      if (!prev[id]) {
+        return prev;
+      }
+      if (value.trim().length > 0) {
+        const { [id]: _removed, ...rest } = prev;
+        return rest;
+      }
+      return prev;
+    });
+  }, []);
+  const validateOrderForm = useCallback(() => {
+    if (orderFormQuestions.length === 0) {
+      setOrderFormErrors({});
+      return true;
+    }
+    const errors: Record<string, string> = {};
+    orderFormQuestions.forEach((question) => {
+      if (!question.required) {
+        return;
+      }
+      const value = orderFormValues[question.id]?.trim() ?? "";
+      if (value.length === 0) {
+        errors[question.id] = "Please provide a response.";
+      }
+    });
+    setOrderFormErrors(errors);
+    return Object.keys(errors).length === 0;
+  }, [orderFormQuestions, orderFormValues]);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const territoriesRef = useRef<TerritoryRecord[] | null>(null);
@@ -1104,9 +1210,14 @@ export default function AddToCartWizard({
   }, [product]);
 
   const hasLocationStep = !hasPresetVenue || overrideLocation;
-  const totalSteps = groups.length + (hasLocationStep ? 2 : 1);
+  const hasOrderFields = orderFormQuestions.length > 0;
+  const totalSteps =
+    groups.length + (hasLocationStep ? 1 : 0) + (hasOrderFields ? 1 : 0) + 1;
   const locationStep = hasLocationStep && step === 0;
-  const modifierIndex = step - (hasLocationStep ? 1 : 0);
+  const orderFieldsStepIndex = hasLocationStep ? 1 : 0;
+  const orderFieldsStep = hasOrderFields && step === orderFieldsStepIndex;
+  const modifierIndex =
+    step - (hasLocationStep ? 1 : 0) - (hasOrderFields ? 1 : 0);
   const currentGroup =
     modifierIndex >= 0 && modifierIndex < groups.length ? groups[modifierIndex] : null;
   const dateStep = step === totalSteps - 1;
@@ -1114,15 +1225,19 @@ export default function AddToCartWizard({
     ? overrideLocation && hasPresetVenue
       ? "Enter the alternate filming location"
       : "Confirm the filming location"
-    : currentGroup
-      ? `Choose ${currentGroup.multiple ? "one or more" : "an"} option for ${currentGroup.name}`
-      : isCampaignProduct
-        ? "Choose a campaign slot"
-        : "Confirm the production date";
+    : orderFieldsStep
+      ? orderFormQuestions.length > 1
+        ? "Answer the booking questions"
+        : "Provide the booking detail"
+      : currentGroup
+        ? `Choose ${currentGroup.multiple ? "one or more" : "an"} option for ${currentGroup.name}`
+        : isCampaignProduct
+          ? "Choose a campaign slot"
+          : "Confirm the production date";
 
   useEffect(() => {
     setStep(0);
-  }, [hasLocationStep]);
+  }, [hasLocationStep, hasOrderFields]);
 
   useEffect(() => {
     setLiveMessage(`Step ${step + 1} of ${totalSteps}: ${stepLabel}`);
@@ -1540,7 +1655,14 @@ export default function AddToCartWizard({
     });
   };
 
-  const next = () => setStep((s) => Math.min(s + 1, totalSteps - 1));
+  const next = () => {
+    setError(null);
+    if (orderFieldsStep && !validateOrderForm()) {
+      setLiveMessage("Answer the required booking questions to continue");
+      return;
+    }
+    setStep((s) => Math.min(s + 1, totalSteps - 1));
+  };
   const back = () => {
     if (step === 0) onClose();
     else setStep((s) => s - 1);
@@ -1549,6 +1671,14 @@ export default function AddToCartWizard({
   const handleFinish = async () => {
     setError(null);
     setConflicts([]);
+    if (!validateOrderForm()) {
+      setLiveMessage("Answer the required booking questions to continue");
+      if (hasOrderFields) {
+        setStep(orderFieldsStepIndex);
+      }
+      setError("Answer the required booking questions to continue.");
+      return;
+    }
     const selections: ProductModifierSelection[] = [];
     let adj = 0;
     groups.forEach((g) => {
@@ -1762,6 +1892,14 @@ export default function AddToCartWizard({
                   : null,
             }
           : null;
+      const orderFormResponses = orderFormQuestions.map((question) => ({
+        fieldId: question.id,
+        label: question.label,
+        value: (orderFormValues[question.id] ?? "").trim(),
+        required: question.required,
+        type: question.type,
+        description: question.description ?? null,
+      }));
       add({
         id: product.id,
         name: product.name,
@@ -1779,6 +1917,7 @@ export default function AddToCartWizard({
         kitStatus: reservationStatus,
         kitWarnings: warnings,
         exhibition: exhibitionSelection,
+        orderFormResponses,
         location: locationLabel.length > 0 ? locationLabel : null,
         postalCode: postalCodeLabel,
         timeSlot:
@@ -1907,11 +2046,19 @@ export default function AddToCartWizard({
 
   const canNext = locationStep
     ? coverageStatus === "success" && !!coverage && locationInput.trim().length > 0
-    : currentGroup
-      ? (selected[currentGroup.id] || []).length > 0
-      : isCampaignProduct
-        ? campaignSlotStatus === "success" && !!selectedSlotId
-        : !!date;
+    : orderFieldsStep
+      ? orderFormQuestions.every((question) => {
+          if (!question.required) {
+            return true;
+          }
+          const value = orderFormValues[question.id] ?? "";
+          return value.trim().length > 0;
+        })
+      : currentGroup
+        ? (selected[currentGroup.id] || []).length > 0
+        : isCampaignProduct
+          ? campaignSlotStatus === "success" && !!selectedSlotId
+          : !!date;
 
   const descriptionIds = useMemo(() => {
     const ids = ["wizard-description"];
@@ -2094,6 +2241,61 @@ export default function AddToCartWizard({
             <p className="text-xs text-gray-500">
               Confirming the filming location routes your booking to the right franchise or HQ
               team before we show available production dates.
+            </p>
+          </div>
+        ) : orderFieldsStep ? (
+          <div className="space-y-3">
+            {orderFormQuestions.map((question) => {
+              const inputId = `order-question-${question.id}`;
+              const value = orderFormValues[question.id] ?? "";
+              const fieldError = orderFormErrors[question.id];
+              return (
+                <div key={question.id} className="space-y-1">
+                  <label
+                    htmlFor={inputId}
+                    className="flex items-center gap-2 text-sm font-semibold text-gray-900"
+                  >
+                    {question.label}
+                    {question.required && (
+                      <span className="text-xs font-medium text-red-600">Required</span>
+                    )}
+                  </label>
+                  {question.description && (
+                    <p className="text-xs text-gray-500">{question.description}</p>
+                  )}
+                  {question.type === "long-text" ? (
+                    <textarea
+                      id={inputId}
+                      className={`textarea textarea-bordered mt-1 w-full ${
+                        fieldError ? "border-red-500 focus:border-red-500 focus:ring-red-500" : ""
+                      }`}
+                      value={value}
+                      rows={3}
+                      onChange={(event) =>
+                        handleOrderFieldChange(question.id, event.target.value)
+                      }
+                    />
+                  ) : (
+                    <input
+                      id={inputId}
+                      type="text"
+                      className={`input input-bordered mt-1 w-full ${
+                        fieldError ? "border-red-500 focus:border-red-500 focus:ring-red-500" : ""
+                      }`}
+                      value={value}
+                      onChange={(event) =>
+                        handleOrderFieldChange(question.id, event.target.value)
+                      }
+                    />
+                  )}
+                  {fieldError && (
+                    <p className="text-xs text-red-600">{fieldError}</p>
+                  )}
+                </div>
+              );
+            })}
+            <p className="text-xs text-gray-500">
+              Your answers help the production team prepare for the shoot.
             </p>
           </div>
         ) : currentGroup ? (

@@ -9,7 +9,7 @@ import {
   useState,
   ReactNode,
 } from "react";
-import { ProductModifierSelection } from "@/lib/products";
+import { ProductModifierSelection, type ProductOrderFieldType } from "@/lib/products";
 
 export interface CartCampaignBooking {
   projectId: string;
@@ -30,6 +30,15 @@ export interface CartTimeSlot {
   setupMinutes?: number | null;
   shootMinutes?: number | null;
   breakdownMinutes?: number | null;
+}
+
+export interface CartOrderFormResponse {
+  fieldId: string;
+  label: string;
+  value: string;
+  required: boolean;
+  type: ProductOrderFieldType;
+  description?: string | null;
 }
 
 export interface CartOrganiserInfo {
@@ -60,6 +69,7 @@ export interface CartItem {
     setupDate?: string | null;
     setupIncluded?: boolean;
   } | null;
+  orderFormResponses?: CartOrderFormResponse[] | null;
   timeSlot?: CartTimeSlot | null;
   coverage?: {
     type: "hq" | "franchise";
@@ -100,6 +110,7 @@ interface ProductInput {
     setupDate?: string | null;
     setupIncluded?: boolean;
   } | null;
+  orderFormResponses?: CartOrderFormResponse[] | null;
   timeSlot?: CartTimeSlot | null;
   coverage?: {
     type: "hq" | "franchise";
@@ -225,6 +236,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
             JSON.stringify(product.coverage || null) &&
           JSON.stringify(i.campaignBooking || null) ===
             JSON.stringify(product.campaignBooking || null) &&
+          JSON.stringify(i.orderFormResponses || []) ===
+            JSON.stringify(product.orderFormResponses || []) &&
           JSON.stringify(i.organiser || null) ===
             JSON.stringify(product.organiser || null) &&
           (i.kitStatus || "confirmed") === (product.kitStatus || "confirmed") &&
