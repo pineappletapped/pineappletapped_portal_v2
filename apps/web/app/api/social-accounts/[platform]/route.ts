@@ -15,6 +15,10 @@ import {
   type TokenExchangeResult,
 } from '@/lib/social-platforms';
 import { createSecretConfig, readSecretValue } from '@/lib/secret-manager';
+import {
+  getCachedSocialServiceKey,
+  setCachedSocialServiceKey,
+} from '@/lib/social-service-key-cache';
 
 const FUNCTIONS_BASE_URL =
   process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL ||
@@ -27,8 +31,6 @@ const SERVICE_KEY_CONFIG = createSecretConfig(
 );
 
 const STATE_SECRET_BYTE_LENGTH = 32;
-
-let cachedServiceKey: string | null | undefined;
 
 const SUPPORTED_PLATFORMS: SocialPlatform[] = [
   'youtube',
@@ -228,24 +230,26 @@ async function resolveAuthenticatedUser(): Promise<AuthenticatedUser | null> {
 }
 
 async function getServiceKey(requireKey = true): Promise<string | null> {
-  if (cachedServiceKey !== undefined) {
-    if (!cachedServiceKey) {
+  const cachedValue = getCachedSocialServiceKey();
+  if (cachedValue !== undefined) {
+    if (!cachedValue) {
       if (requireKey) {
         throw new Error('Social account service key is not configured.');
       }
       return null;
     }
-    return cachedServiceKey;
+    return cachedValue;
   }
+
   const value = await readSecretValue(SERVICE_KEY_CONFIG);
-  cachedServiceKey = value ?? null;
-  if (!cachedServiceKey) {
+  setCachedSocialServiceKey(value ?? null);
+  if (!value) {
     if (requireKey) {
       throw new Error('Social account service key is not configured.');
     }
     return null;
   }
-  return cachedServiceKey;
+  return value;
 }
 
 function buildErrorRedirect(origin: string, redirectUri: string, message: string, code?: string | null) {

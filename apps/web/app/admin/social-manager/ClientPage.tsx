@@ -383,9 +383,26 @@ export default function SocialManagerClientPage() {
         title="HQ Social Manager"
         description="Link Pineapple's owned channels, monitor token health, and refresh permissions before scheduled campaigns."
         metrics={heroMetrics}
+        quickActions={[
+          {
+            label: "Launch OAuth",
+            description: "Connect a new HQ-managed social account.",
+            href: "#hq-launcher",
+          },
+          {
+            label: "Manage OAuth credentials",
+            description: "Rotate client IDs, client secrets, and encryption keys.",
+            href: "/admin/social-manager/oauth",
+          },
+          {
+            label: "Review connections",
+            description: "Jump to the active HQ account roster.",
+            href: "#hq-connections",
+          },
+        ]}
       />
 
-      <section className="grid gap-4 rounded border bg-white p-6 shadow-sm">
+      <section id="hq-launcher" className="grid gap-4 rounded border bg-white p-6 shadow-sm">
         <header className="space-y-1">
           <h2 className="text-lg font-semibold text-gray-900">Connect an HQ social profile</h2>
           <p className="text-sm text-gray-600">
@@ -471,7 +488,7 @@ export default function SocialManagerClientPage() {
         {accountError ? <p className="text-sm text-red-600">{accountError}</p> : null}
       </section>
 
-      <section className="grid gap-4 rounded border bg-white p-6 shadow-sm">
+      <section id="hq-connections" className="grid gap-4 rounded border bg-white p-6 shadow-sm">
         <header className="space-y-1">
           <h2 className="text-lg font-semibold text-gray-900">HQ account connections</h2>
           <p className="text-sm text-gray-600">

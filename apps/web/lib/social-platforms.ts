@@ -181,6 +181,8 @@ const PLATFORM_CONFIGS: Record<SocialPlatform, OAuthPlatformConfig> = {
 
 const credentialCache = new Map<SocialPlatform, PlatformCredentials>();
 
+const PLATFORM_KEYS = Object.freeze(Object.keys(PLATFORM_CONFIGS) as SocialPlatform[]);
+
 function normaliseScopes(scopes: RequestedScopes | null | undefined): RequestedScopes {
   return {
     publish: scopes?.publish === true,
@@ -236,6 +238,42 @@ export async function getPlatformCredentials(platform: SocialPlatform): Promise<
   };
   credentialCache.set(platform, credentials);
   return credentials;
+}
+
+export function listSocialPlatforms(): SocialPlatform[] {
+  return [...PLATFORM_KEYS];
+}
+
+export interface PlatformSecretTargets {
+  clientId: ReturnType<typeof createSecretConfig>;
+  clientSecret: ReturnType<typeof createSecretConfig>;
+  label: string;
+}
+
+export function getPlatformSecretTargets(platform: SocialPlatform): PlatformSecretTargets {
+  const config = PLATFORM_CONFIGS[platform];
+  const clientIdSecretName = config.clientIdSecretEnv ? process.env[config.clientIdSecretEnv] : undefined;
+  const clientIdFallback = config.clientIdEnv ? process.env[config.clientIdEnv] : undefined;
+  const clientSecretName = config.clientSecretSecretEnv ? process.env[config.clientSecretSecretEnv] : undefined;
+  const clientSecretFallback = config.clientSecretEnv ? process.env[config.clientSecretEnv] : undefined;
+
+  return {
+    label: config.label,
+    clientId: createSecretConfig(clientIdSecretName ?? null, clientIdFallback ?? null, `${config.label} OAuth client ID`),
+    clientSecret: createSecretConfig(
+      clientSecretName ?? null,
+      clientSecretFallback ?? null,
+      `${config.label} OAuth client secret`
+    ),
+  };
+}
+
+export function resetPlatformCredentialCache(platform?: SocialPlatform): void {
+  if (platform) {
+    credentialCache.delete(platform);
+    return;
+  }
+  credentialCache.clear();
 }
 
 function buildMockAuthorizationUrl(callback: string, state: string): AuthorizationUrlResult {
