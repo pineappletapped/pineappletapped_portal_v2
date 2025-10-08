@@ -38,6 +38,15 @@ const ANALYTICS_ALLOWED_ORIGINS = [
   'http://localhost:3000',
 ];
 
+function applyRecordLoginCors(req: functions.Request, res: functions.Response) {
+  const origin = req.get('origin');
+  const allowedOrigin = origin && ANALYTICS_ALLOWED_ORIGINS.includes(origin) ? origin : '*';
+  res.set('Access-Control-Allow-Origin', allowedOrigin);
+  res.set('Vary', 'Origin');
+  res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+}
+
 // TODO: wrap all http functions with the cors handler, for example:
 // exports.myFunction = functions.https.onRequest((req, res) => {
 //   corsHandler(req, res, () => {
@@ -75,30 +84,60 @@ let cachedOperationalSettings:
   | { platformFeePercent: number | null; splitTerms: StripeSplitTermConfig[]; fetchedAt: number }
   | null = null;
 
-const KIT_ROUTING_CACHE_TTL_MS = 5 * 60 * 1000;
-let cachedKitRoutingSettings:
-  | { settings: KitRoutingSettings; fetchedAt: number }
-  | null = null;
+type KitRoutingCacheEntry = {
+  settings: KitRoutingSettings;
+  fetchedAt: number;
+  version: string | null;
+};
+
+let cachedKitRoutingSettings: KitRoutingCacheEntry | null = null;
+
+function resolveKitRoutingVersion(
+  data: Record<string, unknown> | null,
+  snap: DocumentSnapshot<DocumentData>,
+): string | null {
+  if (data) {
+    const rawUpdatedAt = data.updatedAt;
+    if (typeof rawUpdatedAt === 'string' && rawUpdatedAt.trim().length > 0) {
+      return rawUpdatedAt.trim();
+    }
+  }
+  const updateTime = snap.updateTime ?? snap.createTime ?? null;
+  return updateTime ? updateTime.toDate().toISOString() : null;
+}
 
 async function loadKitRoutingSettings(): Promise<KitRoutingSettings> {
   const now = Date.now();
-  if (cachedKitRoutingSettings && now - cachedKitRoutingSettings.fetchedAt < KIT_ROUTING_CACHE_TTL_MS) {
-    return cachedKitRoutingSettings.settings;
-  }
   try {
-    const snap = await db.collection('settings').doc('kitRouting').get();
-    if (snap.exists) {
-      const parsed = parseKitRoutingSettings(snap.data());
+    const docRef = db.collection('settings').doc('kitRouting');
+    const snap = await docRef.get();
+    const data = snap.exists ? ((snap.data() as Record<string, unknown>) ?? null) : null;
+    const version = resolveKitRoutingVersion(data, snap);
+    if (
+      cachedKitRoutingSettings &&
+      cachedKitRoutingSettings.version &&
+      version &&
+      cachedKitRoutingSettings.version === version
+    ) {
+      cachedKitRoutingSettings.fetchedAt = now;
+      return cloneRoutingSettings(cachedKitRoutingSettings.settings);
+    }
+    if (data) {
+      const parsed = parseKitRoutingSettings(data);
       const cloned = cloneRoutingSettings(parsed);
-      cachedKitRoutingSettings = { settings: cloned, fetchedAt: now };
-      return cloned;
+      cachedKitRoutingSettings = { settings: cloned, fetchedAt: now, version };
+      return cloneRoutingSettings(cloned);
     }
   } catch (error) {
     console.error('Failed to load kit routing settings', error);
   }
+  if (cachedKitRoutingSettings) {
+    cachedKitRoutingSettings.fetchedAt = now;
+    return cloneRoutingSettings(cachedKitRoutingSettings.settings);
+  }
   const fallback = cloneRoutingSettings(DEFAULT_KIT_ROUTING_SETTINGS);
-  cachedKitRoutingSettings = { settings: fallback, fetchedAt: now };
-  return fallback;
+  cachedKitRoutingSettings = { settings: fallback, fetchedAt: now, version: null };
+  return cloneRoutingSettings(fallback);
 }
 
 const BOOKING_INVITE_BASE_URL =
@@ -427,6 +466,22 @@ function decodeEncryptionKey(raw: string): Buffer {
   throw new Error('Encryption key must decode to 32 bytes for AES-256-GCM.');
 }
 
+function hashStateSecret(secret: string): string {
+  return crypto.createHash('sha256').update(secret, 'utf8').digest('hex');
+}
+
+function timingSafeEqualHex(expected: string, actual: string): boolean {
+  if (expected.length !== actual.length) {
+    return false;
+  }
+  const expectedBuf = Buffer.from(expected, 'hex');
+  const actualBuf = Buffer.from(actual, 'hex');
+  if (expectedBuf.length !== actualBuf.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(expectedBuf, actualBuf);
+}
+
 async function getSocialAccountEncryptionKey(): Promise<Buffer> {
   if (cachedSocialAccountEncryptionKey) {
     return cachedSocialAccountEncryptionKey;
@@ -472,6 +527,7 @@ type SocialAccountProviderInput = {
 
 type StoreSocialAccountCredentialRequest = {
   stateId?: string | null;
+  stateSecret?: string | null;
   accountId?: string | null;
   platform?: string | null;
   organisationId?: string | null;
@@ -717,8 +773,31 @@ async function storeSocialAccountCredentials(
   const initiatorEmail = normaliseString(payload.initiator?.email);
   const requestedBy = normaliseString(payload.requestedBy);
   const stateId = normaliseString(payload.stateId);
+  const stateSecret = normaliseString(payload.stateSecret);
   const providerAccountId = normaliseString(payload.provider?.accountId);
   const providerAccountName = normaliseString(payload.provider?.accountName);
+
+  let stateRef: DocumentReference<DocumentData> | null = null;
+  let stateSecretHash: string | null = null;
+  if (stateId) {
+    stateRef = db.collection('socialAccountAuthStates').doc(stateId);
+    const stateSnap = await stateRef.get();
+    if (!stateSnap.exists) {
+      throw new Error('OAuth session has expired or is invalid.');
+    }
+    const stateData = stateSnap.data() as Record<string, unknown> | null;
+    const expectedHash = normaliseString(stateData?.stateSecretHash);
+    if (expectedHash) {
+      if (!stateSecret) {
+        throw new Error('OAuth session verification secret is missing.');
+      }
+      const providedHash = hashStateSecret(stateSecret);
+      if (!timingSafeEqualHex(expectedHash, providedHash)) {
+        throw new Error('OAuth session verification failed.');
+      }
+      stateSecretHash = expectedHash;
+    }
+  }
 
   const sanitizedAccessToken = tokens.accessToken.trim();
   const sanitizedRefreshToken =
@@ -844,6 +923,17 @@ async function storeSocialAccountCredentials(
     }
 
     transaction.set(secretRef, secretData, { merge: true });
+
+    if (stateRef && stateSecretHash) {
+      transaction.set(
+        stateRef,
+        {
+          stateSecretHash: admin.firestore.FieldValue.delete(),
+          verifiedAt: nowTimestamp,
+        },
+        { merge: true }
+      );
+    }
   });
 
   return {
@@ -873,13 +963,6 @@ export const socialAccountsStoreCredentials = onRequest(async (req, res) => {
   }
 
   try {
-    const expectedKey = await getSocialAccountServiceKey();
-    const providedKey = req.get('x-service-key') ?? req.get('X-Service-Key') ?? null;
-    if (!providedKey || providedKey.trim() !== expectedKey) {
-      res.status(401).json({ error: 'Invalid service key.' });
-      return;
-    }
-
     let body: unknown = req.body;
     if (typeof body === 'string') {
       try {
@@ -900,6 +983,23 @@ export const socialAccountsStoreCredentials = onRequest(async (req, res) => {
           return;
         }
       }
+    }
+
+    let expectedKey: string | null = null;
+    try {
+      expectedKey = await getSocialAccountServiceKey();
+    } catch (error) {
+      console.warn('Social account service key unavailable, relying on OAuth state verification.', error);
+    }
+
+    const providedKey = req.get('x-service-key') ?? req.get('X-Service-Key') ?? null;
+    if (expectedKey) {
+      if (!providedKey || providedKey.trim() !== expectedKey) {
+        res.status(401).json({ error: 'Invalid service key.' });
+        return;
+      }
+    } else if (providedKey && providedKey.trim().length > 0) {
+      console.warn('Ignoring provided social account service key because none is configured.');
     }
 
     const result = await storeSocialAccountCredentials(body as StoreSocialAccountCredentialRequest);
@@ -5058,16 +5158,51 @@ export const reserveKit = functions.https.onCall(async (data) => {
       });
     };
 
-    configuredFlow
-      .filter((stage) => stage.enabled !== false)
-      .forEach((stage) => addStage(stage));
+    const activeStages = configuredFlow.filter((stage) => stage.enabled !== false);
+    activeStages.forEach((stage) => addStage(stage));
 
     if (attempts.length === 0) {
-      const fallbackFlow =
-        flowKey === 'franchiseFlow'
-          ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
-          : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
-      fallbackFlow.forEach((stage) => addStage(stage));
+      const allDisabled = configuredFlow.length > 0 && configuredFlow.every((stage) => stage.enabled === false);
+      if (allDisabled) {
+        const fallbackKey: RoutingStageKey =
+          coverage.type === 'franchise' && coverage.franchiseId ? 'franchise_primary' : 'hq';
+        const fallbackFlow =
+          flowKey === 'franchiseFlow'
+            ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
+            : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
+        const fallbackStage =
+          fallbackFlow.find((stage) => stage.key === fallbackKey) ||
+          ({
+            key: fallbackKey,
+            label: ROUTING_STAGE_META[fallbackKey].defaultLabel,
+            description: ROUTING_STAGE_META[fallbackKey].defaultDescription,
+            requiresKit: false,
+            autoConfirm: true,
+            enabled: true,
+          } satisfies RoutingStageConfig);
+        const fallbackLabel = resolveRoutingStageLabel(fallbackStage, {
+          coverageLabel: coverage.label,
+          fallback: ROUTING_STAGE_META[fallbackKey].defaultLabel,
+        });
+        const ownerType = ROUTING_STAGE_META[fallbackKey].ownerType;
+        const fallbackInitialStatus: ReservationStatus = fallbackStage.autoConfirm === true ? 'confirmed' : 'pending';
+        attempts.push({
+          key: fallbackKey,
+          ownerType,
+          initialStatus: fallbackInitialStatus,
+          franchiseId: ownerType === 'company' ? null : coverage.franchiseId,
+          label: fallbackLabel,
+          requiresKit: false,
+          description: fallbackStage.description ?? null,
+          autoConfirm: fallbackStage.autoConfirm === true,
+        });
+      } else {
+        const fallbackFlow =
+          flowKey === 'franchiseFlow'
+            ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
+            : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
+        fallbackFlow.forEach((stage) => addStage(stage));
+      }
     }
 
     return attempts;
@@ -5085,6 +5220,38 @@ export const reserveKit = functions.https.onCall(async (data) => {
       description: null,
       autoConfirm: true,
     });
+  }
+
+  const anyKitAttempt = attempts.some((attempt) => attempt.requiresKit);
+  const selectBypassAttempt = (): ReservationAttempt | null => {
+    if (attempts.length === 0) {
+      return null;
+    }
+    const nonKitAttempt = attempts.find((attempt) => !attempt.requiresKit);
+    return nonKitAttempt ?? attempts[0];
+  };
+
+  if (!anyKitAttempt || eqIds.length === 0) {
+    const attempt = selectBypassAttempt();
+    if (attempt) {
+      return {
+        conflicts: [],
+        kitItems: [],
+        rentalTotal: 0,
+        status: attempt.initialStatus,
+        missingStandards: [],
+        provider: {
+          level: attempt.key,
+          status: attempt.initialStatus,
+          label: attempt.label,
+          franchiseId: attempt.franchiseId,
+          territoryId: coverageInfo.territoryId,
+          requiresKit: false,
+          autoConfirm: attempt.autoConfirm,
+          description: attempt.description ?? null,
+        },
+      } satisfies ReservationResponse;
+    }
   }
 
   const deriveOwnerInfo = (eq: any): {
@@ -5120,69 +5287,71 @@ export const reserveKit = functions.https.onCall(async (data) => {
   };
 
   const equipmentRecords: EquipmentRecord[] = [];
-  for (const id of eqIds) {
-    const eqRef = db.collection('equipment').doc(id);
-    const eqSnap = await eqRef.get();
-    if (!eqSnap.exists) {
+  if (anyKitAttempt) {
+    for (const id of eqIds) {
+      const eqRef = db.collection('equipment').doc(id);
+      const eqSnap = await eqRef.get();
+      if (!eqSnap.exists) {
+        equipmentRecords.push({
+          id,
+          name: id,
+          category: null,
+          ownerType: 'company',
+          ownerId: null,
+          franchiseId: null,
+          availableFlag: false,
+          booked: false,
+          meetsStandards: [],
+          rentalPrice: 0,
+          exists: false,
+        });
+        continue;
+      }
+      const eq = eqSnap.data() as any;
+      const ownerInfo = deriveOwnerInfo(eq);
+      const category =
+        typeof eq.category === 'string' && eq.category.trim().length > 0
+          ? eq.category.trim()
+          : typeof eq.type === 'string' && eq.type.trim().length > 0
+            ? eq.type.trim()
+            : null;
+      const bookingsSnap = await eqRef
+        .collection('bookings')
+        .where('start', '<', reservationEnd)
+        .where('end', '>', start)
+        .get();
+      const conflictingBookings = bookingsSnap.docs.filter((bookingDoc) =>
+        bookingConflictsWithRange(
+          (bookingDoc.data() as { start?: unknown; end?: unknown }) ?? null,
+          start,
+          reservationEnd,
+        ),
+      );
+      const meetsStandards = Array.isArray(eq.meetsStandards)
+        ? (eq.meetsStandards as unknown[])
+            .map((value) => (typeof value === 'string' ? value.trim() : ''))
+            .filter((value): value is string => value.length > 0)
+        : [];
+      const equipmentName =
+        typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : eqSnap.id;
+      const rentalPrice =
+        typeof eq.rentalPrice === 'number' && Number.isFinite(eq.rentalPrice)
+          ? eq.rentalPrice
+          : 0;
       equipmentRecords.push({
-        id,
-        name: id,
-        category: null,
-        ownerType: 'company',
-        ownerId: null,
-        franchiseId: null,
-        availableFlag: false,
-        booked: false,
-        meetsStandards: [],
-        rentalPrice: 0,
-        exists: false,
+        id: eqSnap.id,
+        name: equipmentName,
+        category,
+        ownerType: ownerInfo.ownerType,
+        ownerId: ownerInfo.ownerId,
+        franchiseId: ownerInfo.franchiseId,
+        availableFlag: eq.available !== false,
+        booked: conflictingBookings.length > 0,
+        meetsStandards,
+        rentalPrice,
+        exists: true,
       });
-      continue;
     }
-    const eq = eqSnap.data() as any;
-    const ownerInfo = deriveOwnerInfo(eq);
-    const category =
-      typeof eq.category === 'string' && eq.category.trim().length > 0
-        ? eq.category.trim()
-        : typeof eq.type === 'string' && eq.type.trim().length > 0
-          ? eq.type.trim()
-          : null;
-    const bookingsSnap = await eqRef
-      .collection('bookings')
-      .where('start', '<', reservationEnd)
-      .where('end', '>', start)
-      .get();
-    const conflictingBookings = bookingsSnap.docs.filter((bookingDoc) =>
-      bookingConflictsWithRange(
-        (bookingDoc.data() as { start?: unknown; end?: unknown }) ?? null,
-        start,
-        reservationEnd,
-      ),
-    );
-    const meetsStandards = Array.isArray(eq.meetsStandards)
-      ? (eq.meetsStandards as unknown[])
-          .map((value) => (typeof value === 'string' ? value.trim() : ''))
-          .filter((value): value is string => value.length > 0)
-      : [];
-    const equipmentName =
-      typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : eqSnap.id;
-    const rentalPrice =
-      typeof eq.rentalPrice === 'number' && Number.isFinite(eq.rentalPrice)
-        ? eq.rentalPrice
-        : 0;
-    equipmentRecords.push({
-      id: eqSnap.id,
-      name: equipmentName,
-      category,
-      ownerType: ownerInfo.ownerType,
-      ownerId: ownerInfo.ownerId,
-      franchiseId: ownerInfo.franchiseId,
-      availableFlag: eq.available !== false,
-      booked: conflictingBookings.length > 0,
-      meetsStandards,
-      rentalPrice,
-      exists: true,
-    });
   }
 
   const matchesOwnerForAttempt = (
@@ -12975,6 +13144,59 @@ export const organiser_settlement_reconcile = functions.pubsub
     return null;
   });
 
+async function recordLoginForUid(uid: string, timestampValue: unknown): Promise<void> {
+  let timestamp: admin.firestore.Timestamp | admin.firestore.FieldValue =
+    admin.firestore.FieldValue.serverTimestamp();
+
+  if (typeof timestampValue === 'string') {
+    const parsed = new Date(timestampValue);
+    if (!Number.isNaN(parsed.getTime())) {
+      timestamp = admin.firestore.Timestamp.fromDate(parsed);
+    }
+  }
+
+  await db.collection('loginHistory').add({
+    uid,
+    timestamp,
+  });
+}
+
+function parseRequestBody(req: functions.Request): Record<string, unknown> {
+  const rawBody = req.body;
+
+  if (typeof rawBody === 'string') {
+    const trimmed = rawBody.trim();
+    if (!trimmed) {
+      return {};
+    }
+    try {
+      return JSON.parse(trimmed) as Record<string, unknown>;
+    } catch (error) {
+      console.warn('recordLoginEvent invalid JSON body', error);
+      return {};
+    }
+  }
+
+  if (Buffer.isBuffer(rawBody)) {
+    const text = rawBody.toString('utf8').trim();
+    if (!text) {
+      return {};
+    }
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch (error) {
+      console.warn('recordLoginEvent invalid buffer body', error);
+      return {};
+    }
+  }
+
+  if (rawBody && typeof rawBody === 'object') {
+    return rawBody as Record<string, unknown>;
+  }
+
+  return {};
+}
+
 /**
  * Record a user login event via HTTPS callable. Stores loginHistory for the current user.
  */
@@ -12982,13 +13204,59 @@ export const recordLogin = functions.https.onCall(async (data, context) => {
   if (!context.auth?.uid) {
     throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
   }
-  await db.collection('loginHistory').add({
-    uid: context.auth.uid,
-    timestamp: data?.timestamp
-      ? admin.firestore.Timestamp.fromDate(new Date(data.timestamp))
-      : admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await recordLoginForUid(context.auth.uid, data?.timestamp);
   return { ok: true };
+});
+
+export const recordLoginEvent = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
+  applyRecordLoginCors(req, res);
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  const authHeader = req.get('authorization') || '';
+  if (!authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Sign in required' });
+    return;
+  }
+
+  const token = authHeader.split('Bearer ')[1]?.trim();
+  if (!token) {
+    res.status(401).json({ error: 'Sign in required' });
+    return;
+  }
+
+  let uid: string | null = null;
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    uid = decoded.uid;
+  } catch (error) {
+    console.error('recordLoginEvent verifyIdToken failed', error);
+    res.status(401).json({ error: 'Invalid token' });
+    return;
+  }
+
+  if (!uid) {
+    res.status(401).json({ error: 'Invalid token' });
+    return;
+  }
+
+  const body = parseRequestBody(req);
+
+  try {
+    await recordLoginForUid(uid, body.timestamp);
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('recordLoginEvent failed', error);
+    res.status(500).json({ error: 'Failed to record login' });
+  }
 });
 
 /**

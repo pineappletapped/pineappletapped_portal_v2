@@ -33,6 +33,13 @@ const config = {
   measurementId,
 };
 
+const defaultFunctionsBaseUrl =
+  cleanEnv(process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL) ||
+  (projectId ? `https://us-central1-${projectId}.cloudfunctions.net` : undefined) ||
+  'https://us-central1-pineapple-tapped---portal.cloudfunctions.net';
+const firebaseProjectId = projectId;
+const functionsBaseUrl = defaultFunctionsBaseUrl;
+
 const missingServiceError = (service: string) =>
   new Error(
     `Firebase ${service} has not been initialised yet. Ensure ensureFirebase() has resolved before accessing ${service}.`
@@ -219,4 +226,6 @@ export {
   sendPasswordResetEmail,
   ensureFirebase,
   loadAuthModule,
+  firebaseProjectId,
+  functionsBaseUrl,
 };

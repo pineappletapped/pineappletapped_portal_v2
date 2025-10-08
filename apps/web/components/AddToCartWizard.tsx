@@ -2412,79 +2412,87 @@ export default function AddToCartWizard({
                 {product.category === "exhibition-videography" && eventRangeLabel && (
                   <p className="text-sm text-gray-600">Show runs {eventRangeLabel}.</p>
                 )}
-                <ProductDatePicker
-                  productId={product.id}
-                  selected={date}
-                  onSelect={handleDateSelect}
-                  scope={availabilityScope}
-                  overrides={availabilityOverrides}
-                  allowedDates={
-                    product.category === "exhibition-videography"
-                      ? exhibitionAllowedDates
-                      : undefined
-                  }
-                  allowedDateLabels={
-                    product.category === "exhibition-videography" &&
-                    Object.keys(exhibitionDayLabels).length > 0
-                      ? exhibitionDayLabels
-                      : undefined
-                  }
-                  highlightedDates={
-                    product.category === "exhibition-videography" &&
-                    exhibitionHighlightDates.length > 0
-                      ? exhibitionHighlightDates
-                      : undefined
-                  }
-                  initialMonth={calendarInitialMonth}
-                />
-                {timeSlotRequired && (
-                  <div className="space-y-2">
-                    <p className="text-sm font-medium">Select a filming window</p>
-                    {slotDateKey ? (
-                      timeSlots.length > 0 ? (
-                        <div className="grid gap-2 sm:grid-cols-2">
-                          {timeSlots.map((slot) => {
-                            const checked = selectedTimeSlot?.id === slot.id;
-                            return (
-                              <label
-                                key={slot.id}
-                                className={`flex items-center justify-between gap-3 rounded-md border p-3 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
-                                  checked
-                                    ? "border-orange-400 bg-orange-50"
-                                    : "border-gray-200 bg-white hover:border-orange/60"
-                                }`}
-                              >
-                                <div className="flex items-center gap-3">
-                                  <input
-                                    type="radio"
-                                    name="onsite-slot"
-                                    className="mt-0.5"
-                                    checked={checked}
-                                    onChange={() => handleTimeSlotSelect(slot)}
-                                  />
-                                  <div className="flex flex-col">
-                                    <span className="font-medium">{slot.label}</span>
-                                  </div>
-                                </div>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-gray-500">
-                          This product doesn’t have any bookable windows yet.
-                        </p>
-                      )
-                    ) : (
-                      <p className="text-xs text-gray-500">
-                        Choose a production date to see available times.
+                <div
+                  className={clsx(
+                    "flex w-full flex-col gap-4 lg:flex-row lg:items-start",
+                    timeSlotRequired ? "lg:gap-8" : undefined,
+                  )}
+                >
+                  <ProductDatePicker
+                    productId={product.id}
+                    selected={date}
+                    onSelect={handleDateSelect}
+                    scope={availabilityScope}
+                    overrides={availabilityOverrides}
+                    allowedDates={
+                      product.category === "exhibition-videography"
+                        ? exhibitionAllowedDates
+                        : undefined
+                    }
+                    allowedDateLabels={
+                      product.category === "exhibition-videography" &&
+                      Object.keys(exhibitionDayLabels).length > 0
+                        ? exhibitionDayLabels
+                        : undefined
+                    }
+                    highlightedDates={
+                      product.category === "exhibition-videography" &&
+                      exhibitionHighlightDates.length > 0
+                        ? exhibitionHighlightDates
+                        : undefined
+                    }
+                    initialMonth={calendarInitialMonth}
+                  />
+                  {timeSlotRequired && (
+                    <aside className="w-full max-w-[24rem] rounded-lg border border-gray-200 bg-white p-4 text-sm shadow-sm lg:max-w-[20rem]">
+                      <p className="text-sm font-semibold text-gray-900">
+                        Select a filming window
                       </p>
-                    )}
-                    <p className="text-xs text-gray-500">
-                      Times shown in UK local time.
-                    </p>
-                  </div>
-                )}
+                      <div className="mt-3 space-y-3">
+                        {slotDateKey ? (
+                          timeSlots.length > 0 ? (
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              {timeSlots.map((slot) => {
+                                const checked = selectedTimeSlot?.id === slot.id;
+                                return (
+                                  <label
+                                    key={slot.id}
+                                    className={clsx(
+                                      "flex items-center gap-3 rounded-md border p-3 text-sm transition focus-within:border-orange-500 focus-within:ring-1 focus-within:ring-orange",
+                                      checked
+                                        ? "border-orange-500 bg-orange-50 text-orange-900 shadow-sm"
+                                        : "border-emerald-500 bg-emerald-50 text-emerald-900 hover:border-emerald-600 hover:bg-emerald-100",
+                                    )}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name="onsite-slot"
+                                      className="mt-0.5"
+                                      checked={checked}
+                                      onChange={() => handleTimeSlotSelect(slot)}
+                                    />
+                                    <span className="font-semibold">{slot.label}</span>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <p className="text-xs text-gray-500">
+                              This product doesn’t have any bookable windows yet.
+                            </p>
+                          )
+                        ) : (
+                          <p className="text-xs text-gray-500">
+                            Choose a production date to see available times.
+                          </p>
+                        )}
+                        <p className="text-xs text-gray-500">
+                          Times shown in UK local time.
+                        </p>
+                      </div>
+                    </aside>
+                  )}
+                </div>
                 {product.category === "exhibition-videography" && exhibitionSetupOption && (
                   <label
                     className={`flex items-start gap-3 rounded-md border px-3 py-2 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${

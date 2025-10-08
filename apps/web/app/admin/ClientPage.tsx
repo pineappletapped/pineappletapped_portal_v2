@@ -353,8 +353,9 @@ export default function AdminPage() {
                 {
                   title: 'Tools',
                   links: [
-                    { href: '/admin/tools', label: 'Content Assistant' },
+                    { href: '/admin/tools', label: 'Production Tools' },
                     { href: '/admin/tools/qr-code-generator', label: 'QR Code Generator' },
+                    { href: '/admin/ai-management', label: 'AI Management' },
                   ],
                 },
                 {
@@ -364,6 +365,7 @@ export default function AdminPage() {
                     { href: '/admin/team', label: 'Manage Team' },
                     { href: '/admin/join-team-steps', label: 'Join Team Form' },
                     { href: '/admin/franchises', label: 'Franchise Network' },
+                    { href: '/admin/training', label: 'Training Library' },
                   ],
                 },
                 {
@@ -373,6 +375,7 @@ export default function AdminPage() {
                     { href: '/admin/client-logos', label: 'Manage Client Logos' },
                     { href: '/admin/blog', label: 'Blog Management' },
                     { href: '/admin/website-design', label: 'Website Design' },
+                    { href: '/admin/email-templates', label: 'Email Templates' },
                   ],
                 },
                 {
@@ -384,6 +387,7 @@ export default function AdminPage() {
                     { href: '/admin/marketing/affiliates', label: 'Affiliate Programme' },
                     { href: '/admin/voucher-codes', label: 'Voucher Management' },
                     { href: '/admin/email-schedules', label: 'Email Schedules' },
+                    { href: '/admin/social-manager', label: 'HQ Social Manager' },
                   ],
                 },
                 {

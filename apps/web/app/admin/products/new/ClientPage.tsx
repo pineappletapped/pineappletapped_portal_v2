@@ -1656,6 +1656,49 @@ export default function NewProductPage() {
         return entry;
       })
       .filter((entry): entry is ProductOrderFormField => entry !== null);
+    const storyboardUploads: { sceneId: string; file: File }[] = [];
+    const storyboardData: ProductStoryboardScene[] = [];
+    if (storyboardEnabled) {
+      storyboardScenes.forEach((scene) => {
+        const sceneId = scene.id || generateFormId();
+        const title = scene.title.trim();
+        const description = scene.description.trim();
+        const startSeconds = parseStoryboardTimecode(scene.start);
+        const endSeconds = parseStoryboardTimecode(scene.end);
+        const hasContent =
+          title.length > 0 ||
+          description.length > 0 ||
+          typeof startSeconds === "number" ||
+          typeof endSeconds === "number" ||
+          Boolean(scene.imageUrl) ||
+          Boolean(scene.imageFile);
+        if (!hasContent) {
+          return;
+        }
+        const variationIds = Array.isArray(scene.variationIds)
+          ? scene.variationIds.filter(
+              (value): value is string =>
+                typeof value === "string" && value.trim().length > 0
+            )
+          : [];
+        const entry: ProductStoryboardScene = { id: sceneId };
+        if (title.length > 0) entry.title = title;
+        if (description.length > 0) entry.description = description;
+        if (typeof startSeconds === "number") entry.startSeconds = startSeconds;
+        if (typeof endSeconds === "number") entry.endSeconds = endSeconds;
+        if (scene.imageUrl) entry.imageUrl = scene.imageUrl;
+        if (scene.imageStoragePath) entry.storagePath = scene.imageStoragePath;
+        if (variationIds.length > 0) entry.variationIds = variationIds;
+        if (scene.imageFile) {
+          storyboardUploads.push({ sceneId, file: scene.imageFile });
+        }
+        storyboardData.push(entry);
+      });
+    }
+    const initialStoryboardImages = storyboardData
+      .map((entry) => (entry.imageUrl ? entry.imageUrl : null))
+      .filter((url): url is string => typeof url === "string" && url.trim().length > 0);
+    const storyboardEnabledValue = storyboardEnabled && storyboardData.length > 0;
     const docRef = await addDoc(collection(db, "products"), {
       name,
       description,
