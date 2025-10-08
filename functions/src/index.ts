@@ -75,30 +75,60 @@ let cachedOperationalSettings:
   | { platformFeePercent: number | null; splitTerms: StripeSplitTermConfig[]; fetchedAt: number }
   | null = null;
 
-const KIT_ROUTING_CACHE_TTL_MS = 5 * 60 * 1000;
-let cachedKitRoutingSettings:
-  | { settings: KitRoutingSettings; fetchedAt: number }
-  | null = null;
+type KitRoutingCacheEntry = {
+  settings: KitRoutingSettings;
+  fetchedAt: number;
+  version: string | null;
+};
+
+let cachedKitRoutingSettings: KitRoutingCacheEntry | null = null;
+
+function resolveKitRoutingVersion(
+  data: Record<string, unknown> | null,
+  snap: DocumentSnapshot<DocumentData>,
+): string | null {
+  if (data) {
+    const rawUpdatedAt = data.updatedAt;
+    if (typeof rawUpdatedAt === 'string' && rawUpdatedAt.trim().length > 0) {
+      return rawUpdatedAt.trim();
+    }
+  }
+  const updateTime = snap.updateTime ?? snap.createTime ?? null;
+  return updateTime ? updateTime.toDate().toISOString() : null;
+}
 
 async function loadKitRoutingSettings(): Promise<KitRoutingSettings> {
   const now = Date.now();
-  if (cachedKitRoutingSettings && now - cachedKitRoutingSettings.fetchedAt < KIT_ROUTING_CACHE_TTL_MS) {
-    return cachedKitRoutingSettings.settings;
-  }
   try {
-    const snap = await db.collection('settings').doc('kitRouting').get();
-    if (snap.exists) {
-      const parsed = parseKitRoutingSettings(snap.data());
+    const docRef = db.collection('settings').doc('kitRouting');
+    const snap = await docRef.get();
+    const data = snap.exists ? ((snap.data() as Record<string, unknown>) ?? null) : null;
+    const version = resolveKitRoutingVersion(data, snap);
+    if (
+      cachedKitRoutingSettings &&
+      cachedKitRoutingSettings.version &&
+      version &&
+      cachedKitRoutingSettings.version === version
+    ) {
+      cachedKitRoutingSettings.fetchedAt = now;
+      return cloneRoutingSettings(cachedKitRoutingSettings.settings);
+    }
+    if (data) {
+      const parsed = parseKitRoutingSettings(data);
       const cloned = cloneRoutingSettings(parsed);
-      cachedKitRoutingSettings = { settings: cloned, fetchedAt: now };
-      return cloned;
+      cachedKitRoutingSettings = { settings: cloned, fetchedAt: now, version };
+      return cloneRoutingSettings(cloned);
     }
   } catch (error) {
     console.error('Failed to load kit routing settings', error);
   }
+  if (cachedKitRoutingSettings) {
+    cachedKitRoutingSettings.fetchedAt = now;
+    return cloneRoutingSettings(cachedKitRoutingSettings.settings);
+  }
   const fallback = cloneRoutingSettings(DEFAULT_KIT_ROUTING_SETTINGS);
-  cachedKitRoutingSettings = { settings: fallback, fetchedAt: now };
-  return fallback;
+  cachedKitRoutingSettings = { settings: fallback, fetchedAt: now, version: null };
+  return cloneRoutingSettings(fallback);
 }
 
 const BOOKING_INVITE_BASE_URL =
