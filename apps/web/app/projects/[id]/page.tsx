@@ -2,6 +2,8 @@
 'use client';
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { db, auth } from '@/lib/firebase';
+import type { BrandGuidelineColors, BrandGuidelinesState } from '@/lib/brand-guidelines';
+import { parseBrandGuidelines } from '@/lib/brand-guidelines';
 import {
   doc,
   getDoc,
@@ -59,6 +61,19 @@ const bookingSlotFormatter = new Intl.DateTimeFormat('en-GB', {
   dateStyle: 'medium',
   timeStyle: 'short',
 });
+
+const brandGuidelinesTimestampFormatter = new Intl.DateTimeFormat('en-GB', {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+});
+
+const BRAND_COLOR_LABELS: Record<keyof BrandGuidelineColors, string> = {
+  primary: 'Primary',
+  secondary: 'Secondary',
+  accent: 'Accent',
+  neutral: 'Neutral',
+  highlight: 'Highlight',
+};
 
 const coerceNumber = (value: any, fallback = 0) => {
   const num = Number(value);
@@ -280,6 +295,30 @@ const parseTimestamp = (value: any): Date | null => {
   return null;
 };
 
+const parseFirestoreDate = (value: unknown): Date | null => {
+  if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+  if (value && typeof value === 'object' && typeof (value as any).toDate === 'function') {
+    try {
+      const parsed = (value as any).toDate();
+      if (parsed instanceof Date && !Number.isNaN(parsed.getTime())) {
+        return parsed;
+      }
+    } catch (err) {
+      console.warn('Failed to parse Firestore timestamp', err);
+    }
+  }
+  return null;
+};
+
 interface ContentDraftRecord {
   id: string;
   status: string;
@@ -382,6 +421,10 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [contentDraftsLoading, setContentDraftsLoading] = useState(true);
   const [projectBookings, setProjectBookings] = useState<ProjectBookingRecord[]>([]);
   const [projectBookingsLoading, setProjectBookingsLoading] = useState(true);
+  const [organisation, setOrganisation] = useState<{ id: string; name: string | null } | null>(null);
+  const [organisationGuidelines, setOrganisationGuidelines] = useState<BrandGuidelinesState | null>(null);
+  const [organisationHasGuidelines, setOrganisationHasGuidelines] = useState(false);
+  const [organisationGuidelinesUpdatedAt, setOrganisationGuidelinesUpdatedAt] = useState<Date | null>(null);
 
   // Internal messages (staff/contractor comms)
   const [internalMessages, setInternalMessages] = useState<any[]>([]);
@@ -548,6 +591,59 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       }
     })();
   },[params.id, loadMessages, loadInternalMessages]);
+
+  useEffect(() => {
+    if (!project?.orgId) {
+      setOrganisation(null);
+      setOrganisationGuidelines(null);
+      setOrganisationHasGuidelines(false);
+      setOrganisationGuidelinesUpdatedAt(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const orgSnap = await getDoc(doc(db, 'orgs', project.orgId));
+        if (cancelled) return;
+        if (!orgSnap.exists()) {
+          setOrganisation(null);
+          setOrganisationGuidelines(null);
+          setOrganisationHasGuidelines(false);
+          setOrganisationGuidelinesUpdatedAt(null);
+          return;
+        }
+
+        const orgData = orgSnap.data() as any;
+        const orgName =
+          typeof orgData?.name === 'string' && orgData.name.trim().length > 0 ? orgData.name.trim() : null;
+        const guidelines = parseBrandGuidelines(orgData?.brandGuidelines);
+        const hasGuidelines = Boolean(
+          (orgData?.brandGuidelines && typeof orgData.brandGuidelines === 'object' && Object.keys(orgData.brandGuidelines).length > 0) ||
+            (typeof orgData?.brandLogoUrl === 'string' && orgData.brandLogoUrl.trim().length > 0) ||
+            orgData?.brandGuidelinesUpdatedAt
+        );
+        const updatedAt = parseFirestoreDate(orgData?.brandGuidelinesUpdatedAt);
+
+        setOrganisation({ id: orgSnap.id, name: orgName });
+        setOrganisationGuidelines(guidelines);
+        setOrganisationHasGuidelines(hasGuidelines);
+        setOrganisationGuidelinesUpdatedAt(updatedAt);
+      } catch (err) {
+        console.error('Failed to load organisation brand guidelines', err);
+        if (!cancelled) {
+          setOrganisationGuidelines(null);
+          setOrganisationHasGuidelines(false);
+          setOrganisationGuidelinesUpdatedAt(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.orgId]);
 
   useEffect(() => {
     let active = true;
@@ -1361,39 +1457,118 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       {/* Brand guidelines task */}
       <div className="card">
         <h2 className="mb-2 text-base font-semibold text-gray-900">Brand Guidelines</h2>
-        {project.brandGuidelinesCompleted ? (
-          <div className="grid gap-2 text-sm">
-            <p className="text-green-700">Completed</p>
+        {!project?.orgId ? (
+          <div className="grid gap-2">
+            <p className="text-sm text-gray-600">
+              Assign this project to an organisation to manage shared brand assets and keep every booking aligned.
+            </p>
+          </div>
+        ) : organisationHasGuidelines && organisationGuidelines ? (
+          <div className="grid gap-3 text-sm">
+            <p className="text-emerald-700">
+              Brand guidelines configured{organisation?.name ? ` for ${organisation.name}` : ''}.
+            </p>
+            <div className="grid gap-3 text-gray-700 sm:grid-cols-2">
+              <div className="space-y-1">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Primary font</p>
+                <p className="text-sm text-gray-900">{organisationGuidelines.fonts.primary || '—'}</p>
+                {organisationGuidelines.fonts.headingStyle ? (
+                  <p className="text-xs text-gray-500">{organisationGuidelines.fonts.headingStyle}</p>
+                ) : null}
+              </div>
+              {organisationGuidelines.fonts.secondary ? (
+                <div className="space-y-1">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Secondary font</p>
+                  <p className="text-sm text-gray-900">{organisationGuidelines.fonts.secondary}</p>
+                </div>
+              ) : null}
+              {organisationGuidelines.fonts.accent ? (
+                <div className="space-y-1">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Accent font</p>
+                  <p className="text-sm text-gray-900">{organisationGuidelines.fonts.accent}</p>
+                </div>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {(['primary', 'secondary', 'accent', 'neutral', 'highlight'] as const).map((colorKey) => {
+                const value = organisationGuidelines.colors[colorKey];
+                if (!value) return null;
+                return (
+                  <div
+                    key={colorKey}
+                    className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 shadow-sm"
+                  >
+                    <span
+                      className="h-8 w-8 rounded-full border border-slate-300"
+                      style={{ backgroundColor: value }}
+                    />
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                        {BRAND_COLOR_LABELS[colorKey]}
+                      </p>
+                      <p className="text-sm font-medium text-slate-900">{value}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {organisationGuidelinesUpdatedAt ? (
+              <p className="text-xs text-gray-500">
+                Updated {brandGuidelinesTimestampFormatter.format(organisationGuidelinesUpdatedAt)}
+              </p>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              {organisation?.id ? (
+                <Link href={`/orgs/${organisation.id}/brand-guidelines?project=${project.id}`} className="btn-sm w-fit">
+                  Manage brand guidelines
+                </Link>
+              ) : null}
+              {organisation?.id ? (
+                <Link href={`/orgs/${organisation.id}`} className="btn-sm btn-outline w-fit">
+                  Open organisation workspace
+                </Link>
+              ) : null}
+            </div>
+          </div>
+        ) : project.brandGuidelinesCompleted ? (
+          <div className="grid gap-3 text-sm">
+            <p className="text-amber-700">
+              These guidelines were saved against the project before organisation workspaces were introduced.
+            </p>
             {project.brandFontName ? (
               <div className="flex flex-wrap items-center gap-2 text-gray-700">
-                <span className="font-medium text-gray-900">Font:</span>
+                <span className="font-medium text-gray-900">Primary font:</span>
                 <span>{project.brandFontName}</span>
                 {project.brandFontSource ? (
-                  <span className="text-xs uppercase tracking-wide text-gray-500">
-                    {project.brandFontSource}
-                  </span>
-                ) : null}
-                {project.brandFontDownloadUrl ? (
-                  <a
-                    href={project.brandFontDownloadUrl}
-                    className="text-orange-600 underline"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    Download font
-                  </a>
+                  <span className="text-xs uppercase tracking-wide text-gray-500">{project.brandFontSource}</span>
                 ) : null}
               </div>
             ) : null}
             {project.brandFontCategory ? (
               <p className="text-xs text-gray-500">Category: {project.brandFontCategory}</p>
             ) : null}
-            <Link href={`/projects/${project.id}/brand-wizard`} className="btn-sm w-fit">Update Guidelines</Link>
+            {organisation?.id ? (
+              <Link href={`/orgs/${organisation.id}/brand-guidelines?project=${project.id}`} className="btn-sm w-fit">
+                Move guidelines to organisation
+              </Link>
+            ) : (
+              <Link href={`/projects/${project.id}/brand-wizard`} className="btn-sm w-fit">
+                Review saved guidelines
+              </Link>
+            )}
           </div>
         ) : (
           <div className="grid gap-2">
-            <p className="text-sm text-red-600">Not configured</p>
-            <Link href={`/projects/${project.id}/brand-wizard`} className="btn-sm w-fit">Complete Guidelines</Link>
+            <p className="text-sm text-amber-600">
+              {organisation?.name
+                ? `${organisation.name} hasn’t shared their brand guidelines yet.`
+                : 'Brand guidelines not configured for this organisation.'}
+            </p>
+            {organisation?.id ? (
+              <Link href={`/orgs/${organisation.id}/brand-guidelines?project=${project.id}`} className="btn-sm w-fit">
+                Set up brand guidelines
+              </Link>
+            ) : null}
           </div>
         )}
       </div>

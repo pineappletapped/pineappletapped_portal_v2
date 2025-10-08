@@ -13,6 +13,7 @@ import {
   FiMapPin,
   FiClock,
   FiCheckCircle,
+  FiFilm,
 } from "react-icons/fi";
 import {
   deliverableIconMap,
@@ -140,8 +141,12 @@ export default function ProductCard({ product }: { product: Product }) {
   const { visibleDeliverables, remainingDeliverableCount } =
     getDeliverableSummary(product);
   const showSummary = Boolean(
-    product.deliveryTime || visibleDeliverables.length > 0 || onsiteSummary
+    product.deliveryTime ||
+    visibleDeliverables.length > 0 ||
+    onsiteSummary ||
+    (product.storyboardEnabled ?? false)
   );
+  const storyboardEnabled = Boolean(product.storyboardEnabled);
   const variationSelectId = `product-${product.id}-variation`;
 
   const handleQuickAdd = () => {
@@ -207,6 +212,12 @@ export default function ProductCard({ product }: { product: Product }) {
             {remainingDeliverableCount > 0 && (
               <span className="inline-flex items-center gap-1 rounded-full bg-gray-50 px-2 py-0.5 font-medium text-gray-600">
                 +{remainingDeliverableCount} more
+              </span>
+            )}
+            {storyboardEnabled && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 font-medium text-emerald-700">
+                <FiFilm className="h-3 w-3" aria-hidden />
+                Storyboard
               </span>
             )}
           </div>

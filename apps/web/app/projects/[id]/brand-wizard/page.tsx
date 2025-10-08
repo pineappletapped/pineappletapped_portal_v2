@@ -70,6 +70,13 @@ export default function BrandWizardPage() {
   const [assigningExisting, setAssigningExisting] = useState(false);
 
   useEffect(() => {
+    if (loading) return;
+    if (project && project.orgId) {
+      router.replace(`/orgs/${project.orgId}/brand-guidelines?project=${projectId}`);
+    }
+  }, [loading, project, projectId, router]);
+
+  useEffect(() => {
     (async () => {
       if (!projectId) return;
       const snap = await getDoc(doc(db, 'projects', projectId));
@@ -474,6 +481,14 @@ export default function BrandWizardPage() {
     selectedGuidelineId
       ? existingGuidelines.find((g) => g.id === selectedGuidelineId) || null
       : null;
+
+  if (!loading && project && project.orgId) {
+    return (
+      <div className="mx-auto max-w-xl rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600 shadow-sm">
+        Redirecting to the organisation brand guidelines…
+      </div>
+    );
+  }
 
   if (loading) return <p>Loading…</p>;
   if (!project) return <p>Project not found.</p>;
