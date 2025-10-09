@@ -27,9 +27,9 @@ export default async function Home() {
       <HeroSection
         title={homepage.heroTitle}
         subtitle={homepage.heroSubtitle}
-        videoSrc="https://www.w3schools.com/html/mov_bbb.mp4"
-        posterSrc="/placeholder.jpg"
-        posterAlt="Pineapple Tapped hero background"
+        videoSrc={homepage.heroVideoUrl}
+        posterSrc={homepage.heroPosterUrl}
+        posterAlt={homepage.heroPosterAlt}
       />
 
       <ProcessSection
