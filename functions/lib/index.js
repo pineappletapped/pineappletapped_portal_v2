@@ -4803,34 +4803,20 @@ export const reserveKit = functions.https.onCall(async (data) => {
             autoConfirm: true,
         });
     }
-    const anyKitAttempt = attempts.some((attempt) => attempt.requiresKit);
+    const manualBypassAttempt = attempts.find((attempt) => !attempt.requiresKit);
+    if (manualBypassAttempt) {
+        return createNonKitResponse(manualBypassAttempt);
+    }
     const selectBypassAttempt = () => {
         if (attempts.length === 0) {
             return null;
         }
-        const nonKitAttempt = attempts.find((attempt) => !attempt.requiresKit);
-        return nonKitAttempt ?? attempts[0];
+        return attempts[0];
     };
-    if (!anyKitAttempt || eqIds.length === 0) {
+    if (eqIds.length === 0) {
         const attempt = selectBypassAttempt();
         if (attempt) {
-            return {
-                conflicts: [],
-                kitItems: [],
-                rentalTotal: 0,
-                status: attempt.initialStatus,
-                missingStandards: [],
-                provider: {
-                    level: attempt.key,
-                    status: attempt.initialStatus,
-                    label: attempt.label,
-                    franchiseId: attempt.franchiseId,
-                    territoryId: coverageInfo.territoryId,
-                    requiresKit: false,
-                    autoConfirm: attempt.autoConfirm,
-                    description: attempt.description ?? null,
-                },
-            };
+            return createNonKitResponse(attempt);
         }
     }
     const deriveOwnerInfo = (eq) => {

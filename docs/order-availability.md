@@ -24,6 +24,8 @@ If the coverage assignment routes directly to HQ (because no franchise exists) o
 
 Each stage uses the same equipment IDs defined on the product. If a stage cannot supply an item—because the item belongs to another owner, is already booked, marked unavailable, or lacks the required compliance standard—the stage fails and the next fallback is tried.
 
+> **Manual routing note:** When an enabled routing stage has the **Check kit automatically** toggle disabled the callable now short-circuits straight to that stage, skipping Firestore equipment lookups entirely. This matches the expectation that manual routing leans on the calendar’s staffing availability instead of inventory checks. 【F:functions/src/index.ts†L5861-L5877】
+
 Behind the scenes each stage is described by a `ReservationAttempt` structure that holds the owner type (`company`, `franchise`, or `user`), franchise ID, initial status (`confirmed` for franchise-owned kit, `pending` otherwise), and whether kit is required at all. The callable iterates through this array until one attempt succeeds or every option produces conflicts.
 
 ## 3. Equipment and standards checks
