@@ -38,6 +38,15 @@ const ANALYTICS_ALLOWED_ORIGINS = [
   'http://localhost:3000',
 ];
 
+function applyRecordLoginCors(req: functions.Request, res: functions.Response) {
+  const origin = req.get('origin');
+  const allowedOrigin = origin && ANALYTICS_ALLOWED_ORIGINS.includes(origin) ? origin : '*';
+  res.set('Access-Control-Allow-Origin', allowedOrigin);
+  res.set('Vary', 'Origin');
+  res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+}
+
 // TODO: wrap all http functions with the cors handler, for example:
 // exports.myFunction = functions.https.onRequest((req, res) => {
 //   corsHandler(req, res, () => {
@@ -75,30 +84,60 @@ let cachedOperationalSettings:
   | { platformFeePercent: number | null; splitTerms: StripeSplitTermConfig[]; fetchedAt: number }
   | null = null;
 
-const KIT_ROUTING_CACHE_TTL_MS = 5 * 60 * 1000;
-let cachedKitRoutingSettings:
-  | { settings: KitRoutingSettings; fetchedAt: number }
-  | null = null;
+type KitRoutingCacheEntry = {
+  settings: KitRoutingSettings;
+  fetchedAt: number;
+  version: string | null;
+};
+
+let cachedKitRoutingSettings: KitRoutingCacheEntry | null = null;
+
+function resolveKitRoutingVersion(
+  data: Record<string, unknown> | null,
+  snap: DocumentSnapshot<DocumentData>,
+): string | null {
+  if (data) {
+    const rawUpdatedAt = data.updatedAt;
+    if (typeof rawUpdatedAt === 'string' && rawUpdatedAt.trim().length > 0) {
+      return rawUpdatedAt.trim();
+    }
+  }
+  const updateTime = snap.updateTime ?? snap.createTime ?? null;
+  return updateTime ? updateTime.toDate().toISOString() : null;
+}
 
 async function loadKitRoutingSettings(): Promise<KitRoutingSettings> {
   const now = Date.now();
-  if (cachedKitRoutingSettings && now - cachedKitRoutingSettings.fetchedAt < KIT_ROUTING_CACHE_TTL_MS) {
-    return cachedKitRoutingSettings.settings;
-  }
   try {
-    const snap = await db.collection('settings').doc('kitRouting').get();
-    if (snap.exists) {
-      const parsed = parseKitRoutingSettings(snap.data());
+    const docRef = db.collection('settings').doc('kitRouting');
+    const snap = await docRef.get();
+    const data = snap.exists ? ((snap.data() as Record<string, unknown>) ?? null) : null;
+    const version = resolveKitRoutingVersion(data, snap);
+    if (
+      cachedKitRoutingSettings &&
+      cachedKitRoutingSettings.version &&
+      version &&
+      cachedKitRoutingSettings.version === version
+    ) {
+      cachedKitRoutingSettings.fetchedAt = now;
+      return cloneRoutingSettings(cachedKitRoutingSettings.settings);
+    }
+    if (data) {
+      const parsed = parseKitRoutingSettings(data);
       const cloned = cloneRoutingSettings(parsed);
-      cachedKitRoutingSettings = { settings: cloned, fetchedAt: now };
-      return cloned;
+      cachedKitRoutingSettings = { settings: cloned, fetchedAt: now, version };
+      return cloneRoutingSettings(cloned);
     }
   } catch (error) {
     console.error('Failed to load kit routing settings', error);
   }
+  if (cachedKitRoutingSettings) {
+    cachedKitRoutingSettings.fetchedAt = now;
+    return cloneRoutingSettings(cachedKitRoutingSettings.settings);
+  }
   const fallback = cloneRoutingSettings(DEFAULT_KIT_ROUTING_SETTINGS);
-  cachedKitRoutingSettings = { settings: fallback, fetchedAt: now };
-  return fallback;
+  cachedKitRoutingSettings = { settings: fallback, fetchedAt: now, version: null };
+  return cloneRoutingSettings(fallback);
 }
 
 const BOOKING_INVITE_BASE_URL =
@@ -152,6 +191,272 @@ function normaliseStringList(value: unknown): string[] {
     }
   });
   return Array.from(new Set(result));
+}
+
+interface NormalisedDigitalRelease {
+  status: 'pending' | 'processing' | 'released' | 'archived';
+  assetId: string | null;
+  assetName: string | null;
+  storageKey: string | null;
+  downloadUrl: string | null;
+  driveFileId: string | null;
+  driveFileName: string | null;
+  driveFileMimeType: string | null;
+  driveFileSize: number | null;
+  driveFileWebViewLink: string | null;
+  driveFileModifiedAt: admin.firestore.Timestamp | null;
+  sizeBytes: number | null;
+  version: number | null;
+  releasedAt: admin.firestore.Timestamp | null;
+  updatedAt: admin.firestore.Timestamp | null;
+  projectId: string | null;
+  orderId: string | null;
+  uploadedBy: string | null;
+  releaseNotes: string | null;
+}
+
+interface NormalisedDigitalDelivery {
+  enabled: boolean;
+  label: string | null;
+  description: string | null;
+  autoRelease: boolean;
+  driveTemplateFolderId: string | null;
+  driveFolderName: string | null;
+  status: 'pending' | 'processing' | 'released' | 'archived' | null;
+  release: NormalisedDigitalRelease | null;
+  releaseHistory: NormalisedDigitalRelease[];
+  lastReleasedAt: admin.firestore.Timestamp | null;
+  lastReleasedAssetId: string | null;
+  lastReleasedVersion: number | null;
+}
+
+function parseTimestamp(value: any): admin.firestore.Timestamp | null {
+  if (!value) return null;
+  if (value instanceof admin.firestore.Timestamp) {
+    return value;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : admin.firestore.Timestamp.fromDate(value);
+  }
+  if (typeof value === 'string') {
+    const parsed = new Date(value.trim());
+    return Number.isNaN(parsed.getTime()) ? null : admin.firestore.Timestamp.fromDate(parsed);
+  }
+  if (typeof value === 'object' && value !== null) {
+    try {
+      if (typeof (value as { toDate?: () => Date }).toDate === 'function') {
+        const converted = (value as { toDate: () => Date }).toDate();
+        if (converted instanceof Date && !Number.isNaN(converted.getTime())) {
+          return admin.firestore.Timestamp.fromDate(converted);
+        }
+      }
+    } catch {
+      // ignore conversion errors
+    }
+    if (typeof (value as { seconds?: number }).seconds === 'number') {
+      const seconds = (value as { seconds: number; nanoseconds?: number }).seconds;
+      const nanos = (value as { seconds: number; nanoseconds?: number }).nanoseconds ?? 0;
+      return new admin.firestore.Timestamp(seconds, nanos);
+    }
+  }
+  return null;
+}
+
+function parseNullableString(value: any): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseNullableNumber(value: any): number | null {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function normaliseDigitalRelease(raw: any): NormalisedDigitalRelease | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const statusRaw = typeof raw.status === 'string' ? raw.status.trim().toLowerCase() : '';
+  const status: NormalisedDigitalRelease['status'] =
+    statusRaw === 'released' || statusRaw === 'processing' || statusRaw === 'archived'
+      ? (statusRaw as NormalisedDigitalRelease['status'])
+      : 'pending';
+  return {
+    status,
+    assetId: parseNullableString(raw.assetId) ?? parseNullableString(raw.id),
+    assetName: parseNullableString(raw.assetName) ?? parseNullableString(raw.name),
+    storageKey: parseNullableString(raw.storageKey),
+    downloadUrl: parseNullableString(raw.downloadUrl),
+    driveFileId: parseNullableString(raw.driveFileId),
+    driveFileName: parseNullableString(raw.driveFileName),
+    driveFileMimeType: parseNullableString(raw.driveFileMimeType),
+    driveFileSize: parseNullableNumber(raw.driveFileSize),
+    driveFileWebViewLink: parseNullableString(raw.driveFileWebViewLink),
+    driveFileModifiedAt: parseTimestamp(raw.driveFileModifiedAt),
+    sizeBytes: parseNullableNumber(raw.sizeBytes) ?? parseNullableNumber(raw.bytes),
+    version: parseNullableNumber(raw.version),
+    releasedAt: parseTimestamp(raw.releasedAt),
+    updatedAt: parseTimestamp(raw.updatedAt),
+    projectId: parseNullableString(raw.projectId),
+    orderId: parseNullableString(raw.orderId),
+    uploadedBy: parseNullableString(raw.uploadedBy),
+    releaseNotes: parseNullableString(raw.releaseNotes),
+  };
+}
+
+function normaliseDigitalDelivery(
+  raw: any,
+  fallbackLabel: string | null = null
+): NormalisedDigitalDelivery | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const enabled = raw.enabled !== false;
+  if (!enabled) {
+    return {
+      enabled: false,
+      label: fallbackLabel ?? null,
+      description: null,
+      autoRelease: true,
+      driveTemplateFolderId: null,
+      driveFolderName: null,
+      status: null,
+      release: null,
+      releaseHistory: [],
+      lastReleasedAt: null,
+      lastReleasedAssetId: null,
+      lastReleasedVersion: null,
+    };
+  }
+  const release = normaliseDigitalRelease(raw.release);
+  const history = Array.isArray(raw.releaseHistory)
+    ? (raw.releaseHistory as any[])
+        .map((entry) => normaliseDigitalRelease(entry))
+        .filter((entry): entry is NormalisedDigitalRelease => Boolean(entry))
+    : [];
+  const statusRaw = typeof raw.status === 'string' ? raw.status.trim().toLowerCase() : '';
+  let status: NormalisedDigitalDelivery['status'] = null;
+  if (statusRaw === 'released' || statusRaw === 'processing' || statusRaw === 'archived') {
+    status = statusRaw;
+  } else if (statusRaw === 'pending') {
+    status = 'pending';
+  } else if (release) {
+    status = release.status;
+  }
+  const label = parseNullableString(raw.label) ?? fallbackLabel;
+  return {
+    enabled: true,
+    label: label ?? null,
+    description: parseNullableString(raw.description),
+    autoRelease: raw.autoRelease === false ? false : true,
+    driveTemplateFolderId: parseNullableString(raw.driveTemplateFolderId),
+    driveFolderName: parseNullableString(raw.driveFolderName),
+    status,
+    release,
+    releaseHistory: history,
+    lastReleasedAt: parseTimestamp(raw.lastReleasedAt) ?? (release?.releasedAt ?? null),
+    lastReleasedAssetId: parseNullableString(raw.lastReleasedAssetId) ?? release?.assetId ?? null,
+    lastReleasedVersion: parseNullableNumber(raw.lastReleasedVersion) ?? release?.version ?? null,
+  };
+}
+
+function computeDigitalDeliveryStatus(config: NormalisedDigitalDelivery | null):
+  | 'pending'
+  | 'processing'
+  | 'released'
+  | 'archived'
+  | null {
+  if (!config || !config.enabled) {
+    return null;
+  }
+  if (config.status) {
+    return config.status;
+  }
+  if (config.release) {
+    return config.release.status;
+  }
+  return 'pending';
+}
+
+function computeAggregateDigitalStatus(
+  deliveries: Record<string, NormalisedDigitalDelivery>
+): 'pending' | 'processing' | 'released' | 'archived' | 'partial' | null {
+  const entries = Object.values(deliveries).filter((entry) => entry.enabled);
+  if (entries.length === 0) {
+    return null;
+  }
+  const statuses = entries.map((entry) => computeDigitalDeliveryStatus(entry));
+  if (statuses.every((status) => status === 'released')) {
+    return 'released';
+  }
+  if (statuses.some((status) => status === 'processing')) {
+    return 'processing';
+  }
+  if (statuses.some((status) => status === 'released')) {
+    return 'partial';
+  }
+  if (statuses.some((status) => status === 'archived')) {
+    return 'archived';
+  }
+  return 'pending';
+}
+
+function serialiseDigitalDeliveryForClient(
+  config: NormalisedDigitalDelivery | null
+): Record<string, any> | null {
+  if (!config || !config.enabled) {
+    return null;
+  }
+  return {
+    label: config.label,
+    description: config.description,
+    autoRelease: config.autoRelease,
+    status: computeDigitalDeliveryStatus(config),
+    release: config.release
+      ? {
+          status: config.release.status,
+          assetId: config.release.assetId,
+          assetName: config.release.assetName,
+          downloadUrl: config.release.downloadUrl,
+          version: config.release.version,
+          releasedAt: config.release.releasedAt?.toDate().toISOString?.() ?? null,
+          updatedAt: config.release.updatedAt?.toDate().toISOString?.() ?? null,
+          releaseNotes: config.release.releaseNotes,
+          driveFileName: config.release.driveFileName,
+          driveFileId: config.release.driveFileId,
+          driveFileWebViewLink: config.release.driveFileWebViewLink,
+          sizeBytes: config.release.sizeBytes,
+        }
+      : null,
+    lastReleasedAt: config.lastReleasedAt?.toDate().toISOString?.() ?? null,
+    lastReleasedAssetId: config.lastReleasedAssetId,
+    lastReleasedVersion: config.lastReleasedVersion,
+  };
+}
+
+function serialiseDigitalDeliveryForStorage(
+  config: NormalisedDigitalDelivery | null
+): Record<string, any> {
+  if (!config || !config.enabled) {
+    return { enabled: false };
+  }
+  const releaseHistory = config.releaseHistory.map((entry) => ({ ...entry }));
+  const release = config.release ? { ...config.release } : null;
+  return {
+    enabled: true,
+    label: config.label,
+    description: config.description,
+    autoRelease: config.autoRelease,
+    driveTemplateFolderId: config.driveTemplateFolderId,
+    driveFolderName: config.driveFolderName,
+    status: config.status,
+    release,
+    releaseHistory,
+    lastReleasedAt: config.lastReleasedAt,
+    lastReleasedAssetId: config.lastReleasedAssetId,
+    lastReleasedVersion: config.lastReleasedVersion,
+  };
 }
 
 function roundCurrency(value: number): number {
@@ -427,6 +732,22 @@ function decodeEncryptionKey(raw: string): Buffer {
   throw new Error('Encryption key must decode to 32 bytes for AES-256-GCM.');
 }
 
+function hashStateSecret(secret: string): string {
+  return crypto.createHash('sha256').update(secret, 'utf8').digest('hex');
+}
+
+function timingSafeEqualHex(expected: string, actual: string): boolean {
+  if (expected.length !== actual.length) {
+    return false;
+  }
+  const expectedBuf = Buffer.from(expected, 'hex');
+  const actualBuf = Buffer.from(actual, 'hex');
+  if (expectedBuf.length !== actualBuf.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(expectedBuf, actualBuf);
+}
+
 async function getSocialAccountEncryptionKey(): Promise<Buffer> {
   if (cachedSocialAccountEncryptionKey) {
     return cachedSocialAccountEncryptionKey;
@@ -472,6 +793,7 @@ type SocialAccountProviderInput = {
 
 type StoreSocialAccountCredentialRequest = {
   stateId?: string | null;
+  stateSecret?: string | null;
   accountId?: string | null;
   platform?: string | null;
   organisationId?: string | null;
@@ -717,8 +1039,31 @@ async function storeSocialAccountCredentials(
   const initiatorEmail = normaliseString(payload.initiator?.email);
   const requestedBy = normaliseString(payload.requestedBy);
   const stateId = normaliseString(payload.stateId);
+  const stateSecret = normaliseString(payload.stateSecret);
   const providerAccountId = normaliseString(payload.provider?.accountId);
   const providerAccountName = normaliseString(payload.provider?.accountName);
+
+  let stateRef: DocumentReference<DocumentData> | null = null;
+  let stateSecretHash: string | null = null;
+  if (stateId) {
+    stateRef = db.collection('socialAccountAuthStates').doc(stateId);
+    const stateSnap = await stateRef.get();
+    if (!stateSnap.exists) {
+      throw new Error('OAuth session has expired or is invalid.');
+    }
+    const stateData = stateSnap.data() as Record<string, unknown> | null;
+    const expectedHash = normaliseString(stateData?.stateSecretHash);
+    if (expectedHash) {
+      if (!stateSecret) {
+        throw new Error('OAuth session verification secret is missing.');
+      }
+      const providedHash = hashStateSecret(stateSecret);
+      if (!timingSafeEqualHex(expectedHash, providedHash)) {
+        throw new Error('OAuth session verification failed.');
+      }
+      stateSecretHash = expectedHash;
+    }
+  }
 
   const sanitizedAccessToken = tokens.accessToken.trim();
   const sanitizedRefreshToken =
@@ -844,6 +1189,17 @@ async function storeSocialAccountCredentials(
     }
 
     transaction.set(secretRef, secretData, { merge: true });
+
+    if (stateRef && stateSecretHash) {
+      transaction.set(
+        stateRef,
+        {
+          stateSecretHash: admin.firestore.FieldValue.delete(),
+          verifiedAt: nowTimestamp,
+        },
+        { merge: true }
+      );
+    }
   });
 
   return {
@@ -873,13 +1229,6 @@ export const socialAccountsStoreCredentials = onRequest(async (req, res) => {
   }
 
   try {
-    const expectedKey = await getSocialAccountServiceKey();
-    const providedKey = req.get('x-service-key') ?? req.get('X-Service-Key') ?? null;
-    if (!providedKey || providedKey.trim() !== expectedKey) {
-      res.status(401).json({ error: 'Invalid service key.' });
-      return;
-    }
-
     let body: unknown = req.body;
     if (typeof body === 'string') {
       try {
@@ -900,6 +1249,23 @@ export const socialAccountsStoreCredentials = onRequest(async (req, res) => {
           return;
         }
       }
+    }
+
+    let expectedKey: string | null = null;
+    try {
+      expectedKey = await getSocialAccountServiceKey();
+    } catch (error) {
+      console.warn('Social account service key unavailable, relying on OAuth state verification.', error);
+    }
+
+    const providedKey = req.get('x-service-key') ?? req.get('X-Service-Key') ?? null;
+    if (expectedKey) {
+      if (!providedKey || providedKey.trim() !== expectedKey) {
+        res.status(401).json({ error: 'Invalid service key.' });
+        return;
+      }
+    } else if (providedKey && providedKey.trim().length > 0) {
+      console.warn('Ignoring provided social account service key because none is configured.');
     }
 
     const result = await storeSocialAccountCredentials(body as StoreSocialAccountCredentialRequest);
@@ -2419,6 +2785,52 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
   }
   const orderData = orderSnap.data() as Record<string, any>;
   const driveInfo = (orderData.drive as Record<string, any>) || {};
+  const orderItems = Array.isArray(orderData.items)
+    ? (orderData.items as Array<Record<string, any>>)
+        .map((item) => {
+          if (!item || typeof item !== 'object') {
+            return null;
+          }
+          const productId =
+            typeof item.productId === 'string' && item.productId.trim().length > 0
+              ? item.productId.trim()
+              : typeof item.id === 'string' && item.id.trim().length > 0
+                ? item.id.trim()
+                : '';
+          if (!productId) {
+            return null;
+          }
+          const name =
+            typeof item.name === 'string' && item.name.trim().length > 0
+              ? item.name.trim()
+              : null;
+          return { productId, name };
+        })
+        .filter((entry): entry is { productId: string; name: string | null } => entry !== null)
+    : [];
+  const rawDigitalDeliveries =
+    orderData.digitalDeliveries && typeof orderData.digitalDeliveries === 'object'
+      ? (orderData.digitalDeliveries as Record<string, any>)
+      : {};
+  let digitalDeliveries: Array<Record<string, any>> = [];
+  const normalisedDigitalMap: Record<string, NormalisedDigitalDelivery> = {};
+  Object.entries(rawDigitalDeliveries).forEach(([productId, raw]) => {
+    const normalised = normaliseDigitalDelivery(raw, null);
+    if (normalised && normalised.enabled) {
+      normalisedDigitalMap[productId] = normalised;
+      const summary = serialiseDigitalDeliveryForClient(normalised);
+      if (summary) {
+        digitalDeliveries.push({ productId, ...summary });
+      }
+    }
+  });
+  const digitalStatusFromOrder =
+    typeof orderData.digitalDeliveryStatus === 'string'
+      ? orderData.digitalDeliveryStatus
+      : null;
+  let digitalUpdatedAtTimestamp = parseTimestamp(orderData.digitalDeliveryUpdatedAt);
+  let digitalStatus =
+    digitalStatusFromOrder ?? computeAggregateDigitalStatus(normalisedDigitalMap) ?? null;
   const orderOwnerUid =
     typeof orderData.userId === 'string' && orderData.userId.trim().length > 0 ? orderData.userId.trim() : null;
 
@@ -2609,11 +3021,17 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
     order: {
       id: orderId,
       status: typeof orderData.status === 'string' ? orderData.status : null,
+      items: orderItems,
     },
     drive: {
       orderFolderId: normaliseDriveId(driveInfo.orderFolderId),
       orderFolderName: typeof driveInfo.orderFolderName === 'string' ? driveInfo.orderFolderName : null,
       productFolders,
+    },
+    digital: {
+      status: digitalStatus,
+      updatedAt: digitalUpdatedAtTimestamp?.toDate().toISOString?.() ?? null,
+      deliveries: digitalDeliveries,
     },
   };
 });
@@ -2775,6 +3193,10 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
   const assetTypeInput =
     typeof data?.assetType === 'string' ? data.assetType.trim().toLowerCase() : '';
   const assetType = assetTypeInput === 'flight_plan' ? 'flight_plan' : 'deliverable';
+  const digitalProductIdInput =
+    typeof data?.digitalProductId === 'string' ? data.digitalProductId.trim() : '';
+  const releaseNotesInput = typeof data?.releaseNotes === 'string' ? data.releaseNotes : '';
+  const digitalReleaseNotes = releaseNotesInput.trim().slice(0, 2000);
   if (!projectId || !driveFileId) {
     throw new functions.https.HttpsError('invalid-argument', 'projectId and fileId are required');
   }
@@ -2937,6 +3359,169 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
   };
 
   const assetRef = await db.collection('assets').add(assetDoc);
+  let digitalReleaseResult: Record<string, any> | null = null;
+
+  if (assetType === 'deliverable' && digitalProductIdInput) {
+    try {
+      let allowedProductIds: string[] = [];
+      if (orderData) {
+        if (Array.isArray(orderData.productIds)) {
+          allowedProductIds = (orderData.productIds as unknown[])
+            .map((value) => (typeof value === 'string' ? value.trim() : ''))
+            .filter((value) => value.length > 0);
+        }
+        if (allowedProductIds.length === 0 && Array.isArray(orderData.items)) {
+          allowedProductIds = (orderData.items as Array<Record<string, any>>)
+            .map((item) => {
+              if (typeof item?.id === 'string' && item.id.trim().length > 0) {
+                return item.id.trim();
+              }
+              if (typeof item?.productId === 'string' && item.productId.trim().length > 0) {
+                return item.productId.trim();
+              }
+              return '';
+            })
+            .filter((value) => value.length > 0);
+        }
+        if (allowedProductIds.length > 0 && !allowedProductIds.includes(digitalProductIdInput)) {
+          throw new functions.https.HttpsError(
+            'failed-precondition',
+            'The selected product is not part of this order.'
+          );
+        }
+      }
+
+      const productRef = db.collection('products').doc(digitalProductIdInput);
+      const productSnap = await productRef.get();
+      if (!productSnap.exists) {
+        throw new functions.https.HttpsError(
+          'not-found',
+          'The selected product for digital delivery could not be found.'
+        );
+      }
+      const productData = productSnap.data() as Record<string, any>;
+      const productName =
+        typeof productData.name === 'string' && productData.name.trim().length > 0
+          ? productData.name.trim()
+          : null;
+      const productDigitalConfig = normaliseDigitalDelivery(
+        productData.digitalDelivery,
+        productName
+      );
+      const previousVersionCandidate =
+        productDigitalConfig?.lastReleasedVersion ?? productDigitalConfig?.release?.version ?? 0;
+      const baseVersion = Number(previousVersionCandidate);
+      const releaseVersion = Number.isFinite(baseVersion) ? baseVersion + 1 : 1;
+      const releaseTimestamp = admin.firestore.Timestamp.now();
+      const driveModifiedAt = parseTimestamp(fileMeta.modifiedTime);
+      const releaseNotes = digitalReleaseNotes.length > 0 ? digitalReleaseNotes : null;
+      const releaseRecord: NormalisedDigitalRelease = {
+        status: 'released',
+        assetId: assetRef.id,
+        assetName,
+        storageKey,
+        downloadUrl,
+        driveFileId,
+        driveFileName: sourceName,
+        driveFileMimeType: mimeType,
+        driveFileSize: sizeBytes ?? null,
+        driveFileWebViewLink:
+          typeof fileMeta.webViewLink === 'string' ? fileMeta.webViewLink : null,
+        driveFileModifiedAt: driveModifiedAt,
+        sizeBytes: sizeBytes ?? null,
+        version: releaseVersion,
+        releasedAt: releaseTimestamp,
+        updatedAt: releaseTimestamp,
+        projectId,
+        orderId,
+        uploadedBy: context.auth.uid,
+        releaseNotes,
+      };
+      const historyLimit = 20;
+      const previousHistory = productDigitalConfig?.releaseHistory ?? [];
+      const nextHistory = productDigitalConfig?.release
+        ? [productDigitalConfig.release, ...previousHistory].slice(0, historyLimit)
+        : [...previousHistory].slice(0, historyLimit);
+      const nextConfig: NormalisedDigitalDelivery =
+        productDigitalConfig && productDigitalConfig.enabled
+          ? {
+              ...productDigitalConfig,
+              status: 'released',
+              release: releaseRecord,
+              releaseHistory: nextHistory,
+              lastReleasedAt: releaseTimestamp,
+              lastReleasedAssetId: assetRef.id,
+              lastReleasedVersion: releaseVersion,
+            }
+          : {
+              enabled: true,
+              label: productDigitalConfig?.label ?? productName ?? null,
+              description: productDigitalConfig?.description ?? null,
+              autoRelease: productDigitalConfig?.autoRelease ?? true,
+              driveTemplateFolderId: productDigitalConfig?.driveTemplateFolderId ?? null,
+              driveFolderName: productDigitalConfig?.driveFolderName ?? null,
+              status: 'released',
+              release: releaseRecord,
+              releaseHistory: nextHistory,
+              lastReleasedAt: releaseTimestamp,
+              lastReleasedAssetId: assetRef.id,
+              lastReleasedVersion: releaseVersion,
+            };
+      await productRef.set(
+        { digitalDelivery: serialiseDigitalDeliveryForStorage(nextConfig) },
+        { merge: true }
+      );
+      normalisedDigitalMap[digitalProductIdInput] = nextConfig;
+      digitalUpdatedAtTimestamp = releaseTimestamp;
+      if (orderId) {
+        const orderRef = db.collection('orders').doc(orderId);
+        const orderDigitalDeliveriesRaw =
+          orderData && orderData.digitalDeliveries && typeof orderData.digitalDeliveries === 'object'
+            ? (orderData.digitalDeliveries as Record<string, any>)
+            : {};
+        orderDigitalDeliveriesRaw[digitalProductIdInput] = serialiseDigitalDeliveryForStorage(
+          nextConfig
+        );
+        const productIdSet = new Set(
+          Array.isArray(orderData?.productIds)
+            ? (orderData?.productIds as unknown[])
+                .map((value) => (typeof value === 'string' ? value.trim() : ''))
+                .filter((value) => value.length > 0)
+            : allowedProductIds
+        );
+        productIdSet.add(digitalProductIdInput);
+        const orderUpdate: Record<string, any> = {
+          digitalDeliveries: orderDigitalDeliveriesRaw,
+          digitalDeliveryStatus: computeAggregateDigitalStatus(normalisedDigitalMap),
+          digitalDeliveryUpdatedAt: releaseTimestamp,
+          productIds: Array.from(productIdSet),
+        };
+        await orderRef.set(orderUpdate, { merge: true });
+        orderData = orderData
+          ? {
+              ...orderData,
+              digitalDeliveries: orderDigitalDeliveriesRaw,
+              digitalDeliveryStatus: orderUpdate.digitalDeliveryStatus,
+              digitalDeliveryUpdatedAt: releaseTimestamp,
+              productIds: Array.from(productIdSet),
+            }
+          : {
+              digitalDeliveries: orderDigitalDeliveriesRaw,
+              digitalDeliveryStatus: orderUpdate.digitalDeliveryStatus,
+              digitalDeliveryUpdatedAt: releaseTimestamp,
+              productIds: Array.from(productIdSet),
+            };
+      }
+      digitalStatus = computeAggregateDigitalStatus(normalisedDigitalMap) ?? digitalStatus;
+      digitalReleaseResult = {
+        productId: digitalProductIdInput,
+        delivery: serialiseDigitalDeliveryForClient(nextConfig),
+      };
+    } catch (digitalError) {
+      console.warn('drive_stageAssetFromFile digital release failed', digitalError);
+      throw digitalError;
+    }
+  }
 
   try {
     await writeAuditLog({
@@ -2978,8 +3563,159 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
     }, taskError);
   }
 
-  return { assetId: assetRef.id, version };
+  digitalDeliveries = Object.entries(normalisedDigitalMap)
+    .map(([productId, config]) => {
+      const summary = serialiseDigitalDeliveryForClient(config);
+      return summary ? { productId, ...summary } : null;
+    })
+    .filter((entry): entry is Record<string, any> => entry !== null);
+  const aggregateStatusFinal = computeAggregateDigitalStatus(normalisedDigitalMap);
+  if (aggregateStatusFinal) {
+    digitalStatus = aggregateStatusFinal;
+  }
+  const digitalUpdatedAtIso = digitalUpdatedAtTimestamp
+    ? digitalUpdatedAtTimestamp.toDate().toISOString()
+    : null;
+
+  return {
+    assetId: assetRef.id,
+    version,
+    digitalRelease: digitalReleaseResult,
+    digital: {
+      status: digitalStatus ?? null,
+      updatedAt: digitalUpdatedAtIso,
+      deliveries: digitalDeliveries,
+    },
+  };
 });
+
+export const syncProductDigitalDeliveryToOrders = functions.firestore
+  .document('products/{productId}')
+  .onWrite(async (change, context) => {
+    const productId = context.params.productId as string;
+    const beforeData = change.before.exists ? (change.before.data() as Record<string, any>) : null;
+    const afterData = change.after.exists ? (change.after.data() as Record<string, any>) : null;
+
+    const beforeName =
+      typeof beforeData?.name === 'string' && beforeData.name.trim().length > 0
+        ? beforeData.name.trim()
+        : null;
+    const afterName =
+      typeof afterData?.name === 'string' && afterData.name.trim().length > 0
+        ? afterData.name.trim()
+        : beforeName;
+
+    const beforeConfig = beforeData
+      ? normaliseDigitalDelivery(beforeData.digitalDelivery, beforeName)
+      : null;
+    const afterConfig = afterData
+      ? normaliseDigitalDelivery(afterData.digitalDelivery, afterName)
+      : null;
+
+    const enabledBefore = beforeConfig ? beforeConfig.enabled === true : false;
+    const enabledAfter = afterConfig ? afterConfig.enabled === true : false;
+
+    if (!enabledBefore && !enabledAfter) {
+      return null;
+    }
+
+    const enabledChanged = enabledBefore !== enabledAfter;
+    const shouldRemove = !afterConfig || !afterConfig.enabled;
+    const metadataChanged =
+      !shouldRemove &&
+      !!beforeConfig &&
+      !!afterConfig &&
+      (
+        beforeConfig.label !== afterConfig.label ||
+        beforeConfig.description !== afterConfig.description ||
+        beforeConfig.driveTemplateFolderId !== afterConfig.driveTemplateFolderId ||
+        beforeConfig.driveFolderName !== afterConfig.driveFolderName ||
+        beforeConfig.status !== afterConfig.status ||
+        beforeConfig.autoRelease !== afterConfig.autoRelease
+      );
+    const releaseChanged = !!afterConfig &&
+      (
+        !beforeConfig ||
+        (beforeConfig.release?.assetId ?? null) !== (afterConfig.release?.assetId ?? null) ||
+        (beforeConfig.release?.version ?? null) !== (afterConfig.release?.version ?? null) ||
+        (beforeConfig.lastReleasedAt?.toMillis?.() ?? null) !==
+          (afterConfig.lastReleasedAt?.toMillis?.() ?? null)
+      );
+
+    if (!shouldRemove && !metadataChanged && !releaseChanged && !enabledChanged) {
+      return null;
+    }
+
+    if (releaseChanged && afterConfig && afterConfig.autoRelease === false && !metadataChanged) {
+      return null;
+    }
+
+    const now = admin.firestore.Timestamp.now();
+    const batchSize = 50;
+    let lastDoc: FirebaseFirestore.QueryDocumentSnapshot | null = null;
+
+    while (true) {
+      let queryRef = db
+        .collection('orders')
+        .where('productIds', 'array-contains', productId)
+        .orderBy(admin.firestore.FieldPath.documentId())
+        .limit(batchSize);
+      if (lastDoc) {
+        queryRef = queryRef.startAfter(lastDoc);
+      }
+      const snapshot = await queryRef.get();
+      if (snapshot.empty) {
+        break;
+      }
+
+      await Promise.all(
+        snapshot.docs.map(async (docSnap) => {
+          const data = docSnap.data() as Record<string, any>;
+          const rawDigital =
+            data.digitalDeliveries && typeof data.digitalDeliveries === 'object'
+              ? (data.digitalDeliveries as Record<string, any>)
+              : {};
+          const nextMap: Record<string, NormalisedDigitalDelivery> = {};
+          Object.entries(rawDigital).forEach(([key, raw]) => {
+            const normalised = normaliseDigitalDelivery(raw, null);
+            if (normalised && normalised.enabled) {
+              nextMap[key] = normalised;
+            }
+          });
+
+          if (shouldRemove) {
+            delete rawDigital[productId];
+            delete nextMap[productId];
+          } else if (afterConfig) {
+            rawDigital[productId] = serialiseDigitalDeliveryForStorage(afterConfig);
+            nextMap[productId] = afterConfig;
+          }
+
+          const aggregateStatus = computeAggregateDigitalStatus(nextMap) ?? null;
+          const updatePayload: Record<string, any> = {};
+
+          if (Object.keys(rawDigital).length > 0) {
+            updatePayload.digitalDeliveries = rawDigital;
+            updatePayload.digitalDeliveryStatus = aggregateStatus;
+            updatePayload.digitalDeliveryUpdatedAt = now;
+          } else {
+            updatePayload.digitalDeliveries = admin.firestore.FieldValue.delete();
+            updatePayload.digitalDeliveryStatus = admin.firestore.FieldValue.delete();
+            updatePayload.digitalDeliveryUpdatedAt = admin.firestore.FieldValue.delete();
+          }
+
+          await docSnap.ref.set(updatePayload, { merge: true });
+        })
+      );
+
+      lastDoc = snapshot.docs[snapshot.docs.length - 1];
+      if (snapshot.size < batchSize) {
+        break;
+      }
+    }
+
+    return null;
+  });
 
 type FranchiseAssignmentMatchType = 'exact' | 'prefix' | 'superset' | 'radius';
 
@@ -5058,16 +5794,51 @@ export const reserveKit = functions.https.onCall(async (data) => {
       });
     };
 
-    configuredFlow
-      .filter((stage) => stage.enabled !== false)
-      .forEach((stage) => addStage(stage));
+    const activeStages = configuredFlow.filter((stage) => stage.enabled !== false);
+    activeStages.forEach((stage) => addStage(stage));
 
     if (attempts.length === 0) {
-      const fallbackFlow =
-        flowKey === 'franchiseFlow'
-          ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
-          : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
-      fallbackFlow.forEach((stage) => addStage(stage));
+      const allDisabled = configuredFlow.length > 0 && configuredFlow.every((stage) => stage.enabled === false);
+      if (allDisabled) {
+        const fallbackKey: RoutingStageKey =
+          coverage.type === 'franchise' && coverage.franchiseId ? 'franchise_primary' : 'hq';
+        const fallbackFlow =
+          flowKey === 'franchiseFlow'
+            ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
+            : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
+        const fallbackStage =
+          fallbackFlow.find((stage) => stage.key === fallbackKey) ||
+          ({
+            key: fallbackKey,
+            label: ROUTING_STAGE_META[fallbackKey].defaultLabel,
+            description: ROUTING_STAGE_META[fallbackKey].defaultDescription,
+            requiresKit: false,
+            autoConfirm: true,
+            enabled: true,
+          } satisfies RoutingStageConfig);
+        const fallbackLabel = resolveRoutingStageLabel(fallbackStage, {
+          coverageLabel: coverage.label,
+          fallback: ROUTING_STAGE_META[fallbackKey].defaultLabel,
+        });
+        const ownerType = ROUTING_STAGE_META[fallbackKey].ownerType;
+        const fallbackInitialStatus: ReservationStatus = fallbackStage.autoConfirm === true ? 'confirmed' : 'pending';
+        attempts.push({
+          key: fallbackKey,
+          ownerType,
+          initialStatus: fallbackInitialStatus,
+          franchiseId: ownerType === 'company' ? null : coverage.franchiseId,
+          label: fallbackLabel,
+          requiresKit: false,
+          description: fallbackStage.description ?? null,
+          autoConfirm: fallbackStage.autoConfirm === true,
+        });
+      } else {
+        const fallbackFlow =
+          flowKey === 'franchiseFlow'
+            ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
+            : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
+        fallbackFlow.forEach((stage) => addStage(stage));
+      }
     }
 
     return attempts;
@@ -5085,6 +5856,38 @@ export const reserveKit = functions.https.onCall(async (data) => {
       description: null,
       autoConfirm: true,
     });
+  }
+
+  const anyKitAttempt = attempts.some((attempt) => attempt.requiresKit);
+  const selectBypassAttempt = (): ReservationAttempt | null => {
+    if (attempts.length === 0) {
+      return null;
+    }
+    const nonKitAttempt = attempts.find((attempt) => !attempt.requiresKit);
+    return nonKitAttempt ?? attempts[0];
+  };
+
+  if (!anyKitAttempt || eqIds.length === 0) {
+    const attempt = selectBypassAttempt();
+    if (attempt) {
+      return {
+        conflicts: [],
+        kitItems: [],
+        rentalTotal: 0,
+        status: attempt.initialStatus,
+        missingStandards: [],
+        provider: {
+          level: attempt.key,
+          status: attempt.initialStatus,
+          label: attempt.label,
+          franchiseId: attempt.franchiseId,
+          territoryId: coverageInfo.territoryId,
+          requiresKit: false,
+          autoConfirm: attempt.autoConfirm,
+          description: attempt.description ?? null,
+        },
+      } satisfies ReservationResponse;
+    }
   }
 
   const deriveOwnerInfo = (eq: any): {
@@ -5120,69 +5923,71 @@ export const reserveKit = functions.https.onCall(async (data) => {
   };
 
   const equipmentRecords: EquipmentRecord[] = [];
-  for (const id of eqIds) {
-    const eqRef = db.collection('equipment').doc(id);
-    const eqSnap = await eqRef.get();
-    if (!eqSnap.exists) {
+  if (anyKitAttempt) {
+    for (const id of eqIds) {
+      const eqRef = db.collection('equipment').doc(id);
+      const eqSnap = await eqRef.get();
+      if (!eqSnap.exists) {
+        equipmentRecords.push({
+          id,
+          name: id,
+          category: null,
+          ownerType: 'company',
+          ownerId: null,
+          franchiseId: null,
+          availableFlag: false,
+          booked: false,
+          meetsStandards: [],
+          rentalPrice: 0,
+          exists: false,
+        });
+        continue;
+      }
+      const eq = eqSnap.data() as any;
+      const ownerInfo = deriveOwnerInfo(eq);
+      const category =
+        typeof eq.category === 'string' && eq.category.trim().length > 0
+          ? eq.category.trim()
+          : typeof eq.type === 'string' && eq.type.trim().length > 0
+            ? eq.type.trim()
+            : null;
+      const bookingsSnap = await eqRef
+        .collection('bookings')
+        .where('start', '<', reservationEnd)
+        .where('end', '>', start)
+        .get();
+      const conflictingBookings = bookingsSnap.docs.filter((bookingDoc) =>
+        bookingConflictsWithRange(
+          (bookingDoc.data() as { start?: unknown; end?: unknown }) ?? null,
+          start,
+          reservationEnd,
+        ),
+      );
+      const meetsStandards = Array.isArray(eq.meetsStandards)
+        ? (eq.meetsStandards as unknown[])
+            .map((value) => (typeof value === 'string' ? value.trim() : ''))
+            .filter((value): value is string => value.length > 0)
+        : [];
+      const equipmentName =
+        typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : eqSnap.id;
+      const rentalPrice =
+        typeof eq.rentalPrice === 'number' && Number.isFinite(eq.rentalPrice)
+          ? eq.rentalPrice
+          : 0;
       equipmentRecords.push({
-        id,
-        name: id,
-        category: null,
-        ownerType: 'company',
-        ownerId: null,
-        franchiseId: null,
-        availableFlag: false,
-        booked: false,
-        meetsStandards: [],
-        rentalPrice: 0,
-        exists: false,
+        id: eqSnap.id,
+        name: equipmentName,
+        category,
+        ownerType: ownerInfo.ownerType,
+        ownerId: ownerInfo.ownerId,
+        franchiseId: ownerInfo.franchiseId,
+        availableFlag: eq.available !== false,
+        booked: conflictingBookings.length > 0,
+        meetsStandards,
+        rentalPrice,
+        exists: true,
       });
-      continue;
     }
-    const eq = eqSnap.data() as any;
-    const ownerInfo = deriveOwnerInfo(eq);
-    const category =
-      typeof eq.category === 'string' && eq.category.trim().length > 0
-        ? eq.category.trim()
-        : typeof eq.type === 'string' && eq.type.trim().length > 0
-          ? eq.type.trim()
-          : null;
-    const bookingsSnap = await eqRef
-      .collection('bookings')
-      .where('start', '<', reservationEnd)
-      .where('end', '>', start)
-      .get();
-    const conflictingBookings = bookingsSnap.docs.filter((bookingDoc) =>
-      bookingConflictsWithRange(
-        (bookingDoc.data() as { start?: unknown; end?: unknown }) ?? null,
-        start,
-        reservationEnd,
-      ),
-    );
-    const meetsStandards = Array.isArray(eq.meetsStandards)
-      ? (eq.meetsStandards as unknown[])
-          .map((value) => (typeof value === 'string' ? value.trim() : ''))
-          .filter((value): value is string => value.length > 0)
-      : [];
-    const equipmentName =
-      typeof eq.name === 'string' && eq.name.trim().length > 0 ? eq.name.trim() : eqSnap.id;
-    const rentalPrice =
-      typeof eq.rentalPrice === 'number' && Number.isFinite(eq.rentalPrice)
-        ? eq.rentalPrice
-        : 0;
-    equipmentRecords.push({
-      id: eqSnap.id,
-      name: equipmentName,
-      category,
-      ownerType: ownerInfo.ownerType,
-      ownerId: ownerInfo.ownerId,
-      franchiseId: ownerInfo.franchiseId,
-      availableFlag: eq.available !== false,
-      booked: conflictingBookings.length > 0,
-      meetsStandards,
-      rentalPrice,
-      exists: true,
-    });
   }
 
   const matchesOwnerForAttempt = (
@@ -8421,6 +9226,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
           !!item
         )
     : [];
+  const productIds = new Set<string>();
+  const digitalDeliveryMap: Record<string, NormalisedDigitalDelivery> = {};
 
   const kitReservationStatusInitial =
     typeof kitReservationStatusInput === 'string' && kitReservationStatusInput === 'pending'
@@ -8974,7 +9781,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     );
     const parking = toNumber(budget.parking);
     const perUnitBudgetTotal = labour + kit + travelCost + parking;
-    orderItems.push({
+    productIds.add(snap.id);
+    const orderItemPayload: Record<string, any> = {
       id: snap.id,
       name: prod.name,
       price,
@@ -9012,7 +9820,23 @@ export const createOrder = functions.https.onCall(async (data, context) => {
           totalCost: perUnitBudgetTotal * qty,
         },
       },
-    });
+    };
+    const digitalConfig = normaliseDigitalDelivery(
+      (prod as any).digitalDelivery,
+      typeof prod.name === 'string' ? prod.name : null
+    );
+    if (digitalConfig && digitalConfig.enabled) {
+      digitalDeliveryMap[snap.id] = digitalConfig;
+      orderItemPayload.digitalDelivery = {
+        status: computeDigitalDeliveryStatus(digitalConfig),
+        label: digitalConfig.label,
+        description: digitalConfig.description,
+        autoRelease: digitalConfig.autoRelease,
+        releaseVersion: digitalConfig.release?.version ?? null,
+      };
+      orderItemPayload.digitalDeliveryKey = snap.id;
+    }
+    orderItems.push(orderItemPayload);
     if (campaignBooking) {
       campaignSelections.push({
         ...campaignBooking,
@@ -9056,6 +9880,13 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     travelSubtotal += travelCost * qty;
     parkingSubtotal += parking * qty;
   });
+
+  const productIdList = Array.from(productIds);
+  const orderDigitalDeliveriesDoc: Record<string, any> = {};
+  Object.entries(digitalDeliveryMap).forEach(([productId, config]) => {
+    orderDigitalDeliveriesDoc[productId] = serialiseDigitalDeliveryForStorage(config);
+  });
+  const digitalDeliveryStatusAggregate = computeAggregateDigitalStatus(digitalDeliveryMap);
 
   const organiserProgramsRecords: Record<string, any>[] = [];
   if (organiserAggregates.size > 0) {
@@ -9550,6 +10381,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     projectName: projectName || null,
     voucher: voucherCode,
     items: orderItems,
+    productIds: productIdList,
     subtotal: productSubtotal,
     rentalSubtotal,
     labourSubtotal,
@@ -9582,6 +10414,12 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
     priceTierLevel: territoryPriceTier,
   };
+
+  if (Object.keys(orderDigitalDeliveriesDoc).length > 0) {
+    orderData.digitalDeliveries = orderDigitalDeliveriesDoc;
+    orderData.digitalDeliveryStatus = digitalDeliveryStatusAggregate;
+    orderData.digitalDeliveryUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+  }
 
   if (campaignSelections.length > 0) {
     orderData.campaignBookings = campaignSelections;
@@ -12975,6 +13813,59 @@ export const organiser_settlement_reconcile = functions.pubsub
     return null;
   });
 
+async function recordLoginForUid(uid: string, timestampValue: unknown): Promise<void> {
+  let timestamp: admin.firestore.Timestamp | admin.firestore.FieldValue =
+    admin.firestore.FieldValue.serverTimestamp();
+
+  if (typeof timestampValue === 'string') {
+    const parsed = new Date(timestampValue);
+    if (!Number.isNaN(parsed.getTime())) {
+      timestamp = admin.firestore.Timestamp.fromDate(parsed);
+    }
+  }
+
+  await db.collection('loginHistory').add({
+    uid,
+    timestamp,
+  });
+}
+
+function parseRequestBody(req: functions.Request): Record<string, unknown> {
+  const rawBody = req.body;
+
+  if (typeof rawBody === 'string') {
+    const trimmed = rawBody.trim();
+    if (!trimmed) {
+      return {};
+    }
+    try {
+      return JSON.parse(trimmed) as Record<string, unknown>;
+    } catch (error) {
+      console.warn('recordLoginEvent invalid JSON body', error);
+      return {};
+    }
+  }
+
+  if (Buffer.isBuffer(rawBody)) {
+    const text = rawBody.toString('utf8').trim();
+    if (!text) {
+      return {};
+    }
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch (error) {
+      console.warn('recordLoginEvent invalid buffer body', error);
+      return {};
+    }
+  }
+
+  if (rawBody && typeof rawBody === 'object') {
+    return rawBody as Record<string, unknown>;
+  }
+
+  return {};
+}
+
 /**
  * Record a user login event via HTTPS callable. Stores loginHistory for the current user.
  */
@@ -12982,13 +13873,59 @@ export const recordLogin = functions.https.onCall(async (data, context) => {
   if (!context.auth?.uid) {
     throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
   }
-  await db.collection('loginHistory').add({
-    uid: context.auth.uid,
-    timestamp: data?.timestamp
-      ? admin.firestore.Timestamp.fromDate(new Date(data.timestamp))
-      : admin.firestore.FieldValue.serverTimestamp(),
-  });
+  await recordLoginForUid(context.auth.uid, data?.timestamp);
   return { ok: true };
+});
+
+export const recordLoginEvent = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
+  applyRecordLoginCors(req, res);
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  const authHeader = req.get('authorization') || '';
+  if (!authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Sign in required' });
+    return;
+  }
+
+  const token = authHeader.split('Bearer ')[1]?.trim();
+  if (!token) {
+    res.status(401).json({ error: 'Sign in required' });
+    return;
+  }
+
+  let uid: string | null = null;
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    uid = decoded.uid;
+  } catch (error) {
+    console.error('recordLoginEvent verifyIdToken failed', error);
+    res.status(401).json({ error: 'Invalid token' });
+    return;
+  }
+
+  if (!uid) {
+    res.status(401).json({ error: 'Invalid token' });
+    return;
+  }
+
+  const body = parseRequestBody(req);
+
+  try {
+    await recordLoginForUid(uid, body.timestamp);
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('recordLoginEvent failed', error);
+    res.status(500).json({ error: 'Failed to record login' });
+  }
 });
 
 /**
@@ -14260,47 +15197,341 @@ export const admin_createProposal = functions.https.onCall(async (data: any, con
  * Save or update a proposal template. Expects { id?, name, items, agreementIds } and
  * returns the template id.
  */
-export const admin_saveProposalTemplate = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
-  await assertStaff(context, ['admin', 'sales']);
-  const { id, name, items = [], agreementIds = [], brandColor, logoUrl } = data;
-  if (!name) throw new functions.https.HttpsError('invalid-argument', 'name required');
-  const tpl = {
-    name,
-    items,
-    agreementIds,
-    brandColor: brandColor || null,
-    logoUrl: logoUrl || null,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  };
-  if (id) {
-    const tplRef = db.collection('proposalTemplates').doc(id);
-    const beforeSnap = await tplRef.get();
-    const beforeData = beforeSnap.exists ? (beforeSnap.data() as admin.firestore.DocumentData) : undefined;
-    await tplRef.set(tpl, { merge: true });
+export const admin_saveProposalTemplate = functions.https.onCall(
+  async (data: any, context: functions.https.CallableContext) => {
+    await assertStaff(context, ['admin', 'sales']);
+
+    const safeString = (value: unknown): string =>
+      typeof value === 'string' ? value.trim() : '';
+
+    const allowedKinds = new Set(['mini', 'detailed', 'quick']);
+    const allowedPageTypes = new Set([
+      'cover',
+      'intro',
+      'about',
+      'contents',
+      'service_overview',
+      'storyboard',
+      'operations',
+      'quote',
+      'estimate',
+      'terms',
+      'custom',
+    ]);
+    const allowedLayouts = new Set([
+      'hero',
+      'split',
+      'columns',
+      'gallery',
+      'timeline',
+      'table',
+    ]);
+    const allowedThemes = new Set(['modern', 'spotlight', 'classic']);
+    const allowedBackgrounds = new Set(['clean', 'gradient', 'texture']);
+
+    const {
+      id,
+      name,
+      summary,
+      category,
+      baseProductId,
+      items = [],
+      agreementIds = [],
+      pages = [],
+      styling = {},
+      brandSnapshot = {},
+      brandColor,
+      logoUrl,
+      metadata = {},
+    } = data || {};
+
+    const templateName = safeString(name);
+    if (!templateName) {
+      throw new functions.https.HttpsError('invalid-argument', 'name required');
+    }
+
+    const sanitiseMoney = (value: unknown): number | undefined => {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return value;
+      }
+      if (typeof value === 'string' && value.trim().length > 0) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      }
+      return undefined;
+    };
+
+    const sanitiseItem = (item: any) => {
+      if (!item || typeof item !== 'object') {
+        return null;
+      }
+      const type = safeString(item.type);
+      if (type !== 'product' && type !== 'custom') {
+        return null;
+      }
+      const nameValue = safeString(item.name || item.title);
+      if (!nameValue) {
+        return null;
+      }
+      const priceValue = sanitiseMoney(item.price);
+      const descriptionValue = safeString(item.description || item.summary);
+      const productIdValue = safeString(item.productId);
+      const sanitised: {
+        type: 'product' | 'custom';
+        name: string;
+        description: string | null;
+        price?: number;
+        productId?: string;
+      } = {
+        type,
+        name: nameValue,
+        description: descriptionValue || null,
+      };
+      if (typeof priceValue === 'number') {
+        sanitised.price = priceValue;
+      }
+      if (productIdValue) {
+        sanitised.productId = productIdValue;
+      }
+      return sanitised;
+    };
+
+    const sanitisePage = (page: any) => {
+      if (!page || typeof page !== 'object') {
+        return null;
+      }
+      const type = safeString(page.type) as string;
+      if (!allowedPageTypes.has(type)) {
+        return null;
+      }
+      const layout = safeString(page.layout) as string;
+      const resolvedLayout = allowedLayouts.has(layout) ? layout : 'hero';
+      const title = safeString(page.title) || null;
+      const subtitle = safeString(page.subtitle) || null;
+      const body = safeString(page.body) || null;
+      const includeInContents = Boolean(page.includeInContents ?? type !== 'cover');
+      const displayMode = safeString(page.displayMode);
+      const sections = Array.isArray(page.sections)
+        ? (page.sections as unknown[])
+            .map((value) => safeString(value))
+            .filter((value) => value.length > 0)
+        : [];
+      const bulletPoints = Array.isArray(page.bulletPoints)
+        ? (page.bulletPoints as unknown[])
+            .map((value) => safeString(value))
+            .filter((value) => value.length > 0)
+        : [];
+      const notes = safeString(page.notes) || null;
+      const idValue = safeString(page.id) || `page-${Date.now().toString(36)}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+
+      const sanitisedPage: {
+        id: string;
+        type: string;
+        layout: string;
+        title: string | null;
+        subtitle: string | null;
+        body: string | null;
+        includeInContents: boolean;
+        sections: string[];
+        bulletPoints: string[];
+        notes: string | null;
+        productId: string | null;
+        autoContents: boolean;
+        displayMode?: 'quote' | 'estimate';
+      } = {
+        id: idValue,
+        type,
+        layout: resolvedLayout,
+        title,
+        subtitle,
+        body,
+        includeInContents,
+        sections,
+        bulletPoints,
+        notes,
+        productId: safeString(page.productId) || null,
+        autoContents: Boolean(page.autoContents && type === 'contents'),
+      };
+      if (type === 'quote' || type === 'estimate') {
+        sanitisedPage.displayMode = displayMode === 'estimate' ? 'estimate' : 'quote';
+      }
+      return sanitisedPage;
+    };
+
+    const sanitiseAgreementIds = Array.isArray(agreementIds)
+      ? (agreementIds as unknown[])
+          .map((value) => safeString(value))
+          .filter((value) => value.length > 0)
+      : [];
+
+    const sanitisedItems = Array.isArray(items)
+      ? (items as unknown[])
+          .map((item) => sanitiseItem(item))
+          .filter((item): item is {
+            type: 'product' | 'custom';
+            name: string;
+            description: string | null;
+            price?: number;
+            productId?: string;
+          } => Boolean(item))
+      : [];
+
+    const sanitisedPages = Array.isArray(pages)
+      ? (pages as unknown[])
+          .map((page) => sanitisePage(page))
+          .filter((page): page is {
+            id: string;
+            type: string;
+            layout: string;
+            title: string | null;
+            subtitle: string | null;
+            body: string | null;
+            includeInContents: boolean;
+            sections: string[];
+            bulletPoints: string[];
+            notes: string | null;
+            productId: string | null;
+            displayMode?: string;
+            autoContents?: boolean;
+          } => Boolean(page))
+      : [];
+
+    if (sanitisedPages.length === 0) {
+      throw new functions.https.HttpsError('invalid-argument', 'At least one page is required');
+    }
+
+    const resolvedCategory = allowedKinds.has(safeString(category))
+      ? safeString(category)
+      : 'detailed';
+
+    const safeColor = (value: unknown): string | null => {
+      const normalised = safeString(value);
+      return normalised ? normalised : null;
+    };
+
+    const stylingTheme = safeString(styling.theme);
+    const stylingBackground = safeString(styling.background);
+    const accentColor = safeColor(styling.accentColor) || safeColor(brandColor);
+    const secondaryColor = safeColor(styling.secondaryColor);
+    const includePageNumbers = Boolean(
+      typeof styling.includePageNumbers === 'boolean'
+        ? styling.includePageNumbers
+        : data?.includePageNumbers,
+    );
+
+    const sanitisedStyling = {
+      theme: allowedThemes.has(stylingTheme) ? stylingTheme : 'modern',
+      background: allowedBackgrounds.has(stylingBackground) ? stylingBackground : 'clean',
+      accentColor: accentColor,
+      secondaryColor: secondaryColor,
+      includePageNumbers,
+    };
+
+    const sanitiseBrandSnapshot = (snapshot: any) => {
+      if (!snapshot || typeof snapshot !== 'object') {
+        return null;
+      }
+      const colors = snapshot.colors && typeof snapshot.colors === 'object'
+        ? {
+            primary: safeColor(snapshot.colors.primary),
+            secondary: safeColor(snapshot.colors.secondary),
+            accent: safeColor(snapshot.colors.accent),
+            neutral: safeColor(snapshot.colors.neutral),
+            highlight: safeColor(snapshot.colors.highlight),
+          }
+        : null;
+      const fonts = snapshot.fonts && typeof snapshot.fonts === 'object'
+        ? {
+            primary: safeString(snapshot.fonts.primary) || null,
+            secondary: safeString(snapshot.fonts.secondary) || null,
+            accent: safeString(snapshot.fonts.accent) || null,
+            headingStyle: safeString(snapshot.fonts.headingStyle) || null,
+          }
+        : null;
+      const voice = snapshot.voice && typeof snapshot.voice === 'object'
+        ? {
+            voicePrinciples: safeString(snapshot.voice.voicePrinciples) || null,
+            tonePrinciples: safeString(snapshot.voice.tonePrinciples) || null,
+            elevatorPitch: safeString(snapshot.voice.elevatorPitch) || null,
+          }
+        : null;
+      return {
+        colors,
+        fonts,
+        voice,
+        logoUrl: safeString(snapshot.logoUrl) || null,
+        updatedAt: safeString(snapshot.updatedAt) || null,
+      };
+    };
+
+    const sanitisedBrandSnapshot = sanitiseBrandSnapshot(brandSnapshot);
+    const resolvedLogoUrl = safeString(logoUrl) || sanitisedBrandSnapshot?.logoUrl || null;
+    const resolvedBrandColor = safeColor(brandColor) || sanitisedBrandSnapshot?.colors?.primary || null;
+
+    const sanitisedMetadata = metadata && typeof metadata === 'object'
+      ? {
+          allowProductOverride: Boolean(metadata.allowProductOverride),
+          presetSource: safeString(metadata.presetSource) || null,
+        }
+      : null;
+
+    const templatePayload: Record<string, any> = {
+      name: templateName,
+      summary: safeString(summary) || null,
+      category: resolvedCategory,
+      baseProductId: safeString(baseProductId) || null,
+      items: sanitisedItems,
+      agreementIds: sanitiseAgreementIds,
+      pages: sanitisedPages,
+      styling: sanitisedStyling,
+      brandSnapshot: sanitisedBrandSnapshot,
+      brandColor: resolvedBrandColor,
+      logoUrl: resolvedLogoUrl,
+      includePageNumbers,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (sanitisedMetadata) {
+      templatePayload.metadata = sanitisedMetadata;
+    }
+
+    if (id) {
+      const tplRef = db.collection('proposalTemplates').doc(id);
+      const beforeSnap = await tplRef.get();
+      const beforeData = beforeSnap.exists
+        ? (beforeSnap.data() as admin.firestore.DocumentData)
+        : undefined;
+      await tplRef.set(templatePayload, { merge: true });
+      if (context.auth?.uid) {
+        const changes = buildChangesFromUpdates(beforeData, templatePayload);
+        await writeAuditLog({
+          actorUid: context.auth.uid,
+          action: 'admin_update_proposal_template',
+          entityType: 'proposalTemplate',
+          entityId: id,
+          changes: Object.keys(changes).length ? changes : null,
+        });
+      }
+      return { id };
+    }
+
+    templatePayload.createdAt = admin.firestore.FieldValue.serverTimestamp();
+
+    const ref = await db.collection('proposalTemplates').add(templatePayload);
     if (context.auth?.uid) {
-      const changes = buildChangesFromUpdates(beforeData, tpl);
       await writeAuditLog({
         actorUid: context.auth.uid,
-        action: 'admin_update_proposal_template',
+        action: 'admin_create_proposal_template',
         entityType: 'proposalTemplate',
-        entityId: id,
-        changes: Object.keys(changes).length ? changes : null,
+        entityId: ref.id,
+        changes: buildChangesFromCreate(templatePayload),
       });
     }
-    return { id };
+    return { id: ref.id };
   }
-  const ref = await db.collection('proposalTemplates').add(tpl);
-  if (context.auth?.uid) {
-    await writeAuditLog({
-      actorUid: context.auth.uid,
-      action: 'admin_create_proposal_template',
-      entityType: 'proposalTemplate',
-      entityId: ref.id,
-      changes: buildChangesFromCreate(tpl),
-    });
-  }
-  return { id: ref.id };
-});
+);
 
 /**
  * Accept a sent proposal and convert it into an order awaiting deposit. Expects

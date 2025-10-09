@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 
 import { cookies } from 'next/headers';
 import { NextResponse, type NextRequest } from 'next/server';
@@ -15,6 +15,10 @@ import {
   type TokenExchangeResult,
 } from '@/lib/social-platforms';
 import { createSecretConfig, readSecretValue } from '@/lib/secret-manager';
+import {
+  getCachedSocialServiceKey,
+  setCachedSocialServiceKey,
+} from '@/lib/social-service-key-cache';
 
 const FUNCTIONS_BASE_URL =
   process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL ||
@@ -26,7 +30,7 @@ const SERVICE_KEY_CONFIG = createSecretConfig(
   'Social account service key'
 );
 
-let cachedServiceKey: string | null | undefined;
+const STATE_SECRET_BYTE_LENGTH = 32;
 
 const SUPPORTED_PLATFORMS: SocialPlatform[] = [
   'youtube',
@@ -66,6 +70,7 @@ interface AuthStateDoc {
   errorMessage?: string | null;
   expiresAt?: Timestamp | Date | null;
   completedAt?: Timestamp | Date | FieldValue | null;
+  stateSecretHash?: string | null;
 }
 
 interface StoreCredentialPayload {
@@ -77,6 +82,7 @@ interface StoreCredentialPayload {
   displayName: string | null;
   scopes: RequestedScopes;
   hqManaged: boolean;
+  stateSecret: string | null;
   tokens: {
     accessToken: string;
     refreshToken: string | null;
@@ -141,6 +147,43 @@ function parseBooleanFlag(value: string | null): boolean {
   return normalised === 'true' || normalised === '1' || normalised === 'yes';
 }
 
+function generateStateSecret(): string {
+  return randomBytes(STATE_SECRET_BYTE_LENGTH).toString('hex');
+}
+
+function hashStateSecret(secret: string): string {
+  return createHash('sha256').update(secret, 'utf8').digest('hex');
+}
+
+function encodeStateValue(id: string, secret: string): string {
+  try {
+    return Buffer.from(JSON.stringify({ id, secret }), 'utf8').toString('base64url');
+  } catch (error) {
+    console.warn('Failed to encode OAuth state payload, falling back to raw ID', error);
+    return id;
+  }
+}
+
+function parseStateValue(value: string): { id: string; secret: string | null } {
+  if (!value) {
+    return { id: '', secret: null };
+  }
+
+  try {
+    const decoded = Buffer.from(value, 'base64url').toString('utf8');
+    const parsed = JSON.parse(decoded) as { id?: unknown; secret?: unknown };
+    const id = typeof parsed.id === 'string' ? parsed.id : '';
+    const secret = typeof parsed.secret === 'string' ? parsed.secret : null;
+    if (id) {
+      return { id, secret };
+    }
+  } catch (error) {
+    // Not an encoded payload, fall through to treating the value as the ID.
+  }
+
+  return { id: value, secret: null };
+}
+
 function sanitiseRedirect(origin: string, candidate: string | null): string {
   const defaultUrl = new URL('/admin/tools/social-scheduler', origin);
   defaultUrl.searchParams.set('tab', 'accounts');
@@ -186,19 +229,27 @@ async function resolveAuthenticatedUser(): Promise<AuthenticatedUser | null> {
   }
 }
 
-async function getServiceKey(): Promise<string> {
-  if (cachedServiceKey !== undefined) {
-    if (!cachedServiceKey) {
+async function getServiceKey(requireKey = true): Promise<string | null> {
+  const cachedValue = getCachedSocialServiceKey();
+  if (cachedValue !== undefined) {
+    if (!cachedValue) {
+      if (requireKey) {
+        throw new Error('Social account service key is not configured.');
+      }
+      return null;
+    }
+    return cachedValue;
+  }
+
+  const value = await readSecretValue(SERVICE_KEY_CONFIG);
+  setCachedSocialServiceKey(value ?? null);
+  if (!value) {
+    if (requireKey) {
       throw new Error('Social account service key is not configured.');
     }
-    return cachedServiceKey;
+    return null;
   }
-  const value = await readSecretValue(SERVICE_KEY_CONFIG);
-  cachedServiceKey = value ?? null;
-  if (!cachedServiceKey) {
-    throw new Error('Social account service key is not configured.');
-  }
-  return cachedServiceKey;
+  return value;
 }
 
 function buildErrorRedirect(origin: string, redirectUri: string, message: string, code?: string | null) {
@@ -212,13 +263,19 @@ function buildErrorRedirect(origin: string, redirectUri: string, message: string
 }
 
 async function callStoreCredentials(payload: StoreCredentialPayload): Promise<StoreCredentialResponse> {
-  const serviceKey = await getServiceKey();
+  const serviceKey = await getServiceKey(false);
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (serviceKey) {
+    headers['X-Service-Key'] = serviceKey;
+  } else {
+    console.warn('Proceeding with social credential storage without a service key.');
+  }
+
   const response = await fetch(`${FUNCTIONS_BASE_URL}/socialAccountsStoreCredentials`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Service-Key': serviceKey,
-    },
+    headers,
     body: JSON.stringify(payload),
   });
 
@@ -277,6 +334,8 @@ async function handleInitiation(request: NextRequest, platform: SocialPlatform) 
 
   const firestore = getFirebaseAdminFirestore();
   const stateId = randomUUID();
+  const stateSecret = generateStateSecret();
+  const stateSecretHash = hashStateSecret(stateSecret);
   const callbackUri = getCallbackUri(request, platform);
   const redirectUri = sanitiseRedirect(origin, redirectCandidate);
 
@@ -295,11 +354,17 @@ async function handleInitiation(request: NextRequest, platform: SocialPlatform) 
       accountId: accountId ?? null,
       status: 'pending',
       expiresAt: resolveStateExpiry(),
+      stateSecretHash,
     } satisfies AuthStateDoc,
     { merge: true }
   );
 
-  const authorization = await buildAuthorizationUrl(platform, callbackUri, stateId, scopes);
+  const authorization = await buildAuthorizationUrl(
+    platform,
+    callbackUri,
+    encodeStateValue(stateId, stateSecret),
+    scopes
+  );
   return NextResponse.redirect(authorization.url);
 }
 
@@ -338,8 +403,13 @@ async function handleCallback(request: NextRequest, platform: SocialPlatform) {
     return NextResponse.json({ error: 'Missing OAuth state parameter.' }, { status: 400 });
   }
 
+  const { id: stateId, secret: stateSecret } = parseStateValue(stateParam);
+  if (!stateId) {
+    return NextResponse.json({ error: 'Invalid OAuth session.' }, { status: 400 });
+  }
+
   const firestore = getFirebaseAdminFirestore();
-  const stateRef = firestore.collection('socialAccountAuthStates').doc(stateParam);
+  const stateRef = firestore.collection('socialAccountAuthStates').doc(stateId);
   const stateSnap = await stateRef.get();
   if (!stateSnap.exists) {
     return NextResponse.json({ error: 'Invalid or expired OAuth session.' }, { status: 400 });
@@ -347,6 +417,45 @@ async function handleCallback(request: NextRequest, platform: SocialPlatform) {
 
   const stateData = (stateSnap.data() ?? {}) as AuthStateDoc;
   const redirectUri = sanitiseRedirect(origin, stateData.redirectUri ?? null);
+
+  const expectedSecretHash = stateData.stateSecretHash?.trim() ?? null;
+  if (expectedSecretHash) {
+    if (!stateSecret) {
+      await stateRef.set(
+        {
+          status: 'error',
+          errorCode: 'state_verification_failed',
+          errorMessage: 'OAuth verification secret missing from provider response.',
+          completedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+      return buildErrorRedirect(
+        origin,
+        redirectUri,
+        `We were unable to verify the ${getPlatformLabel(platform)} response. Please try again.`,
+        'state_verification_failed'
+      );
+    }
+    const providedHash = hashStateSecret(stateSecret);
+    if (providedHash !== expectedSecretHash) {
+      await stateRef.set(
+        {
+          status: 'error',
+          errorCode: 'state_verification_failed',
+          errorMessage: 'OAuth verification secret did not match.',
+          completedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+      return buildErrorRedirect(
+        origin,
+        redirectUri,
+        `We were unable to verify the ${getPlatformLabel(platform)} response. Please try again.`,
+        'state_verification_failed'
+      );
+    }
+  }
 
   if (providerError) {
     await stateRef.set(
@@ -430,7 +539,7 @@ async function handleCallback(request: NextRequest, platform: SocialPlatform) {
 
   try {
     const storeResult = await callStoreCredentials({
-      stateId: stateParam,
+      stateId,
       accountId: stateData.accountId ?? null,
       platform,
       organisationId: stateData.organisationId ?? null,
@@ -438,6 +547,7 @@ async function handleCallback(request: NextRequest, platform: SocialPlatform) {
       displayName: stateData.displayName ?? stateData.organisationName ?? null,
       scopes: stateData.scopes ?? { publish: true, analytics: true },
       hqManaged: stateData.hqManaged === true,
+      stateSecret,
       tokens: {
         accessToken: tokenResult.accessToken,
         refreshToken: tokenResult.refreshToken,
@@ -461,6 +571,7 @@ async function handleCallback(request: NextRequest, platform: SocialPlatform) {
         errorMessage: null,
         accountId: storeResult.accountId,
         completedAt: FieldValue.serverTimestamp(),
+        stateSecretHash: FieldValue.delete(),
       },
       { merge: true }
     );

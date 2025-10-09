@@ -20,6 +20,54 @@ interface Agreement {
   signatures?: { uid: string; signedAt: Timestamp }[];
 }
 
+const DEFAULT_AGREEMENTS: Agreement[] = [
+  {
+    title: 'Franchise Agreements',
+    category: 'Franchise',
+    content: '',
+    requireSign: true,
+    history: [],
+    signatures: [],
+  },
+  {
+    title: 'Affiliate Agreements',
+    category: 'Affiliate',
+    content: '',
+    requireSign: true,
+    history: [],
+    signatures: [],
+  },
+  {
+    title: 'Team Contracts',
+    category: 'Internal',
+    content: '',
+    requireSign: true,
+    history: [],
+    signatures: [],
+  },
+];
+
+const DEFAULT_POLICIES = [
+  {
+    title: 'Data Privacy',
+    content: '',
+    audience: 'client',
+    version: '1.0',
+  },
+  {
+    title: 'Terms of Business (Videography)',
+    content: '',
+    audience: 'client',
+    version: '1.0',
+  },
+  {
+    title: 'Terms of Business (Live Events)',
+    content: '',
+    audience: 'client',
+    version: '1.0',
+  },
+];
+
 const emptyForm: Agreement = {
   title: '',
   category: '',
@@ -61,13 +109,32 @@ export default function AdminAgreementsPage() {
         signatures: sigSnap.docs.map((s) => s.data() as any)
       });
     }
-    list.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+    const existingTitles = new Set(list.map((item) => item.title.trim().toLowerCase()));
+    DEFAULT_AGREEMENTS.forEach((defaultAgreement) => {
+      if (!existingTitles.has(defaultAgreement.title.trim().toLowerCase())) {
+        list.push({ ...defaultAgreement });
+      }
+    });
+    list.sort((a, b) => {
+      const aTime = a.createdAt?.seconds || 0;
+      const bTime = b.createdAt?.seconds || 0;
+      if (aTime !== bTime) {
+        return bTime - aTime;
+      }
+      return a.title.localeCompare(b.title);
+    });
     setAgreements(list);
   };
 
   const loadPolicies = async () => {
     const polSnap = await getDocs(collection(db, 'policies'));
-    setPolicies(polSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+    const loaded = polSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+    const existingTitles = new Set(loaded.map((item) => item.title.trim().toLowerCase()));
+    const merged = [
+      ...loaded,
+      ...DEFAULT_POLICIES.filter((policy) => !existingTitles.has(policy.title.trim().toLowerCase())),
+    ].sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+    setPolicies(merged);
   };
 
   useEffect(() => {

@@ -163,7 +163,7 @@ const ProductStoryboardEditor = ({
             : "…",
         durationLabel: buildDurationLabel(startSeconds, endSeconds),
         image: scene.previewUrl || scene.imageUrl || null,
-      } satisfies TimelineSegment & { duration: number };
+      } satisfies Omit<TimelineSegment, "width"> & { duration: number };
     });
     const total = segments.reduce((sum, item) => sum + item.duration, 0) || 1;
     return segments.map((segment) => ({

@@ -32,6 +32,8 @@ import type {
   ProductModifierSelection,
   ProductOrderFormField,
   ProductStoryboardScene,
+  ProductDigitalDelivery,
+  ProductDigitalRelease,
 } from "@/lib/products";
 import type { PriceTiers } from "@/lib/pricing";
 import type { Venue } from "@/lib/venues";
@@ -47,6 +49,11 @@ import ProductStoryboardEditor, {
   formatStoryboardSeconds,
   parseStoryboardTimecode,
 } from "@/components/admin/products/ProductStoryboardEditor";
+import {
+  DIGITAL_STATUS_META,
+  formatDigitalTimestamp,
+  getDigitalStatusMeta,
+} from "@/lib/digital-delivery";
 import type { IconType } from "react-icons";
 import {
   FiCheck,
@@ -57,6 +64,9 @@ import {
   FiImage,
   FiMusic,
   FiFileText,
+  FiDownload,
+  FiAlertCircle,
+  FiClock,
 } from "react-icons/fi";
 import type { Category } from "@/lib/categories";
 import VenueMap from "@/components/VenueMap";
@@ -864,6 +874,16 @@ export default function EditProductPage() {
   const [driveTemplateFolderId, setDriveTemplateFolderId] = useState("");
   const [driveFolderName, setDriveFolderName] = useState("");
   const [driveTemplatePickerOpen, setDriveTemplatePickerOpen] = useState(false);
+  const [digitalDeliveryEnabled, setDigitalDeliveryEnabled] = useState(false);
+  const [digitalDeliveryLabel, setDigitalDeliveryLabel] = useState("");
+  const [digitalDeliveryDescription, setDigitalDeliveryDescription] = useState("");
+  const [digitalDeliveryAutoRelease, setDigitalDeliveryAutoRelease] = useState(true);
+  const [digitalDeliveryFolderId, setDigitalDeliveryFolderId] = useState("");
+  const [digitalDeliveryFolderName, setDigitalDeliveryFolderName] = useState("");
+  const [digitalDeliveryPickerOpen, setDigitalDeliveryPickerOpen] = useState(false);
+  const [digitalDeliveryStatus, setDigitalDeliveryStatus] = useState<string | null>(null);
+  const [digitalReleaseSnapshot, setDigitalReleaseSnapshot] =
+    useState<ProductDigitalRelease | null>(null);
   const [tasks, setTasks] = useState<ProductTask[]>([]);
   const [taskTitle, setTaskTitle] = useState("");
   const [taskForCustomer, setTaskForCustomer] = useState(false);
@@ -1449,6 +1469,57 @@ export default function EditProductPage() {
               ? (p as any).driveFolderName
               : ""
           );
+          const digitalConfig = (p as any).digitalDelivery as
+            | ProductDigitalDelivery
+            | undefined;
+          if (digitalConfig && typeof digitalConfig === "object") {
+            const enabled = digitalConfig.enabled !== false;
+            setDigitalDeliveryEnabled(enabled);
+            setDigitalDeliveryLabel(
+              typeof digitalConfig.label === "string" ? digitalConfig.label : ""
+            );
+            setDigitalDeliveryDescription(
+              typeof digitalConfig.description === "string"
+                ? digitalConfig.description
+                : ""
+            );
+            setDigitalDeliveryAutoRelease(
+              digitalConfig.autoRelease === false ? false : true
+            );
+            setDigitalDeliveryFolderId(
+              typeof digitalConfig.driveTemplateFolderId === "string"
+                ? digitalConfig.driveTemplateFolderId
+                : ""
+            );
+            setDigitalDeliveryFolderName(
+              typeof digitalConfig.driveFolderName === "string"
+                ? digitalConfig.driveFolderName
+                : ""
+            );
+            const statusValue =
+              typeof digitalConfig.status === "string"
+                ? digitalConfig.status
+                : typeof digitalConfig.release?.status === "string"
+                  ? digitalConfig.release.status
+                  : digitalConfig.release
+                    ? "released"
+                    : null;
+            setDigitalDeliveryStatus(statusValue);
+            setDigitalReleaseSnapshot(
+              digitalConfig.release && typeof digitalConfig.release === "object"
+                ? (digitalConfig.release as ProductDigitalRelease)
+                : null
+            );
+          } else {
+            setDigitalDeliveryEnabled(false);
+            setDigitalDeliveryLabel("");
+            setDigitalDeliveryDescription("");
+            setDigitalDeliveryAutoRelease(true);
+            setDigitalDeliveryFolderId("");
+            setDigitalDeliveryFolderName("");
+            setDigitalDeliveryStatus(null);
+            setDigitalReleaseSnapshot(null);
+          }
           setTasks(p.defaultTasks || []);
           setWorkflowId((p as any).workflowId || "");
           setOnsiteDays(
@@ -1911,6 +1982,14 @@ export default function EditProductPage() {
     setDriveTemplatePickerOpen(false);
   };
 
+  const handleDigitalFolderSelection = (selection: DriveFolderSelection) => {
+    setDigitalDeliveryFolderId(selection.id);
+    if (selection.name && selection.name.trim().length > 0) {
+      setDigitalDeliveryFolderName(selection.name.trim());
+    }
+    setDigitalDeliveryPickerOpen(false);
+  };
+
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     const uploadedGalleryUrls = new Map<string, string>();
@@ -2271,9 +2350,11 @@ export default function EditProductPage() {
           commissionRate: organiserCommissionValue,
         }
       : null;
-    await updateDoc(doc(db, "products", id), {
-      name,
-      description,
+    const trimmedName = name.trim();
+    const trimmedDescription = description.trim();
+    const updates: Record<string, any> = {
+      name: trimmedName || name,
+      description: trimmedDescription || description,
       tagline: tagline || null,
       salesMode,
       price: baseProductPrice,
@@ -2338,7 +2419,36 @@ export default function EditProductPage() {
         keywords: seo.keywords || null,
         socialImageUrl: seoImage || null,
       },
-    });
+    };
+
+    if (digitalDeliveryEnabled) {
+      updates["digitalDelivery.enabled"] = true;
+      updates["digitalDelivery.label"] =
+        digitalDeliveryLabel.trim().length > 0
+          ? digitalDeliveryLabel.trim()
+          : trimmedName || name || null;
+      updates["digitalDelivery.description"] =
+        digitalDeliveryDescription.trim().length > 0
+          ? digitalDeliveryDescription.trim()
+          : null;
+      updates["digitalDelivery.autoRelease"] = digitalDeliveryAutoRelease;
+      updates["digitalDelivery.driveTemplateFolderId"] =
+        digitalDeliveryFolderId.trim().length > 0
+          ? digitalDeliveryFolderId.trim()
+          : null;
+      updates["digitalDelivery.driveFolderName"] =
+        digitalDeliveryFolderName.trim().length > 0
+          ? digitalDeliveryFolderName.trim()
+          : null;
+      if (digitalDeliveryStatus) {
+        updates["digitalDelivery.status"] = digitalDeliveryStatus;
+      }
+      updates["digitalDelivery.release"] = digitalReleaseSnapshot ?? null;
+    } else {
+      updates["digitalDelivery"] = { enabled: false };
+    }
+
+    await updateDoc(doc(db, "products", id), updates);
     setOrderFormFields(
       orderFieldData.map((field) => ({
         id: field.id,
@@ -3042,6 +3152,51 @@ export default function EditProductPage() {
     );
     return items;
   }, [organiserEnabled]);
+  const digitalStatusKey = useMemo(() => {
+    if (digitalReleaseSnapshot?.status) return digitalReleaseSnapshot.status;
+    if (digitalDeliveryStatus) return digitalDeliveryStatus;
+    if (digitalReleaseSnapshot) return "released";
+    return digitalDeliveryEnabled ? "pending" : null;
+  }, [digitalDeliveryEnabled, digitalDeliveryStatus, digitalReleaseSnapshot]);
+  const digitalStatusMeta = useMemo(() => {
+    if (!digitalStatusKey) {
+      return digitalDeliveryEnabled ? DIGITAL_STATUS_META.pending : null;
+    }
+    return getDigitalStatusMeta(digitalStatusKey) ?? DIGITAL_STATUS_META.pending;
+  }, [digitalDeliveryEnabled, digitalStatusKey]);
+  const digitalStatusToneClass = useMemo(() => {
+    switch (digitalStatusMeta?.tone) {
+      case "released":
+        return "bg-emerald-100 text-emerald-800";
+      case "processing":
+        return "bg-sky-100 text-sky-800";
+      case "partial":
+        return "bg-amber-100 text-amber-800";
+      case "archived":
+        return "bg-slate-200 text-slate-700";
+      default:
+        return "bg-amber-100 text-amber-800";
+    }
+  }, [digitalStatusMeta]);
+  const digitalReleaseUpdatedAt = digitalReleaseSnapshot?.updatedAt ?? digitalReleaseSnapshot?.releasedAt ?? null;
+  const digitalReleaseDriveLink = useMemo(() => {
+    if (!digitalReleaseSnapshot) return null;
+    if (
+      typeof digitalReleaseSnapshot.driveFileId === "string" &&
+      digitalReleaseSnapshot.driveFileId.trim().length > 0
+    ) {
+      return `https://drive.google.com/file/d/${encodeURIComponent(
+        digitalReleaseSnapshot.driveFileId.trim()
+      )}/view?usp=drivesdk`;
+    }
+    if (
+      typeof digitalReleaseSnapshot.driveFileWebViewLink === "string" &&
+      digitalReleaseSnapshot.driveFileWebViewLink.trim().length > 0
+    ) {
+      return digitalReleaseSnapshot.driveFileWebViewLink;
+    }
+    return null;
+  }, [digitalReleaseSnapshot]);
   if (guardLoading || loading) return <p>Loading…</p>;
   if (!allowed) return <p>You do not have permission to edit products.</p>;
 
@@ -3053,6 +3208,14 @@ export default function EditProductPage() {
         onConfirm={handleDriveTemplateSelection}
         title="Select template folder"
         description="Browse the client Drive template structure and choose the folder that should be cloned for this product."
+        confirmLabel="Use this folder"
+      />
+      <DriveFolderPicker
+        open={digitalDeliveryPickerOpen}
+        onClose={() => setDigitalDeliveryPickerOpen(false)}
+        onConfirm={handleDigitalFolderSelection}
+        title="Select digital delivery folder"
+        description="Choose the Google Drive folder that will hold the final download before it is released to customers."
         confirmLabel="Use this folder"
       />
       <form onSubmit={save} className="grid w-full gap-6">
@@ -3120,6 +3283,165 @@ export default function EditProductPage() {
               value={driveFolderName}
               onChange={(event) => setDriveFolderName(event.target.value)}
             />
+          </div>
+          <div className="rounded border bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold">Digital downloads</h2>
+                <p className="text-xs text-gray-600">
+                  Enable Drive-powered fulfilment so customers receive the final edit as a secure download inside the portal.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={digitalDeliveryEnabled}
+                onClick={() => setDigitalDeliveryEnabled((current) => !current)}
+                className={`relative inline-flex h-6 w-12 items-center rounded-full transition ${
+                  digitalDeliveryEnabled ? "bg-emerald-500" : "bg-gray-300"
+                }`}
+              >
+                <span className="sr-only">Toggle digital downloads</span>
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+                    digitalDeliveryEnabled ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+            {digitalDeliveryEnabled ? (
+              <div className="mt-4 grid gap-3">
+                <div className="rounded border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-emerald-900">
+                      <FiDownload className="h-4 w-4" aria-hidden />
+                      <span>Release status</span>
+                    </div>
+                    <span
+                      className={`inline-flex items-center gap-2 rounded-full px-2 py-0.5 text-xs font-semibold ${digitalStatusToneClass}`}
+                    >
+                      {digitalStatusMeta?.label ?? "Pending"}
+                    </span>
+                  </div>
+                  <div className="mt-3 grid gap-1">
+                    <div className="flex items-center gap-2">
+                      <FiClock className="h-3 w-3" aria-hidden />
+                      <span>Last update: {formatDigitalTimestamp(digitalReleaseUpdatedAt)}</span>
+                    </div>
+                    {digitalReleaseSnapshot ? (
+                      <div className="grid gap-1 text-sm">
+                        <p className="font-medium">
+                          {digitalReleaseSnapshot.assetName ||
+                            digitalReleaseSnapshot.driveFileName ||
+                            "Ready for release"}
+                        </p>
+                        <p className="text-xs">Version: {digitalReleaseSnapshot.version ?? "—"}</p>
+                        {digitalReleaseDriveLink ? (
+                          <a
+                            className="text-xs font-semibold text-emerald-800 underline"
+                            href={digitalReleaseDriveLink}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open source in Drive
+                          </a>
+                        ) : null}
+                        {digitalReleaseSnapshot.downloadUrl ? (
+                          <a
+                            className="text-xs font-semibold text-emerald-800 underline"
+                            href={digitalReleaseSnapshot.downloadUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Customer download link
+                          </a>
+                        ) : null}
+                        {digitalReleaseSnapshot.releaseNotes ? (
+                          <p className="text-xs text-emerald-900/80">
+                            Notes: {digitalReleaseSnapshot.releaseNotes}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 text-sm text-emerald-900">
+                        <FiAlertCircle className="h-3 w-3" aria-hidden />
+                        <span>No digital release has been published yet.</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <label className="grid gap-1 text-xs text-gray-600">
+                  <span className="font-semibold text-gray-700">Download label</span>
+                  <input
+                    className="input"
+                    placeholder="eg. Multicam performance film"
+                    value={digitalDeliveryLabel}
+                    onChange={(event) => setDigitalDeliveryLabel(event.target.value)}
+                  />
+                </label>
+                <label className="grid gap-1 text-xs text-gray-600">
+                  <span className="font-semibold text-gray-700">Customer message</span>
+                  <textarea
+                    className="textarea min-h-[88px]"
+                    placeholder="Explain how and when the digital download will be released."
+                    value={digitalDeliveryDescription}
+                    onChange={(event) => setDigitalDeliveryDescription(event.target.value)}
+                  />
+                </label>
+                <div className="grid gap-1 text-xs text-gray-600">
+                  <span className="font-semibold text-gray-700">Digital fulfilment folder</span>
+                  <input
+                    className="input"
+                    placeholder="Drive folder ID"
+                    value={digitalDeliveryFolderId}
+                    onChange={(event) => setDigitalDeliveryFolderId(event.target.value)}
+                  />
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setDigitalDeliveryPickerOpen(true)}
+                    >
+                      Browse Drive
+                    </button>
+                    {digitalDeliveryFolderId.trim().length > 0 && (
+                      <a
+                        className="text-xs text-blue-600 underline"
+                        href={`https://drive.google.com/drive/folders/${encodeURIComponent(
+                          digitalDeliveryFolderId.trim()
+                        )}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open folder in Drive
+                      </a>
+                    )}
+                  </div>
+                </div>
+                <label className="grid gap-1 text-xs text-gray-600">
+                  <span className="font-semibold text-gray-700">Default release folder name</span>
+                  <input
+                    className="input"
+                    placeholder="eg. Digital downloads"
+                    value={digitalDeliveryFolderName}
+                    onChange={(event) => setDigitalDeliveryFolderName(event.target.value)}
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                    checked={digitalDeliveryAutoRelease}
+                    onChange={(event) =>
+                      setDigitalDeliveryAutoRelease(event.target.checked)
+                    }
+                  />
+                  <span>
+                    Automatically notify existing orders when you publish a new Drive release.
+                  </span>
+                </label>
+              </div>
+            ) : null}
           </div>
         </div>
       )}

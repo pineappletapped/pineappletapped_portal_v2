@@ -757,6 +757,7 @@ export default function AddToCartWizard({
     }
     return normaliseDateKey(reservationStartKey);
   }, [date, product.category, reservationStartKey]);
+  const showTimeSlotPanel = timeSlotRequired && !!slotDateKey;
   const timeSlots = useMemo(
     () => buildTimeSlots(timeSlotRequired ? onsiteTiming : null),
     [onsiteTiming, timeSlotRequired]
@@ -2080,7 +2081,10 @@ export default function AddToCartWizard({
         aria-labelledby="wizard-title"
         aria-describedby={descriptionIds}
         tabIndex={-1}
-        className="bg-white p-6 rounded-lg shadow-xl max-w-lg w-full space-y-5 focus:outline-none"
+        className={clsx(
+          "bg-white p-6 rounded-lg shadow-xl max-w-lg w-full space-y-5 focus:outline-none transition-[max-width] duration-300",
+          showTimeSlotPanel ? "lg:max-w-5xl" : undefined,
+        )}
       >
         <div className="sr-only" aria-live="polite">
           {liveMessage}
@@ -2412,49 +2416,79 @@ export default function AddToCartWizard({
                 {product.category === "exhibition-videography" && eventRangeLabel && (
                   <p className="text-sm text-gray-600">Show runs {eventRangeLabel}.</p>
                 )}
-                <ProductDatePicker
-                  productId={product.id}
-                  selected={date}
-                  onSelect={handleDateSelect}
-                  scope={availabilityScope}
-                  overrides={availabilityOverrides}
-                  allowedDates={
-                    product.category === "exhibition-videography"
-                      ? exhibitionAllowedDates
-                      : undefined
-                  }
-                  allowedDateLabels={
-                    product.category === "exhibition-videography" &&
-                    Object.keys(exhibitionDayLabels).length > 0
-                      ? exhibitionDayLabels
-                      : undefined
-                  }
-                  highlightedDates={
-                    product.category === "exhibition-videography" &&
-                    exhibitionHighlightDates.length > 0
-                      ? exhibitionHighlightDates
-                      : undefined
-                  }
-                  initialMonth={calendarInitialMonth}
-                />
-                {timeSlotRequired && (
-                  <div className="space-y-2">
-                    <p className="text-sm font-medium">Select a filming window</p>
-                    {slotDateKey ? (
-                      timeSlots.length > 0 ? (
-                        <div className="grid gap-2 sm:grid-cols-2">
-                          {timeSlots.map((slot) => {
-                            const checked = selectedTimeSlot?.id === slot.id;
-                            return (
-                              <label
-                                key={slot.id}
-                                className={`flex items-center justify-between gap-3 rounded-md border p-3 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${
-                                  checked
-                                    ? "border-orange-400 bg-orange-50"
-                                    : "border-gray-200 bg-white hover:border-orange/60"
-                                }`}
-                              >
-                                <div className="flex items-center gap-3">
+                <div
+                  className={clsx(
+                    "relative flex w-full flex-col gap-4",
+                    showTimeSlotPanel ? "lg:flex-row lg:items-start lg:gap-8" : undefined,
+                  )}
+                >
+                  <div
+                    className={clsx(
+                      "flex flex-col gap-3",
+                      showTimeSlotPanel ? "lg:flex-shrink-0" : undefined,
+                    )}
+                  >
+                    <div className="self-center lg:self-start">
+                      <ProductDatePicker
+                        productId={product.id}
+                        selected={date}
+                        onSelect={handleDateSelect}
+                        scope={availabilityScope}
+                        overrides={availabilityOverrides}
+                        allowedDates={
+                          product.category === "exhibition-videography"
+                            ? exhibitionAllowedDates
+                            : undefined
+                        }
+                        allowedDateLabels={
+                          product.category === "exhibition-videography" &&
+                          Object.keys(exhibitionDayLabels).length > 0
+                            ? exhibitionDayLabels
+                            : undefined
+                        }
+                        highlightedDates={
+                          product.category === "exhibition-videography" &&
+                          exhibitionHighlightDates.length > 0
+                            ? exhibitionHighlightDates
+                            : undefined
+                        }
+                        initialMonth={calendarInitialMonth}
+                      />
+                    </div>
+                    {timeSlotRequired && !slotDateKey && (
+                      <p className="text-xs text-gray-500">
+                        Choose a production date to see available times.
+                      </p>
+                    )}
+                  </div>
+                  {timeSlotRequired && (
+                    <aside
+                      className={clsx(
+                        "w-full rounded-lg border border-gray-200 bg-white p-4 text-sm shadow-sm transition-all duration-300 ease-out lg:w-[22rem]",
+                        showTimeSlotPanel
+                          ? "mt-4 opacity-100 lg:mt-0 lg:translate-x-0"
+                          : "mt-4 hidden opacity-0 lg:mt-0 lg:pointer-events-none lg:absolute lg:right-0 lg:top-0 lg:block lg:translate-x-[110%]",
+                      )}
+                      aria-hidden={showTimeSlotPanel ? undefined : true}
+                    >
+                      <p className="text-sm font-semibold text-gray-900">
+                        Select a filming window
+                      </p>
+                      <div className="mt-3 space-y-3">
+                        {slotDateKey && timeSlots.length > 0 ? (
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            {timeSlots.map((slot) => {
+                              const checked = selectedTimeSlot?.id === slot.id;
+                              return (
+                                <label
+                                  key={slot.id}
+                                  className={clsx(
+                                    "flex items-center gap-3 rounded-md border p-3 text-sm transition focus-within:border-orange-500 focus-within:ring-1 focus-within:ring-orange",
+                                    checked
+                                      ? "border-orange-500 bg-orange-50 text-orange-900 shadow-sm"
+                                      : "border-emerald-500 bg-emerald-50 text-emerald-900 hover:border-emerald-600 hover:bg-emerald-100",
+                                  )}
+                                >
                                   <input
                                     type="radio"
                                     name="onsite-slot"
@@ -2462,29 +2496,23 @@ export default function AddToCartWizard({
                                     checked={checked}
                                     onChange={() => handleTimeSlotSelect(slot)}
                                   />
-                                  <div className="flex flex-col">
-                                    <span className="font-medium">{slot.label}</span>
-                                  </div>
-                                </div>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      ) : (
+                                  <span className="font-semibold">{slot.label}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-gray-500">
+                            This product doesn’t have any bookable windows yet.
+                          </p>
+                        )}
                         <p className="text-xs text-gray-500">
-                          This product doesn’t have any bookable windows yet.
+                          Times shown in UK local time.
                         </p>
-                      )
-                    ) : (
-                      <p className="text-xs text-gray-500">
-                        Choose a production date to see available times.
-                      </p>
-                    )}
-                    <p className="text-xs text-gray-500">
-                      Times shown in UK local time.
-                    </p>
-                  </div>
-                )}
+                      </div>
+                    </aside>
+                  )}
+                </div>
                 {product.category === "exhibition-videography" && exhibitionSetupOption && (
                   <label
                     className={`flex items-start gap-3 rounded-md border px-3 py-2 text-sm transition focus-within:border-orange-400 focus-within:ring-1 focus-within:ring-orange ${

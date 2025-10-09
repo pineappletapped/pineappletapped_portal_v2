@@ -16,6 +16,9 @@ export interface ProcessStage {
 export interface HomepageContent {
   heroTitle: string;
   heroSubtitle: string;
+  heroVideoUrl: string;
+  heroPosterUrl: string;
+  heroPosterAlt: string;
   aboutTitle: string;
   aboutText: string;
   ctaTitle: string;
@@ -45,6 +48,9 @@ async function loadFirestore() {
 const sampleHomepage: HomepageContent = {
   heroTitle: "Pineapple Tapped",
   heroSubtitle: "Production, streaming and creative services for modern brands.",
+  heroVideoUrl: "https://www.w3schools.com/html/mov_bbb.mp4",
+  heroPosterUrl: "https://dummyimage.com/1920x1080/101828/ffffff&text=Pineapple+Tapped",
+  heroPosterAlt: "Pineapple Tapped hero background",
   aboutTitle: "About Us",
   aboutText:
     "We craft compelling video and livestream experiences that help organisations tell their story. From strategy and production to delivery, our team handles every step.",
@@ -93,6 +99,9 @@ export async function getHomepage(): Promise<HomepageContent> {
     return {
       heroTitle: data.heroTitle || sampleHomepage.heroTitle,
       heroSubtitle: data.heroSubtitle || sampleHomepage.heroSubtitle,
+      heroVideoUrl: data.heroVideoUrl || sampleHomepage.heroVideoUrl,
+      heroPosterUrl: data.heroPosterUrl || sampleHomepage.heroPosterUrl,
+      heroPosterAlt: data.heroPosterAlt || sampleHomepage.heroPosterAlt,
       aboutTitle: data.aboutTitle || sampleHomepage.aboutTitle,
       aboutText: data.aboutText || sampleHomepage.aboutText,
       ctaTitle: data.ctaTitle || sampleHomepage.ctaTitle,

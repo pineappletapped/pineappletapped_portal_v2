@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { auth, db, ensureFirebase, functions, httpsCallable } from '@/lib/firebase';
@@ -57,6 +57,14 @@ interface UserContextState {
   canManage: boolean;
   canOutsource: boolean;
   isHq: boolean;
+}
+
+type AssignmentSource = 'client' | 'franchise' | 'hq' | 'outsourced';
+
+interface AssignmentOption {
+  uid: string;
+  name: string;
+  source: AssignmentSource;
 }
 
 const OFFER_FORM_DEFAULTS: OfferFormState = {
@@ -184,7 +192,9 @@ export default function ProjectTasksPage() {
   const [description, setDescription] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [assignedTo, setAssignedTo] = useState('');
-  const [members, setMembers] = useState<any[]>([]);
+  const [clientMembers, setClientMembers] = useState<AssignmentOption[]>([]);
+  const [teamMembers, setTeamMembers] = useState<AssignmentOption[]>([]);
+  const [outsourcedMembers, setOutsourcedMembers] = useState<AssignmentOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [franchises, setFranchises] = useState<any[]>([]);
   const [userContext, setUserContext] = useState<UserContextState>({
@@ -214,6 +224,8 @@ export default function ProjectTasksPage() {
     orgName: string | null;
   }>({ loading: false, hasGuidelines: false, orgName: null });
 
+  const userNameCacheRef = useRef(new Map<string, string>());
+
   const franchiseMap = useMemo(() => {
     const map = new Map<string, any>();
     franchises.forEach((item) => {
@@ -223,15 +235,99 @@ export default function ProjectTasksPage() {
     });
     return map;
   }, [franchises]);
+  const assignmentMembers = useMemo(() => {
+    const map = new Map<string, AssignmentOption>();
+    const normaliseName = (name: string) => name.trim();
+    const addOption = (option: AssignmentOption) => {
+      if (!option?.uid) return;
+      const uid = option.uid.trim();
+      if (!uid) return;
+      const existing = map.get(uid);
+      const name = typeof option.name === 'string' && option.name.trim().length > 0 ? normaliseName(option.name) : uid;
+      if (!existing) {
+        map.set(uid, { ...option, uid, name });
+        return;
+      }
+      if (!existing.name && name) {
+        existing.name = name;
+      }
+      if (existing.source !== 'client' && option.source === 'client') {
+        map.set(uid, { ...existing, source: 'client', name });
+        return;
+      }
+      if (existing.source === option.source && name && !existing.name) {
+        existing.name = name;
+      }
+    };
+    clientMembers.forEach(addOption);
+    teamMembers.forEach(addOption);
+    outsourcedMembers.forEach(addOption);
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [clientMembers, teamMembers, outsourcedMembers]);
   const membersMap = useMemo(() => {
     const map = new Map<string, string>();
-    members.forEach((member: any) => {
+    assignmentMembers.forEach((member: AssignmentOption) => {
       if (member?.uid) {
         map.set(member.uid, member.name || member.uid);
       }
     });
     return map;
-  }, [members]);
+  }, [assignmentMembers]);
+
+  const fetchUserNames = useCallback(
+    async (uids: string[], fallbackNames?: Map<string, string>) => {
+      const unique = Array.from(
+        new Set(
+          uids
+            .map((uid) => (typeof uid === 'string' ? uid.trim() : ''))
+            .filter((uid) => uid.length > 0)
+        )
+      );
+      if (unique.length === 0) {
+        return new Map<string, string>();
+      }
+      const result = new Map<string, string>();
+      const missing: string[] = [];
+      unique.forEach((uid) => {
+        if (userNameCacheRef.current.has(uid)) {
+          result.set(uid, userNameCacheRef.current.get(uid) as string);
+        } else if (fallbackNames?.has(uid)) {
+          result.set(uid, fallbackNames.get(uid) as string);
+        } else {
+          missing.push(uid);
+        }
+      });
+      if (missing.length) {
+        const snapshots = await Promise.all(
+          missing.map((uid) =>
+            getDoc(doc(db, 'users', uid)).catch((error) => {
+              console.warn('Failed to load user profile', uid, error);
+              return null;
+            })
+          )
+        );
+        snapshots.forEach((snap, index) => {
+          const uid = missing[index];
+          let name = fallbackNames?.get(uid) || null;
+          if (snap?.exists()) {
+            const data = snap.data() as any;
+            name =
+              (typeof data?.displayName === 'string' && data.displayName.trim()) ||
+              (typeof data?.fullName === 'string' && data.fullName.trim()) ||
+              (typeof data?.name === 'string' && data.name.trim()) ||
+              (typeof data?.email === 'string' && data.email.trim()) ||
+              name ||
+              uid;
+          }
+          const resolvedName = name || uid;
+          userNameCacheRef.current.set(uid, resolvedName);
+          result.set(uid, resolvedName);
+        });
+      }
+      return result;
+    },
+    []
+  );
 
   const formatCurrency = useCallback((value: unknown, currency?: string | null) => {
     const numeric = typeof value === 'number' ? value : Number(value);
@@ -277,7 +373,9 @@ export default function ProjectTasksPage() {
     [tasks]
   );
 
-  const brandGuidelinesComplete = Boolean(project?.brandGuidelinesCompleted);
+  const brandGuidelinesComplete = project?.orgId
+    ? orgBrandInfo.hasGuidelines || Boolean(project?.brandGuidelinesCompleted)
+    : Boolean(project?.brandGuidelinesCompleted);
 
   useEffect(() => {
     let active = true;
@@ -317,7 +415,7 @@ export default function ProjectTasksPage() {
   useEffect(() => {
     if (!projectId) return;
     if (!brandTasks.length) return;
-    const shouldComplete = brandGuidelinesComplete || orgBrandInfo.hasGuidelines;
+    const shouldComplete = brandGuidelinesComplete;
     if (!shouldComplete) return;
     const pending = brandTasks.filter((task) => task.status !== 'done');
     if (pending.length === 0) return;
@@ -343,7 +441,7 @@ export default function ProjectTasksPage() {
     return () => {
       cancelled = true;
     };
-  }, [brandTasks, brandGuidelinesComplete, orgBrandInfo.hasGuidelines, projectId, reloadTasks]);
+  }, [brandTasks, brandGuidelinesComplete, projectId, reloadTasks]);
 
   const loadTaskComments = useCallback(
     async (taskId: string) => {
@@ -394,7 +492,8 @@ export default function ProjectTasksPage() {
         if (!projectSnap.exists()) {
           setProject(null);
           setTasks([]);
-          setMembers([]);
+          setClientMembers([]);
+          setTeamMembers([]);
           setIsStaffOrAdmin(false);
           setUserContext({ uid: null, franchiseIds: [], canManage: false, canOutsource: false, isHq: false });
           setLoading(false);
@@ -455,23 +554,176 @@ export default function ProjectTasksPage() {
           const memSnap = await getDocs(query(collection(db, 'memberships'), where('orgId', '==', proj.orgId)));
           if (!active) return;
           const mems = memSnap.docs.map((d) => d.data() as any);
-          const userSnaps = await Promise.all(mems.map((m) => getDoc(doc(db, 'users', m.userId))));
-          if (!active) return;
-          setMembers(
-            mems.map((m, i) => {
-              const userSnap = userSnaps[i];
-              const data = userSnap.data() as any;
-              return {
-                uid: m.userId,
-                name: data?.displayName || data?.email || 'Unnamed',
-              };
-            })
+          const userSnaps = await Promise.all(
+            mems.map((m) => (typeof m?.userId === 'string' && m.userId ? getDoc(doc(db, 'users', m.userId)) : null))
           );
+          if (!active) return;
+          const clientOptions = mems.reduce<AssignmentOption[]>((acc, m, index) => {
+            const uid = typeof m?.userId === 'string' ? m.userId.trim() : '';
+            if (!uid) {
+              return acc;
+            }
+            const userSnap = userSnaps[index];
+            const data = userSnap?.data() as any;
+            const nameCandidate =
+              (typeof data?.displayName === 'string' && data.displayName.trim()) ||
+              (typeof data?.fullName === 'string' && data.fullName.trim()) ||
+              (typeof data?.email === 'string' && data.email.trim()) ||
+              null;
+            acc.push({ uid, name: nameCandidate || uid, source: 'client' });
+            return acc;
+          }, []);
+          setClientMembers(clientOptions);
         } else {
-          setMembers([]);
+          setClientMembers([]);
+        }
+
+        const projectFranchiseId =
+          typeof proj?.franchiseId === 'string' && proj.franchiseId.trim().length > 0 ? proj.franchiseId.trim() : null;
+        const candidateSources = new Map<string, { source: AssignmentSource; fallback?: string }>();
+        const fallbackNames = new Map<string, string>();
+        const addCandidate = (
+          uidValue: unknown,
+          fallback: unknown,
+          overrideSource?: AssignmentSource
+        ) => {
+          if (typeof uidValue !== 'string') return;
+          const uid = uidValue.trim();
+          if (!uid) return;
+          const fallbackName = typeof fallback === 'string' && fallback.trim().length > 0 ? fallback.trim() : undefined;
+          const source = overrideSource ?? (projectFranchiseId ? 'franchise' : 'hq');
+          if (fallbackName && !fallbackNames.has(uid)) {
+            fallbackNames.set(uid, fallbackName);
+          }
+          if (candidateSources.has(uid)) {
+            const existing = candidateSources.get(uid)!;
+            if (fallbackName && !existing.fallback) {
+              existing.fallback = fallbackName;
+            }
+            if (overrideSource && existing.source !== 'client') {
+              existing.source = overrideSource;
+            }
+            return;
+          }
+          candidateSources.set(uid, { source, fallback: fallbackName });
+        };
+
+        const addFromArray = (entries: unknown, source: AssignmentSource | null = null) => {
+          if (!Array.isArray(entries)) return;
+          entries.forEach((entry) => {
+            if (!entry || typeof entry !== 'object') return;
+            const record = entry as Record<string, any>;
+            const uidCandidate =
+              (typeof record.uid === 'string' && record.uid.trim()) ||
+              (typeof record.userId === 'string' && record.userId.trim()) ||
+              (typeof record.id === 'string' && record.id.trim()) ||
+              (typeof record.memberId === 'string' && record.memberId.trim()) ||
+              (typeof record.assigneeUid === 'string' && record.assigneeUid.trim()) ||
+              (typeof record.ownerUid === 'string' && record.ownerUid.trim()) ||
+              '';
+            if (!uidCandidate) return;
+            const fallback =
+              (typeof record.name === 'string' && record.name.trim()) ||
+              (typeof record.displayName === 'string' && record.displayName.trim()) ||
+              (typeof record.fullName === 'string' && record.fullName.trim()) ||
+              (typeof record.label === 'string' && record.label.trim()) ||
+              (typeof record.email === 'string' && record.email.trim()) ||
+              (typeof record.title === 'string' && record.title.trim()) ||
+              (typeof record.role === 'string' && record.role.trim()) ||
+              undefined;
+            addCandidate(uidCandidate, fallback, source ?? (projectFranchiseId ? 'franchise' : 'hq'));
+          });
+        };
+
+        addCandidate(
+          proj?.franchiseAssignedUserId,
+          proj?.franchiseAssignedUser?.displayName || proj?.franchiseAssignedUser?.email || null,
+          projectFranchiseId ? 'franchise' : 'hq'
+        );
+        addCandidate(proj?.ownerUid, proj?.ownerName || proj?.ownerDisplayName || proj?.ownerEmail || null, 'hq');
+        addCandidate(proj?.projectManagerUid, proj?.projectManagerName || proj?.projectManagerEmail || null, 'hq');
+        addCandidate(proj?.operationsOwnerUid, proj?.operationsOwnerName || null, 'hq');
+        addCandidate(proj?.deliveryOwnerUid, proj?.deliveryOwnerName || null, 'hq');
+        addCandidate(proj?.editorUid, proj?.editorName || null, 'hq');
+        addCandidate(proj?.postProductionUid, proj?.postProductionName || null, 'hq');
+
+        addFromArray(proj?.projectTeam);
+        addFromArray(proj?.teamMembers);
+        addFromArray(proj?.internalTeam);
+        addFromArray(proj?.hqTeamMembers, 'hq');
+        addFromArray(proj?.franchiseTeamMembers, 'franchise');
+        addFromArray(proj?.franchiseTeam, 'franchise');
+        addFromArray(proj?.deliveryTeam);
+        addFromArray(proj?.operationsTeam);
+        addFromArray(proj?.productionTeam);
+        addFromArray(proj?.supportTeam);
+        addFromArray(proj?.projectOwners, 'hq');
+        addFromArray(proj?.projectManagers, 'hq');
+        addFromArray(proj?.crew);
+        addFromArray(proj?.assignedTeam);
+        addFromArray(proj?.assignedTeamMembers);
+        addFromArray(proj?.outsourcingTeam, 'outsourced');
+
+        if (proj?.franchiseAssignment && typeof proj.franchiseAssignment === 'object') {
+          const assignment = proj.franchiseAssignment as Record<string, any>;
+          addFromArray(assignment.members, 'franchise');
+          addFromArray(assignment.team, 'franchise');
+        }
+
+        if (projectFranchiseId) {
+          try {
+            const franchiseMembersSnap = await getDocs(
+              query(collection(db, 'franchiseMembers'), where('franchiseId', '==', projectFranchiseId))
+            );
+            if (!active) return;
+            franchiseMembersSnap.docs.forEach((memberDoc) => {
+              const data = memberDoc.data() as any;
+              if (typeof data?.userId === 'string' && data.userId.trim().length > 0) {
+                addCandidate(data.userId, null, 'franchise');
+              }
+            });
+          } catch (error) {
+            console.warn('Failed to load franchise team members for project', projectId, error);
+          }
+        }
+
+        const candidateIds = Array.from(candidateSources.keys());
+        if (candidateIds.length === 0) {
+          setTeamMembers([]);
+        } else {
+          try {
+            const resolvedNames = await fetchUserNames(candidateIds, fallbackNames);
+            if (!active) return;
+            const teamOptions = candidateIds.reduce<AssignmentOption[]>((acc, uid) => {
+              const meta = candidateSources.get(uid);
+              if (!meta) {
+                return acc;
+              }
+              const label = resolvedNames.get(uid) || fallbackNames.get(uid) || uid;
+              acc.push({ uid, name: label, source: meta.source });
+              return acc;
+            }, []);
+            teamOptions.sort((a, b) => a.name.localeCompare(b.name));
+            setTeamMembers(teamOptions);
+          } catch (error) {
+            console.warn('Failed to resolve internal team members for project', projectId, error);
+            if (!active) return;
+            const fallbackOptions = candidateIds.reduce<AssignmentOption[]>((acc, uid) => {
+              const meta = candidateSources.get(uid);
+              if (!meta) {
+                return acc;
+              }
+              acc.push({ uid, name: fallbackNames.get(uid) || uid, source: meta.source });
+              return acc;
+            }, []);
+            fallbackOptions.sort((a, b) => a.name.localeCompare(b.name));
+            setTeamMembers(fallbackOptions);
+          }
         }
       } catch (err) {
         console.error('Failed to load project tasks', err);
+        setClientMembers([]);
+        setTeamMembers([]);
       } finally {
         if (active) {
           setLoading(false);
@@ -482,7 +734,106 @@ export default function ProjectTasksPage() {
     return () => {
       active = false;
     };
-  }, [projectId, reloadTasks]);
+  }, [projectId, reloadTasks, fetchUserNames]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!tasks.length) {
+      setOutsourcedMembers([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+    const fallback = new Map<string, string>();
+    const candidates = new Map<string, AssignmentSource>();
+
+    const registerCandidate = (uidValue: unknown, fallbackName?: unknown) => {
+      if (typeof uidValue !== 'string') return;
+      const uid = uidValue.trim();
+      if (!uid) return;
+      if (typeof fallbackName === 'string' && fallbackName.trim().length > 0 && !fallback.has(uid)) {
+        fallback.set(uid, fallbackName.trim());
+      }
+      if (!candidates.has(uid)) {
+        candidates.set(uid, 'outsourced');
+      }
+    };
+
+    tasks.forEach((task) => {
+      const assignedUid = typeof task.assignedTo === 'string' ? task.assignedTo.trim() : '';
+      if (assignedUid) {
+        registerCandidate(assignedUid, typeof task.assigneeName === 'string' ? task.assigneeName : null);
+      }
+      const agreement = task?.outsourcingAgreement as any;
+      if (agreement) {
+        if (typeof agreement.providerUserId === 'string' && agreement.providerUserId.trim()) {
+          registerCandidate(
+            agreement.providerUserId,
+            (typeof agreement.providerName === 'string' && agreement.providerName.trim()) ||
+              (typeof agreement.providerCompany === 'string' && agreement.providerCompany.trim()) ||
+              null
+          );
+        }
+        if (typeof agreement.acceptedByUid === 'string' && agreement.acceptedByUid.trim()) {
+          registerCandidate(agreement.acceptedByUid, null);
+        }
+      }
+      const proposal = task?.outsourcingProposal as any;
+      if (proposal) {
+        if (typeof proposal.targetUserId === 'string' && proposal.targetUserId.trim()) {
+          registerCandidate(
+            proposal.targetUserId,
+            (typeof proposal.targetUserName === 'string' && proposal.targetUserName.trim()) ||
+              (typeof proposal.targetName === 'string' && proposal.targetName.trim()) ||
+              null
+          );
+        }
+        if (typeof proposal.proposedByUid === 'string' && proposal.proposedByUid.trim()) {
+          registerCandidate(proposal.proposedByUid, proposal.proposedByName);
+        }
+      }
+    });
+
+    const ids = Array.from(candidates.keys());
+    if (ids.length === 0) {
+      setOutsourcedMembers([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    (async () => {
+      try {
+        const names = await fetchUserNames(ids, fallback);
+        if (cancelled) return;
+        setOutsourcedMembers(
+          ids
+            .map((uid) => ({
+              uid,
+              name: names.get(uid) || fallback.get(uid) || uid,
+              source: 'outsourced' as const,
+            }))
+            .sort((a, b) => a.name.localeCompare(b.name))
+        );
+      } catch (error) {
+        console.warn('Failed to resolve outsourced members', error);
+        if (cancelled) return;
+        setOutsourcedMembers(
+          ids
+            .map((uid) => ({
+              uid,
+              name: fallback.get(uid) || uid,
+              source: 'outsourced' as const,
+            }))
+            .sort((a, b) => a.name.localeCompare(b.name))
+        );
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [tasks, fetchUserNames]);
 
   useEffect(() => {
     if (!projectId || !userContext.canOutsource) return;
@@ -527,7 +878,7 @@ export default function ProjectTasksPage() {
         status: 'todo',
         createdAt: new Date().toISOString(),
         assignedTo: assignedTo || null,
-        assigneeName: members.find((m) => m.uid === assignedTo)?.name || null,
+        assigneeName: assignmentMembers.find((m) => m.uid === assignedTo)?.name || null,
       });
       // Record audit trail for creation
       const user = auth.currentUser;
@@ -579,7 +930,7 @@ export default function ProjectTasksPage() {
   const updateTaskAssignee = async (taskId: string, uid: string) => {
     if (!projectId) { alert('Project is unavailable.'); return; }
     try {
-      const member = members.find((m) => m.uid === uid);
+      const member = assignmentMembers.find((m) => m.uid === uid);
       await updateDoc(doc(db, 'projects', projectId, 'tasks', taskId), {
         assignedTo: uid || null,
         assigneeName: member?.name || null,
@@ -861,7 +1212,7 @@ export default function ProjectTasksPage() {
                 onChange={(event) => setAssignedTo(event.target.value)}
               >
                 <option value="">Unassigned</option>
-                {members.map((member) => (
+                {assignmentMembers.map((member) => (
                   <option key={member.uid} value={member.uid}>
                     {member.name}
                   </option>
@@ -942,7 +1293,7 @@ export default function ProjectTasksPage() {
                                   Choose organisation
                                 </Link>
                               </>
-                            ) : brandGuidelinesComplete || orgBrandInfo.hasGuidelines ? (
+                            ) : brandGuidelinesComplete ? (
                               <p>
                                 We already have the brand guidelines
                                 {orgBrandInfo.orgName ? ` for ${orgBrandInfo.orgName}` : ''}, so this task has been marked as
@@ -951,14 +1302,14 @@ export default function ProjectTasksPage() {
                             ) : (
                               <>
                                 <p>
-                                  Open the brand guidelines form to upload your logo, fonts, and brand colours so production can
-                                  stay on-brand from the first draft.
+                                  Open the organisation’s brand workspace to upload logos, fonts, and colours before production
+                                  begins.
                                 </p>
                                 <Link
-                                  href={`/projects/${projectId}/brand-wizard`}
+                                  href={project?.orgId ? `/orgs/${project.orgId}/brand-guidelines?project=${projectId}` : `/projects/${projectId}/brand-wizard`}
                                   className={brandTaskCtaClasses}
                                 >
-                                  Open brand guidelines form
+                                  Open brand guidelines workspace
                                 </Link>
                               </>
                             )}
@@ -982,7 +1333,7 @@ export default function ProjectTasksPage() {
                               onChange={(event) => updateTaskAssignee(task.id, event.target.value)}
                             >
                               <option value="">Unassigned</option>
-                              {members.map((m) => (
+                              {assignmentMembers.map((m) => (
                                 <option key={m.uid} value={m.uid}>
                                   {m.name}
                                 </option>
@@ -1545,7 +1896,7 @@ export default function ProjectTasksPage() {
                       disabled={!canEditTask}
                     >
                       <option value="">Unassigned</option>
-                      {members.map((m) => (
+                      {assignmentMembers.map((m) => (
                         <option key={m.uid} value={m.uid}>
                           {m.name}
                         </option>
