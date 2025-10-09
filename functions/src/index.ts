@@ -5953,7 +5953,6 @@ export const reserveKit = functions.https.onCall(async (data) => {
             : null;
       const bookingsSnap = await eqRef
         .collection('bookings')
-        .where('start', '<', reservationEnd)
         .where('end', '>', start)
         .get();
       const conflictingBookings = bookingsSnap.docs.filter((bookingDoc) =>
