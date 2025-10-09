@@ -5922,13 +5922,17 @@ export const reserveKit = functions.https.onCall(async (data) => {
     return { ownerType, ownerId: rawOwnerId, franchiseId };
   };
 
-  const equipmentRecords: EquipmentRecord[] = [];
-  if (anyKitAttempt) {
+  let equipmentRecordsCache: EquipmentRecord[] | null = null;
+  const loadEquipmentRecords = async (): Promise<EquipmentRecord[]> => {
+    if (equipmentRecordsCache) {
+      return equipmentRecordsCache;
+    }
+    const records: EquipmentRecord[] = [];
     for (const id of eqIds) {
       const eqRef = db.collection('equipment').doc(id);
       const eqSnap = await eqRef.get();
       if (!eqSnap.exists) {
-        equipmentRecords.push({
+        records.push({
           id,
           name: id,
           category: null,
@@ -5973,7 +5977,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
         typeof eq.rentalPrice === 'number' && Number.isFinite(eq.rentalPrice)
           ? eq.rentalPrice
           : 0;
-      equipmentRecords.push({
+      records.push({
         id: eqSnap.id,
         name: equipmentName,
         category,
@@ -5987,7 +5991,9 @@ export const reserveKit = functions.https.onCall(async (data) => {
         exists: true,
       });
     }
-  }
+    equipmentRecordsCache = records;
+    return records;
+  };
 
   const matchesOwnerForAttempt = (
     record: EquipmentRecord,
@@ -6011,8 +6017,27 @@ export const reserveKit = functions.https.onCall(async (data) => {
     );
   };
 
+  const createNonKitResponse = (attempt: ReservationAttempt): ReservationResponse => ({
+    conflicts: [],
+    kitItems: [],
+    rentalTotal: 0,
+    status: attempt.initialStatus,
+    missingStandards: [],
+    provider: {
+      level: attempt.key,
+      status: attempt.initialStatus,
+      label: attempt.label,
+      franchiseId: attempt.franchiseId,
+      territoryId: coverageInfo.territoryId,
+      requiresKit: false,
+      autoConfirm: attempt.autoConfirm,
+      description: attempt.description ?? null,
+    },
+  });
+
   const evaluateAttempt = (
     attempt: ReservationAttempt,
+    equipmentRecords: EquipmentRecord[],
   ): { success: boolean; response: ReservationResponse } => {
     const conflicts: ConflictRecord[] = [];
     const kitItems: KitReservationItem[] = [];
@@ -6023,27 +6048,6 @@ export const reserveKit = functions.https.onCall(async (data) => {
     requiredStandards.forEach((standard) => {
       standardMatches.set(standard, new Set());
     });
-
-    if (!attempt.requiresKit) {
-      const response: ReservationResponse = {
-        conflicts: [],
-        kitItems: [],
-        rentalTotal: 0,
-        status: attempt.initialStatus,
-        missingStandards: [],
-        provider: {
-          level: attempt.key,
-          status: attempt.initialStatus,
-          label: attempt.label,
-          franchiseId: attempt.franchiseId,
-          territoryId: coverageInfo.territoryId,
-          requiresKit: false,
-          autoConfirm: attempt.autoConfirm,
-          description: attempt.description ?? null,
-        },
-      };
-      return { success: true, response };
-    }
 
     for (const record of equipmentRecords) {
       if (!record.exists) {
@@ -6132,7 +6136,11 @@ export const reserveKit = functions.https.onCall(async (data) => {
   let fallbackResponse: ReservationResponse | null = null;
 
   for (const attempt of attempts) {
-    const { success, response } = evaluateAttempt(attempt);
+    if (!attempt.requiresKit) {
+      return createNonKitResponse(attempt);
+    }
+    const equipmentRecords = await loadEquipmentRecords();
+    const { success, response } = evaluateAttempt(attempt, equipmentRecords);
     if (success) {
       if (response.status === 'confirmed' && response.kitItems.length > 0) {
         const batch = db.batch();
