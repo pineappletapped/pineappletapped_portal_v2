@@ -15276,13 +15276,24 @@ export const admin_saveProposalTemplate = functions.https.onCall(
       const priceValue = sanitiseMoney(item.price);
       const descriptionValue = safeString(item.description || item.summary);
       const productIdValue = safeString(item.productId);
-      return {
+      const sanitised: {
+        type: 'product' | 'custom';
+        name: string;
+        description: string | null;
+        price?: number;
+        productId?: string;
+      } = {
         type,
         name: nameValue,
         description: descriptionValue || null,
-        price: typeof priceValue === 'number' ? priceValue : undefined,
-        productId: productIdValue || undefined,
       };
+      if (typeof priceValue === 'number') {
+        sanitised.price = priceValue;
+      }
+      if (productIdValue) {
+        sanitised.productId = productIdValue;
+      }
+      return sanitised;
     };
 
     const sanitisePage = (page: any) => {
@@ -15315,7 +15326,21 @@ export const admin_saveProposalTemplate = functions.https.onCall(
         .toString(36)
         .slice(2, 8)}`;
 
-      return {
+      const sanitisedPage: {
+        id: string;
+        type: string;
+        layout: string;
+        title: string | null;
+        subtitle: string | null;
+        body: string | null;
+        includeInContents: boolean;
+        sections: string[];
+        bulletPoints: string[];
+        notes: string | null;
+        productId: string | null;
+        autoContents: boolean;
+        displayMode?: 'quote' | 'estimate';
+      } = {
         id: idValue,
         type,
         layout: resolvedLayout,
@@ -15327,12 +15352,12 @@ export const admin_saveProposalTemplate = functions.https.onCall(
         bulletPoints,
         notes,
         productId: safeString(page.productId) || null,
-        displayMode:
-          type === 'quote' || type === 'estimate'
-            ? (displayMode === 'estimate' ? 'estimate' : 'quote')
-            : undefined,
         autoContents: Boolean(page.autoContents && type === 'contents'),
       };
+      if (type === 'quote' || type === 'estimate') {
+        sanitisedPage.displayMode = displayMode === 'estimate' ? 'estimate' : 'quote';
+      }
+      return sanitisedPage;
     };
 
     const sanitiseAgreementIds = Array.isArray(agreementIds)
