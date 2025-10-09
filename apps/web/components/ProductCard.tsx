@@ -154,7 +154,8 @@ export default function ProductCard({ product }: { product: Product }) {
       (url) => typeof url === "string" && url.trim().length > 0
     )?.trim() ||
     (typeof product.imageUrl === "string" ? product.imageUrl.trim() : "");
-  const img = coverImage || "https://placehold.co/600x400?text=No+Image";
+  const img =
+    coverImage || "https://placehold.co/1280x720?text=No+Image&font=source-sans-pro";
   const { visibleDeliverables, remainingDeliverableCount } =
     getDeliverableSummary(product);
   const digitalConfig = product.digitalDelivery ?? null;
@@ -215,13 +216,16 @@ export default function ProductCard({ product }: { product: Product }) {
   return (
     <>
       <div className="card p-4 flex flex-col gap-2 text-sm">
-        <Image
-          src={img}
-          alt={product.name}
-          width={600}
-          height={400}
-          className="w-full h-40 object-cover rounded"
-        />
+        <div className="relative aspect-video w-full overflow-hidden rounded bg-slate-100">
+          <Image
+            src={img}
+            alt={product.name}
+            fill
+            sizes="(min-width: 1280px) 22rem, (min-width: 1024px) 20rem, 100vw"
+            className="object-cover"
+            priority={false}
+          />
+        </div>
         <h3 className="font-medium text-sm">{product.name}</h3>
         {product.tagline && (
           <p className="text-xs text-gray-600">{product.tagline}</p>

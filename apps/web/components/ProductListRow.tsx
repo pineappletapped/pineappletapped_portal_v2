@@ -26,7 +26,8 @@ export default function ProductListRow({ product }: { product: Product }) {
       (url) => typeof url === "string" && url.trim().length > 0
     )?.trim() ||
     (typeof product.imageUrl === "string" ? product.imageUrl.trim() : "");
-  const imageUrl = coverImage || "https://placehold.co/600x400?text=No+Image";
+  const imageUrl =
+    coverImage || "https://placehold.co/1280x720?text=No+Image&font=source-sans-pro";
   const priceDetails = getListingPriceLabel(product);
   const priceHeadline = priceDetails?.headline ?? "Pricing on request";
   const { visibleDeliverables, remainingDeliverableCount } =
@@ -40,12 +41,12 @@ export default function ProductListRow({ product }: { product: Product }) {
   return (
     <article className="card p-4 text-sm shadow-sm">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-stretch">
-        <div className="relative aspect-video w-full overflow-hidden rounded-md sm:aspect-[3/4] sm:w-48 sm:flex-shrink-0">
+        <div className="relative aspect-video w-full overflow-hidden rounded-md bg-slate-100 sm:w-56 sm:flex-shrink-0">
           <Image
             src={imageUrl}
             alt={product.name}
             fill
-            sizes="(min-width: 640px) 12rem, 100vw"
+            sizes="(min-width: 1024px) 14rem, (min-width: 640px) 12rem, 100vw"
             className="object-cover"
           />
         </div>
