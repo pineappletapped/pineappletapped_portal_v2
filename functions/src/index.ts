@@ -15197,47 +15197,316 @@ export const admin_createProposal = functions.https.onCall(async (data: any, con
  * Save or update a proposal template. Expects { id?, name, items, agreementIds } and
  * returns the template id.
  */
-export const admin_saveProposalTemplate = functions.https.onCall(async (data: any, context: functions.https.CallableContext) => {
-  await assertStaff(context, ['admin', 'sales']);
-  const { id, name, items = [], agreementIds = [], brandColor, logoUrl } = data;
-  if (!name) throw new functions.https.HttpsError('invalid-argument', 'name required');
-  const tpl = {
-    name,
-    items,
-    agreementIds,
-    brandColor: brandColor || null,
-    logoUrl: logoUrl || null,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  };
-  if (id) {
-    const tplRef = db.collection('proposalTemplates').doc(id);
-    const beforeSnap = await tplRef.get();
-    const beforeData = beforeSnap.exists ? (beforeSnap.data() as admin.firestore.DocumentData) : undefined;
-    await tplRef.set(tpl, { merge: true });
+export const admin_saveProposalTemplate = functions.https.onCall(
+  async (data: any, context: functions.https.CallableContext) => {
+    await assertStaff(context, ['admin', 'sales']);
+
+    const safeString = (value: unknown): string =>
+      typeof value === 'string' ? value.trim() : '';
+
+    const allowedKinds = new Set(['mini', 'detailed', 'quick']);
+    const allowedPageTypes = new Set([
+      'cover',
+      'intro',
+      'about',
+      'contents',
+      'service_overview',
+      'storyboard',
+      'operations',
+      'quote',
+      'estimate',
+      'terms',
+      'custom',
+    ]);
+    const allowedLayouts = new Set([
+      'hero',
+      'split',
+      'columns',
+      'gallery',
+      'timeline',
+      'table',
+    ]);
+    const allowedThemes = new Set(['modern', 'spotlight', 'classic']);
+    const allowedBackgrounds = new Set(['clean', 'gradient', 'texture']);
+
+    const {
+      id,
+      name,
+      summary,
+      category,
+      baseProductId,
+      items = [],
+      agreementIds = [],
+      pages = [],
+      styling = {},
+      brandSnapshot = {},
+      brandColor,
+      logoUrl,
+      metadata = {},
+    } = data || {};
+
+    const templateName = safeString(name);
+    if (!templateName) {
+      throw new functions.https.HttpsError('invalid-argument', 'name required');
+    }
+
+    const sanitiseMoney = (value: unknown): number | undefined => {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return value;
+      }
+      if (typeof value === 'string' && value.trim().length > 0) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      }
+      return undefined;
+    };
+
+    const sanitiseItem = (item: any) => {
+      if (!item || typeof item !== 'object') {
+        return null;
+      }
+      const type = safeString(item.type);
+      if (type !== 'product' && type !== 'custom') {
+        return null;
+      }
+      const nameValue = safeString(item.name || item.title);
+      if (!nameValue) {
+        return null;
+      }
+      const priceValue = sanitiseMoney(item.price);
+      const descriptionValue = safeString(item.description || item.summary);
+      const productIdValue = safeString(item.productId);
+      return {
+        type,
+        name: nameValue,
+        description: descriptionValue || null,
+        price: typeof priceValue === 'number' ? priceValue : undefined,
+        productId: productIdValue || undefined,
+      };
+    };
+
+    const sanitisePage = (page: any) => {
+      if (!page || typeof page !== 'object') {
+        return null;
+      }
+      const type = safeString(page.type) as string;
+      if (!allowedPageTypes.has(type)) {
+        return null;
+      }
+      const layout = safeString(page.layout) as string;
+      const resolvedLayout = allowedLayouts.has(layout) ? layout : 'hero';
+      const title = safeString(page.title) || null;
+      const subtitle = safeString(page.subtitle) || null;
+      const body = safeString(page.body) || null;
+      const includeInContents = Boolean(page.includeInContents ?? type !== 'cover');
+      const displayMode = safeString(page.displayMode);
+      const sections = Array.isArray(page.sections)
+        ? (page.sections as unknown[])
+            .map((value) => safeString(value))
+            .filter((value) => value.length > 0)
+        : [];
+      const bulletPoints = Array.isArray(page.bulletPoints)
+        ? (page.bulletPoints as unknown[])
+            .map((value) => safeString(value))
+            .filter((value) => value.length > 0)
+        : [];
+      const notes = safeString(page.notes) || null;
+      const idValue = safeString(page.id) || `page-${Date.now().toString(36)}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+
+      return {
+        id: idValue,
+        type,
+        layout: resolvedLayout,
+        title,
+        subtitle,
+        body,
+        includeInContents,
+        sections,
+        bulletPoints,
+        notes,
+        productId: safeString(page.productId) || null,
+        displayMode:
+          type === 'quote' || type === 'estimate'
+            ? (displayMode === 'estimate' ? 'estimate' : 'quote')
+            : undefined,
+        autoContents: Boolean(page.autoContents && type === 'contents'),
+      };
+    };
+
+    const sanitiseAgreementIds = Array.isArray(agreementIds)
+      ? (agreementIds as unknown[])
+          .map((value) => safeString(value))
+          .filter((value) => value.length > 0)
+      : [];
+
+    const sanitisedItems = Array.isArray(items)
+      ? (items as unknown[])
+          .map((item) => sanitiseItem(item))
+          .filter((item): item is {
+            type: 'product' | 'custom';
+            name: string;
+            description: string | null;
+            price?: number;
+            productId?: string;
+          } => Boolean(item))
+      : [];
+
+    const sanitisedPages = Array.isArray(pages)
+      ? (pages as unknown[])
+          .map((page) => sanitisePage(page))
+          .filter((page): page is {
+            id: string;
+            type: string;
+            layout: string;
+            title: string | null;
+            subtitle: string | null;
+            body: string | null;
+            includeInContents: boolean;
+            sections: string[];
+            bulletPoints: string[];
+            notes: string | null;
+            productId: string | null;
+            displayMode?: string;
+            autoContents?: boolean;
+          } => Boolean(page))
+      : [];
+
+    if (sanitisedPages.length === 0) {
+      throw new functions.https.HttpsError('invalid-argument', 'At least one page is required');
+    }
+
+    const resolvedCategory = allowedKinds.has(safeString(category))
+      ? safeString(category)
+      : 'detailed';
+
+    const safeColor = (value: unknown): string | null => {
+      const normalised = safeString(value);
+      return normalised ? normalised : null;
+    };
+
+    const stylingTheme = safeString(styling.theme);
+    const stylingBackground = safeString(styling.background);
+    const accentColor = safeColor(styling.accentColor) || safeColor(brandColor);
+    const secondaryColor = safeColor(styling.secondaryColor);
+    const includePageNumbers = Boolean(
+      typeof styling.includePageNumbers === 'boolean'
+        ? styling.includePageNumbers
+        : data?.includePageNumbers,
+    );
+
+    const sanitisedStyling = {
+      theme: allowedThemes.has(stylingTheme) ? stylingTheme : 'modern',
+      background: allowedBackgrounds.has(stylingBackground) ? stylingBackground : 'clean',
+      accentColor: accentColor,
+      secondaryColor: secondaryColor,
+      includePageNumbers,
+    };
+
+    const sanitiseBrandSnapshot = (snapshot: any) => {
+      if (!snapshot || typeof snapshot !== 'object') {
+        return null;
+      }
+      const colors = snapshot.colors && typeof snapshot.colors === 'object'
+        ? {
+            primary: safeColor(snapshot.colors.primary),
+            secondary: safeColor(snapshot.colors.secondary),
+            accent: safeColor(snapshot.colors.accent),
+            neutral: safeColor(snapshot.colors.neutral),
+            highlight: safeColor(snapshot.colors.highlight),
+          }
+        : null;
+      const fonts = snapshot.fonts && typeof snapshot.fonts === 'object'
+        ? {
+            primary: safeString(snapshot.fonts.primary) || null,
+            secondary: safeString(snapshot.fonts.secondary) || null,
+            accent: safeString(snapshot.fonts.accent) || null,
+            headingStyle: safeString(snapshot.fonts.headingStyle) || null,
+          }
+        : null;
+      const voice = snapshot.voice && typeof snapshot.voice === 'object'
+        ? {
+            voicePrinciples: safeString(snapshot.voice.voicePrinciples) || null,
+            tonePrinciples: safeString(snapshot.voice.tonePrinciples) || null,
+            elevatorPitch: safeString(snapshot.voice.elevatorPitch) || null,
+          }
+        : null;
+      return {
+        colors,
+        fonts,
+        voice,
+        logoUrl: safeString(snapshot.logoUrl) || null,
+        updatedAt: safeString(snapshot.updatedAt) || null,
+      };
+    };
+
+    const sanitisedBrandSnapshot = sanitiseBrandSnapshot(brandSnapshot);
+    const resolvedLogoUrl = safeString(logoUrl) || sanitisedBrandSnapshot?.logoUrl || null;
+    const resolvedBrandColor = safeColor(brandColor) || sanitisedBrandSnapshot?.colors?.primary || null;
+
+    const sanitisedMetadata = metadata && typeof metadata === 'object'
+      ? {
+          allowProductOverride: Boolean(metadata.allowProductOverride),
+          presetSource: safeString(metadata.presetSource) || null,
+        }
+      : null;
+
+    const templatePayload: Record<string, any> = {
+      name: templateName,
+      summary: safeString(summary) || null,
+      category: resolvedCategory,
+      baseProductId: safeString(baseProductId) || null,
+      items: sanitisedItems,
+      agreementIds: sanitiseAgreementIds,
+      pages: sanitisedPages,
+      styling: sanitisedStyling,
+      brandSnapshot: sanitisedBrandSnapshot,
+      brandColor: resolvedBrandColor,
+      logoUrl: resolvedLogoUrl,
+      includePageNumbers,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (sanitisedMetadata) {
+      templatePayload.metadata = sanitisedMetadata;
+    }
+
+    if (id) {
+      const tplRef = db.collection('proposalTemplates').doc(id);
+      const beforeSnap = await tplRef.get();
+      const beforeData = beforeSnap.exists
+        ? (beforeSnap.data() as admin.firestore.DocumentData)
+        : undefined;
+      await tplRef.set(templatePayload, { merge: true });
+      if (context.auth?.uid) {
+        const changes = buildChangesFromUpdates(beforeData, templatePayload);
+        await writeAuditLog({
+          actorUid: context.auth.uid,
+          action: 'admin_update_proposal_template',
+          entityType: 'proposalTemplate',
+          entityId: id,
+          changes: Object.keys(changes).length ? changes : null,
+        });
+      }
+      return { id };
+    }
+
+    templatePayload.createdAt = admin.firestore.FieldValue.serverTimestamp();
+
+    const ref = await db.collection('proposalTemplates').add(templatePayload);
     if (context.auth?.uid) {
-      const changes = buildChangesFromUpdates(beforeData, tpl);
       await writeAuditLog({
         actorUid: context.auth.uid,
-        action: 'admin_update_proposal_template',
+        action: 'admin_create_proposal_template',
         entityType: 'proposalTemplate',
-        entityId: id,
-        changes: Object.keys(changes).length ? changes : null,
+        entityId: ref.id,
+        changes: buildChangesFromCreate(templatePayload),
       });
     }
-    return { id };
+    return { id: ref.id };
   }
-  const ref = await db.collection('proposalTemplates').add(tpl);
-  if (context.auth?.uid) {
-    await writeAuditLog({
-      actorUid: context.auth.uid,
-      action: 'admin_create_proposal_template',
-      entityType: 'proposalTemplate',
-      entityId: ref.id,
-      changes: buildChangesFromCreate(tpl),
-    });
-  }
-  return { id: ref.id };
-});
+);
 
 /**
  * Accept a sent proposal and convert it into an order awaiting deposit. Expects
