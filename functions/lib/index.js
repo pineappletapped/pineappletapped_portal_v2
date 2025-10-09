@@ -4712,6 +4712,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
     };
     const coverageInfo = normaliseCoverage(data?.coverage);
     const kitRoutingSettings = await loadKitRoutingSettings();
+    const skipKitCheckRequested = data?.skipKitCheck === true;
     const buildAttempts = (coverage) => {
         const flowKey = coverage.type === 'franchise' && coverage.franchiseId ? 'franchiseFlow' : 'hqFlow';
         const configuredFlow = flowKey === 'franchiseFlow' ? kitRoutingSettings.franchiseFlow : kitRoutingSettings.hqFlow;
@@ -4820,20 +4821,42 @@ export const reserveKit = functions.https.onCall(async (data) => {
             autoConfirm: true,
         });
     }
-    const manualBypassAttempt = attempts.find((attempt) => !attempt.requiresKit);
-    if (manualBypassAttempt) {
-        return createNonKitResponse(manualBypassAttempt);
-    }
     const selectBypassAttempt = () => {
         if (attempts.length === 0) {
             return null;
         }
         return attempts[0];
     };
+    const coerceToManualAttempt = (attempt) => {
+        if (!attempt) {
+            return null;
+        }
+        if (!attempt.requiresKit) {
+            return attempt;
+        }
+        return { ...attempt, requiresKit: false };
+    };
+    const manualBypassAttempt = attempts.find((attempt) => !attempt.requiresKit);
+    const respondWithManualAttempt = (preferredAttempt = null) => {
+        const attempt = coerceToManualAttempt(preferredAttempt ?? manualBypassAttempt ?? selectBypassAttempt());
+        if (!attempt) {
+            return null;
+        }
+        return createNonKitResponse(attempt);
+    };
+    if (skipKitCheckRequested) {
+        const manualResponse = respondWithManualAttempt(manualBypassAttempt ?? selectBypassAttempt());
+        if (manualResponse) {
+            return manualResponse;
+        }
+    }
+    if (manualBypassAttempt) {
+        return createNonKitResponse(manualBypassAttempt);
+    }
     if (eqIds.length === 0) {
-        const attempt = selectBypassAttempt();
-        if (attempt) {
-            return createNonKitResponse(attempt);
+        const manualResponse = respondWithManualAttempt(selectBypassAttempt());
+        if (manualResponse) {
+            return manualResponse;
         }
     }
     const deriveOwnerInfo = (eq) => {
@@ -5033,31 +5056,44 @@ export const reserveKit = functions.https.onCall(async (data) => {
         return { success, response };
     };
     let fallbackResponse = null;
-    for (const attempt of attempts) {
-        if (!attempt.requiresKit) {
-            return createNonKitResponse(attempt);
-        }
-        const equipmentRecords = await loadEquipmentRecords();
-        const { success, response } = evaluateAttempt(attempt, equipmentRecords);
-        if (success) {
-            if (response.status === 'confirmed' && response.kitItems.length > 0) {
-                const batch = db.batch();
-                for (const item of response.kitItems) {
-                    const eqRef = db.collection('equipment').doc(item.id);
-                    batch.set(eqRef.collection('bookings').doc(), {
-                        start: admin.firestore.Timestamp.fromDate(start),
-                        end: admin.firestore.Timestamp.fromDate(reservationEnd),
-                        projectId: null,
-                    });
-                }
-                await batch.commit();
+    try {
+        for (const attempt of attempts) {
+            if (!attempt.requiresKit) {
+                return createNonKitResponse(attempt);
             }
-            return response;
+            const equipmentRecords = await loadEquipmentRecords();
+            const { success, response } = evaluateAttempt(attempt, equipmentRecords);
+            if (success) {
+                if (response.status === 'confirmed' && response.kitItems.length > 0) {
+                    const batch = db.batch();
+                    for (const item of response.kitItems) {
+                        const eqRef = db.collection('equipment').doc(item.id);
+                        batch.set(eqRef.collection('bookings').doc(), {
+                            start: admin.firestore.Timestamp.fromDate(start),
+                            end: admin.firestore.Timestamp.fromDate(reservationEnd),
+                            projectId: null,
+                        });
+                    }
+                    await batch.commit();
+                }
+                return response;
+            }
+            fallbackResponse = response;
         }
-        fallbackResponse = response;
+    }
+    catch (error) {
+        console.error('reserveKit evaluation failed', error);
+        const manualResponse = respondWithManualAttempt();
+        if (manualResponse) {
+            return manualResponse;
+        }
     }
     if (fallbackResponse) {
         return fallbackResponse;
+    }
+    const manualFallback = respondWithManualAttempt();
+    if (manualFallback) {
+        return manualFallback;
     }
     const defaultAttempt = attempts[0] ?? {
         key: 'hq',

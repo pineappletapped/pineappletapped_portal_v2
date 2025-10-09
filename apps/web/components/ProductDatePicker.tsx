@@ -223,14 +223,14 @@ export default function ProductDatePicker({
 
   const statusText: Record<ProductAvailabilityStatus, string> = {
     available: "Available",
-    pending: "Pending confirmation",
+    pending: "Limited availability",
     booked: "Booked",
     unavailable: "Unavailable",
   };
 
   const statusDisplayText: Record<ProductAvailabilityStatus, string> = {
     available: "Available",
-    pending: "",
+    pending: "Limited",
     booked: "Booked",
     unavailable: "Unavailable",
   };
@@ -378,24 +378,54 @@ export default function ProductDatePicker({
           );
         })}
       </div>
-      <ul className="mt-3 space-y-1" aria-label="Booking status legend">
-        <li className="flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-green-600" aria-hidden />
-          <span>Available – reserve immediately.</span>
-        </li>
-        <li className="flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-amber-500" aria-hidden />
-          <span>Pending confirmation – we’ll follow up if the slot changes.</span>
-        </li>
-        <li className="flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-red-500" aria-hidden />
-          <span>Booked – choose a different day.</span>
-        </li>
-        <li className="flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-gray-400" aria-hidden />
-          <span>Unavailable – this date can’t be scheduled.</span>
-        </li>
-      </ul>
+      <dl
+        className="mt-3 grid gap-2 text-[0.65rem] text-gray-600"
+        aria-label="Booking status legend"
+      >
+        {[
+          {
+            status: "available",
+            label: "Available",
+            description: "Fully available for bookings.",
+            dotClass: "bg-emerald-500",
+            textClass: "text-emerald-700",
+          },
+          {
+            status: "pending",
+            label: "Limited",
+            description: "Manual confirmation required or reduced hours.",
+            dotClass: "bg-amber-400",
+            textClass: "text-amber-700",
+          },
+          {
+            status: "booked",
+            label: "Booked",
+            description: "Already reserved. Pick another date.",
+            dotClass: "bg-red-500",
+            textClass: "text-red-600",
+          },
+          {
+            status: "unavailable",
+            label: "Unavailable",
+            description: "Not accepting bookings on this date.",
+            dotClass: "bg-gray-400",
+            textClass: "text-gray-600",
+          },
+        ].map((item) => (
+          <div key={item.status} className="flex items-start gap-2">
+            <span
+              className={`mt-0.5 inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full ${item.dotClass}`}
+              aria-hidden
+            >
+              <span className="sr-only">{item.label}</span>
+            </span>
+            <div>
+              <dt className={`font-semibold ${item.textClass}`}>{item.label}</dt>
+              <dd className="text-[0.6rem] text-gray-500">{item.description}</dd>
+            </div>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }

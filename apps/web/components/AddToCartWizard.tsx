@@ -14,7 +14,7 @@ import {
   type ProductOrderFieldType,
 } from "@/lib/products";
 import { useCart } from "@/lib/cart";
-import { db, functions } from "@/lib/firebase";
+import { db, ensureFirebase, functions } from "@/lib/firebase";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import {
@@ -34,6 +34,13 @@ import {
   type PriceTierLevel,
   type PriceTiers,
 } from "@/lib/pricing";
+import {
+  DEFAULT_KIT_ROUTING_SETTINGS,
+  cloneKitRoutingSettings,
+  parseKitRoutingSettings,
+  resolveRoutingAttempts,
+  type KitRoutingSettings,
+} from "@/lib/kit-routing";
 
 interface ModifierOption {
   id: string;
@@ -849,6 +856,7 @@ export default function AddToCartWizard({
   const [coverage, setCoverage] = useState<CoverageAssignment | null>(null);
   const [coverageStatus, setCoverageStatus] = useState<CoverageStatus>("idle");
   const [coverageError, setCoverageError] = useState<string | null>(null);
+  const [kitRoutingSettings, setKitRoutingSettings] = useState<KitRoutingSettings | null>(null);
   const [campaignSlots, setCampaignSlots] = useState<CampaignSlotRecord[]>([]);
   const [campaignSlotStatus, setCampaignSlotStatus] =
     useState<CampaignSlotStatus>("idle");
@@ -859,6 +867,37 @@ export default function AddToCartWizard({
       setOverrideLocation(false);
     }
   }, [organiserActive]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await ensureFirebase();
+        if (cancelled || !db) {
+          if (!cancelled) {
+            setKitRoutingSettings(cloneKitRoutingSettings(DEFAULT_KIT_ROUTING_SETTINGS));
+          }
+          return;
+        }
+        const ref = doc(db, "settings", "kitRouting");
+        const snap = await getDoc(ref);
+        if (cancelled) {
+          return;
+        }
+        const parsed = snap.exists()
+          ? parseKitRoutingSettings(snap.data())
+          : cloneKitRoutingSettings(DEFAULT_KIT_ROUTING_SETTINGS);
+        setKitRoutingSettings(parsed);
+      } catch (err) {
+        console.error("Failed to load kit routing settings", err);
+        if (!cancelled) {
+          setKitRoutingSettings(cloneKitRoutingSettings(DEFAULT_KIT_ROUTING_SETTINGS));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const [availabilityOverrides, setAvailabilityOverrides] = useState<
     Record<string, ProductAvailabilityStatus>
@@ -1079,6 +1118,24 @@ export default function AddToCartWizard({
     }
     return { type: "hq", organisationId: null } satisfies ProductAvailabilityScope;
   }, [coverage, coverageStatus]);
+  const routingAttempts = useMemo(() => {
+    if (!coverage || coverageStatus !== "success") {
+      return [];
+    }
+    const settings = kitRoutingSettings ?? DEFAULT_KIT_ROUTING_SETTINGS;
+    return resolveRoutingAttempts(settings, {
+      type: coverage.type,
+      franchiseId: coverage.franchiseId,
+      label: coverage.label,
+    });
+  }, [coverage, coverageStatus, kitRoutingSettings]);
+  const skipAutomaticKitCheck = useMemo(() => {
+    if (!coverage || coverageStatus !== "success") {
+      return false;
+    }
+    const primary = routingAttempts[0];
+    return Boolean(primary && primary.requiresKit === false);
+  }, [coverage, coverageStatus, routingAttempts]);
   const announceSelection = useCallback(
     (startKey: string | null, span: number) => {
       if (!startKey) {
@@ -1802,6 +1859,7 @@ export default function AddToCartWizard({
               matchType: coverage.matchType,
             }
           : null,
+        skipKitCheck: skipAutomaticKitCheck,
       });
       const {
         conflicts = [],
