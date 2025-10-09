@@ -5844,6 +5844,24 @@ export const reserveKit = functions.https.onCall(async (data) => {
     return attempts;
   };
 
+  const createNonKitResponse = (attempt: ReservationAttempt): ReservationResponse => ({
+    conflicts: [],
+    kitItems: [],
+    rentalTotal: 0,
+    status: attempt.initialStatus,
+    missingStandards: [],
+    provider: {
+      level: attempt.key,
+      status: attempt.initialStatus,
+      label: attempt.label,
+      franchiseId: attempt.franchiseId,
+      territoryId: coverageInfo.territoryId,
+      requiresKit: false,
+      autoConfirm: attempt.autoConfirm,
+      description: attempt.description ?? null,
+    },
+  });
+
   const attempts = buildAttempts(coverageInfo);
   if (attempts.length === 0) {
     attempts.push({
@@ -6003,24 +6021,6 @@ export const reserveKit = functions.https.onCall(async (data) => {
       record.franchiseId === attempt.franchiseId
     );
   };
-
-  const createNonKitResponse = (attempt: ReservationAttempt): ReservationResponse => ({
-    conflicts: [],
-    kitItems: [],
-    rentalTotal: 0,
-    status: attempt.initialStatus,
-    missingStandards: [],
-    provider: {
-      level: attempt.key,
-      status: attempt.initialStatus,
-      label: attempt.label,
-      franchiseId: attempt.franchiseId,
-      territoryId: coverageInfo.territoryId,
-      requiresKit: false,
-      autoConfirm: attempt.autoConfirm,
-      description: attempt.description ?? null,
-    },
-  });
 
   const evaluateAttempt = (
     attempt: ReservationAttempt,
