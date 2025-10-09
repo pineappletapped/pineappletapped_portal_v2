@@ -111,6 +111,43 @@ export interface ProductModifierDeliverable {
   label?: string | null;
 }
 
+export interface ProductDigitalRelease {
+  status?: "pending" | "processing" | "released" | "archived";
+  assetId?: string | null;
+  assetName?: string | null;
+  storageKey?: string | null;
+  downloadUrl?: string | null;
+  driveFileId?: string | null;
+  driveFileName?: string | null;
+  driveFileMimeType?: string | null;
+  driveFileSize?: number | null;
+  driveFileWebViewLink?: string | null;
+  driveFileModifiedAt?: unknown;
+  sizeBytes?: number | null;
+  version?: number | null;
+  releasedAt?: unknown;
+  updatedAt?: unknown;
+  projectId?: string | null;
+  orderId?: string | null;
+  uploadedBy?: string | null;
+  releaseNotes?: string | null;
+}
+
+export interface ProductDigitalDelivery {
+  enabled: boolean;
+  label?: string | null;
+  description?: string | null;
+  autoRelease?: boolean | null;
+  driveTemplateFolderId?: string | null;
+  driveFolderName?: string | null;
+  release?: ProductDigitalRelease | null;
+  releaseHistory?: ProductDigitalRelease[] | null;
+  status?: "pending" | "processing" | "released" | "archived" | null;
+  lastReleasedAt?: unknown;
+  lastReleasedAssetId?: string | null;
+  lastReleasedVersion?: number | null;
+}
+
 export type ProductOrderFieldType = "short-text" | "long-text";
 
 export interface ProductOrderFormField {
@@ -325,6 +362,8 @@ export interface Product {
   driveTemplateFolderId?: string;
   /** Optional override for the deliverables folder name created per order. Defaults to the product name. */
   driveFolderName?: string;
+  /** Digital delivery configuration describing post-production downloads. */
+  digitalDelivery?: ProductDigitalDelivery | null;
   deliverables?: ProductDeliverable[];
   modifiers?: ProductModifierSelection[];
   /** Modifier group IDs enabled for this product. */

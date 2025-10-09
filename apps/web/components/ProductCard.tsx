@@ -8,12 +8,14 @@ import {
   getProductEventRangeLabel,
   formatProductOnsiteDuration,
 } from "@/lib/products";
+import { DIGITAL_STATUS_META, getDigitalStatusMeta } from "@/lib/digital-delivery";
 import {
   FiCalendar,
   FiMapPin,
   FiClock,
   FiCheckCircle,
   FiFilm,
+  FiDownload,
 } from "react-icons/fi";
 import {
   deliverableIconMap,
@@ -28,6 +30,21 @@ import {
   normaliseOrganiserProgram,
   type OrganiserAccessContext,
 } from "@/lib/organisers";
+
+const DIGITAL_TONE_CLASSES: Record<string, string> = {
+  released: "bg-emerald-100 text-emerald-800",
+  processing: "bg-sky-100 text-sky-800",
+  archived: "bg-slate-200 text-slate-700",
+  partial: "bg-amber-100 text-amber-800",
+  pending: "bg-amber-100 text-amber-800",
+};
+
+const resolveDigitalToneClass = (tone?: string | null): string => {
+  if (!tone) {
+    return "bg-sky-100 text-sky-800";
+  }
+  return DIGITAL_TONE_CLASSES[tone] ?? "bg-sky-100 text-sky-800";
+};
 
 export default function ProductCard({ product }: { product: Product }) {
   const [selectedVariation, setSelectedVariation] = useState("");
@@ -140,11 +157,38 @@ export default function ProductCard({ product }: { product: Product }) {
   const img = coverImage || "https://placehold.co/600x400?text=No+Image";
   const { visibleDeliverables, remainingDeliverableCount } =
     getDeliverableSummary(product);
+  const digitalConfig = product.digitalDelivery ?? null;
+  const digitalEnabled = Boolean(digitalConfig && digitalConfig.enabled !== false);
+  const digitalStatusKey = digitalEnabled && digitalConfig
+    ? (typeof digitalConfig.status === "string" && digitalConfig.status.trim().length > 0
+        ? digitalConfig.status.trim()
+        : typeof digitalConfig.release?.status === "string" && digitalConfig.release.status.trim().length > 0
+          ? digitalConfig.release.status.trim()
+          : digitalConfig.release
+            ? "released"
+            : "pending")
+    : null;
+  const digitalStatusMeta = digitalEnabled
+    ? getDigitalStatusMeta(digitalStatusKey) ?? DIGITAL_STATUS_META.pending
+    : null;
+  const digitalBadgeToneClass = resolveDigitalToneClass(digitalStatusMeta?.tone);
+  const digitalBadgeLabel = digitalStatusMeta
+    ? digitalStatusMeta.key === "released"
+      ? digitalConfig?.label || "Digital download ready"
+      : digitalStatusMeta.key === "processing"
+        ? "Digital download processing"
+        : digitalStatusMeta.key === "archived"
+          ? "Digital download archived"
+          : digitalStatusMeta.key === "partial"
+            ? "Digital download updating"
+            : digitalConfig?.label || "Digital download included"
+    : null;
   const showSummary = Boolean(
     product.deliveryTime ||
     visibleDeliverables.length > 0 ||
     onsiteSummary ||
-    (product.storyboardEnabled ?? false)
+    (product.storyboardEnabled ?? false) ||
+    digitalEnabled
   );
   const storyboardEnabled = Boolean(product.storyboardEnabled);
   const variationSelectId = `product-${product.id}-variation`;
@@ -218,6 +262,14 @@ export default function ProductCard({ product }: { product: Product }) {
               <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 font-medium text-emerald-700">
                 <FiFilm className="h-3 w-3" aria-hidden />
                 Storyboard
+              </span>
+            )}
+            {digitalEnabled && digitalBadgeLabel && (
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-medium ${digitalBadgeToneClass}`}
+              >
+                <FiDownload className="h-3 w-3" aria-hidden />
+                {digitalBadgeLabel}
               </span>
             )}
           </div>

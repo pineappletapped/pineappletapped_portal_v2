@@ -13,6 +13,7 @@ import {
   setDoc,
   writeBatch,
   type DocumentData,
+  type Firestore,
 } from "firebase/firestore";
 
 import PortalContainer from "@/components/PortalContainer";
@@ -20,7 +21,7 @@ import PortalHero from "@/components/PortalHero";
 import { useRoleGate } from "@/hooks/useRoleGate";
 import type { Category } from "@/lib/categories";
 import type { ProcessStage } from "@/lib/homepage";
-import { db } from "@/lib/firebase";
+import { db, ensureFirebase } from "@/lib/firebase";
 
 interface PageDoc {
   id: string;
@@ -42,8 +43,16 @@ type FeedbackState = {
   message: string;
 } | null;
 
-const HOMEPAGE_DOC = doc(db, "settings", "homepage");
-const BRANDING_DOC = doc(db, "settings", "branding");
+const getHomepageDoc = (database: Firestore) => doc(database, "settings", "homepage");
+const getBrandingDoc = (database: Firestore) => doc(database, "settings", "branding");
+
+async function requireDb(): Promise<Firestore> {
+  await ensureFirebase();
+  if (!db) {
+    throw new Error("Firestore is unavailable");
+  }
+  return db as Firestore;
+}
 
 function createId(prefix: string) {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -54,24 +63,24 @@ function createId(prefix: string) {
 }
 
 function sanitizeCards(cards: HomeCard[]): HomeCard[] {
-  return cards
-    .map((card, index) => {
-      const title = card.title?.trim?.() ?? "";
-      const text = card.text?.trim?.() ?? "";
-      const link = card.link?.trim?.() ?? "";
+  return cards.reduce<HomeCard[]>((acc, card, index) => {
+    const title = card.title?.trim?.() ?? "";
+    const text = card.text?.trim?.() ?? "";
+    const link = card.link?.trim?.() ?? "";
 
-      if (!title || !text) {
-        return null;
-      }
+    if (!title || !text) {
+      return acc;
+    }
 
-      return {
-        id: card.id || createId(`card-${index}`),
-        title,
-        text,
-        link: link || undefined,
-      };
-    })
-    .filter((card): card is HomeCard => Boolean(card));
+    acc.push({
+      id: card.id || createId(`card-${index}`),
+      title,
+      text,
+      link: link || undefined,
+    });
+
+    return acc;
+  }, []);
 }
 
 function sanitizeProcessStages(stages: ProcessStage[]): ProcessStage[] {
@@ -176,22 +185,69 @@ export default function WebsiteDesignPage() {
 
     (async () => {
       try {
+        const database = await requireDb();
         const [pageSnap, categorySnap, brandingSnap, homeSnap] = await Promise.all([
-          getDocs(collection(db, "pages")),
-          getDocs(collection(db, "categories")),
-          getDoc(BRANDING_DOC),
-          getDoc(HOMEPAGE_DOC),
+          getDocs(collection(database, "pages")),
+          getDocs(collection(database, "categories")),
+          getDoc(getBrandingDoc(database)),
+          getDoc(getHomepageDoc(database)),
         ]);
 
         if (!active) {
           return;
         }
 
-        setPages(pageSnap.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as DocumentData) })));
+        setPages(
+          pageSnap.docs
+            .map((docSnap) => {
+              const data = docSnap.data() as DocumentData;
+              const title = typeof data.title === "string" ? data.title : "";
+              const slug = typeof data.slug === "string" ? data.slug : "";
+
+              if (!title || !slug) {
+                return null;
+              }
+
+              return { id: docSnap.id, title, slug } satisfies PageDoc;
+            })
+            .filter((page): page is PageDoc => Boolean(page))
+        );
         const sortedCategories = categorySnap.docs
-          .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as DocumentData) }))
+          .map((docSnap) => {
+            const data = docSnap.data() as DocumentData;
+            const name = typeof data.name === "string" ? data.name : "";
+            const slug = typeof data.slug === "string" ? data.slug : "";
+            if (!name || !slug) {
+              return null;
+            }
+            const base: Category = {
+              id: docSnap.id,
+              name,
+              slug,
+            };
+            if (typeof data.description === "string" && data.description.trim()) {
+              base.description = data.description;
+            }
+            if (typeof data.howWeWork === "string" && data.howWeWork.trim()) {
+              base.howWeWork = data.howWeWork;
+            }
+            if (typeof data.parentId === "string" && data.parentId.trim()) {
+              base.parentId = data.parentId;
+            }
+            if (typeof data.headerImage === "string" && data.headerImage.trim()) {
+              base.headerImage = data.headerImage;
+            }
+            if (typeof data.layout === "string" && data.layout.trim()) {
+              base.layout = data.layout as Category["layout"];
+            }
+            if (typeof data.order === "number" && Number.isFinite(data.order)) {
+              base.order = data.order;
+            }
+            return base;
+          })
+          .filter((category): category is Category => Boolean(category))
           .sort((a, b) => (a.order || 0) - (b.order || 0));
-        setMenuCats(sortedCategories as Category[]);
+        setMenuCats(sortedCategories);
 
         const brandingData = brandingSnap.data() as DocumentData | undefined;
         setMetaPixelId((brandingData?.metaPixelId as string) || "");
@@ -250,7 +306,8 @@ export default function WebsiteDesignPage() {
   );
 
   const mergeHomepage = async (payload: Record<string, unknown>) => {
-    await setDoc(HOMEPAGE_DOC, payload, { merge: true });
+    const database = await requireDb();
+    await setDoc(getHomepageDoc(database), payload, { merge: true });
   };
 
   const handleAddPage = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -262,7 +319,8 @@ export default function WebsiteDesignPage() {
 
     try {
       setCreatingPage(true);
-      const ref = await addDoc(collection(db, "pages"), {
+      const database = await requireDb();
+      const ref = await addDoc(collection(database, "pages"), {
         title: pageTitle.trim(),
         slug: pageSlug.trim(),
       });
@@ -439,9 +497,10 @@ export default function WebsiteDesignPage() {
     setMenuCats(updated);
 
     try {
-      const batch = writeBatch(db);
+      const database = await requireDb();
+      const batch = writeBatch(database);
       updated.forEach((category) => {
-        batch.update(doc(db, "categories", category.id), { order: category.order });
+        batch.update(doc(database, "categories", category.id), { order: category.order });
       });
       await batch.commit();
       setFeedback({ type: "success", message: "Navigation order updated." });
@@ -456,8 +515,9 @@ export default function WebsiteDesignPage() {
 
     try {
       setSavingAnalytics(true);
+      const database = await requireDb();
       await setDoc(
-        BRANDING_DOC,
+        getBrandingDoc(database),
         {
           metaPixelId: metaPixelId.trim() || null,
           linkedinPartnerId: linkedinPartnerId.trim() || null,

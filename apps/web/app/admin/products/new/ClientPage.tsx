@@ -660,6 +660,13 @@ export default function NewProductPage() {
   const [driveTemplateFolderId, setDriveTemplateFolderId] = useState("");
   const [driveFolderName, setDriveFolderName] = useState("");
   const [driveTemplatePickerOpen, setDriveTemplatePickerOpen] = useState(false);
+  const [digitalDeliveryEnabled, setDigitalDeliveryEnabled] = useState(false);
+  const [digitalDeliveryLabel, setDigitalDeliveryLabel] = useState("");
+  const [digitalDeliveryDescription, setDigitalDeliveryDescription] = useState("");
+  const [digitalDeliveryAutoRelease, setDigitalDeliveryAutoRelease] = useState(true);
+  const [digitalDeliveryFolderId, setDigitalDeliveryFolderId] = useState("");
+  const [digitalDeliveryFolderName, setDigitalDeliveryFolderName] = useState("");
+  const [digitalDeliveryPickerOpen, setDigitalDeliveryPickerOpen] = useState(false);
   const [kitCostMode, setKitCostMode] = useState<"manual" | "guided">("manual");
   const [manualKitCost, setManualKitCost] = useState("0");
   const [travelMiles, setTravelMiles] = useState("100");
@@ -1158,6 +1165,14 @@ export default function NewProductPage() {
       setDriveFolderName(selection.name.trim());
     }
     setDriveTemplatePickerOpen(false);
+  };
+
+  const handleDigitalFolderSelection = (selection: DriveFolderSelection) => {
+    setDigitalDeliveryFolderId(selection.id);
+    if (selection.name && selection.name.trim().length > 0) {
+      setDigitalDeliveryFolderName(selection.name.trim());
+    }
+    setDigitalDeliveryPickerOpen(false);
   };
 
   const buildVariationForm = useCallback(
@@ -1699,9 +1714,36 @@ export default function NewProductPage() {
       .map((entry) => (entry.imageUrl ? entry.imageUrl : null))
       .filter((url): url is string => typeof url === "string" && url.trim().length > 0);
     const storyboardEnabledValue = storyboardEnabled && storyboardData.length > 0;
+    const trimmedName = name.trim();
+    const trimmedDescription = description.trim();
+    const digitalDeliveryPayload = digitalDeliveryEnabled
+      ? {
+          enabled: true,
+          label:
+            digitalDeliveryLabel.trim().length > 0
+              ? digitalDeliveryLabel.trim()
+              : trimmedName || name || null,
+          description:
+            digitalDeliveryDescription.trim().length > 0
+              ? digitalDeliveryDescription.trim()
+              : null,
+          autoRelease: digitalDeliveryAutoRelease,
+          driveTemplateFolderId:
+            digitalDeliveryFolderId.trim().length > 0
+              ? digitalDeliveryFolderId.trim()
+              : null,
+          driveFolderName:
+            digitalDeliveryFolderName.trim().length > 0
+              ? digitalDeliveryFolderName.trim()
+              : null,
+          status: "pending" as const,
+          release: null,
+          releaseHistory: [],
+        }
+      : { enabled: false };
     const docRef = await addDoc(collection(db, "products"), {
-      name,
-      description,
+      name: trimmedName || name,
+      description: trimmedDescription || description,
       tagline: tagline || null,
       salesMode,
       price: baseProductPrice,
@@ -1742,6 +1784,7 @@ export default function NewProductPage() {
       driveTemplateFolderId:
         driveTemplateFolderId.trim().length > 0 ? driveTemplateFolderId.trim() : null,
       driveFolderName: driveFolderName.trim().length > 0 ? driveFolderName.trim() : null,
+      digitalDelivery: digitalDeliveryPayload,
       defaultTasks: tasks,
       variations: variationData,
       seo: {
@@ -2276,6 +2319,14 @@ export default function NewProductPage() {
         description="Browse the client Drive template structure and choose the folder that should be cloned for this product."
         confirmLabel="Use this folder"
       />
+      <DriveFolderPicker
+        open={digitalDeliveryPickerOpen}
+        onClose={() => setDigitalDeliveryPickerOpen(false)}
+        onConfirm={handleDigitalFolderSelection}
+        title="Select digital delivery folder"
+        description="Choose the Google Drive folder that will hold the final download before it is released to customers."
+        confirmLabel="Use this folder"
+      />
       <form onSubmit={save} className="grid w-full gap-6">
       <h1 className="text-xl font-semibold">Create Product</h1>
       <nav className="flex gap-4 border-b">
@@ -2341,6 +2392,106 @@ export default function NewProductPage() {
               value={driveFolderName}
               onChange={(event) => setDriveFolderName(event.target.value)}
             />
+          </div>
+          <div className="rounded border bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold">Digital downloads</h2>
+                <p className="text-xs text-gray-600">
+                  Enable Drive-powered fulfilment so customers receive the final edit as a secure download inside the portal.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={digitalDeliveryEnabled}
+                onClick={() => setDigitalDeliveryEnabled((current) => !current)}
+                className={`relative inline-flex h-6 w-12 items-center rounded-full transition ${
+                  digitalDeliveryEnabled ? "bg-emerald-500" : "bg-gray-300"
+                }`}
+              >
+                <span className="sr-only">Toggle digital downloads</span>
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+                    digitalDeliveryEnabled ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+            {digitalDeliveryEnabled ? (
+              <div className="mt-4 grid gap-3">
+                <label className="grid gap-1 text-xs text-gray-600">
+                  <span className="font-semibold text-gray-700">Download label</span>
+                  <input
+                    className="input"
+                    placeholder="eg. Multicam performance film"
+                    value={digitalDeliveryLabel}
+                    onChange={(event) => setDigitalDeliveryLabel(event.target.value)}
+                  />
+                </label>
+                <label className="grid gap-1 text-xs text-gray-600">
+                  <span className="font-semibold text-gray-700">Customer message</span>
+                  <textarea
+                    className="textarea min-h-[88px]"
+                    placeholder="Explain how and when the digital download will be released."
+                    value={digitalDeliveryDescription}
+                    onChange={(event) => setDigitalDeliveryDescription(event.target.value)}
+                  />
+                </label>
+                <div className="grid gap-1 text-xs text-gray-600">
+                  <span className="font-semibold text-gray-700">Digital fulfilment folder</span>
+                  <input
+                    className="input"
+                    placeholder="Drive folder ID"
+                    value={digitalDeliveryFolderId}
+                    onChange={(event) => setDigitalDeliveryFolderId(event.target.value)}
+                  />
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setDigitalDeliveryPickerOpen(true)}
+                    >
+                      Browse Drive
+                    </button>
+                    {digitalDeliveryFolderId.trim().length > 0 && (
+                      <a
+                        className="text-xs text-blue-600 underline"
+                        href={`https://drive.google.com/drive/folders/${encodeURIComponent(
+                          digitalDeliveryFolderId.trim()
+                        )}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open folder in Drive
+                      </a>
+                    )}
+                  </div>
+                </div>
+                <label className="grid gap-1 text-xs text-gray-600">
+                  <span className="font-semibold text-gray-700">Default release folder name</span>
+                  <input
+                    className="input"
+                    placeholder="eg. Digital downloads"
+                    value={digitalDeliveryFolderName}
+                    onChange={(event) => setDigitalDeliveryFolderName(event.target.value)}
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                    checked={digitalDeliveryAutoRelease}
+                    onChange={(event) =>
+                      setDigitalDeliveryAutoRelease(event.target.checked)
+                    }
+                  />
+                  <span>
+                    Automatically notify existing orders when you publish a new Drive release.
+                  </span>
+                </label>
+              </div>
+            ) : null}
           </div>
         </div>
       )}

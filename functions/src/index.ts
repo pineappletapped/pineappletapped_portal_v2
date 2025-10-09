@@ -193,6 +193,272 @@ function normaliseStringList(value: unknown): string[] {
   return Array.from(new Set(result));
 }
 
+interface NormalisedDigitalRelease {
+  status: 'pending' | 'processing' | 'released' | 'archived';
+  assetId: string | null;
+  assetName: string | null;
+  storageKey: string | null;
+  downloadUrl: string | null;
+  driveFileId: string | null;
+  driveFileName: string | null;
+  driveFileMimeType: string | null;
+  driveFileSize: number | null;
+  driveFileWebViewLink: string | null;
+  driveFileModifiedAt: admin.firestore.Timestamp | null;
+  sizeBytes: number | null;
+  version: number | null;
+  releasedAt: admin.firestore.Timestamp | null;
+  updatedAt: admin.firestore.Timestamp | null;
+  projectId: string | null;
+  orderId: string | null;
+  uploadedBy: string | null;
+  releaseNotes: string | null;
+}
+
+interface NormalisedDigitalDelivery {
+  enabled: boolean;
+  label: string | null;
+  description: string | null;
+  autoRelease: boolean;
+  driveTemplateFolderId: string | null;
+  driveFolderName: string | null;
+  status: 'pending' | 'processing' | 'released' | 'archived' | null;
+  release: NormalisedDigitalRelease | null;
+  releaseHistory: NormalisedDigitalRelease[];
+  lastReleasedAt: admin.firestore.Timestamp | null;
+  lastReleasedAssetId: string | null;
+  lastReleasedVersion: number | null;
+}
+
+function parseTimestamp(value: any): admin.firestore.Timestamp | null {
+  if (!value) return null;
+  if (value instanceof admin.firestore.Timestamp) {
+    return value;
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : admin.firestore.Timestamp.fromDate(value);
+  }
+  if (typeof value === 'string') {
+    const parsed = new Date(value.trim());
+    return Number.isNaN(parsed.getTime()) ? null : admin.firestore.Timestamp.fromDate(parsed);
+  }
+  if (typeof value === 'object' && value !== null) {
+    try {
+      if (typeof (value as { toDate?: () => Date }).toDate === 'function') {
+        const converted = (value as { toDate: () => Date }).toDate();
+        if (converted instanceof Date && !Number.isNaN(converted.getTime())) {
+          return admin.firestore.Timestamp.fromDate(converted);
+        }
+      }
+    } catch {
+      // ignore conversion errors
+    }
+    if (typeof (value as { seconds?: number }).seconds === 'number') {
+      const seconds = (value as { seconds: number; nanoseconds?: number }).seconds;
+      const nanos = (value as { seconds: number; nanoseconds?: number }).nanoseconds ?? 0;
+      return new admin.firestore.Timestamp(seconds, nanos);
+    }
+  }
+  return null;
+}
+
+function parseNullableString(value: any): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseNullableNumber(value: any): number | null {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function normaliseDigitalRelease(raw: any): NormalisedDigitalRelease | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const statusRaw = typeof raw.status === 'string' ? raw.status.trim().toLowerCase() : '';
+  const status: NormalisedDigitalRelease['status'] =
+    statusRaw === 'released' || statusRaw === 'processing' || statusRaw === 'archived'
+      ? (statusRaw as NormalisedDigitalRelease['status'])
+      : 'pending';
+  return {
+    status,
+    assetId: parseNullableString(raw.assetId) ?? parseNullableString(raw.id),
+    assetName: parseNullableString(raw.assetName) ?? parseNullableString(raw.name),
+    storageKey: parseNullableString(raw.storageKey),
+    downloadUrl: parseNullableString(raw.downloadUrl),
+    driveFileId: parseNullableString(raw.driveFileId),
+    driveFileName: parseNullableString(raw.driveFileName),
+    driveFileMimeType: parseNullableString(raw.driveFileMimeType),
+    driveFileSize: parseNullableNumber(raw.driveFileSize),
+    driveFileWebViewLink: parseNullableString(raw.driveFileWebViewLink),
+    driveFileModifiedAt: parseTimestamp(raw.driveFileModifiedAt),
+    sizeBytes: parseNullableNumber(raw.sizeBytes) ?? parseNullableNumber(raw.bytes),
+    version: parseNullableNumber(raw.version),
+    releasedAt: parseTimestamp(raw.releasedAt),
+    updatedAt: parseTimestamp(raw.updatedAt),
+    projectId: parseNullableString(raw.projectId),
+    orderId: parseNullableString(raw.orderId),
+    uploadedBy: parseNullableString(raw.uploadedBy),
+    releaseNotes: parseNullableString(raw.releaseNotes),
+  };
+}
+
+function normaliseDigitalDelivery(
+  raw: any,
+  fallbackLabel: string | null = null
+): NormalisedDigitalDelivery | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const enabled = raw.enabled !== false;
+  if (!enabled) {
+    return {
+      enabled: false,
+      label: fallbackLabel ?? null,
+      description: null,
+      autoRelease: true,
+      driveTemplateFolderId: null,
+      driveFolderName: null,
+      status: null,
+      release: null,
+      releaseHistory: [],
+      lastReleasedAt: null,
+      lastReleasedAssetId: null,
+      lastReleasedVersion: null,
+    };
+  }
+  const release = normaliseDigitalRelease(raw.release);
+  const history = Array.isArray(raw.releaseHistory)
+    ? (raw.releaseHistory as any[])
+        .map((entry) => normaliseDigitalRelease(entry))
+        .filter((entry): entry is NormalisedDigitalRelease => Boolean(entry))
+    : [];
+  const statusRaw = typeof raw.status === 'string' ? raw.status.trim().toLowerCase() : '';
+  let status: NormalisedDigitalDelivery['status'] = null;
+  if (statusRaw === 'released' || statusRaw === 'processing' || statusRaw === 'archived') {
+    status = statusRaw;
+  } else if (statusRaw === 'pending') {
+    status = 'pending';
+  } else if (release) {
+    status = release.status;
+  }
+  const label = parseNullableString(raw.label) ?? fallbackLabel;
+  return {
+    enabled: true,
+    label: label ?? null,
+    description: parseNullableString(raw.description),
+    autoRelease: raw.autoRelease === false ? false : true,
+    driveTemplateFolderId: parseNullableString(raw.driveTemplateFolderId),
+    driveFolderName: parseNullableString(raw.driveFolderName),
+    status,
+    release,
+    releaseHistory: history,
+    lastReleasedAt: parseTimestamp(raw.lastReleasedAt) ?? (release?.releasedAt ?? null),
+    lastReleasedAssetId: parseNullableString(raw.lastReleasedAssetId) ?? release?.assetId ?? null,
+    lastReleasedVersion: parseNullableNumber(raw.lastReleasedVersion) ?? release?.version ?? null,
+  };
+}
+
+function computeDigitalDeliveryStatus(config: NormalisedDigitalDelivery | null):
+  | 'pending'
+  | 'processing'
+  | 'released'
+  | 'archived'
+  | null {
+  if (!config || !config.enabled) {
+    return null;
+  }
+  if (config.status) {
+    return config.status;
+  }
+  if (config.release) {
+    return config.release.status;
+  }
+  return 'pending';
+}
+
+function computeAggregateDigitalStatus(
+  deliveries: Record<string, NormalisedDigitalDelivery>
+): 'pending' | 'processing' | 'released' | 'archived' | 'partial' | null {
+  const entries = Object.values(deliveries).filter((entry) => entry.enabled);
+  if (entries.length === 0) {
+    return null;
+  }
+  const statuses = entries.map((entry) => computeDigitalDeliveryStatus(entry));
+  if (statuses.every((status) => status === 'released')) {
+    return 'released';
+  }
+  if (statuses.some((status) => status === 'processing')) {
+    return 'processing';
+  }
+  if (statuses.some((status) => status === 'released')) {
+    return 'partial';
+  }
+  if (statuses.some((status) => status === 'archived')) {
+    return 'archived';
+  }
+  return 'pending';
+}
+
+function serialiseDigitalDeliveryForClient(
+  config: NormalisedDigitalDelivery | null
+): Record<string, any> | null {
+  if (!config || !config.enabled) {
+    return null;
+  }
+  return {
+    label: config.label,
+    description: config.description,
+    autoRelease: config.autoRelease,
+    status: computeDigitalDeliveryStatus(config),
+    release: config.release
+      ? {
+          status: config.release.status,
+          assetId: config.release.assetId,
+          assetName: config.release.assetName,
+          downloadUrl: config.release.downloadUrl,
+          version: config.release.version,
+          releasedAt: config.release.releasedAt?.toDate().toISOString?.() ?? null,
+          updatedAt: config.release.updatedAt?.toDate().toISOString?.() ?? null,
+          releaseNotes: config.release.releaseNotes,
+          driveFileName: config.release.driveFileName,
+          driveFileId: config.release.driveFileId,
+          driveFileWebViewLink: config.release.driveFileWebViewLink,
+          sizeBytes: config.release.sizeBytes,
+        }
+      : null,
+    lastReleasedAt: config.lastReleasedAt?.toDate().toISOString?.() ?? null,
+    lastReleasedAssetId: config.lastReleasedAssetId,
+    lastReleasedVersion: config.lastReleasedVersion,
+  };
+}
+
+function serialiseDigitalDeliveryForStorage(
+  config: NormalisedDigitalDelivery | null
+): Record<string, any> {
+  if (!config || !config.enabled) {
+    return { enabled: false };
+  }
+  const releaseHistory = config.releaseHistory.map((entry) => ({ ...entry }));
+  const release = config.release ? { ...config.release } : null;
+  return {
+    enabled: true,
+    label: config.label,
+    description: config.description,
+    autoRelease: config.autoRelease,
+    driveTemplateFolderId: config.driveTemplateFolderId,
+    driveFolderName: config.driveFolderName,
+    status: config.status,
+    release,
+    releaseHistory,
+    lastReleasedAt: config.lastReleasedAt,
+    lastReleasedAssetId: config.lastReleasedAssetId,
+    lastReleasedVersion: config.lastReleasedVersion,
+  };
+}
+
 function roundCurrency(value: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return 0;
@@ -2519,6 +2785,52 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
   }
   const orderData = orderSnap.data() as Record<string, any>;
   const driveInfo = (orderData.drive as Record<string, any>) || {};
+  const orderItems = Array.isArray(orderData.items)
+    ? (orderData.items as Array<Record<string, any>>)
+        .map((item) => {
+          if (!item || typeof item !== 'object') {
+            return null;
+          }
+          const productId =
+            typeof item.productId === 'string' && item.productId.trim().length > 0
+              ? item.productId.trim()
+              : typeof item.id === 'string' && item.id.trim().length > 0
+                ? item.id.trim()
+                : '';
+          if (!productId) {
+            return null;
+          }
+          const name =
+            typeof item.name === 'string' && item.name.trim().length > 0
+              ? item.name.trim()
+              : null;
+          return { productId, name };
+        })
+        .filter((entry): entry is { productId: string; name: string | null } => entry !== null)
+    : [];
+  const rawDigitalDeliveries =
+    orderData.digitalDeliveries && typeof orderData.digitalDeliveries === 'object'
+      ? (orderData.digitalDeliveries as Record<string, any>)
+      : {};
+  let digitalDeliveries: Array<Record<string, any>> = [];
+  const normalisedDigitalMap: Record<string, NormalisedDigitalDelivery> = {};
+  Object.entries(rawDigitalDeliveries).forEach(([productId, raw]) => {
+    const normalised = normaliseDigitalDelivery(raw, null);
+    if (normalised && normalised.enabled) {
+      normalisedDigitalMap[productId] = normalised;
+      const summary = serialiseDigitalDeliveryForClient(normalised);
+      if (summary) {
+        digitalDeliveries.push({ productId, ...summary });
+      }
+    }
+  });
+  const digitalStatusFromOrder =
+    typeof orderData.digitalDeliveryStatus === 'string'
+      ? orderData.digitalDeliveryStatus
+      : null;
+  let digitalUpdatedAtTimestamp = parseTimestamp(orderData.digitalDeliveryUpdatedAt);
+  let digitalStatus =
+    digitalStatusFromOrder ?? computeAggregateDigitalStatus(normalisedDigitalMap) ?? null;
   const orderOwnerUid =
     typeof orderData.userId === 'string' && orderData.userId.trim().length > 0 ? orderData.userId.trim() : null;
 
@@ -2709,11 +3021,17 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
     order: {
       id: orderId,
       status: typeof orderData.status === 'string' ? orderData.status : null,
+      items: orderItems,
     },
     drive: {
       orderFolderId: normaliseDriveId(driveInfo.orderFolderId),
       orderFolderName: typeof driveInfo.orderFolderName === 'string' ? driveInfo.orderFolderName : null,
       productFolders,
+    },
+    digital: {
+      status: digitalStatus,
+      updatedAt: digitalUpdatedAtTimestamp?.toDate().toISOString?.() ?? null,
+      deliveries: digitalDeliveries,
     },
   };
 });
@@ -2875,6 +3193,10 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
   const assetTypeInput =
     typeof data?.assetType === 'string' ? data.assetType.trim().toLowerCase() : '';
   const assetType = assetTypeInput === 'flight_plan' ? 'flight_plan' : 'deliverable';
+  const digitalProductIdInput =
+    typeof data?.digitalProductId === 'string' ? data.digitalProductId.trim() : '';
+  const releaseNotesInput = typeof data?.releaseNotes === 'string' ? data.releaseNotes : '';
+  const digitalReleaseNotes = releaseNotesInput.trim().slice(0, 2000);
   if (!projectId || !driveFileId) {
     throw new functions.https.HttpsError('invalid-argument', 'projectId and fileId are required');
   }
@@ -3037,6 +3359,169 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
   };
 
   const assetRef = await db.collection('assets').add(assetDoc);
+  let digitalReleaseResult: Record<string, any> | null = null;
+
+  if (assetType === 'deliverable' && digitalProductIdInput) {
+    try {
+      let allowedProductIds: string[] = [];
+      if (orderData) {
+        if (Array.isArray(orderData.productIds)) {
+          allowedProductIds = (orderData.productIds as unknown[])
+            .map((value) => (typeof value === 'string' ? value.trim() : ''))
+            .filter((value) => value.length > 0);
+        }
+        if (allowedProductIds.length === 0 && Array.isArray(orderData.items)) {
+          allowedProductIds = (orderData.items as Array<Record<string, any>>)
+            .map((item) => {
+              if (typeof item?.id === 'string' && item.id.trim().length > 0) {
+                return item.id.trim();
+              }
+              if (typeof item?.productId === 'string' && item.productId.trim().length > 0) {
+                return item.productId.trim();
+              }
+              return '';
+            })
+            .filter((value) => value.length > 0);
+        }
+        if (allowedProductIds.length > 0 && !allowedProductIds.includes(digitalProductIdInput)) {
+          throw new functions.https.HttpsError(
+            'failed-precondition',
+            'The selected product is not part of this order.'
+          );
+        }
+      }
+
+      const productRef = db.collection('products').doc(digitalProductIdInput);
+      const productSnap = await productRef.get();
+      if (!productSnap.exists) {
+        throw new functions.https.HttpsError(
+          'not-found',
+          'The selected product for digital delivery could not be found.'
+        );
+      }
+      const productData = productSnap.data() as Record<string, any>;
+      const productName =
+        typeof productData.name === 'string' && productData.name.trim().length > 0
+          ? productData.name.trim()
+          : null;
+      const productDigitalConfig = normaliseDigitalDelivery(
+        productData.digitalDelivery,
+        productName
+      );
+      const previousVersionCandidate =
+        productDigitalConfig?.lastReleasedVersion ?? productDigitalConfig?.release?.version ?? 0;
+      const baseVersion = Number(previousVersionCandidate);
+      const releaseVersion = Number.isFinite(baseVersion) ? baseVersion + 1 : 1;
+      const releaseTimestamp = admin.firestore.Timestamp.now();
+      const driveModifiedAt = parseTimestamp(fileMeta.modifiedTime);
+      const releaseNotes = digitalReleaseNotes.length > 0 ? digitalReleaseNotes : null;
+      const releaseRecord: NormalisedDigitalRelease = {
+        status: 'released',
+        assetId: assetRef.id,
+        assetName,
+        storageKey,
+        downloadUrl,
+        driveFileId,
+        driveFileName: sourceName,
+        driveFileMimeType: mimeType,
+        driveFileSize: sizeBytes ?? null,
+        driveFileWebViewLink:
+          typeof fileMeta.webViewLink === 'string' ? fileMeta.webViewLink : null,
+        driveFileModifiedAt: driveModifiedAt,
+        sizeBytes: sizeBytes ?? null,
+        version: releaseVersion,
+        releasedAt: releaseTimestamp,
+        updatedAt: releaseTimestamp,
+        projectId,
+        orderId,
+        uploadedBy: context.auth.uid,
+        releaseNotes,
+      };
+      const historyLimit = 20;
+      const previousHistory = productDigitalConfig?.releaseHistory ?? [];
+      const nextHistory = productDigitalConfig?.release
+        ? [productDigitalConfig.release, ...previousHistory].slice(0, historyLimit)
+        : [...previousHistory].slice(0, historyLimit);
+      const nextConfig: NormalisedDigitalDelivery =
+        productDigitalConfig && productDigitalConfig.enabled
+          ? {
+              ...productDigitalConfig,
+              status: 'released',
+              release: releaseRecord,
+              releaseHistory: nextHistory,
+              lastReleasedAt: releaseTimestamp,
+              lastReleasedAssetId: assetRef.id,
+              lastReleasedVersion: releaseVersion,
+            }
+          : {
+              enabled: true,
+              label: productDigitalConfig?.label ?? productName ?? null,
+              description: productDigitalConfig?.description ?? null,
+              autoRelease: productDigitalConfig?.autoRelease ?? true,
+              driveTemplateFolderId: productDigitalConfig?.driveTemplateFolderId ?? null,
+              driveFolderName: productDigitalConfig?.driveFolderName ?? null,
+              status: 'released',
+              release: releaseRecord,
+              releaseHistory: nextHistory,
+              lastReleasedAt: releaseTimestamp,
+              lastReleasedAssetId: assetRef.id,
+              lastReleasedVersion: releaseVersion,
+            };
+      await productRef.set(
+        { digitalDelivery: serialiseDigitalDeliveryForStorage(nextConfig) },
+        { merge: true }
+      );
+      normalisedDigitalMap[digitalProductIdInput] = nextConfig;
+      digitalUpdatedAtTimestamp = releaseTimestamp;
+      if (orderId) {
+        const orderRef = db.collection('orders').doc(orderId);
+        const orderDigitalDeliveriesRaw =
+          orderData && orderData.digitalDeliveries && typeof orderData.digitalDeliveries === 'object'
+            ? (orderData.digitalDeliveries as Record<string, any>)
+            : {};
+        orderDigitalDeliveriesRaw[digitalProductIdInput] = serialiseDigitalDeliveryForStorage(
+          nextConfig
+        );
+        const productIdSet = new Set(
+          Array.isArray(orderData?.productIds)
+            ? (orderData?.productIds as unknown[])
+                .map((value) => (typeof value === 'string' ? value.trim() : ''))
+                .filter((value) => value.length > 0)
+            : allowedProductIds
+        );
+        productIdSet.add(digitalProductIdInput);
+        const orderUpdate: Record<string, any> = {
+          digitalDeliveries: orderDigitalDeliveriesRaw,
+          digitalDeliveryStatus: computeAggregateDigitalStatus(normalisedDigitalMap),
+          digitalDeliveryUpdatedAt: releaseTimestamp,
+          productIds: Array.from(productIdSet),
+        };
+        await orderRef.set(orderUpdate, { merge: true });
+        orderData = orderData
+          ? {
+              ...orderData,
+              digitalDeliveries: orderDigitalDeliveriesRaw,
+              digitalDeliveryStatus: orderUpdate.digitalDeliveryStatus,
+              digitalDeliveryUpdatedAt: releaseTimestamp,
+              productIds: Array.from(productIdSet),
+            }
+          : {
+              digitalDeliveries: orderDigitalDeliveriesRaw,
+              digitalDeliveryStatus: orderUpdate.digitalDeliveryStatus,
+              digitalDeliveryUpdatedAt: releaseTimestamp,
+              productIds: Array.from(productIdSet),
+            };
+      }
+      digitalStatus = computeAggregateDigitalStatus(normalisedDigitalMap) ?? digitalStatus;
+      digitalReleaseResult = {
+        productId: digitalProductIdInput,
+        delivery: serialiseDigitalDeliveryForClient(nextConfig),
+      };
+    } catch (digitalError) {
+      console.warn('drive_stageAssetFromFile digital release failed', digitalError);
+      throw digitalError;
+    }
+  }
 
   try {
     await writeAuditLog({
@@ -3078,8 +3563,159 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
     }, taskError);
   }
 
-  return { assetId: assetRef.id, version };
+  digitalDeliveries = Object.entries(normalisedDigitalMap)
+    .map(([productId, config]) => {
+      const summary = serialiseDigitalDeliveryForClient(config);
+      return summary ? { productId, ...summary } : null;
+    })
+    .filter((entry): entry is Record<string, any> => entry !== null);
+  const aggregateStatusFinal = computeAggregateDigitalStatus(normalisedDigitalMap);
+  if (aggregateStatusFinal) {
+    digitalStatus = aggregateStatusFinal;
+  }
+  const digitalUpdatedAtIso = digitalUpdatedAtTimestamp
+    ? digitalUpdatedAtTimestamp.toDate().toISOString()
+    : null;
+
+  return {
+    assetId: assetRef.id,
+    version,
+    digitalRelease: digitalReleaseResult,
+    digital: {
+      status: digitalStatus ?? null,
+      updatedAt: digitalUpdatedAtIso,
+      deliveries: digitalDeliveries,
+    },
+  };
 });
+
+export const syncProductDigitalDeliveryToOrders = functions.firestore
+  .document('products/{productId}')
+  .onWrite(async (change, context) => {
+    const productId = context.params.productId as string;
+    const beforeData = change.before.exists ? (change.before.data() as Record<string, any>) : null;
+    const afterData = change.after.exists ? (change.after.data() as Record<string, any>) : null;
+
+    const beforeName =
+      typeof beforeData?.name === 'string' && beforeData.name.trim().length > 0
+        ? beforeData.name.trim()
+        : null;
+    const afterName =
+      typeof afterData?.name === 'string' && afterData.name.trim().length > 0
+        ? afterData.name.trim()
+        : beforeName;
+
+    const beforeConfig = beforeData
+      ? normaliseDigitalDelivery(beforeData.digitalDelivery, beforeName)
+      : null;
+    const afterConfig = afterData
+      ? normaliseDigitalDelivery(afterData.digitalDelivery, afterName)
+      : null;
+
+    const enabledBefore = beforeConfig ? beforeConfig.enabled === true : false;
+    const enabledAfter = afterConfig ? afterConfig.enabled === true : false;
+
+    if (!enabledBefore && !enabledAfter) {
+      return null;
+    }
+
+    const enabledChanged = enabledBefore !== enabledAfter;
+    const shouldRemove = !afterConfig || !afterConfig.enabled;
+    const metadataChanged =
+      !shouldRemove &&
+      !!beforeConfig &&
+      !!afterConfig &&
+      (
+        beforeConfig.label !== afterConfig.label ||
+        beforeConfig.description !== afterConfig.description ||
+        beforeConfig.driveTemplateFolderId !== afterConfig.driveTemplateFolderId ||
+        beforeConfig.driveFolderName !== afterConfig.driveFolderName ||
+        beforeConfig.status !== afterConfig.status ||
+        beforeConfig.autoRelease !== afterConfig.autoRelease
+      );
+    const releaseChanged = !!afterConfig &&
+      (
+        !beforeConfig ||
+        (beforeConfig.release?.assetId ?? null) !== (afterConfig.release?.assetId ?? null) ||
+        (beforeConfig.release?.version ?? null) !== (afterConfig.release?.version ?? null) ||
+        (beforeConfig.lastReleasedAt?.toMillis?.() ?? null) !==
+          (afterConfig.lastReleasedAt?.toMillis?.() ?? null)
+      );
+
+    if (!shouldRemove && !metadataChanged && !releaseChanged && !enabledChanged) {
+      return null;
+    }
+
+    if (releaseChanged && afterConfig && afterConfig.autoRelease === false && !metadataChanged) {
+      return null;
+    }
+
+    const now = admin.firestore.Timestamp.now();
+    const batchSize = 50;
+    let lastDoc: FirebaseFirestore.QueryDocumentSnapshot | null = null;
+
+    while (true) {
+      let queryRef = db
+        .collection('orders')
+        .where('productIds', 'array-contains', productId)
+        .orderBy(admin.firestore.FieldPath.documentId())
+        .limit(batchSize);
+      if (lastDoc) {
+        queryRef = queryRef.startAfter(lastDoc);
+      }
+      const snapshot = await queryRef.get();
+      if (snapshot.empty) {
+        break;
+      }
+
+      await Promise.all(
+        snapshot.docs.map(async (docSnap) => {
+          const data = docSnap.data() as Record<string, any>;
+          const rawDigital =
+            data.digitalDeliveries && typeof data.digitalDeliveries === 'object'
+              ? (data.digitalDeliveries as Record<string, any>)
+              : {};
+          const nextMap: Record<string, NormalisedDigitalDelivery> = {};
+          Object.entries(rawDigital).forEach(([key, raw]) => {
+            const normalised = normaliseDigitalDelivery(raw, null);
+            if (normalised && normalised.enabled) {
+              nextMap[key] = normalised;
+            }
+          });
+
+          if (shouldRemove) {
+            delete rawDigital[productId];
+            delete nextMap[productId];
+          } else if (afterConfig) {
+            rawDigital[productId] = serialiseDigitalDeliveryForStorage(afterConfig);
+            nextMap[productId] = afterConfig;
+          }
+
+          const aggregateStatus = computeAggregateDigitalStatus(nextMap) ?? null;
+          const updatePayload: Record<string, any> = {};
+
+          if (Object.keys(rawDigital).length > 0) {
+            updatePayload.digitalDeliveries = rawDigital;
+            updatePayload.digitalDeliveryStatus = aggregateStatus;
+            updatePayload.digitalDeliveryUpdatedAt = now;
+          } else {
+            updatePayload.digitalDeliveries = admin.firestore.FieldValue.delete();
+            updatePayload.digitalDeliveryStatus = admin.firestore.FieldValue.delete();
+            updatePayload.digitalDeliveryUpdatedAt = admin.firestore.FieldValue.delete();
+          }
+
+          await docSnap.ref.set(updatePayload, { merge: true });
+        })
+      );
+
+      lastDoc = snapshot.docs[snapshot.docs.length - 1];
+      if (snapshot.size < batchSize) {
+        break;
+      }
+    }
+
+    return null;
+  });
 
 type FranchiseAssignmentMatchType = 'exact' | 'prefix' | 'superset' | 'radius';
 
@@ -8590,6 +9226,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
           !!item
         )
     : [];
+  const productIds = new Set<string>();
+  const digitalDeliveryMap: Record<string, NormalisedDigitalDelivery> = {};
 
   const kitReservationStatusInitial =
     typeof kitReservationStatusInput === 'string' && kitReservationStatusInput === 'pending'
@@ -9143,7 +9781,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     );
     const parking = toNumber(budget.parking);
     const perUnitBudgetTotal = labour + kit + travelCost + parking;
-    orderItems.push({
+    productIds.add(snap.id);
+    const orderItemPayload: Record<string, any> = {
       id: snap.id,
       name: prod.name,
       price,
@@ -9181,7 +9820,23 @@ export const createOrder = functions.https.onCall(async (data, context) => {
           totalCost: perUnitBudgetTotal * qty,
         },
       },
-    });
+    };
+    const digitalConfig = normaliseDigitalDelivery(
+      (prod as any).digitalDelivery,
+      typeof prod.name === 'string' ? prod.name : null
+    );
+    if (digitalConfig && digitalConfig.enabled) {
+      digitalDeliveryMap[snap.id] = digitalConfig;
+      orderItemPayload.digitalDelivery = {
+        status: computeDigitalDeliveryStatus(digitalConfig),
+        label: digitalConfig.label,
+        description: digitalConfig.description,
+        autoRelease: digitalConfig.autoRelease,
+        releaseVersion: digitalConfig.release?.version ?? null,
+      };
+      orderItemPayload.digitalDeliveryKey = snap.id;
+    }
+    orderItems.push(orderItemPayload);
     if (campaignBooking) {
       campaignSelections.push({
         ...campaignBooking,
@@ -9225,6 +9880,13 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     travelSubtotal += travelCost * qty;
     parkingSubtotal += parking * qty;
   });
+
+  const productIdList = Array.from(productIds);
+  const orderDigitalDeliveriesDoc: Record<string, any> = {};
+  Object.entries(digitalDeliveryMap).forEach(([productId, config]) => {
+    orderDigitalDeliveriesDoc[productId] = serialiseDigitalDeliveryForStorage(config);
+  });
+  const digitalDeliveryStatusAggregate = computeAggregateDigitalStatus(digitalDeliveryMap);
 
   const organiserProgramsRecords: Record<string, any>[] = [];
   if (organiserAggregates.size > 0) {
@@ -9719,6 +10381,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     projectName: projectName || null,
     voucher: voucherCode,
     items: orderItems,
+    productIds: productIdList,
     subtotal: productSubtotal,
     rentalSubtotal,
     labourSubtotal,
@@ -9751,6 +10414,12 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     clientRoyaltyOrderIndex: clientRoyaltyOrderIndex,
     priceTierLevel: territoryPriceTier,
   };
+
+  if (Object.keys(orderDigitalDeliveriesDoc).length > 0) {
+    orderData.digitalDeliveries = orderDigitalDeliveriesDoc;
+    orderData.digitalDeliveryStatus = digitalDeliveryStatusAggregate;
+    orderData.digitalDeliveryUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+  }
 
   if (campaignSelections.length > 0) {
     orderData.campaignBookings = campaignSelections;
