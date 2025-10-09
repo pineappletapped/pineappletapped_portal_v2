@@ -14,9 +14,8 @@ import {
   type ProductOrderFieldType,
 } from "@/lib/products";
 import { useCart } from "@/lib/cart";
-import { db, ensureFirebase, functions } from "@/lib/firebase";
+import { db, ensureFirebase } from "@/lib/firebase";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import {
   isOrganiserProgramEnabled,
   normaliseOrganiserId,
@@ -1842,25 +1841,63 @@ export default function AddToCartWizard({
     setSubmitting(true);
     setLiveMessage("Checking equipment availability");
     try {
-      const reserve = httpsCallable(functions, "reserveKit");
-      const res: any = await reserve({
-        productId: product.id,
-        date: requestDateIso,
-        spanOverride: bookingSpan,
-        timeWindow,
-        coverage: coverage
-          ? {
-              type: coverage.type,
-              franchiseId: coverage.franchiseId,
-              territoryId: coverage.territoryId,
-              label: coverage.label,
-              territoryLabel: coverage.territoryLabel,
-              postalCode: coverage.postalCode,
-              matchType: coverage.matchType,
-            }
-          : null,
-        skipKitCheck: skipAutomaticKitCheck,
+      const response = await fetch("/api/reserve-kit", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          productId: product.id,
+          date: requestDateIso,
+          spanOverride: bookingSpan,
+          timeWindow: timeWindow ?? null,
+          coverage: coverage
+            ? {
+                type: coverage.type,
+                franchiseId: coverage.franchiseId,
+                territoryId: coverage.territoryId,
+                label: coverage.label,
+                territoryLabel: coverage.territoryLabel,
+                postalCode: coverage.postalCode,
+                matchType: coverage.matchType,
+              }
+            : null,
+          skipKitCheck: skipAutomaticKitCheck,
+        }),
       });
+
+      const responseText = await response.text();
+      let parsed: any = null;
+
+      if (responseText) {
+        try {
+          parsed = JSON.parse(responseText);
+        } catch (parseError) {
+          throw {
+            code: "invalid-response",
+            message: "Kit availability response was not valid JSON.",
+            details: (parseError as Error)?.message ?? null,
+          } as FunctionsError;
+        }
+      }
+
+      if (!response.ok) {
+        const errorMessage =
+          (parsed && typeof parsed.error === "string" && parsed.error) ||
+          "reserve-kit-error";
+        const errorCode =
+          (parsed && typeof parsed.code === "string" && parsed.code) ||
+          "reserve-kit-error";
+        throw {
+          code: errorCode,
+          message: errorMessage,
+          details: parsed?.details ?? null,
+        } as FunctionsError;
+      }
+
+      const reservePayload =
+        parsed && typeof parsed === "object" && "data" in parsed ? (parsed as any).data : parsed;
       const {
         conflicts = [],
         kitItems = [],
@@ -1868,7 +1905,7 @@ export default function AddToCartWizard({
         status,
         missingStandards = [],
         provider: providerInfo = null,
-      } = res.data || {};
+      } = (reservePayload && typeof reservePayload === "object" ? reservePayload : {}) as any;
       const reservationStatus = status === "pending" ? "pending" : "confirmed";
       if (reservationStatus === "confirmed" && conflicts.length > 0) {
         const conflictNames = conflicts
