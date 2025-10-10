@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import PortalContainer from "@/components/PortalContainer";
+import ExpoLeadOutreachManager from "@/components/admin/expo/ExpoLeadOutreachManager";
 import PortalHero from "@/components/PortalHero";
 import CrmPipelineBoard from "@/components/CrmPipelineBoard";
 import { CRM_PIPELINE_STATUSES, normaliseCrmStatus } from "@/lib/crm";
@@ -1378,6 +1379,20 @@ export default function FranchisePortalPage() {
                 </div>
               )}
             </section>
+
+            <div id="expo-leads">
+              <ExpoLeadOutreachManager
+                variant="franchise"
+                heading="Event leads & follow-up"
+                description={
+                  <p className="text-sm text-gray-600">
+                    See every lead captured on your expo landing pages and send tailored follow-ups once you&apos;re back
+                    from the stand.
+                  </p>
+                }
+                className="rounded-3xl border border-gray-200 bg-white shadow-sm"
+              />
+            </div>
 
             <section id="upload-deliverables" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">

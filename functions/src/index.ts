@@ -7477,16 +7477,29 @@ export const expo_lead_submit = functions.https.onCall(async (data) => {
     throw new functions.https.HttpsError('failed-precondition', 'Consent must be provided.');
   }
 
+  const eventSlug =
+    typeof pageData.slug === 'string' && pageData.slug.trim().length > 0
+      ? pageData.slug.trim()
+      : slugInput || null;
+  const eventName = typeof pageData.eventName === 'string' && pageData.eventName.trim().length > 0
+    ? pageData.eventName.trim()
+    : null;
+  const eventTag = eventSlug || (eventName ? eventName.toLowerCase().replace(/[^a-z0-9]+/gi, '-') : null);
+
   const leadDoc = {
     pageId: pageDoc.id,
-    slug: (pageData.slug as string) || slugInput,
-    eventName: (pageData.eventName as string) || null,
+    slug: eventSlug || slugInput,
+    eventSlug,
+    eventName,
+    eventTag: eventTag || null,
+    source: 'expo',
     firstName,
     lastName: lastName || null,
     email,
     phone: phone || null,
     company: company || null,
     consented: true,
+    lastFollowUpAt: null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -7501,8 +7514,21 @@ export const expo_lead_submit = functions.https.onCall(async (data) => {
       company: company || null,
       status: 'new',
       source: 'expo',
-      leadSource: (pageData.slug as string) || slugInput || 'expo',
+      leadSource: eventSlug || slugInput || 'expo',
+      leadSourceCapturedAt: timestamp,
       updatedAt: timestamp,
+      lastExpoInteractionAt: timestamp,
+      eventName,
+      eventSlug,
+      tags: Array.from(
+        new Set(
+          [
+            'expo',
+            eventSlug ? `expo:${eventSlug}` : null,
+            eventName ? `event:${eventName}` : null,
+          ].filter((value): value is string => typeof value === 'string')
+        )
+      ),
     };
     if (existingLead.empty) {
       await db.collection('leads').add({ ...leadBase, createdAt: timestamp });
@@ -7563,6 +7589,92 @@ export const expo_lead_submit = functions.https.onCall(async (data) => {
           })
         )
     );
+  }
+
+  return { ok: true };
+});
+
+export const expo_lead_sendFollowUp = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Sign in required.');
+  }
+
+  const leadId = typeof data.leadId === 'string' ? data.leadId.trim() : '';
+  const subject = typeof data.subject === 'string' ? data.subject.trim() : '';
+  const body = typeof data.body === 'string' ? data.body.trim() : '';
+
+  if (!leadId) {
+    throw new functions.https.HttpsError('invalid-argument', 'leadId is required.');
+  }
+  if (!subject) {
+    throw new functions.https.HttpsError('invalid-argument', 'subject is required.');
+  }
+  if (!body) {
+    throw new functions.https.HttpsError('invalid-argument', 'body is required.');
+  }
+
+  const leadSnap = await db.collection('expoLeads').doc(leadId).get();
+  if (!leadSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'Expo lead not found.');
+  }
+
+  const leadData = leadSnap.data() ?? {};
+  const email = typeof leadData.email === 'string' ? leadData.email.trim() : '';
+  if (!email) {
+    throw new functions.https.HttpsError('failed-precondition', 'Lead has no email address.');
+  }
+
+  await sendEmail(email, subject, body);
+
+  const timestamp = admin.firestore.FieldValue.serverTimestamp();
+  const followUpLog = {
+    leadId,
+    subject,
+    body,
+    sentTo: email,
+    sentByUid: context.auth.uid ?? null,
+    sentByEmail: typeof context.auth.token?.email === 'string' ? context.auth.token.email : null,
+    eventName: typeof leadData.eventName === 'string' ? leadData.eventName : null,
+    eventSlug:
+      typeof leadData.eventSlug === 'string'
+        ? leadData.eventSlug
+        : typeof leadData.slug === 'string'
+          ? leadData.slug
+          : null,
+    createdAt: timestamp,
+  };
+
+  await Promise.all([
+    db.collection('expoLeads').doc(leadId).set(
+      {
+        lastFollowUpAt: timestamp,
+        lastFollowUpByUid: context.auth.uid ?? null,
+        lastFollowUpByEmail: typeof context.auth.token?.email === 'string' ? context.auth.token.email : null,
+        lastFollowUpSubject: subject,
+        updatedAt: timestamp,
+      },
+      { merge: true }
+    ),
+    db.collection('expoLeadFollowUps').add(followUpLog),
+  ]);
+
+  try {
+    const crmSnap = await db.collection('leads').where('email', '==', email).limit(1).get();
+    if (!crmSnap.empty) {
+      const crmUpdate: Record<string, unknown> = {
+        status: 'outreach',
+        lastFollowUpAt: timestamp,
+        lastFollowUpByUid: context.auth.uid ?? null,
+        lastFollowUpByEmail: typeof context.auth.token?.email === 'string' ? context.auth.token.email : null,
+        lastFollowUpSource: 'expo',
+        updatedAt: timestamp,
+      };
+      if (followUpLog.eventName) crmUpdate.eventName = followUpLog.eventName;
+      if (followUpLog.eventSlug) crmUpdate.eventSlug = followUpLog.eventSlug;
+      await crmSnap.docs[0].ref.set(crmUpdate, { merge: true });
+    }
+  } catch (err) {
+    console.error('Failed to update CRM lead after expo follow-up', err);
   }
 
   return { ok: true };
