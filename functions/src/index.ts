@@ -118,22 +118,18 @@ function resolveStoredOrderNumber(
 async function allocateOrderNumber(): Promise<{ number: number | null; label: string | null }> {
   try {
     const sequenceRef = db.collection(ORDER_SEQUENCE_COLLECTION).doc(ORDER_SEQUENCE_DOC_ID);
-    const nextValue = await db.runTransaction(async (tx) => {
-      const snap = await tx.get(sequenceRef);
-      const rawData = snap.exists ? ((snap.data() as Record<string, any>) ?? {}) : {};
-      const current = parseOrderNumberValue(rawData.current);
-      const candidate = current !== null ? current : 0;
-      const next = candidate + 1;
-      tx.set(
-        sequenceRef,
-        {
-          current: next,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
-      return next;
-    });
+    await sequenceRef.set(
+      {
+        current: admin.firestore.FieldValue.increment(1),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    const sequenceSnap = await sequenceRef.get();
+    const sequenceData = sequenceSnap.exists
+      ? ((sequenceSnap.data() as Record<string, any>) ?? {})
+      : {};
+    const nextValue = parseOrderNumberValue(sequenceData.current);
     const label = formatOrderNumberLabel(nextValue);
     return { number: nextValue, label };
   } catch (error) {
