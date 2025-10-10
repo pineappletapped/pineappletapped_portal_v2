@@ -918,6 +918,57 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     }
   };
 
+  const describeCallableError = useCallback((error: unknown): string => {
+    if (!error) {
+      return "We couldn't complete your order. Please try again.";
+    }
+    if (typeof error === "string") {
+      return error;
+    }
+    if (error instanceof Error) {
+      const firebaseError = error as FirebaseError;
+      const extractDetailMessage = (payload: unknown): string | null => {
+        if (!payload || typeof payload !== "object") {
+          return null;
+        }
+        const candidate = payload as Record<string, unknown>;
+        const nestedMessage = candidate.message;
+        if (typeof nestedMessage === "string" && nestedMessage.trim().length > 0) {
+          return nestedMessage;
+        }
+        return null;
+      };
+
+      const customData = firebaseError?.customData;
+      const detailFromCustomData = extractDetailMessage(
+        customData && typeof customData === "object"
+          ? (customData as Record<string, unknown>).details ?? null
+          : null
+      );
+      if (detailFromCustomData) {
+        return detailFromCustomData;
+      }
+      const details = (firebaseError as FirebaseError & { details?: unknown }).details;
+      if (typeof details === "string" && details.trim().length > 0) {
+        return details;
+      }
+      const detailObject = extractDetailMessage(details ?? null);
+      if (detailObject) {
+        return detailObject;
+      }
+      if (firebaseError.message && firebaseError.message.trim().length > 0) {
+        return firebaseError.message;
+      }
+    }
+    if (typeof error === "object" && error !== null && "message" in error) {
+      const messageValue = (error as Record<string, unknown>).message;
+      if (typeof messageValue === "string" && messageValue.trim().length > 0) {
+        return messageValue;
+      }
+    }
+    return "We couldn't complete your order. Please try again.";
+  }, []);
+
   const initializePaymentIntent = useCallback(async () => {
     if (initializingPayment) {
       return false;
@@ -1041,57 +1092,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     },
     [clear, router]
   );
-
-  const describeCallableError = useCallback((error: unknown): string => {
-    if (!error) {
-      return "We couldn't complete your order. Please try again.";
-    }
-    if (typeof error === "string") {
-      return error;
-    }
-    if (error instanceof Error) {
-      const firebaseError = error as FirebaseError;
-      const extractDetailMessage = (payload: unknown): string | null => {
-        if (!payload || typeof payload !== "object") {
-          return null;
-        }
-        const candidate = payload as Record<string, unknown>;
-        const nestedMessage = candidate.message;
-        if (typeof nestedMessage === "string" && nestedMessage.trim().length > 0) {
-          return nestedMessage;
-        }
-        return null;
-      };
-
-      const customData = firebaseError?.customData;
-      const detailFromCustomData = extractDetailMessage(
-        customData && typeof customData === "object"
-          ? (customData as Record<string, unknown>).details ?? null
-          : null
-      );
-      if (detailFromCustomData) {
-        return detailFromCustomData;
-      }
-      const details = firebaseError.details;
-      if (typeof details === "string" && details.trim().length > 0) {
-        return details;
-      }
-      const detailObject = extractDetailMessage(details ?? null);
-      if (detailObject) {
-        return detailObject;
-      }
-      if (firebaseError.message && firebaseError.message.trim().length > 0) {
-        return firebaseError.message;
-      }
-    }
-    if (typeof error === "object" && error !== null && "message" in error) {
-      const messageValue = (error as Record<string, unknown>).message;
-      if (typeof messageValue === "string" && messageValue.trim().length > 0) {
-        return messageValue;
-      }
-    }
-    return "We couldn't complete your order. Please try again.";
-  }, []);
 
   const completeZeroBalanceOrder = useCallback(async () => {
     if (initializingPayment) {
