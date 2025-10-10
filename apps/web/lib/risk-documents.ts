@@ -579,7 +579,7 @@ export function buildGenericRiskDocument(id: string, input: CreateRiskDocumentIn
     lastReviewedOn: input.lastReviewedOn,
     owner: input.owner,
     status: "current",
-    visibleTo: [...new Set(["hq", ...input.visibleTo])],
+    visibleTo: [...new Set<RiskDocumentAudience>(["hq", ...input.visibleTo])],
     productIds,
     categories: categoryIds.length > 0 ? categoryIds : ["general"],
   };
@@ -616,7 +616,7 @@ export function buildCustomRiskDocument(id: string, input: CreateRiskDocumentInp
     lastReviewedOn: input.lastReviewedOn,
     owner: input.owner,
     status: "current",
-    visibleTo: [...new Set(["hq", ...input.visibleTo])],
+    visibleTo: [...new Set<RiskDocumentAudience>(["hq", ...input.visibleTo])],
     projectKeys: Array.from(derivedProjectKeys),
     projectName: input.projectName ?? "Project",
     linkedProductIds: productIds,

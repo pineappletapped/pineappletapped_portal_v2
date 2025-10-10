@@ -1,3 +1,5 @@
+'use client';
+
 import type { ReactNode } from "react";
 
 import PortalContainer from "@/components/PortalContainer";
