@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 
-import PortalContainer from "@/components/PortalContainer";
+import AdminWorkspaceLayout, { AdminSection } from "@/components/admin/AdminWorkspaceLayout";
 import ContentAssistantWorkspace from "@/components/admin/tools/ContentAssistantWorkspace";
 import SocialSchedulerWorkspace from "@/components/admin/tools/SocialSchedulerWorkspace";
 import { useRoleGate } from "@/hooks/useRoleGate";
@@ -33,30 +33,36 @@ export default function AdminToolsClientPage() {
 
   if (loading) {
     return (
-      <PortalContainer>
-        <p>Checking permissions…</p>
-      </PortalContainer>
+      <AdminWorkspaceLayout title="Production tools" description="Loading workspace access permissions">
+        <AdminSection>
+          <p className="text-sm text-gray-600">Checking permissions…</p>
+        </AdminSection>
+      </AdminWorkspaceLayout>
     );
   }
 
   if (!allowed) {
     return (
-      <PortalContainer>
-        <div className="space-y-2">
-          <h1 className="text-lg font-semibold text-gray-900">Access required</h1>
-          <p className="text-sm text-gray-600">
-            This workspace is available to admin, marketing, or project operations roles. Contact HQ to enable access.
-          </p>
-        </div>
-      </PortalContainer>
+      <AdminWorkspaceLayout title="Production tools" description="Automation workspaces for marketing and operations teams">
+        <AdminSection tone="danger">
+          <div className="space-y-2">
+            <h1 className="text-lg font-semibold text-gray-900">Access required</h1>
+            <p className="text-sm text-gray-600">
+              This workspace is available to admin, marketing, or project operations roles. Contact HQ to enable access.
+            </p>
+          </div>
+        </AdminSection>
+      </AdminWorkspaceLayout>
     );
   }
 
   return (
-    <PortalContainer>
-      <div className="grid gap-4">
+    <AdminWorkspaceLayout
+      title="Production tools"
+      description="Switch between the content assistant and social scheduler to support campaign fulfilment."
+    >
+      <AdminSection>
         <header className="space-y-2">
-          <h1 className="text-2xl font-semibold text-gray-900">Production tools</h1>
           <p className="text-sm text-gray-600">{activeDescription}</p>
           <div className="flex flex-wrap gap-2">
             {TOOL_OPTIONS.map((tool) => (
@@ -76,12 +82,14 @@ export default function AdminToolsClientPage() {
           </div>
         </header>
 
-        {activeTool === "copy" ? (
-          <ContentAssistantWorkspace />
-        ) : (
-          <SocialSchedulerWorkspace allowFlagEditing={Boolean(roles?.admin)} roles={roles ?? null} emphasisePilotNote />
-        )}
-      </div>
-    </PortalContainer>
+        <div className="mt-4">
+          {activeTool === "copy" ? (
+            <ContentAssistantWorkspace />
+          ) : (
+            <SocialSchedulerWorkspace allowFlagEditing={Boolean(roles?.admin)} roles={roles ?? null} emphasisePilotNote />
+          )}
+        </div>
+      </AdminSection>
+    </AdminWorkspaceLayout>
   );
 }

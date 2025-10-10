@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { db } from "@/lib/firebase";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import AdminWorkspaceLayout, { AdminSection } from "@/components/admin/AdminWorkspaceLayout";
 import {
   collection,
   getDocs,
@@ -148,131 +149,141 @@ export default function AdminProductsPage() {
     });
   }, [products, search, catFilter, venueFilter]);
 
-  if (guardLoading || loading) return <p>Loading…</p>;
-  if (!allowed) return <p>You do not have permission to manage products.</p>;
+  if (guardLoading || loading) {
+    return (
+      <AdminWorkspaceLayout
+        title="Product library"
+        description="Manage storefront services, pricing, and intake metadata."
+      >
+        <AdminSection>
+          <p className="text-sm text-gray-600">Loading product catalogue…</p>
+        </AdminSection>
+      </AdminWorkspaceLayout>
+    );
+  }
+
+  if (!allowed) {
+    return (
+      <AdminWorkspaceLayout
+        title="Product library"
+        description="Manage storefront services, pricing, and intake metadata."
+      >
+        <AdminSection tone="danger">
+          <p className="text-sm font-medium text-rose-700">You do not have permission to manage products.</p>
+        </AdminSection>
+      </AdminWorkspaceLayout>
+    );
+  }
 
   return (
-    <div className="grid gap-6">
-      <h1 className="text-xl font-semibold">Manage Products</h1>
-      <div className="flex flex-wrap items-center gap-3">
-        <input
-          className="input"
-          placeholder="Search products"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        <select
-          className="input"
-          value={catFilter}
-          onChange={(e) => setCatFilter(e.target.value)}
-        >
-          <option value="all">All categories</option>
-          {cats.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-        <input
-          className="input"
-          placeholder="Filter by venue"
-          value={venueFilter}
-          onChange={(e) => setVenueFilter(e.target.value)}
-        />
+    <AdminWorkspaceLayout
+      title="Product library"
+      description="Update product visibility, route bespoke workflows, and keep pricing aligned with HQ guidance."
+      actions={
         <Link href="/admin/products/new" className="btn">
-          Create Product
+          Create product
         </Link>
-        <button onClick={downloadCSV} className="btn">
-          Download CSV
-        </button>
-        <label className="btn">
-          Upload CSV
+      }
+    >
+      <AdminSection title="Filters" description="Search by name, category, or venue to refine the list.">
+        <div className="flex flex-wrap items-center gap-3">
           <input
-            type="file"
-            accept=".csv"
-            onChange={handleUpload}
-            className="hidden"
+            className="input max-w-xs"
+            placeholder="Search products"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
           />
-        </label>
-      </div>
-      {filtered.length === 0 ? (
-        <p>No products found.</p>
-      ) : (
-        <div className="grid gap-3">
-          {filtered.map((p) => {
-            const eventLabel = getProductEventRangeLabel(p);
-            const onsiteLabel = formatProductOnsiteDuration(p);
-            const coverImage =
-              p.imageUrls?.find(
-                (url) => typeof url === "string" && url.trim().length > 0
-              )?.trim() ||
-              (typeof p.imageUrl === "string" ? p.imageUrl.trim() : "");
-            return (
-              <div
-                key={p.id}
-                className="card p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4"
-              >
-              <div className="flex items-center gap-4">
-                {coverImage && (
-                  <Image
-                    src={coverImage}
-                    alt={p.name}
-                    width={64}
-                    height={64}
-                    className="h-16 w-16 rounded object-cover"
-                  />
-                )}
-                <div>
-                  <p className="font-medium">{p.name}</p>
-                  <p className="text-sm text-gray-700">
-                    {p.salesMode === "quote"
-                      ? "Quote-only workflow"
-                      : `£${(p.price ?? 0).toFixed(2)}`}
-                  </p>
-                  {p.salesMode === "quote" && (
-                    <p className="text-xs text-orange-600">
-                      Requests route to bespoke quote intake.
-                    </p>
-                  )}
-                  {p.venue && (
-                    <p className="text-xs text-gray-600">{p.venue}</p>
-                  )}
-                  {eventLabel && (
-                    <p className="text-xs text-gray-600">{eventLabel}</p>
-                  )}
-                  {onsiteLabel && (
-                    <p className="text-xs text-gray-500">{onsiteLabel}</p>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => toggleHidden(p.id, p.hidden)}
-                  className="btn btn-sm"
-                >
-                  {p.hidden ? "Show" : "Hide"}
-                </button>
-                <Link href={`/admin/products/${p.id}`} className="btn btn-sm">
-                  Edit
-                </Link>
-                <button
-                  onClick={() => duplicate(p)}
-                  className="btn btn-sm"
-                >
-                  Duplicate
-                </button>
-                <button
-                  onClick={() => remove(p.id)}
-                  className="btn btn-sm bg-red-600 text-white"
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-            );
-          })}
+          <select
+            className="input max-w-xs"
+            value={catFilter}
+            onChange={(e) => setCatFilter(e.target.value)}
+          >
+            <option value="all">All categories</option>
+            {cats.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <input
+            className="input max-w-xs"
+            placeholder="Filter by venue"
+            value={venueFilter}
+            onChange={(e) => setVenueFilter(e.target.value)}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={downloadCSV} className="btn btn-sm">
+              Download CSV
+            </button>
+            <label className="btn btn-sm">
+              Upload CSV
+              <input type="file" accept=".csv" onChange={handleUpload} className="hidden" />
+            </label>
+          </div>
         </div>
-      )}
-    </div>
+      </AdminSection>
+      <AdminSection
+        title="Catalogue"
+        description="Toggle visibility, duplicate templates, or jump into deep editing."
+      >
+        {filtered.length === 0 ? (
+          <p className="text-sm text-gray-600">No products match the selected filters.</p>
+        ) : (
+          <div className="grid gap-3">
+            {filtered.map((p) => {
+              const eventLabel = getProductEventRangeLabel(p);
+              const onsiteLabel = formatProductOnsiteDuration(p);
+              const coverImage =
+                p.imageUrls?.find((url) => typeof url === "string" && url.trim().length > 0)?.trim() ||
+                (typeof p.imageUrl === "string" ? p.imageUrl.trim() : "");
+              return (
+                <div
+                  key={p.id}
+                  className="flex flex-col gap-4 rounded-3xl border border-gray-200 bg-white p-5 shadow-sm md:flex-row md:items-center md:justify-between"
+                >
+                  <div className="flex items-center gap-4">
+                    {coverImage && (
+                      <Image
+                        src={coverImage}
+                        alt={p.name}
+                        width={64}
+                        height={64}
+                        className="h-16 w-16 rounded object-cover"
+                      />
+                    )}
+                    <div>
+                      <p className="font-medium text-gray-900">{p.name}</p>
+                      <p className="text-sm text-gray-700">
+                        {p.salesMode === "quote" ? "Quote-only workflow" : `£${(p.price ?? 0).toFixed(2)}`}
+                      </p>
+                      {p.salesMode === "quote" ? (
+                        <p className="text-xs text-orange-600">Requests route to bespoke quote intake.</p>
+                      ) : null}
+                      {p.venue ? <p className="text-xs text-gray-600">{p.venue}</p> : null}
+                      {eventLabel ? <p className="text-xs text-gray-600">{eventLabel}</p> : null}
+                      {onsiteLabel ? <p className="text-xs text-gray-500">{onsiteLabel}</p> : null}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button onClick={() => toggleHidden(p.id, p.hidden)} className="btn btn-sm">
+                      {p.hidden ? "Show" : "Hide"}
+                    </button>
+                    <Link href={`/admin/products/${p.id}`} className="btn btn-sm">
+                      Edit
+                    </Link>
+                    <button onClick={() => duplicate(p)} className="btn btn-sm">
+                      Duplicate
+                    </button>
+                    <button onClick={() => remove(p.id)} className="btn btn-sm bg-rose-600 text-white">
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </AdminSection>
+    </AdminWorkspaceLayout>
   );
 }
