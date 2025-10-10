@@ -331,6 +331,7 @@ export default function AdminPage() {
                     { href: '/admin/projects', label: 'Project Management' },
                     { href: '/admin/workflows', label: 'Manage Workflows' },
                     { href: '/admin/proposals', label: 'Quotes & Proposals' },
+                    { href: '/admin/risk-assessments', label: 'Risk Assessments & SOPs' },
                     { href: '/admin/availability', label: 'Manage Availability' },
                     { href: '/admin/availability/routing', label: 'Routing Workflow' },
                   ],
