@@ -1839,65 +1839,107 @@ export default function AddToCartWizard({
       requestDateIso = new Date().toISOString();
     }
     setSubmitting(true);
-    setLiveMessage("Checking equipment availability");
+    setLiveMessage(
+      skipAutomaticKitCheck
+        ? "Routing to manual confirmation"
+        : "Checking equipment availability",
+    );
     try {
-      const response = await fetch("/api/reserve-kit", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "same-origin",
-        body: JSON.stringify({
-          productId: product.id,
-          date: requestDateIso,
-          spanOverride: bookingSpan,
-          timeWindow: timeWindow ?? null,
-          coverage: coverage
-            ? {
-                type: coverage.type,
-                franchiseId: coverage.franchiseId,
-                territoryId: coverage.territoryId,
-                label: coverage.label,
-                territoryLabel: coverage.territoryLabel,
-                postalCode: coverage.postalCode,
-                matchType: coverage.matchType,
-              }
-            : null,
-          skipKitCheck: skipAutomaticKitCheck,
-        }),
-      });
+      let reservePayload: any = null;
 
-      const responseText = await response.text();
-      let parsed: any = null;
+      if (skipAutomaticKitCheck && routingAttempts.length > 0 && coverage) {
+        const selectBypassAttempt = () => routingAttempts[0] ?? null;
+        const manualAttempt =
+          routingAttempts.find((attempt) => attempt.requiresKit === false) ??
+          selectBypassAttempt();
 
-      if (responseText) {
-        try {
-          parsed = JSON.parse(responseText);
-        } catch (parseError) {
-          throw {
-            code: "invalid-response",
-            message: "Kit availability response was not valid JSON.",
-            details: (parseError as Error)?.message ?? null,
-          } as FunctionsError;
+        if (manualAttempt) {
+          const coercedAttempt = manualAttempt.requiresKit
+            ? { ...manualAttempt, requiresKit: false }
+            : manualAttempt;
+          const manualStatus = coercedAttempt.autoConfirm ? "confirmed" : "pending";
+          reservePayload = {
+            conflicts: [],
+            kitItems: [],
+            rentalTotal: 0,
+            status: manualStatus,
+            missingStandards: [],
+            provider: {
+              level: coercedAttempt.key,
+              status: manualStatus,
+              label: coercedAttempt.label,
+              franchiseId:
+                coercedAttempt.ownerType === "company"
+                  ? null
+                  : coverage.franchiseId ?? null,
+              territoryId: coverage.territoryId ?? null,
+              requiresKit: false,
+              autoConfirm: coercedAttempt.autoConfirm,
+              description: coercedAttempt.description ?? null,
+            },
+          };
         }
       }
 
-      if (!response.ok) {
-        const errorMessage =
-          (parsed && typeof parsed.error === "string" && parsed.error) ||
-          "reserve-kit-error";
-        const errorCode =
-          (parsed && typeof parsed.code === "string" && parsed.code) ||
-          "reserve-kit-error";
-        throw {
-          code: errorCode,
-          message: errorMessage,
-          details: parsed?.details ?? null,
-        } as FunctionsError;
-      }
+      if (!reservePayload) {
+        const response = await fetch("/api/reserve-kit", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          credentials: "same-origin",
+          body: JSON.stringify({
+            productId: product.id,
+            date: requestDateIso,
+            spanOverride: bookingSpan,
+            timeWindow: timeWindow ?? null,
+            coverage: coverage
+              ? {
+                  type: coverage.type,
+                  franchiseId: coverage.franchiseId,
+                  territoryId: coverage.territoryId,
+                  label: coverage.label,
+                  territoryLabel: coverage.territoryLabel,
+                  postalCode: coverage.postalCode,
+                  matchType: coverage.matchType,
+                }
+              : null,
+            skipKitCheck: skipAutomaticKitCheck,
+          }),
+        });
 
-      const reservePayload =
-        parsed && typeof parsed === "object" && "data" in parsed ? (parsed as any).data : parsed;
+        const responseText = await response.text();
+        let parsed: any = null;
+
+        if (responseText) {
+          try {
+            parsed = JSON.parse(responseText);
+          } catch (parseError) {
+            throw {
+              code: "invalid-response",
+              message: "Kit availability response was not valid JSON.",
+              details: (parseError as Error)?.message ?? null,
+            } as FunctionsError;
+          }
+        }
+
+        if (!response.ok) {
+          const errorMessage =
+            (parsed && typeof parsed.error === "string" && parsed.error) ||
+            "reserve-kit-error";
+          const errorCode =
+            (parsed && typeof parsed.code === "string" && parsed.code) ||
+            "reserve-kit-error";
+          throw {
+            code: errorCode,
+            message: errorMessage,
+            details: parsed?.details ?? null,
+          } as FunctionsError;
+        }
+
+        reservePayload =
+          parsed && typeof parsed === "object" && "data" in parsed ? (parsed as any).data : parsed;
+      }
       const {
         conflicts = [],
         kitItems = [],
