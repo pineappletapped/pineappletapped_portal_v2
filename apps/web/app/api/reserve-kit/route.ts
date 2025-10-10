@@ -23,6 +23,8 @@ type CallableErrorEnvelope = {
   };
 };
 
+type CallableEnvelope = (CallableSuccessEnvelope & CallableErrorEnvelope) & { code?: string };
+
 const normaliseBaseUrl = (value: unknown): string => {
   if (typeof value !== "string") {
     return "";
@@ -92,10 +94,10 @@ export async function POST(request: Request) {
     });
 
     const text = await response.text();
-    let json: CallableSuccessEnvelope & CallableErrorEnvelope | null = null;
+    let json: CallableEnvelope | null = null;
     if (text) {
       try {
-        json = JSON.parse(text) as typeof json;
+        json = JSON.parse(text) as CallableEnvelope;
       } catch (parseError) {
         return createErrorResponse(
           502,
@@ -107,14 +109,24 @@ export async function POST(request: Request) {
     }
 
     if (!response.ok) {
-      const errorDetails = json?.error?.message ?? json?.error ?? text || "callable request failed";
+      const callableError = (json as CallableErrorEnvelope | null)?.error;
+      const errorDetails =
+        (callableError && typeof callableError === "object" && typeof callableError.message === "string"
+          ? callableError.message
+          : typeof callableError === "string"
+            ? callableError
+            : text || "callable request failed");
       const errorCode =
-        (json?.error && typeof json.error === "object" && typeof json.error.status === "string"
-          ? json.error.status
+        (callableError && typeof callableError === "object" && typeof callableError.status === "string"
+          ? callableError.status
           : null) ||
-        (json && typeof (json as any).code === "string" ? (json as any).code : null) ||
+        (json && typeof json.code === "string" ? json.code : null) ||
         "reserve-kit-error";
-      return createErrorResponse(502, errorCode, errorDetails, json?.error?.details ?? json?.error ?? text);
+      const errorDetailsPayload =
+        callableError && typeof callableError === "object" && "details" in callableError
+          ? callableError.details
+          : callableError ?? text;
+      return createErrorResponse(502, errorCode, errorDetails, errorDetailsPayload);
     }
 
     const data = (json?.result?.data ?? json?.data) as unknown;
