@@ -8,6 +8,7 @@ import PortalContainer from "@/components/PortalContainer";
 import DriveAssetStager from "@/components/storage/DriveAssetStager";
 import { db } from "@/lib/firebase";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import { resolveOrderIdentifier } from "@/lib/orders";
 
 interface OrderSummary {
   id: string;
@@ -15,6 +16,10 @@ interface OrderSummary {
   serviceName?: string | null;
   status?: string | null;
   items?: Array<Record<string, any>> | null;
+  orderNumber?: number | null;
+  orderNumberFormatted?: string | null;
+  orderNumberLabel?: string | null;
+  orderNumberDisplay?: string | null;
 }
 
 export default function AdminDeliveryFormClientPage() {
@@ -41,12 +46,32 @@ export default function AdminDeliveryFormClientPage() {
         if (cancelled) return;
         if (snap.exists()) {
           const data = snap.data() as Record<string, any>;
+          const orderNumber =
+            typeof data?.orderNumber === "number" && Number.isFinite(data.orderNumber)
+              ? Math.trunc(data.orderNumber)
+              : null;
+          const orderNumberFormattedRaw =
+            typeof data?.orderNumberFormatted === "string" && data.orderNumberFormatted.trim().length > 0
+              ? data.orderNumberFormatted.trim()
+              : typeof data?.orderNumberLabel === "string" && data.orderNumberLabel.trim().length > 0
+                ? data.orderNumberLabel.trim()
+                : null;
+          const orderNumberDisplay =
+            typeof data?.orderNumberDisplay === "string" && data.orderNumberDisplay.trim().length > 0
+              ? data.orderNumberDisplay.trim()
+              : orderNumberFormattedRaw
+                ? `#${orderNumberFormattedRaw}`
+                : null;
           setOrder({
             id: snap.id,
             projectName: data?.projectName || null,
             serviceName: data?.serviceName || null,
             status: data?.status || null,
             items: Array.isArray(data?.items) ? (data.items as Array<Record<string, any>>) : null,
+            orderNumber,
+            orderNumberFormatted: orderNumberFormattedRaw,
+            orderNumberLabel: orderNumberFormattedRaw,
+            orderNumberDisplay,
           });
         } else {
           setOrder(null);
@@ -72,14 +97,26 @@ export default function AdminDeliveryFormClientPage() {
     return order.items.find((item) => typeof item?.id === "string" && item.id === itemIdParam) || null;
   }, [itemIdParam, order?.items]);
 
+  const orderIdentifier = useMemo(() => resolveOrderIdentifier(order), [order]);
+
   const headerTitle = useMemo(() => {
     if (selectedItem?.name) return selectedItem.name as string;
     if (itemNameParam) return itemNameParam;
     if (order?.projectName) return order.projectName;
     if (order?.serviceName) return order.serviceName;
+    if (orderIdentifier.friendlyDisplay) return `Order ${orderIdentifier.friendlyDisplay}`;
+    if (orderIdentifier.originalId) return `Order ${orderIdentifier.originalId}`;
     if (orderIdParam) return `Order ${orderIdParam}`;
     return "Delivery staging";
-  }, [itemNameParam, order?.projectName, order?.serviceName, orderIdParam, selectedItem?.name]);
+  }, [
+    itemNameParam,
+    order?.projectName,
+    order?.serviceName,
+    orderIdParam,
+    selectedItem?.name,
+    orderIdentifier.friendlyDisplay,
+    orderIdentifier.originalId,
+  ]);
 
   if (guardLoading) {
     return <p>Loading…</p>;
@@ -104,11 +141,20 @@ export default function AdminDeliveryFormClientPage() {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="space-y-1">
               <h2 className="text-lg font-semibold text-gray-900">{headerTitle}</h2>
-              {orderIdParam ? (
+              {orderIdentifier.friendlyDisplay ? (
+                <p className="text-sm text-gray-600">Order number: {orderIdentifier.friendlyDisplay}</p>
+              ) : orderIdParam ? (
                 <p className="text-sm text-gray-600">Order ID: {orderIdParam}</p>
               ) : (
                 <p className="text-sm text-gray-600">Select a project to begin staging assets.</p>
               )}
+              {orderIdentifier.originalId &&
+              orderIdentifier.friendlyDisplay &&
+              orderIdentifier.friendlyDisplay !== orderIdentifier.originalId ? (
+                <p className="text-[10px] uppercase tracking-wide text-gray-400">
+                  Internal ID: {orderIdentifier.originalId}
+                </p>
+              ) : null}
               {order?.status ? (
                 <p className="text-xs uppercase tracking-wide text-gray-500">Order status: {order.status}</p>
               ) : null}

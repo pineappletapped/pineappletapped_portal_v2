@@ -20,6 +20,7 @@ import { getDownloadURL, ref } from "firebase/storage";
 import PortalContainer from "@/components/PortalContainer";
 import { ensureFirebase } from "@/lib/firebase";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import { resolveOrderIdentifier } from "@/lib/orders";
 import {
   AFFILIATE_MIN_WITHDRAWAL_NET,
   AffiliateRecord,
@@ -234,12 +235,22 @@ export default function AffiliatePortal() {
                   const list: OrderSummary[] = snapshot.docs.map((orderSnap) => {
                     const data = orderSnap.data() as Record<string, any>;
                     const affiliateInfo = (data.affiliate ?? {}) as Record<string, any>;
+                    const orderIdentifier = resolveOrderIdentifier({ id: orderSnap.id, ...data });
+                    const descriptor =
+                      (typeof data.projectName === "string" && data.projectName.trim().length > 0
+                        ? data.projectName.trim()
+                        : null) ??
+                      (typeof data.customerName === "string" && data.customerName.trim().length > 0
+                        ? data.customerName.trim()
+                        : null);
+                    const orderDisplay =
+                      orderIdentifier.friendlyDisplay ||
+                      orderIdentifier.originalId ||
+                      `Order ${orderSnap.id.slice(0, 6)}`;
+                    const label = descriptor ? `${orderDisplay} · ${descriptor}` : orderDisplay;
                     return {
                       id: orderSnap.id,
-                      label:
-                        (typeof data.projectName === "string" && data.projectName) ||
-                        (typeof data.customerName === "string" && data.customerName) ||
-                        `Order ${orderSnap.id.slice(0, 6)}`,
+                      label,
                       status: typeof data.status === "string" ? data.status : null,
                       total: typeof data.price === "number" ? data.price : data.netTotal || 0,
                       commissionNet: Number(affiliateInfo.commissionNet) || 0,

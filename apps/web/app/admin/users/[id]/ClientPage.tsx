@@ -16,6 +16,7 @@ import {
 import { useRoleGate } from '@/hooks/useRoleGate';
 import { adminListUsers, adminUpdateUser } from '@/lib/admin';
 import { ensureFirebase, functions } from '@/lib/firebase';
+import { resolveOrderIdentifier } from '@/lib/orders';
 import {
   CRM_STAGE_OPTIONS,
   CRM_STATUS_LABELS,
@@ -1053,25 +1054,37 @@ export default function AdminUserDetailPage() {
                 </tr>
               </thead>
               <tbody>
-                {orders.map((order) => (
-                  <tr key={order.id} className="border-t">
-                    <td className="p-2">
-                      <Link className="text-orange" href={`/orders/${order.id}`}>
-                        {order.id}
-                      </Link>
-                    </td>
-                    <td className="p-2">
-                      {order.items?.length
-                        ? order.items.map((item) => item.name || 'Item').join(', ')
-                        : '—'}
-                    </td>
-                    <td className="p-2 capitalize">{order.status || '—'}</td>
-                    <td className="p-2">{formatDate(order.createdAt)}</td>
-                    <td className="p-2 text-right">
-                      {formatCurrency(typeof order.price === 'number' ? order.price : Number(order.price) || 0)}
-                    </td>
-                  </tr>
-                ))}
+                {orders.map((order) => {
+                  const orderIdentifier = resolveOrderIdentifier(order);
+                  const orderDisplay =
+                    orderIdentifier.friendlyDisplay || orderIdentifier.originalId || order.id;
+                  return (
+                    <tr key={order.id} className="border-t">
+                      <td className="p-2">
+                        <Link className="text-orange" href={`/orders/${order.id}`}>
+                          {orderDisplay}
+                        </Link>
+                        {orderIdentifier.originalId &&
+                        orderIdentifier.friendlyDisplay &&
+                        orderIdentifier.friendlyDisplay !== orderIdentifier.originalId ? (
+                          <div className="text-[10px] uppercase tracking-wide text-gray-400">
+                            ID: {orderIdentifier.originalId}
+                          </div>
+                        ) : null}
+                      </td>
+                      <td className="p-2">
+                        {order.items?.length
+                          ? order.items.map((item) => item.name || 'Item').join(', ')
+                          : '—'}
+                      </td>
+                      <td className="p-2 capitalize">{order.status || '—'}</td>
+                      <td className="p-2">{formatDate(order.createdAt)}</td>
+                      <td className="p-2 text-right">
+                        {formatCurrency(typeof order.price === 'number' ? order.price : Number(order.price) || 0)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

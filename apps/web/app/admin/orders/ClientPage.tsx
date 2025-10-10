@@ -17,6 +17,7 @@ import {
 } from "firebase/firestore";
 import { useRoleGate } from "@/hooks/useRoleGate";
 import { describeLeadSource } from "@/lib/lead-source";
+import { resolveOrderIdentifier } from "@/lib/orders";
 import { HQ_UNASSIGNED_TERRITORY_LABEL } from "@/lib/franchises";
 
 function toDate(value: any): Date | null {
@@ -340,6 +341,7 @@ export default function AdminOrdersPage() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {filtered.map((o) => {
+                  const orderIdentifier = resolveOrderIdentifier(o);
                   const name =
                     o.customerName ||
                     o.user?.displayName ||
@@ -449,7 +451,16 @@ export default function AdminOrdersPage() {
                   return (
                     <tr key={o.id} className="align-top border-b last:border-b-0">
                       <td className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        {o.id}
+                        <div className="font-semibold text-gray-900">
+                          {orderIdentifier.friendlyDisplay || orderIdentifier.originalId || "—"}
+                        </div>
+                        {orderIdentifier.originalId &&
+                        orderIdentifier.friendlyDisplay &&
+                        orderIdentifier.friendlyDisplay !== orderIdentifier.originalId ? (
+                          <div className="text-[10px] uppercase tracking-wide text-gray-400">
+                            ID: {orderIdentifier.originalId}
+                          </div>
+                        ) : null}
                       </td>
                       <td className="px-4 py-3">
                         <div className="space-y-1">

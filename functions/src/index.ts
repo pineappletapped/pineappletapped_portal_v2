@@ -61,6 +61,87 @@ admin.initializeApp({
 });
 const db = admin.firestore();
 
+const ORDER_SEQUENCE_COLLECTION = 'settings';
+const ORDER_SEQUENCE_DOC_ID = 'orderSequence';
+const ORDER_NUMBER_PAD_LENGTH = 5;
+
+function parseOrderNumberValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const integer = Math.trunc(value);
+    return integer >= 0 ? integer : null;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      const integer = Math.trunc(parsed);
+      return integer >= 0 ? integer : null;
+    }
+  }
+  return null;
+}
+
+function formatOrderNumberLabel(value: number | null, padLength = ORDER_NUMBER_PAD_LENGTH): string | null {
+  if (value === null) {
+    return null;
+  }
+  const safeValue = Math.max(0, Math.trunc(value));
+  return safeValue.toString().padStart(padLength, '0');
+}
+
+function resolveStoredOrderNumber(
+  data: Record<string, any> | null | undefined,
+): { number: number | null; label: string | null } {
+  if (!data) {
+    return { number: null, label: null };
+  }
+  const number = parseOrderNumberValue(data.orderNumber ?? data.internalOrderNumber);
+  const labelCandidates = [
+    normaliseString(data.orderNumberFormatted),
+    normaliseString(data.orderNumberLabel),
+    normaliseString(data.orderFriendlyId),
+    normaliseString(data.orderNumberString),
+    normaliseString(data.orderNumberDisplay),
+  ];
+  let label: string | null = null;
+  for (const candidate of labelCandidates) {
+    if (candidate) {
+      label = candidate;
+      break;
+    }
+  }
+  if (!label && number !== null) {
+    label = formatOrderNumberLabel(number);
+  }
+  return { number, label };
+}
+
+async function allocateOrderNumber(): Promise<{ number: number | null; label: string | null }> {
+  try {
+    const sequenceRef = db.collection(ORDER_SEQUENCE_COLLECTION).doc(ORDER_SEQUENCE_DOC_ID);
+    const nextValue = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(sequenceRef);
+      const rawData = snap.exists ? ((snap.data() as Record<string, any>) ?? {}) : {};
+      const current = parseOrderNumberValue(rawData.current);
+      const candidate = current !== null ? current : 0;
+      const next = candidate + 1;
+      tx.set(
+        sequenceRef,
+        {
+          current: next,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      return next;
+    });
+    const label = formatOrderNumberLabel(nextValue);
+    return { number: nextValue, label };
+  } catch (error) {
+    console.error('Failed to allocate sequential order number', error);
+    return { number: null, label: null };
+  }
+}
+
 type StripeSplitTermConfig = {
   label: string;
   percentage: number;
@@ -2784,6 +2865,7 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
     throw new functions.https.HttpsError('not-found', 'Linked order not found');
   }
   const orderData = orderSnap.data() as Record<string, any>;
+  const storedOrderNumber = resolveStoredOrderNumber(orderData);
   const driveInfo = (orderData.drive as Record<string, any>) || {};
   const orderItems = Array.isArray(orderData.items)
     ? (orderData.items as Array<Record<string, any>>)
@@ -3022,6 +3104,9 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
       id: orderId,
       status: typeof orderData.status === 'string' ? orderData.status : null,
       items: orderItems,
+      number: storedOrderNumber.number,
+      numberLabel: storedOrderNumber.label,
+      numberDisplay: storedOrderNumber.label ? `#${storedOrderNumber.label}` : null,
     },
     drive: {
       orderFolderId: normaliseDriveId(driveInfo.orderFolderId),
@@ -10563,6 +10648,16 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     }
   }
 
+  const allocatedOrderNumber = await allocateOrderNumber();
+  if (allocatedOrderNumber.number !== null) {
+    orderData.orderNumber = allocatedOrderNumber.number;
+  }
+  if (allocatedOrderNumber.label) {
+    orderData.orderNumberFormatted = allocatedOrderNumber.label;
+    orderData.orderNumberLabel = allocatedOrderNumber.label;
+    orderData.orderNumberDisplay = `#${allocatedOrderNumber.label}`;
+  }
+
   const orderRef = await db.collection('orders').add(orderData);
 
   if (affiliateSnapshot) {
@@ -15598,7 +15693,7 @@ export const admin_acceptProposal = functions.https.onCall(
       throw new functions.https.HttpsError('failed-precondition', 'proposal not sent');
     }
 
-    const order = {
+    const order: Record<string, any> = {
       orgId: proposal.orgId,
       clientEmail: proposal.clientEmail || null,
       items: proposal.items || [],
@@ -15606,6 +15701,15 @@ export const admin_acceptProposal = functions.https.onCall(
       proposalId,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
+    const orderNumberAllocation = await allocateOrderNumber();
+    if (orderNumberAllocation.number !== null) {
+      order.orderNumber = orderNumberAllocation.number;
+    }
+    if (orderNumberAllocation.label) {
+      order.orderNumberFormatted = orderNumberAllocation.label;
+      order.orderNumberLabel = orderNumberAllocation.label;
+      order.orderNumberDisplay = `#${orderNumberAllocation.label}`;
+    }
     const orderRef = await db.collection('orders').add(order);
 
     await proposalRef.set({ status: 'accepted', orderId: orderRef.id }, { merge: true });

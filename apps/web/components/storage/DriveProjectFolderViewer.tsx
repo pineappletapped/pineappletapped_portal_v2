@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { httpsCallable } from "firebase/functions";
 
 import { ensureFirebase } from "@/lib/firebase";
+import { resolveOrderIdentifier } from "@/lib/orders";
 
 interface DriveProjectFolderItem {
   id: string;
@@ -24,6 +25,8 @@ interface DriveMetadata {
   projectName: string | null;
   orderId: string;
   orderStatus: string | null;
+  orderNumberLabel: string | null;
+  orderNumberDisplay: string | null;
   driveOrderFolderId: string | null;
   driveOrderFolderName: string | null;
 }
@@ -47,6 +50,9 @@ interface DriveListProjectFolderResponse {
   order?: {
     id?: string | null;
     status?: string | null;
+    number?: number | null;
+    numberLabel?: string | null;
+    numberDisplay?: string | null;
   } | null;
   drive?: {
     orderFolderId?: string | null;
@@ -202,19 +208,43 @@ export default function DriveProjectFolderViewer({
         setItems(parsedItems);
         setCurrentFolder({ id: resolvedFolderId, name: resolvedFolderName || null });
         setBreadcrumbs(nextBreadcrumbs);
+        const rawOrderId =
+          data.order && typeof data.order.id === "string" && data.order.id.trim().length > 0
+            ? data.order.id.trim()
+            : null;
+        const rawOrderNumber =
+          typeof data.order?.number === "number" && Number.isFinite(data.order.number)
+            ? Math.trunc(data.order.number)
+            : null;
+        const rawOrderNumberLabel =
+          typeof data.order?.numberLabel === "string" && data.order.numberLabel.trim().length > 0
+            ? data.order.numberLabel.trim()
+            : null;
+        const rawOrderNumberDisplay =
+          typeof data.order?.numberDisplay === "string" && data.order.numberDisplay.trim().length > 0
+            ? data.order.numberDisplay.trim()
+            : rawOrderNumberLabel
+              ? `#${rawOrderNumberLabel}`
+              : null;
+        const orderIdentifier = resolveOrderIdentifier({
+          id: rawOrderId,
+          orderNumber: rawOrderNumber,
+          orderNumberFormatted: rawOrderNumberLabel,
+          orderNumberLabel: rawOrderNumberLabel,
+          orderNumberDisplay: rawOrderNumberDisplay,
+        });
         setMetadata({
           projectName:
             data.project && typeof data.project.name === "string" && data.project.name.trim().length > 0
               ? data.project.name.trim()
               : null,
-          orderId:
-            data.order && typeof data.order.id === "string" && data.order.id.trim().length > 0
-              ? data.order.id.trim()
-              : projectId,
+          orderId: orderIdentifier.originalId || rawOrderId || projectId,
           orderStatus:
             data.order && typeof data.order.status === "string" && data.order.status.trim().length > 0
               ? data.order.status.trim()
               : null,
+          orderNumberLabel: orderIdentifier.friendlyLabel,
+          orderNumberDisplay: orderIdentifier.friendlyDisplay,
           driveOrderFolderId:
             data.drive && typeof data.drive.orderFolderId === "string" && data.drive.orderFolderId.trim().length > 0
               ? data.drive.orderFolderId.trim()
@@ -297,6 +327,18 @@ export default function DriveProjectFolderViewer({
         {metadata?.orderStatus && (
           <p className="text-xs text-gray-500">Order status: {metadata.orderStatus}</p>
         )}
+        {metadata?.orderNumberDisplay ? (
+          <p className="text-xs text-gray-500">Order number: {metadata.orderNumberDisplay}</p>
+        ) : metadata?.orderId ? (
+          <p className="text-xs text-gray-500">Order ID: {metadata.orderId}</p>
+        ) : null}
+        {metadata?.orderNumberDisplay &&
+        metadata.orderId &&
+        metadata.orderNumberDisplay !== metadata.orderId ? (
+          <p className="text-[10px] uppercase tracking-wide text-gray-400">
+            Internal ID: {metadata.orderId}
+          </p>
+        ) : null}
       </div>
 
       {breadcrumbs.length > 0 && (

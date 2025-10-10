@@ -42,6 +42,77 @@ admin.initializeApp({
         'pineapple-tapped---portal.firebasestorage.app',
 });
 const db = admin.firestore();
+const ORDER_SEQUENCE_COLLECTION = 'settings';
+const ORDER_SEQUENCE_DOC_ID = 'orderSequence';
+const ORDER_NUMBER_PAD_LENGTH = 5;
+function parseOrderNumberValue(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        const integer = Math.trunc(value);
+        return integer >= 0 ? integer : null;
+    }
+    if (typeof value === 'string') {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) {
+            const integer = Math.trunc(parsed);
+            return integer >= 0 ? integer : null;
+        }
+    }
+    return null;
+}
+function formatOrderNumberLabel(value, padLength = ORDER_NUMBER_PAD_LENGTH) {
+    if (value === null) {
+        return null;
+    }
+    const safeValue = Math.max(0, Math.trunc(value));
+    return safeValue.toString().padStart(padLength, '0');
+}
+function resolveStoredOrderNumber(data) {
+    if (!data) {
+        return { number: null, label: null };
+    }
+    const number = parseOrderNumberValue(data.orderNumber ?? data.internalOrderNumber);
+    const labelCandidates = [
+        normaliseString(data.orderNumberFormatted),
+        normaliseString(data.orderNumberLabel),
+        normaliseString(data.orderFriendlyId),
+        normaliseString(data.orderNumberString),
+        normaliseString(data.orderNumberDisplay),
+    ];
+    let label = null;
+    for (const candidate of labelCandidates) {
+        if (candidate) {
+            label = candidate;
+            break;
+        }
+    }
+    if (!label && number !== null) {
+        label = formatOrderNumberLabel(number);
+    }
+    return { number, label };
+}
+async function allocateOrderNumber() {
+    try {
+        const sequenceRef = db.collection(ORDER_SEQUENCE_COLLECTION).doc(ORDER_SEQUENCE_DOC_ID);
+        const nextValue = await db.runTransaction(async (tx) => {
+            const snap = await tx.get(sequenceRef);
+            const rawData = snap.exists ? (snap.data() ?? {}) : {};
+            const current = parseOrderNumberValue(rawData.current);
+            const candidate = current !== null ? current : 0;
+            const next = candidate + 1;
+            tx.set(sequenceRef, {
+                current: next,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+            return next;
+        });
+        const label = formatOrderNumberLabel(nextValue);
+        return { number: nextValue, label };
+    }
+    catch (error) {
+        console.error('Failed to allocate sequential order number', error);
+        return { number: null, label: null };
+    }
+}
 const STRIPE_SETTINGS_COLLECTION = 'settings';
 const STRIPE_SETTINGS_DOC_ID = 'stripeConnect';
 const STRIPE_API_VERSION = '2024-06-20';
@@ -2209,6 +2280,7 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
         throw new functions.https.HttpsError('not-found', 'Linked order not found');
     }
     const orderData = orderSnap.data();
+    const storedOrderNumber = resolveStoredOrderNumber(orderData);
     const driveInfo = orderData.drive || {};
     const orderItems = Array.isArray(orderData.items)
         ? orderData.items
@@ -2419,6 +2491,9 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
             id: orderId,
             status: typeof orderData.status === 'string' ? orderData.status : null,
             items: orderItems,
+            number: storedOrderNumber.number,
+            numberLabel: storedOrderNumber.label,
+            numberDisplay: storedOrderNumber.label ? `#${storedOrderNumber.label}` : null,
         },
         drive: {
             orderFolderId: normaliseDriveId(driveInfo.orderFolderId),
@@ -8968,6 +9043,15 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             console.warn('Failed to apply default Stripe payment schedule', scheduleError);
         }
     }
+    const allocatedOrderNumber = await allocateOrderNumber();
+    if (allocatedOrderNumber.number !== null) {
+        orderData.orderNumber = allocatedOrderNumber.number;
+    }
+    if (allocatedOrderNumber.label) {
+        orderData.orderNumberFormatted = allocatedOrderNumber.label;
+        orderData.orderNumberLabel = allocatedOrderNumber.label;
+        orderData.orderNumberDisplay = `#${allocatedOrderNumber.label}`;
+    }
     const orderRef = await db.collection('orders').add(orderData);
     if (affiliateSnapshot) {
         const commissionNet = affiliateSnapshot.commissionNet ?? 0;
@@ -9083,13 +9167,13 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             },
         }, { merge: true });
     }
-  return {
-    orderId: orderRef.id,
-    price,
-    netTotal: finalTotal,
-    voucherDiscount,
-    discountAmount,
-  };
+    return {
+        orderId: orderRef.id,
+        price,
+        netTotal: finalTotal,
+        voucherDiscount,
+        discountAmount,
+    };
 });
 export const clientResearch_onOrderCreated = functions.firestore
     .document('orders/{orderId}')
@@ -13358,6 +13442,15 @@ export const admin_acceptProposal = functions.https.onCall(async (data, context)
         proposalId,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
+    const orderNumberAllocation = await allocateOrderNumber();
+    if (orderNumberAllocation.number !== null) {
+        order.orderNumber = orderNumberAllocation.number;
+    }
+    if (orderNumberAllocation.label) {
+        order.orderNumberFormatted = orderNumberAllocation.label;
+        order.orderNumberLabel = orderNumberAllocation.label;
+        order.orderNumberDisplay = `#${orderNumberAllocation.label}`;
+    }
     const orderRef = await db.collection('orders').add(order);
     await proposalRef.set({ status: 'accepted', orderId: orderRef.id }, { merge: true });
     if (context.auth?.uid) {

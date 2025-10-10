@@ -17,6 +17,7 @@ import {
 } from "firebase/firestore";
 import type { User } from "firebase/auth";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
+import { resolveOrderIdentifier } from "@/lib/orders";
 import {
   DIGITAL_STATUS_META,
   formatDigitalTimestamp,
@@ -68,6 +69,10 @@ interface OrderSummary {
   id: string | null;
   status: string | null;
   items: OrderProductSummary[];
+  orderNumber?: number | null;
+  orderNumberFormatted?: string | null;
+  orderNumberLabel?: string | null;
+  orderNumberDisplay?: string | null;
 }
 
 interface DigitalDeliverySummaryEntry {
@@ -437,7 +442,29 @@ export default function DriveAssetStager({
                 })
                 .filter((entry): entry is OrderProductSummary => entry !== null)
             : [];
-          setOrderSummary({ id: orderId, status: orderStatus, items: orderItems });
+          const orderNumber =
+            typeof payload.order.number === "number" && Number.isFinite(payload.order.number)
+              ? Math.trunc(payload.order.number)
+              : null;
+          const orderNumberLabel =
+            typeof payload.order.numberLabel === "string" && payload.order.numberLabel.trim().length > 0
+              ? payload.order.numberLabel.trim()
+              : null;
+          const orderNumberDisplay =
+            typeof payload.order.numberDisplay === "string" && payload.order.numberDisplay.trim().length > 0
+              ? payload.order.numberDisplay.trim()
+              : orderNumberLabel
+                ? `#${orderNumberLabel}`
+                : null;
+          setOrderSummary({
+            id: orderId,
+            status: orderStatus,
+            items: orderItems,
+            orderNumber,
+            orderNumberFormatted: orderNumberLabel,
+            orderNumberLabel,
+            orderNumberDisplay,
+          });
         } else {
           setOrderSummary(null);
         }
@@ -697,6 +724,8 @@ export default function DriveAssetStager({
 
   const productFolders = driveMeta?.productFolders || [];
 
+  const orderIdentifier = useMemo(() => resolveOrderIdentifier(orderSummary), [orderSummary]);
+
   const productNameById = useMemo(() => {
     const map = new Map<string, string>();
     (orderSummary?.items || []).forEach((item) => {
@@ -804,8 +833,17 @@ export default function DriveAssetStager({
                 <p className="text-xs text-gray-500">
                   Order status: {orderSummary?.status ? orderSummary.status.replace(/_/g, " ") : "Unknown"}
                 </p>
-                {orderSummary?.id ? (
+                {orderIdentifier.friendlyDisplay ? (
+                  <p className="text-xs text-gray-500">Order number: {orderIdentifier.friendlyDisplay}</p>
+                ) : orderSummary?.id ? (
                   <p className="text-xs text-gray-500">Order ID: {orderSummary.id}</p>
+                ) : null}
+                {orderIdentifier.originalId &&
+                orderIdentifier.friendlyDisplay &&
+                orderIdentifier.friendlyDisplay !== orderIdentifier.originalId ? (
+                  <p className="text-[10px] uppercase tracking-wide text-gray-400">
+                    Internal ID: {orderIdentifier.originalId}
+                  </p>
                 ) : null}
                 {driveMeta?.orderFolderName ? (
                   <p className="text-xs text-gray-500">
