@@ -49,6 +49,21 @@ const functionsEndpoint =
 
 const JSON_TYPE = "application/json";
 
+const MAX_INLINE_DETAILS = 600;
+
+const summariseDetails = (value: string | null | undefined) => {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  return trimmed.length > MAX_INLINE_DETAILS ? `${trimmed.slice(0, MAX_INLINE_DETAILS)}…` : trimmed;
+};
+
 const createErrorResponse = (
   status: number,
   code: string,
@@ -94,8 +109,10 @@ export async function POST(request: Request) {
     });
 
     const text = await response.text();
+    const contentType = response.headers.get("content-type") ?? "";
+    const isJson = contentType.toLowerCase().includes("application/json");
     let json: CallableEnvelope | null = null;
-    if (text) {
+    if (text && isJson) {
       try {
         json = JSON.parse(text) as CallableEnvelope;
       } catch (parseError) {
@@ -108,6 +125,15 @@ export async function POST(request: Request) {
       }
     }
 
+    if (response.ok && !isJson) {
+      return createErrorResponse(
+        502,
+        "invalid-function-response",
+        "Callable response was not JSON",
+        summariseDetails(text),
+      );
+    }
+
     if (!response.ok) {
       const callableError = (json as CallableErrorEnvelope | null)?.error;
       const errorDetails =
@@ -115,7 +141,7 @@ export async function POST(request: Request) {
           ? callableError.message
           : typeof callableError === "string"
             ? callableError
-            : text || "callable request failed");
+            : summariseDetails(text) || `callable request failed (${response.status})`);
       const errorCode =
         (callableError && typeof callableError === "object" && typeof callableError.status === "string"
           ? callableError.status
@@ -125,7 +151,7 @@ export async function POST(request: Request) {
       const errorDetailsPayload =
         callableError && typeof callableError === "object" && "details" in callableError
           ? callableError.details
-          : callableError ?? text;
+          : callableError ?? summariseDetails(text) ?? null;
       return createErrorResponse(502, errorCode, errorDetails, errorDetailsPayload);
     }
 
