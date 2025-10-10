@@ -83,6 +83,7 @@ export default function AdminOrdersPage() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [loading, setLoading] = useState(true);
+  const [franchiseFilter, setFranchiseFilter] = useState("all");
 
   const handleStatusChange = async (order: any, newStatus: string) => {
     if (order.status === newStatus) return;
@@ -251,7 +252,31 @@ export default function AdminOrdersPage() {
     ])
   );
 
+  const HQ_FILTER_KEY = "__hq__";
+
+  const franchiseOptionsMap = new Map<string, string>();
+
   const filtered = orders.filter((o) => {
+    const assignment = o.franchiseAssignment as
+      | {
+          franchiseId?: string | null;
+        }
+      | null;
+    const franchiseId =
+      (o.franchiseId as string | undefined) ||
+      (assignment?.franchiseId as string | undefined) ||
+      null;
+    const franchiseDetails = franchiseId ? franchiseMap[franchiseId] : undefined;
+    const franchiseLabel =
+      franchiseDetails?.name ||
+      franchiseDetails?.code ||
+      franchiseId ||
+      HQ_UNASSIGNED_TERRITORY_LABEL;
+    const filterKey = franchiseId ?? HQ_FILTER_KEY;
+    if (!franchiseOptionsMap.has(filterKey)) {
+      franchiseOptionsMap.set(filterKey, franchiseLabel);
+    }
+
     if (statusFilter !== "all" && o.status !== statusFilter) return false;
     if (
       emailFilter &&
@@ -263,7 +288,14 @@ export default function AdminOrdersPage() {
     const created = o.createdAt?.toDate ? o.createdAt.toDate() : null;
     if (startDate && (!created || created < new Date(startDate))) return false;
     if (endDate && (!created || created > new Date(endDate))) return false;
+    if (franchiseFilter !== "all" && franchiseFilter !== filterKey) return false;
     return true;
+  });
+
+  const franchiseOptions = Array.from(franchiseOptionsMap.entries()).sort((a, b) => {
+    const [, labelA] = a;
+    const [, labelB] = b;
+    return labelA.localeCompare(labelB);
   });
 
   return (
@@ -272,7 +304,7 @@ export default function AdminOrdersPage() {
       description="Track customer purchases, update fulfilment status, and launch follow-on projects as payments clear."
     >
       <AdminSection title="Filters" description="Narrow the order list by payment state or booking window.">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <label className="grid gap-1 text-sm text-gray-700">
             <span className="font-medium text-gray-900">Status</span>
             <select
@@ -314,6 +346,21 @@ export default function AdminOrdersPage() {
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
             />
+          </label>
+          <label className="grid gap-1 text-sm text-gray-700">
+            <span className="font-medium text-gray-900">Franchise</span>
+            <select
+              className="input"
+              value={franchiseFilter}
+              onChange={(e) => setFranchiseFilter(e.target.value)}
+            >
+              <option value="all">All</option>
+              {franchiseOptions.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
           </label>
         </div>
       </AdminSection>
