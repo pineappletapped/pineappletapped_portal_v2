@@ -8,15 +8,6 @@ import {
   type CallableErrorEnvelope,
 } from "@/lib/server/callable-proxy";
 
-type ReserveKitPayload = {
-  productId: string;
-  date: string;
-  spanOverride?: number | null;
-  timeWindow?: { start: string; end: string } | null;
-  coverage?: Record<string, unknown> | null;
-  skipKitCheck?: boolean;
-};
-
 const createErrorResponse = (
   status: number,
   code: string,
@@ -33,9 +24,9 @@ const createErrorResponse = (
   );
 
 export async function POST(request: Request) {
-  let payload: ReserveKitPayload;
+  let payload: Record<string, unknown>;
   try {
-    payload = (await request.json()) as ReserveKitPayload;
+    payload = (await request.json()) as Record<string, unknown>;
   } catch (error) {
     return createErrorResponse(
       400,
@@ -45,13 +36,13 @@ export async function POST(request: Request) {
     );
   }
 
-  if (!payload || typeof payload.productId !== "string" || typeof payload.date !== "string") {
-    return createErrorResponse(400, "invalid-argument", "productId and date are required");
+  if (!payload || typeof payload !== "object") {
+    return createErrorResponse(400, "invalid-argument", "Order payload is required");
   }
 
   const body = JSON.stringify({ data: payload });
-  const endpoints = buildCallableEndpointCandidates("reserveKit", request, {
-    explicitEndpointEnvVar: "RESERVE_KIT_ENDPOINT",
+  const endpoints = buildCallableEndpointCandidates("createOrder", request, {
+    explicitEndpointEnvVar: "CREATE_ORDER_ENDPOINT",
   });
   const attemptLogger = createEndpointAttemptLogger();
 
@@ -110,7 +101,7 @@ export async function POST(request: Request) {
             ? callableError.status
             : null) ||
           (json && typeof json.code === "string" ? json.code : null) ||
-          "reserve-kit-error";
+          "create-order-error";
         const errorDetailsPayload =
           callableError && typeof callableError === "object" && "details" in callableError
             ? callableError.details
@@ -140,8 +131,8 @@ export async function POST(request: Request) {
 
       return createErrorResponse(
         502,
-        "reserve-kit-request-failed",
-        "Failed to contact reserveKit function",
+        "create-order-request-failed",
+        "Failed to contact createOrder function",
         attemptLogger.attempts,
       );
     }
@@ -149,8 +140,8 @@ export async function POST(request: Request) {
 
   return createErrorResponse(
     502,
-    "reserve-kit-endpoint-unavailable",
-    "No reserveKit endpoints responded successfully",
+    "create-order-endpoint-unavailable",
+    "No createOrder endpoints responded successfully",
     attemptLogger.attempts,
   );
 }

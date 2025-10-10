@@ -66,6 +66,15 @@ interface VoucherEvaluationResult {
   message: string | null;
 }
 
+interface CreateOrderResult {
+  orderId?: string;
+  price?: number;
+  netTotal?: number;
+  discountAmount?: number;
+  voucherDiscount?: number;
+  [key: string]: unknown;
+}
+
 interface VoucherFeedbackMessage {
   text: string | null;
   tone: "muted" | "success" | "warning" | "error";
@@ -969,6 +978,66 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     return "We couldn't complete your order. Please try again.";
   }, []);
 
+  const callCreateOrder = useCallback(
+    async (token: string | null): Promise<CreateOrderResult> => {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+
+      const response = await fetch("/api/create-order", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(orderInput),
+        credentials: "include",
+      });
+
+      let payload: unknown;
+      try {
+        payload = await response.json();
+      } catch (parseError) {
+        if (!response.ok) {
+          const error = Object.assign(
+            new Error(`Failed to create order (${response.status})`),
+            { code: "create-order-error" },
+          );
+          throw error;
+        }
+        throw parseError;
+      }
+
+      const payloadRecord =
+        payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
+
+      if (!response.ok || !payloadRecord) {
+        const message =
+          payloadRecord && typeof payloadRecord.error === "string" && payloadRecord.error.trim().length > 0
+            ? payloadRecord.error
+            : payloadRecord && typeof payloadRecord.message === "string" && payloadRecord.message.trim().length > 0
+              ? payloadRecord.message
+              : `Failed to create order (${response.status})`;
+        const error = Object.assign(new Error(message), {
+          code:
+            payloadRecord && typeof payloadRecord.code === "string" && payloadRecord.code.trim().length > 0
+              ? payloadRecord.code
+              : "create-order-error",
+          details: payloadRecord?.details,
+        });
+        throw error;
+      }
+
+      const data = payloadRecord.data;
+      if (!data || typeof data !== "object") {
+        return {};
+      }
+
+      return data as CreateOrderResult;
+    },
+    [orderInput],
+  );
+
   const initializePaymentIntent = useCallback(async () => {
     if (initializingPayment) {
       return false;
@@ -1014,9 +1083,10 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         throw new Error("Firebase functions are unavailable.");
       }
 
-      const createOrder = httpsCallable(functionsInstance, "createOrder");
-      const orderRes: any = await createOrder(orderInput);
-      const createdOrderId: string | undefined = orderRes.data?.orderId;
+      const token = await currentUser.getIdToken();
+      const orderData = await callCreateOrder(token);
+      const createdOrderId: string | undefined =
+        typeof orderData.orderId === "string" ? orderData.orderId : undefined;
       if (!createdOrderId) {
         throw new Error("Failed to create order.");
       }
@@ -1049,6 +1119,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       setInitializingPayment(false);
     }
   }, [
+    callCreateOrder,
     currentUser,
     currentIntentPayload,
     describeCallableError,
@@ -1125,13 +1196,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       }
       functionsRef.current = functionsInstance;
 
-      const createOrder = httpsCallable(functionsInstance, "createOrder");
-      const orderRes: any = await createOrder(orderInput);
-      const createdOrderId: string | undefined = orderRes.data?.orderId;
-      const serverPriceValue = orderRes.data?.price;
-      const serverNetTotalValue = orderRes.data?.netTotal;
-      const serverVoucherDiscountValue = orderRes.data?.voucherDiscount;
-      const serverDiscountAmountValue = orderRes.data?.discountAmount;
+      const token = await currentUser.getIdToken();
+      const orderData = await callCreateOrder(token);
+      const createdOrderId: string | undefined =
+        typeof orderData.orderId === "string" ? orderData.orderId : undefined;
+      const serverPriceValue = orderData.price;
+      const serverNetTotalValue = orderData.netTotal;
+      const serverVoucherDiscountValue = orderData.voucherDiscount;
+      const serverDiscountAmountValue = orderData.discountAmount;
       const serverPrice =
         typeof serverPriceValue === "number" && Number.isFinite(serverPriceValue)
           ? serverPriceValue
@@ -1225,6 +1297,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       setInitializingPayment(false);
     }
   }, [
+    callCreateOrder,
     currentIntentPayload,
     currentUser,
     describeCallableError,
