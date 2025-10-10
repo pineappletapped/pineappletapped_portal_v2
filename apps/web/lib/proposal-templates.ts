@@ -91,6 +91,130 @@ export type TemplateKindDescriptor = {
   description: string;
 };
 
+export type ProposalPlaceholderCategory =
+  | "client"
+  | "project"
+  | "proposal"
+  | "financial"
+  | "narrative";
+
+export const PROPOSAL_PLACEHOLDER_CATEGORY_LABELS: Record<
+  ProposalPlaceholderCategory,
+  string
+> = {
+  client: "Client & organisation",
+  project: "Project details",
+  proposal: "Proposal metadata",
+  financial: "Commercials & pricing",
+  narrative: "Story & impact",
+};
+
+export interface ProposalPlaceholderToken {
+  token: string;
+  label: string;
+  description: string;
+  category: ProposalPlaceholderCategory;
+}
+
+export const PROPOSAL_PLACEHOLDER_TOKENS: ProposalPlaceholderToken[] = [
+  {
+    token: "{{clientName}}",
+    label: "Client name",
+    description: "Primary client contact that the proposal is addressed to.",
+    category: "client",
+  },
+  {
+    token: "{{organisationName}}",
+    label: "Organisation name",
+    description: "Organisation selected during proposal setup.",
+    category: "client",
+  },
+  {
+    token: "{{clientEmail}}",
+    label: "Client email",
+    description: "Email address used for proposal delivery.",
+    category: "client",
+  },
+  {
+    token: "{{projectTitle}}",
+    label: "Project title",
+    description: "The working project or campaign title.",
+    category: "project",
+  },
+  {
+    token: "{{projectSummary}}",
+    label: "Project summary",
+    description: "Short summary captured during proposal intake.",
+    category: "project",
+  },
+  {
+    token: "{{eventDate}}",
+    label: "Event date",
+    description: "Primary production or event date.",
+    category: "project",
+  },
+  {
+    token: "{{projectLocation}}",
+    label: "Project location",
+    description: "Venue or shoot location confirmed for the proposal.",
+    category: "project",
+  },
+  {
+    token: "{{proposalDate}}",
+    label: "Proposal date",
+    description: "Date the proposal is prepared for the client.",
+    category: "proposal",
+  },
+  {
+    token: "{{preparedBy}}",
+    label: "Prepared by",
+    description: "Staff member responsible for the proposal.",
+    category: "proposal",
+  },
+  {
+    token: "{{proposalReference}}",
+    label: "Proposal reference",
+    description: "Reference number or identifier used internally.",
+    category: "proposal",
+  },
+  {
+    token: "{{formattedTotal}}",
+    label: "Total investment",
+    description: "Formatted proposal total derived from pricing.",
+    category: "financial",
+  },
+  {
+    token: "{{depositDueDate}}",
+    label: "Deposit due date",
+    description: "Due date for deposit based on payment schedule.",
+    category: "financial",
+  },
+  {
+    token: "{{marginPercent}}",
+    label: "Margin percent",
+    description: "Calculated margin for the scoped work.",
+    category: "financial",
+  },
+  {
+    token: "{{packageOutcome}}",
+    label: "Package outcome",
+    description: "Outcome statement defined by the selected product.",
+    category: "narrative",
+  },
+  {
+    token: "{{primaryMetric}}",
+    label: "Primary metric",
+    description: "Key success metric tied to the proposal objectives.",
+    category: "narrative",
+  },
+  {
+    token: "{{topClients}}",
+    label: "Top clients",
+    description: "List of marquee clients for credibility slides.",
+    category: "narrative",
+  },
+];
+
 const createPageId = () =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
