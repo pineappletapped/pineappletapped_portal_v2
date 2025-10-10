@@ -134,6 +134,12 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       ),
     [items]
   );
+  const primaryCartLocation = useMemo(() => {
+    const entry = items.find(
+      (item) => typeof item.location === "string" && item.location.trim().length > 0
+    );
+    return entry ? entry.location!.trim() : "";
+  }, [items]);
   const lockedVenueLocation = useMemo(() => {
     const preset = items.find(
       (item) => typeof item.location === "string" && item.location.trim().length > 0
@@ -153,6 +159,70 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       setAllowLocationOverride(false);
     }
   }, [venueLocked]);
+  useEffect(() => {
+    if (location.trim().length === 0 && primaryCartLocation) {
+      setLocation(primaryCartLocation);
+    }
+  }, [location, primaryCartLocation]);
+
+  const parseDateTime = useCallback((value: string | null | undefined) => {
+    if (!value) return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const dateOnlyPattern = /^\d{4}-\d{2}-\d{2}$/;
+    const dateWithMinutesPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+    const normalised = dateOnlyPattern.test(trimmed)
+      ? `${trimmed}T00:00:00`
+      : dateWithMinutesPattern.test(trimmed)
+        ? `${trimmed}:00`
+        : trimmed;
+    const parsed = new Date(normalised);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }, []);
+
+  const formatDateLabel = useCallback(
+    (value: string | null | undefined) => {
+      const parsed = parseDateTime(value);
+      if (!parsed) return null;
+      return parsed.toLocaleDateString("en-GB", {
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      });
+    },
+    [parseDateTime]
+  );
+
+  const formatTimeSlotLabel = useCallback(
+    (
+      slot:
+        | null
+        | undefined
+        | {
+            start?: string | null;
+            end?: string | null;
+            label?: string | null;
+          }
+    ) => {
+      if (!slot) {
+        return null;
+      }
+      if (typeof slot.label === "string" && slot.label.trim().length > 0) {
+        return slot.label.trim();
+      }
+      const start = parseDateTime(slot.start ?? null);
+      const end = parseDateTime(slot.end ?? null);
+      if (start && end) {
+        return `${start.toLocaleTimeString("en-GB", { timeStyle: "short" })} – ${end.toLocaleTimeString("en-GB", { timeStyle: "short" })}`;
+      }
+      if (start) {
+        return start.toLocaleTimeString("en-GB", { timeStyle: "short" });
+      }
+      return null;
+    },
+    [parseDateTime]
+  );
 
   useEffect(() => {
     const trimmed = voucher.trim();
@@ -1236,60 +1306,35 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       <div className="space-y-4">
         <h2 className="font-semibold">Order Summary</h2>
         <div className="space-y-2">
-          {items.map((item, idx) => (
-            <div key={idx} className="text-sm">
-              <div className="flex justify-between">
-                <span>
-                  {item.name} x {item.quantity}
-                </span>
-                <span>£{(item.price * item.quantity).toFixed(2)}</span>
-              </div>
-              {(() => {
-                const parseDateTime = (value: string | null | undefined) => {
-                  if (!value) return null;
-                  const normalised =
-                    /^\d{4}-\d{2}-\d{2}$/.test(value)
-                      ? `${value}T00:00:00`
-                      : value;
-                  const parsed = new Date(normalised);
-                  return Number.isNaN(parsed.getTime()) ? null : parsed;
-                };
-                const slot = item.timeSlot;
-                if (!slot) {
-                  return null;
-                }
-                if (slot.label) {
-                  return (
-                    <div className="text-xs text-gray-500">Time: {slot.label}</div>
-                  );
-                }
-                const start = parseDateTime(slot.start);
-                const end = parseDateTime(slot.end);
-                if (start && end) {
-                  return (
-                    <div className="text-xs text-gray-500">
-                      Time: {start.toLocaleTimeString("en-GB", { timeStyle: "short" })} – {" "}
-                      {end.toLocaleTimeString("en-GB", { timeStyle: "short" })}
-                    </div>
-                  );
-                }
-                if (start) {
-                  return (
-                    <div className="text-xs text-gray-500">
-                      Time: {start.toLocaleTimeString("en-GB", { timeStyle: "short" })}
-                    </div>
-                  );
-                }
-                return null;
-              })()}
+          {items.map((item, idx) => {
+            const bookingDateLabel =
+              formatDateLabel(item.date ?? null) ||
+              formatDateLabel(item.timeSlot?.start ?? null) ||
+              null;
+            const timeSlotLabel = formatTimeSlotLabel(item.timeSlot ?? null);
+            return (
+              <div key={idx} className="text-sm">
+                <div className="flex justify-between">
+                  <span>
+                    {item.name} x {item.quantity}
+                  </span>
+                  <span>£{(item.price * item.quantity).toFixed(2)}</span>
+                </div>
+                {bookingDateLabel || timeSlotLabel ? (
+                  <div className="text-xs text-gray-500 space-y-0.5">
+                    {bookingDateLabel ? <div>Date: {bookingDateLabel}</div> : null}
+                    {timeSlotLabel ? <div>Time: {timeSlotLabel}</div> : null}
+                  </div>
+                ) : null}
               {item.rentalTotal ? (
                 <div className="flex justify-between text-xs text-gray-600">
                   <span>Rental</span>
                   <span>£{(item.rentalTotal * item.quantity).toFixed(2)}</span>
                 </div>
               ) : null}
-            </div>
-          ))}
+              </div>
+            );
+          })}
         </div>
         <div className="flex justify-between font-semibold border-t pt-2">
           <span>Subtotal</span>
