@@ -10694,7 +10694,13 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     );
   }
 
-  return { orderId: orderRef.id };
+  return {
+    orderId: orderRef.id,
+    price,
+    netTotal: finalTotal,
+    voucherDiscount,
+    discountAmount,
+  };
 });
 
 export const clientResearch_onOrderCreated = functions.firestore

@@ -989,8 +989,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       return true;
     } catch (error) {
       console.error("Failed to initialise payment intent", error);
-      const message =
-        error instanceof Error ? error.message : "Could not start payment.";
+      const message = describeCallableError(error);
       setPaymentError(message);
       setOrderId(null);
       setClientSecret(null);
@@ -1001,6 +1000,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   }, [
     currentUser,
     currentIntentPayload,
+    describeCallableError,
     initializingPayment,
     items.length,
     orderInput,
@@ -1042,6 +1042,57 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     [clear, router]
   );
 
+  const describeCallableError = useCallback((error: unknown): string => {
+    if (!error) {
+      return "We couldn't complete your order. Please try again.";
+    }
+    if (typeof error === "string") {
+      return error;
+    }
+    if (error instanceof Error) {
+      const firebaseError = error as FirebaseError;
+      const extractDetailMessage = (payload: unknown): string | null => {
+        if (!payload || typeof payload !== "object") {
+          return null;
+        }
+        const candidate = payload as Record<string, unknown>;
+        const nestedMessage = candidate.message;
+        if (typeof nestedMessage === "string" && nestedMessage.trim().length > 0) {
+          return nestedMessage;
+        }
+        return null;
+      };
+
+      const customData = firebaseError?.customData;
+      const detailFromCustomData = extractDetailMessage(
+        customData && typeof customData === "object"
+          ? (customData as Record<string, unknown>).details ?? null
+          : null
+      );
+      if (detailFromCustomData) {
+        return detailFromCustomData;
+      }
+      const details = firebaseError.details;
+      if (typeof details === "string" && details.trim().length > 0) {
+        return details;
+      }
+      const detailObject = extractDetailMessage(details ?? null);
+      if (detailObject) {
+        return detailObject;
+      }
+      if (firebaseError.message && firebaseError.message.trim().length > 0) {
+        return firebaseError.message;
+      }
+    }
+    if (typeof error === "object" && error !== null && "message" in error) {
+      const messageValue = (error as Record<string, unknown>).message;
+      if (typeof messageValue === "string" && messageValue.trim().length > 0) {
+        return messageValue;
+      }
+    }
+    return "We couldn't complete your order. Please try again.";
+  }, []);
+
   const completeZeroBalanceOrder = useCallback(async () => {
     if (initializingPayment) {
       return false;
@@ -1077,8 +1128,31 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       const createOrder = httpsCallable(functionsInstance, "createOrder");
       const orderRes: any = await createOrder(orderInput);
       const createdOrderId: string | undefined = orderRes.data?.orderId;
+      const serverPriceValue = orderRes.data?.price;
+      const serverNetTotalValue = orderRes.data?.netTotal;
+      const serverVoucherDiscountValue = orderRes.data?.voucherDiscount;
+      const serverDiscountAmountValue = orderRes.data?.discountAmount;
+      const serverPrice =
+        typeof serverPriceValue === "number" && Number.isFinite(serverPriceValue)
+          ? serverPriceValue
+          : null;
+      const serverNetTotal =
+        typeof serverNetTotalValue === "number" && Number.isFinite(serverNetTotalValue)
+          ? serverNetTotalValue
+          : null;
+      const serverZeroBalance = [serverPrice, serverNetTotal]
+        .filter((value): value is number => value !== null)
+        .some((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
       if (!createdOrderId) {
         throw new Error("Failed to create order.");
+      }
+
+      if (serverZeroBalance) {
+        setOrderId(createdOrderId);
+        setClientSecret(null);
+        lastIntentPayload.current = currentIntentPayload;
+        handlePaymentSuccess(createdOrderId);
+        return true;
       }
 
       if (!db) {
@@ -1088,9 +1162,32 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       if (!orderSnap.exists) {
         throw new Error("Order could not be verified. Please try again.");
       }
-      const priceValue = Number(orderSnap.data()?.price ?? 0);
+      const snapData = orderSnap.data() ?? {};
+      const priceValue = Number(
+        snapData.price ?? (serverPrice !== null ? serverPrice : 0)
+      );
+      const netTotalValue = Number(
+        snapData.netTotal ?? (serverNetTotal !== null ? serverNetTotal : 0)
+      );
+      const voucherDiscountValue =
+        serverVoucherDiscountValue ?? snapData.voucherDiscount ?? null;
+      const discountAmountValue =
+        serverDiscountAmountValue ?? snapData.discountAmount ?? null;
       const normalisedPrice = Number.isFinite(priceValue) ? priceValue : 0;
-      if (normalisedPrice <= ZERO_BALANCE_TOLERANCE) {
+      const normalisedNetTotal = Number.isFinite(netTotalValue)
+        ? netTotalValue
+        : 0;
+      if (
+        Math.abs(normalisedPrice) <= ZERO_BALANCE_TOLERANCE ||
+        Math.abs(normalisedNetTotal) <= ZERO_BALANCE_TOLERANCE
+      ) {
+        console.info("Zero balance order confirmed", {
+          createdOrderId,
+          price: normalisedPrice,
+          netTotal: normalisedNetTotal,
+          voucherDiscount: voucherDiscountValue,
+          discountAmount: discountAmountValue,
+        });
         setOrderId(createdOrderId);
         setClientSecret(null);
         lastIntentPayload.current = currentIntentPayload;
@@ -1118,11 +1215,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       );
       return false;
     } catch (error) {
-      console.error("Failed to finalise zero-balance order", error);
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Could not complete your order. Please try again.";
+      console.error("Failed to submit zero-balance order", error);
+      const message = describeCallableError(error);
       setPaymentError(message);
       setOrderId(null);
       setClientSecret(null);
@@ -1133,6 +1227,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   }, [
     currentIntentPayload,
     currentUser,
+    describeCallableError,
     handlePaymentSuccess,
     initializingPayment,
     items.length,

@@ -9083,7 +9083,13 @@ export const createOrder = functions.https.onCall(async (data, context) => {
             },
         }, { merge: true });
     }
-    return { orderId: orderRef.id };
+  return {
+    orderId: orderRef.id,
+    price,
+    netTotal: finalTotal,
+    voucherDiscount,
+    discountAmount,
+  };
 });
 export const clientResearch_onOrderCreated = functions.firestore
     .document('orders/{orderId}')
