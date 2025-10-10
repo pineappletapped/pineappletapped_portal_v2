@@ -36,16 +36,58 @@ const normaliseBaseUrl = (value: unknown): string => {
   return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
 };
 
-const baseUrl = normaliseBaseUrl(functionsBaseUrl) ||
-  normaliseBaseUrl(process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL) ||
-  "https://us-central1-pineapple-tapped---portal.cloudfunctions.net";
+const DEFAULT_FUNCTION_BASE = "https://us-central1-pineapple-tapped---portal.cloudfunctions.net";
 
-const DEFAULT_FUNCTION_URL = `${baseUrl}/reserveKit`;
+const resolveHostedAppBase = (host: string | null | undefined) => {
+  if (!host) {
+    return undefined;
+  }
 
-const functionsEndpoint =
-  typeof process.env.RESERVE_KIT_ENDPOINT === "string" && process.env.RESERVE_KIT_ENDPOINT.trim().length > 0
-    ? process.env.RESERVE_KIT_ENDPOINT.trim()
-    : DEFAULT_FUNCTION_URL;
+  const trimmed = host.trim().toLowerCase();
+  if (!trimmed.endsWith(".hosted.app")) {
+    return undefined;
+  }
+
+  const [subdomain] = trimmed.split(".");
+  if (!subdomain) {
+    return undefined;
+  }
+
+  const parts = subdomain.split("--");
+  if (parts.length < 2) {
+    return undefined;
+  }
+
+  const appIdCandidate = parts[parts.length - 1];
+  if (!appIdCandidate) {
+    return undefined;
+  }
+
+  return `https://us-central1-${appIdCandidate}.cloudfunctions.net`;
+};
+
+const buildEndpointCandidates = (request: Request) => {
+  const explicitEndpoint =
+    typeof process.env.RESERVE_KIT_ENDPOINT === "string" && process.env.RESERVE_KIT_ENDPOINT.trim().length > 0
+      ? process.env.RESERVE_KIT_ENDPOINT.trim()
+      : null;
+
+  if (explicitEndpoint) {
+    return [explicitEndpoint];
+  }
+
+  const candidateBases = [
+    normaliseBaseUrl(functionsBaseUrl),
+    normaliseBaseUrl(process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL),
+    normaliseBaseUrl(process.env.FUNCTIONS_BASE_URL),
+    normaliseBaseUrl(process.env.FIREBASE_FUNCTIONS_URL),
+    resolveHostedAppBase(request.headers.get("host")),
+    DEFAULT_FUNCTION_BASE,
+  ];
+
+  const uniqueBases = new Set(candidateBases.filter((value): value is string => Boolean(value)));
+  return Array.from(uniqueBases).map((base) => `${base}/reserveKit`);
+};
 
 const JSON_TYPE = "application/json";
 
@@ -97,74 +139,104 @@ export async function POST(request: Request) {
   }
 
   const body = JSON.stringify({ data: payload });
+  const endpoints = buildEndpointCandidates(request);
+  const attemptSummaries: string[] = [];
 
-  try {
-    const response = await fetch(functionsEndpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": JSON_TYPE,
-      },
-      body,
-      cache: "no-store",
-    });
+  for (let index = 0; index < endpoints.length; index += 1) {
+    const endpoint = endpoints[index];
 
-    const text = await response.text();
-    const contentType = response.headers.get("content-type") ?? "";
-    const isJson = contentType.toLowerCase().includes("application/json");
-    let json: CallableEnvelope | null = null;
-    if (text && isJson) {
-      try {
-        json = JSON.parse(text) as CallableEnvelope;
-      } catch (parseError) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": JSON_TYPE,
+        },
+        body,
+        cache: "no-store",
+      });
+
+      const text = await response.text();
+      const contentType = response.headers.get("content-type") ?? "";
+      const isJson = contentType.toLowerCase().includes("application/json");
+      let json: CallableEnvelope | null = null;
+      if (text && isJson) {
+        try {
+          json = JSON.parse(text) as CallableEnvelope;
+        } catch (parseError) {
+          return createErrorResponse(
+            502,
+            "invalid-function-response",
+            "Callable response was not valid JSON",
+            (parseError as Error)?.message ?? "Callable response was not valid JSON",
+          );
+        }
+      }
+
+      if (response.ok && !isJson) {
         return createErrorResponse(
           502,
           "invalid-function-response",
-          "Callable response was not valid JSON",
-          (parseError as Error)?.message ?? "Callable response was not valid JSON",
+          "Callable response was not JSON",
+          summariseDetails(text),
         );
       }
-    }
 
-    if (response.ok && !isJson) {
+      if (!response.ok) {
+        const callableError = (json as CallableErrorEnvelope | null)?.error;
+        const errorDetails =
+          (callableError && typeof callableError === "object" && typeof callableError.message === "string"
+            ? callableError.message
+            : typeof callableError === "string"
+              ? callableError
+              : summariseDetails(text) || `callable request failed (${response.status})`);
+        const errorCode =
+          (callableError && typeof callableError === "object" && typeof callableError.status === "string"
+            ? callableError.status
+            : null) ||
+          (json && typeof json.code === "string" ? json.code : null) ||
+          "reserve-kit-error";
+        const errorDetailsPayload =
+          callableError && typeof callableError === "object" && "details" in callableError
+            ? callableError.details
+            : callableError ?? summariseDetails(text) ?? null;
+
+        if (response.status === 404) {
+          attemptSummaries.push(`${endpoint} → 404`);
+          if (index < endpoints.length - 1) {
+            continue;
+          }
+        }
+
+        return createErrorResponse(502, errorCode, errorDetails, {
+          endpoint,
+          responseStatus: response.status,
+          details: errorDetailsPayload,
+        });
+      }
+
+      const data = (json?.result?.data ?? json?.data) as unknown;
+      return NextResponse.json({ data });
+    } catch (error) {
+      attemptSummaries.push(`${endpoint} → ${(error as Error)?.message ?? "request failed"}`);
+      if (index < endpoints.length - 1) {
+        continue;
+      }
+
       return createErrorResponse(
         502,
-        "invalid-function-response",
-        "Callable response was not JSON",
-        summariseDetails(text),
+        "reserve-kit-request-failed",
+        "Failed to contact reserveKit function",
+        attemptSummaries,
       );
     }
-
-    if (!response.ok) {
-      const callableError = (json as CallableErrorEnvelope | null)?.error;
-      const errorDetails =
-        (callableError && typeof callableError === "object" && typeof callableError.message === "string"
-          ? callableError.message
-          : typeof callableError === "string"
-            ? callableError
-            : summariseDetails(text) || `callable request failed (${response.status})`);
-      const errorCode =
-        (callableError && typeof callableError === "object" && typeof callableError.status === "string"
-          ? callableError.status
-          : null) ||
-        (json && typeof json.code === "string" ? json.code : null) ||
-        "reserve-kit-error";
-      const errorDetailsPayload =
-        callableError && typeof callableError === "object" && "details" in callableError
-          ? callableError.details
-          : callableError ?? summariseDetails(text) ?? null;
-      return createErrorResponse(502, errorCode, errorDetails, errorDetailsPayload);
-    }
-
-    const data = (json?.result?.data ?? json?.data) as unknown;
-    return NextResponse.json({ data });
-  } catch (error) {
-    return createErrorResponse(
-      502,
-      "reserve-kit-request-failed",
-      "Failed to contact reserveKit function",
-      (error as Error)?.message ?? "Unknown error",
-    );
   }
+
+  return createErrorResponse(
+    502,
+    "reserve-kit-endpoint-unavailable",
+    "No reserveKit endpoints responded successfully",
+    attemptSummaries,
+  );
 }
 
 export async function OPTIONS() {
