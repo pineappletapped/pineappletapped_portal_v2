@@ -58,6 +58,7 @@ export interface CartItem {
   id: string;
   name: string;
   price: number;
+  category?: string | null;
   variation?: string;
   date: string;
   quantity: number;
@@ -100,6 +101,7 @@ interface ProductInput {
   id: string;
   name: string;
   price: number;
+  category?: string | null;
   variation?: string;
   date: string;
   modifiers?: ProductModifierSelection[];

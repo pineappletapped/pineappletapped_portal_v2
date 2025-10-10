@@ -5754,6 +5754,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
 
   const coverageInfo = normaliseCoverage(data?.coverage);
   const kitRoutingSettings = await loadKitRoutingSettings();
+  const skipKitCheckRequested = data?.skipKitCheck === true;
 
   const buildAttempts = (coverage: CoverageInfo): ReservationAttempt[] => {
     const flowKey: 'franchiseFlow' | 'hqFlow' =
@@ -5844,6 +5845,24 @@ export const reserveKit = functions.https.onCall(async (data) => {
     return attempts;
   };
 
+  const createNonKitResponse = (attempt: ReservationAttempt): ReservationResponse => ({
+    conflicts: [],
+    kitItems: [],
+    rentalTotal: 0,
+    status: attempt.initialStatus,
+    missingStandards: [],
+    provider: {
+      level: attempt.key,
+      status: attempt.initialStatus,
+      label: attempt.label,
+      franchiseId: attempt.franchiseId,
+      territoryId: coverageInfo.territoryId,
+      requiresKit: false,
+      autoConfirm: attempt.autoConfirm,
+      description: attempt.description ?? null,
+    },
+  });
+
   const attempts = buildAttempts(coverageInfo);
   if (attempts.length === 0) {
     attempts.push({
@@ -5858,35 +5877,50 @@ export const reserveKit = functions.https.onCall(async (data) => {
     });
   }
 
-  const anyKitAttempt = attempts.some((attempt) => attempt.requiresKit);
   const selectBypassAttempt = (): ReservationAttempt | null => {
     if (attempts.length === 0) {
       return null;
     }
-    const nonKitAttempt = attempts.find((attempt) => !attempt.requiresKit);
-    return nonKitAttempt ?? attempts[0];
+    return attempts[0];
   };
 
-  if (!anyKitAttempt || eqIds.length === 0) {
-    const attempt = selectBypassAttempt();
-    if (attempt) {
-      return {
-        conflicts: [],
-        kitItems: [],
-        rentalTotal: 0,
-        status: attempt.initialStatus,
-        missingStandards: [],
-        provider: {
-          level: attempt.key,
-          status: attempt.initialStatus,
-          label: attempt.label,
-          franchiseId: attempt.franchiseId,
-          territoryId: coverageInfo.territoryId,
-          requiresKit: false,
-          autoConfirm: attempt.autoConfirm,
-          description: attempt.description ?? null,
-        },
-      } satisfies ReservationResponse;
+  const coerceToManualAttempt = (attempt: ReservationAttempt | null): ReservationAttempt | null => {
+    if (!attempt) {
+      return null;
+    }
+    if (!attempt.requiresKit) {
+      return attempt;
+    }
+    return { ...attempt, requiresKit: false };
+  };
+
+  const manualBypassAttempt = attempts.find((attempt) => !attempt.requiresKit);
+
+  const respondWithManualAttempt = (
+    preferredAttempt: ReservationAttempt | null = null,
+  ): ReservationResponse | null => {
+    const attempt = coerceToManualAttempt(preferredAttempt ?? manualBypassAttempt ?? selectBypassAttempt());
+    if (!attempt) {
+      return null;
+    }
+    return createNonKitResponse(attempt);
+  };
+
+  if (skipKitCheckRequested) {
+    const manualResponse = respondWithManualAttempt(manualBypassAttempt ?? selectBypassAttempt());
+    if (manualResponse) {
+      return manualResponse;
+    }
+  }
+
+  if (manualBypassAttempt) {
+    return createNonKitResponse(manualBypassAttempt);
+  }
+
+  if (eqIds.length === 0) {
+    const manualResponse = respondWithManualAttempt(selectBypassAttempt());
+    if (manualResponse) {
+      return manualResponse;
     }
   }
 
@@ -5922,13 +5956,17 @@ export const reserveKit = functions.https.onCall(async (data) => {
     return { ownerType, ownerId: rawOwnerId, franchiseId };
   };
 
-  const equipmentRecords: EquipmentRecord[] = [];
-  if (anyKitAttempt) {
+  let equipmentRecordsCache: EquipmentRecord[] | null = null;
+  const loadEquipmentRecords = async (): Promise<EquipmentRecord[]> => {
+    if (equipmentRecordsCache) {
+      return equipmentRecordsCache;
+    }
+    const records: EquipmentRecord[] = [];
     for (const id of eqIds) {
       const eqRef = db.collection('equipment').doc(id);
       const eqSnap = await eqRef.get();
       if (!eqSnap.exists) {
-        equipmentRecords.push({
+        records.push({
           id,
           name: id,
           category: null,
@@ -5953,7 +5991,6 @@ export const reserveKit = functions.https.onCall(async (data) => {
             : null;
       const bookingsSnap = await eqRef
         .collection('bookings')
-        .where('start', '<', reservationEnd)
         .where('end', '>', start)
         .get();
       const conflictingBookings = bookingsSnap.docs.filter((bookingDoc) =>
@@ -5974,7 +6011,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
         typeof eq.rentalPrice === 'number' && Number.isFinite(eq.rentalPrice)
           ? eq.rentalPrice
           : 0;
-      equipmentRecords.push({
+      records.push({
         id: eqSnap.id,
         name: equipmentName,
         category,
@@ -5988,7 +6025,9 @@ export const reserveKit = functions.https.onCall(async (data) => {
         exists: true,
       });
     }
-  }
+    equipmentRecordsCache = records;
+    return records;
+  };
 
   const matchesOwnerForAttempt = (
     record: EquipmentRecord,
@@ -6014,6 +6053,7 @@ export const reserveKit = functions.https.onCall(async (data) => {
 
   const evaluateAttempt = (
     attempt: ReservationAttempt,
+    equipmentRecords: EquipmentRecord[],
   ): { success: boolean; response: ReservationResponse } => {
     const conflicts: ConflictRecord[] = [];
     const kitItems: KitReservationItem[] = [];
@@ -6024,27 +6064,6 @@ export const reserveKit = functions.https.onCall(async (data) => {
     requiredStandards.forEach((standard) => {
       standardMatches.set(standard, new Set());
     });
-
-    if (!attempt.requiresKit) {
-      const response: ReservationResponse = {
-        conflicts: [],
-        kitItems: [],
-        rentalTotal: 0,
-        status: attempt.initialStatus,
-        missingStandards: [],
-        provider: {
-          level: attempt.key,
-          status: attempt.initialStatus,
-          label: attempt.label,
-          franchiseId: attempt.franchiseId,
-          territoryId: coverageInfo.territoryId,
-          requiresKit: false,
-          autoConfirm: attempt.autoConfirm,
-          description: attempt.description ?? null,
-        },
-      };
-      return { success: true, response };
-    }
 
     for (const record of equipmentRecords) {
       if (!record.exists) {
@@ -6132,28 +6151,45 @@ export const reserveKit = functions.https.onCall(async (data) => {
 
   let fallbackResponse: ReservationResponse | null = null;
 
-  for (const attempt of attempts) {
-    const { success, response } = evaluateAttempt(attempt);
-    if (success) {
-      if (response.status === 'confirmed' && response.kitItems.length > 0) {
-        const batch = db.batch();
-        for (const item of response.kitItems) {
-          const eqRef = db.collection('equipment').doc(item.id);
-          batch.set(eqRef.collection('bookings').doc(), {
-            start: admin.firestore.Timestamp.fromDate(start),
-            end: admin.firestore.Timestamp.fromDate(reservationEnd),
-            projectId: null,
-          });
-        }
-        await batch.commit();
+  try {
+    for (const attempt of attempts) {
+      if (!attempt.requiresKit) {
+        return createNonKitResponse(attempt);
       }
-      return response;
+      const equipmentRecords = await loadEquipmentRecords();
+      const { success, response } = evaluateAttempt(attempt, equipmentRecords);
+      if (success) {
+        if (response.status === 'confirmed' && response.kitItems.length > 0) {
+          const batch = db.batch();
+          for (const item of response.kitItems) {
+            const eqRef = db.collection('equipment').doc(item.id);
+            batch.set(eqRef.collection('bookings').doc(), {
+              start: admin.firestore.Timestamp.fromDate(start),
+              end: admin.firestore.Timestamp.fromDate(reservationEnd),
+              projectId: null,
+            });
+          }
+          await batch.commit();
+        }
+        return response;
+      }
+      fallbackResponse = response;
     }
-    fallbackResponse = response;
+  } catch (error) {
+    console.error('reserveKit evaluation failed', error);
+    const manualResponse = respondWithManualAttempt();
+    if (manualResponse) {
+      return manualResponse;
+    }
   }
 
   if (fallbackResponse) {
     return fallbackResponse;
+  }
+
+  const manualFallback = respondWithManualAttempt();
+  if (manualFallback) {
+    return manualFallback;
   }
 
   const defaultAttempt = attempts[0] ?? {
@@ -10658,7 +10694,13 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     );
   }
 
-  return { orderId: orderRef.id };
+  return {
+    orderId: orderRef.id,
+    price,
+    netTotal: finalTotal,
+    voucherDiscount,
+    discountAmount,
+  };
 });
 
 export const clientResearch_onOrderCreated = functions.firestore

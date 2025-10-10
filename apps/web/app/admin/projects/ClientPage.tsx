@@ -10,6 +10,7 @@ import { collection, doc, getDoc, getDocs, Timestamp, updateDoc } from 'firebase
 import { summariseKitItems, type KitSummary } from '@/lib/kit-summary';
 import { HQ_UNASSIGNED_TERRITORY_LABEL } from '@/lib/franchises';
 import CallSheetBuilder from '@/components/admin/projects/CallSheetBuilder';
+import AdminWorkspaceLayout, { AdminSection } from '@/components/admin/AdminWorkspaceLayout';
 
 interface StaffOption {
   uid: string;
@@ -739,12 +740,40 @@ export default function AdminProjectsPage() {
     }));
   }, [filtered, groupBy, resolveDueBucket, staff, updateOwner, updateStatus, statuses]);
 
-  if (guardLoading) return <p>Loading…</p>;
-  if (!allowed) return <p>You do not have permission to view projects.</p>;
+  if (guardLoading) {
+    return (
+      <AdminWorkspaceLayout
+        title="Project management"
+        description="Oversee bookings from intake through delivery, assign owners, and monitor production readiness."
+      >
+        <AdminSection>
+          <p className="text-sm text-gray-600">Loading projects…</p>
+        </AdminSection>
+      </AdminWorkspaceLayout>
+    );
+  }
+
+  if (!allowed) {
+    return (
+      <AdminWorkspaceLayout
+        title="Project management"
+        description="Oversee bookings from intake through delivery, assign owners, and monitor production readiness."
+      >
+        <AdminSection tone="danger">
+          <p className="text-sm font-medium text-rose-700">You do not have permission to view projects.</p>
+        </AdminSection>
+      </AdminWorkspaceLayout>
+    );
+  }
 
   return (
-    <div className="grid gap-4">
-      <h1 className="text-xl font-semibold">Project Management</h1>
+    <AdminWorkspaceLayout
+      title="Project management"
+      description="Track deliverables, assign territory operators, and keep kits aligned with the production timeline."
+    >
+      <AdminSection>
+        <div className="grid gap-4">
+          <h1 className="text-xl font-semibold">Project Management</h1>
       <div className="flex flex-wrap gap-2 items-center">
         <input
           type="text"
@@ -1222,15 +1251,17 @@ export default function AdminProjectsPage() {
           ))}
         </div>
       )}
-      {callSheetProject ? (
-        <CallSheetBuilder
-          project={callSheetProject}
-          kitSummary={callSheetKitSummary}
-          bookings={callSheetBookings}
-          staffOptions={staff}
-          onClose={() => setCallSheetProjectId(null)}
-        />
-      ) : null}
-    </div>
+          {callSheetProject ? (
+            <CallSheetBuilder
+              project={callSheetProject}
+              kitSummary={callSheetKitSummary}
+              bookings={callSheetBookings}
+              staffOptions={staff}
+              onClose={() => setCallSheetProjectId(null)}
+            />
+          ) : null}
+        </div>
+      </AdminSection>
+    </AdminWorkspaceLayout>
   );
 }

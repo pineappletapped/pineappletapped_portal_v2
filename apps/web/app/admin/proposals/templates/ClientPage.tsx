@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import clsx from "clsx";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -20,6 +20,9 @@ import {
   PAGE_TYPE_LABELS,
   TEMPLATE_KINDS,
   TEMPLATE_LAYOUT_OPTIONS,
+  PROPOSAL_PLACEHOLDER_CATEGORY_LABELS,
+  PROPOSAL_PLACEHOLDER_TOKENS,
+  type ProposalPlaceholderToken,
   allowedTemplateKinds,
   createBlankPage,
   createTemplatePreset,
@@ -69,6 +72,8 @@ const findTemplateKindDescriptor = (id: string | null | undefined) =>
   TEMPLATE_KINDS.find((kind) => kind.id === id);
 
 type PageUpdate = Partial<ProposalTemplatePage>;
+
+type EditableField = "title" | "subtitle" | "body";
 
 type BuilderState = {
   name: string;
@@ -130,6 +135,13 @@ export default function ProposalTemplatesWorkspace() {
   );
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [presetSeeded, setPresetSeeded] = useState(false);
+  const [activeEditorField, setActiveEditorField] = useState<{
+    pageId: string;
+    field: EditableField;
+  } | null>(null);
+  const editorFieldRefs = useRef<
+    Record<string, HTMLInputElement | HTMLTextAreaElement | null>
+  >({});
 
   useEffect(() => {
     if (roleLoading) return;
@@ -366,6 +378,10 @@ export default function ProposalTemplatesWorkspace() {
     }
   }, [activePage, builder.pages]);
 
+  useEffect(() => {
+    setActiveEditorField(null);
+  }, [activePageId]);
+
   const handleToggleAgreement = (id: string) => {
     handleBuilderChange({
       agreements: builder.agreements.includes(id)
@@ -446,6 +462,39 @@ export default function ProposalTemplatesWorkspace() {
   const contentsPreview = useMemo(
     () => (activePage ? deriveContentsEntries(builder.pages, activePage.id) : []),
     [activePage, builder.pages],
+  );
+
+  const placeholderGroups = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        label: string;
+        tokens: ProposalPlaceholderToken[];
+      }
+    >();
+    PROPOSAL_PLACEHOLDER_TOKENS.forEach((token) => {
+      const label = PROPOSAL_PLACEHOLDER_CATEGORY_LABELS[token.category];
+      const existing = grouped.get(token.category);
+      const entryTokens = existing?.tokens ? [...existing.tokens, token] : [token];
+      grouped.set(token.category, { label, tokens: entryTokens });
+    });
+    return Array.from(grouped.entries()).map(([category, data]) => ({
+      category,
+      label: data.label,
+      tokens: [...data.tokens].sort((a, b) => a.label.localeCompare(b.label)),
+    }));
+  }, []);
+
+  const currencyFormatter = useMemo(
+    () =>
+      typeof Intl !== "undefined"
+        ? new Intl.NumberFormat("en-GB", {
+            style: "currency",
+            currency: "GBP",
+            maximumFractionDigits: 0,
+          })
+        : null,
+    [],
   );
 
   const refreshTemplates = async () => {
@@ -643,169 +692,651 @@ export default function ProposalTemplatesWorkspace() {
     const contentsEntries = contentsPreview;
     const bulletPointValue = (activePage.bulletPoints || []).join("\n");
 
-    return (
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-900">
-              {PAGE_TYPE_LABELS[activePage.type] || "Page"}
-            </h3>
-            <p className="text-xs text-slate-500">
-              Configure layout, copy, and visibility for this page.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <label className="text-xs text-slate-600">
-              Layout
-              <select
-                className="input ml-2"
-                value={activePage.layout}
-                onChange={(event) => handleFieldChange("layout", event.target.value)}
-              >
-                {layoutOptions.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
+    const fieldLabelMap: Record<EditableField, string> = {
+      title: "Title",
+      subtitle: "Subtitle",
+      body: "Body copy",
+    };
+    const canInsertTokens =
+      !!activeEditorField && activeEditorField.pageId === activePage.id;
+    const registerFieldRef =
+      (field: EditableField) =>
+      (element: HTMLInputElement | HTMLTextAreaElement | null) => {
+        const key = `${activePage.id}:${field}`;
+        if (element) {
+          editorFieldRefs.current[key] = element;
+        } else {
+          delete editorFieldRefs.current[key];
+        }
+      };
+    const getFieldValue = (field: EditableField): string => {
+      switch (field) {
+        case "title":
+          return activePage.title || "";
+        case "subtitle":
+          return activePage.subtitle || "";
+        case "body":
+          return activePage.body || "";
+        default:
+          return "";
+      }
+    };
+    const insertPlaceholder = (token: string) => {
+      if (!canInsertTokens || !activeEditorField) return;
+      const targetField = activeEditorField.field;
+      const key = `${activePage.id}:${targetField}`;
+      const element = editorFieldRefs.current[key];
+      const currentValue = getFieldValue(targetField);
+      if (element && typeof element.selectionStart === "number") {
+        const start = element.selectionStart;
+        const end =
+          typeof element.selectionEnd === "number"
+            ? element.selectionEnd
+            : start;
+        const nextValue =
+          currentValue.slice(0, start) + token + currentValue.slice(end);
+        handleFieldChange(targetField, nextValue);
+        setTimeout(() => {
+          if (element instanceof HTMLElement) {
+            element.focus();
+            const cursor = start + token.length;
+            try {
+              const targetElement =
+                element as HTMLInputElement | HTMLTextAreaElement;
+              targetElement.selectionStart = cursor;
+              targetElement.selectionEnd = cursor;
+            } catch {
+              // ignore selection restoration errors in non-DOM environments
+            }
+          }
+        }, 0);
+        return;
+      }
+      const needsSpace =
+        currentValue.length > 0 && !/\s$/.test(currentValue);
+      const nextValue = needsSpace
+        ? `${currentValue} ${token}`
+        : `${currentValue}${token}`;
+      handleFieldChange(targetField, nextValue);
+    };
+    const placeholderTargetLabel = canInsertTokens
+      ? fieldLabelMap[activeEditorField.field]
+      : "Focus a field";
+
+    const accentColor =
+      builder.styling.accentColor ||
+      brandGuidelines.colors?.secondary ||
+      DEFAULT_BRAND_GUIDELINES.colors.secondary;
+    const secondaryColor =
+      builder.styling.secondaryColor ||
+      brandGuidelines.colors?.accent ||
+      DEFAULT_BRAND_GUIDELINES.colors.accent;
+
+    const baseTitleColor =
+      builder.styling.background === "gradient" ? "text-white" : "text-slate-900";
+    const baseSubtitleColor =
+      builder.styling.background === "gradient"
+        ? "text-white/80"
+        : "text-slate-500";
+    const baseBodyColor =
+      builder.styling.background === "gradient"
+        ? "text-white/85"
+        : "text-slate-600";
+
+    const titleFont =
+      builder.styling.theme === "classic"
+        ? "font-serif text-2xl"
+        : builder.styling.theme === "spotlight"
+        ? "font-bold uppercase tracking-[0.28em] text-lg"
+        : "font-semibold text-xl tracking-tight";
+    const subtitleFont =
+      builder.styling.theme === "classic"
+        ? "font-serif italic text-base"
+        : builder.styling.theme === "spotlight"
+        ? "font-semibold uppercase tracking-[0.3em] text-xs"
+        : "font-medium text-sm";
+    const bodyFont =
+      builder.styling.theme === "classic"
+        ? "font-serif"
+        : builder.styling.theme === "spotlight"
+        ? "font-medium"
+        : "font-normal";
+
+    const titleClass = clsx(baseTitleColor, titleFont);
+    const subtitleClass = clsx(baseSubtitleColor, subtitleFont);
+    const bodyClass = clsx(baseBodyColor, "text-sm leading-relaxed", bodyFont);
+
+    const rawBody = (activePage.body || "").trim();
+    const fallbackBodyByType: Partial<
+      Record<ProposalTemplatePageType, string[]>
+    > = {
+      intro: [
+        "Summarise the project vision and the value Pineapple Tapped will deliver.",
+      ],
+      about: [
+        "Share credentials, differentiators, and the Pineapple Tapped approach.",
+      ],
+      service_overview: [
+        "Highlight the core outcomes and inclusions for this service.",
+      ],
+      storyboard: [
+        "Describe the creative flow and how each scene delivers the brief.",
+      ],
+      operations: [
+        "Map out the logistics, crew call, and production cadence.",
+      ],
+    };
+    const previewBodyParagraphs =
+      rawBody.length > 0
+        ? rawBody
+            .split(/\n{2,}/)
+            .map((paragraph) => paragraph.trim())
+            .filter(Boolean)
+        : fallbackBodyByType[activePage.type] || [
+            "Use this space to outline the story, deliverables, and experience your team will bring to the project.",
+          ];
+    const previewTitle =
+      activePage.title?.trim() ||
+      (activePage.autoContents ? "Table of contents" : "Add a page title");
+    const previewSubtitle =
+      activePage.subtitle?.trim() ||
+      (activePage.autoContents
+        ? "Contents generate automatically as you add pages."
+        : "Add a subtitle or placeholder token to tailor this page.");
+    const previewContents =
+      contentsEntries.length > 0
+        ? contentsEntries
+        : ["Add pages and mark them for the contents to build this list."];
+    const bulletPoints = activePage.bulletPoints || [];
+    const previewItems = (
+      builder.items.length > 0
+        ? builder.items
+        : [
+            { type: "custom" as const, name: "Production crew", price: 1250 },
+            { type: "custom" as const, name: "Livestream package", price: 850 },
+            { type: "custom" as const, name: "Highlights edit", price: 650 },
+          ]
+    ).slice(0, 3);
+    const computedTotal = builder.items.reduce(
+      (sum, item) => sum + (typeof item.price === "number" ? item.price : 0),
+      0,
+    );
+    const fallbackTotal = previewItems.reduce(
+      (sum, item) => sum + (typeof item.price === "number" ? item.price : 0),
+      0,
+    );
+    const displayTotal = computedTotal > 0 ? computedTotal : fallbackTotal;
+    const pageIndex = builder.pages.findIndex(
+      (page) => page.id === activePage.id,
+    );
+
+    const previewSurfaceClass = clsx(
+      "relative overflow-hidden rounded-2xl border border-slate-100 p-5 shadow-sm transition-colors",
+      builder.styling.background === "clean" && "bg-white text-slate-900",
+      builder.styling.background === "gradient" && "text-white",
+      builder.styling.background === "texture" && "bg-slate-50 text-slate-900",
+    );
+    const previewSurfaceStyle: CSSProperties =
+      builder.styling.background === "gradient"
+        ? {
+            backgroundImage: `linear-gradient(135deg, ${accentColor}, ${secondaryColor})`,
+          }
+        : builder.styling.background === "texture"
+        ? {
+            backgroundImage: `linear-gradient(135deg, ${accentColor}1a 25%, transparent 25%, transparent 50%, ${accentColor}1a 50%, ${accentColor}1a 75%, transparent 75%, transparent)`,
+            backgroundSize: "28px 28px",
+          }
+        : {};
+
+    const layoutPreview = (() => {
+      switch (activePage.layout) {
+        case "split":
+          return (
+            <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <div className="rounded-xl border border-white/30 border-dashed bg-white/10 p-4 text-xs uppercase tracking-wide opacity-80">
+                <div className="h-24 rounded-lg border border-white/40 border-dashed" />
+                <p className="mt-3">Visual placeholder</p>
+              </div>
+              <div className="space-y-2">
+                {previewBodyParagraphs.slice(0, 2).map((paragraph, index) => (
+                  <p key={`${paragraph}-${index}`} className={bodyClass}>
+                    {paragraph}
+                  </p>
                 ))}
-              </select>
-            </label>
-            {activePage.type !== "cover" && (
-              <label className="flex items-center gap-2 text-xs text-slate-600">
-                <input
-                  type="checkbox"
-                  checked={activePage.includeInContents !== false}
-                  onChange={(event) =>
-                    handleFieldChange("includeInContents", event.target.checked)
-                  }
-                />
-                Show in contents
-              </label>
+                {bulletPoints.length > 0 && (
+                  <ul className="space-y-1 text-sm">
+                    {bulletPoints.slice(0, 3).map((point, index) => (
+                      <li key={`${point}-${index}`} className="flex items-start gap-2">
+                        <span
+                          className="mt-1 inline-block h-2.5 w-2.5 rounded-full"
+                          style={{ backgroundColor: accentColor }}
+                        />
+                        <span className={clsx(bodyClass, "flex-1")}>{point}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          );
+        case "columns":
+          return (
+            <div className="grid gap-3 sm:grid-cols-3">
+              {[0, 1, 2].map((index) => (
+                <div
+                  key={index}
+                  className="rounded-xl border border-white/30 bg-white/10 p-3 text-sm"
+                >
+                  <p
+                    className="text-xs font-semibold uppercase tracking-wide"
+                    style={{ color: accentColor }}
+                  >
+                    Column {index + 1}
+                  </p>
+                  <p className="mt-1 text-xs opacity-80">
+                    {bulletPoints[index] ||
+                      previewBodyParagraphs[index] ||
+                      "Add highlights to populate these columns."}
+                  </p>
+                </div>
+              ))}
+            </div>
+          );
+        case "gallery":
+          return (
+            <div className="grid gap-2 sm:grid-cols-3">
+              {[0, 1, 2].map((index) => (
+                <div
+                  key={index}
+                  className="rounded-xl border border-white/30 bg-white/10 p-3 text-sm"
+                >
+                  <div className="mb-2 h-20 rounded-lg border border-dashed border-white/40" />
+                  <p className="text-xs opacity-85">
+                    {bulletPoints[index] || `Storyboard ${index + 1}`}
+                  </p>
+                </div>
+              ))}
+            </div>
+          );
+        case "timeline": {
+          const timelineSource =
+            bulletPoints.length > 0 ? bulletPoints : previewBodyParagraphs;
+          return (
+            <ol className="space-y-3 border-l border-white/30 pl-4">
+              {timelineSource.slice(0, 4).map((entry, index) => (
+                <li key={`${entry}-${index}`} className="relative">
+                  <span
+                    className="absolute -left-[9px] top-1 h-3 w-3 rounded-full"
+                    style={{ backgroundColor: accentColor }}
+                  />
+                  <p className="text-xs font-semibold uppercase tracking-wide opacity-75">{`Phase ${
+                    index + 1
+                  }`}</p>
+                  <p className={clsx(bodyClass, "opacity-90")}>{entry}</p>
+                </li>
+              ))}
+            </ol>
+          );
+        }
+        case "table": {
+          const formatCurrency = (value: number) =>
+            currencyFormatter
+              ? currencyFormatter.format(value)
+              : `£${value.toLocaleString("en-GB")}`;
+          return (
+            <div className="overflow-hidden rounded-xl border border-white/30 text-sm">
+              <div className="grid grid-cols-[2fr_1fr] bg-white/10 text-xs font-semibold uppercase tracking-wide">
+                <div className="px-3 py-2">Line item</div>
+                <div className="px-3 py-2 text-right">Amount</div>
+              </div>
+              <div className="divide-y divide-white/10">
+                {previewItems.map((item, index) => (
+                  <div
+                    key={`${item.name}-${index}`}
+                    className="grid grid-cols-[2fr_1fr] px-3 py-2"
+                  >
+                    <div className="pr-2">{item.name}</div>
+                    <div className="text-right">
+                      {typeof item.price === "number"
+                        ? formatCurrency(item.price)
+                        : "—"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="grid grid-cols-[2fr_1fr] bg-white/10 px-3 py-2 text-sm font-semibold">
+                <div>Total</div>
+                <div className="text-right">
+                  {displayTotal > 0 ? formatCurrency(displayTotal) : "—"}
+                </div>
+              </div>
+            </div>
+          );
+        }
+        default:
+          if (activePage.type === "contents") {
+            return (
+              <ol className="space-y-2 text-sm">
+                {previewContents.map((entry, index) => (
+                  <li key={`${entry}-${index}`} className="flex items-center gap-2">
+                    <span
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold"
+                      style={{ borderColor: accentColor, color: accentColor }}
+                    >
+                      {index + 1}
+                    </span>
+                    <span className={bodyClass}>{entry}</span>
+                  </li>
+                ))}
+              </ol>
+            );
+          }
+          return (
+            <div className="space-y-2">
+              {previewBodyParagraphs.map((paragraph, index) => (
+                <p key={`${paragraph}-${index}`} className={bodyClass}>
+                  {paragraph}
+                </p>
+              ))}
+              {bulletPoints.length > 0 && (
+                <ul className="space-y-1 text-sm">
+                  {bulletPoints.slice(0, 4).map((point, index) => (
+                    <li key={`${point}-${index}`} className="flex items-start gap-2">
+                      <span
+                        className="mt-1 inline-block h-2 w-2 rounded-full"
+                        style={{ backgroundColor: accentColor }}
+                      />
+                      <span className={clsx(bodyClass, "flex-1")}>{point}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          );
+      }
+    })();
+
+    const placeholderPanel = (
+      <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-sm font-semibold text-slate-900">Placeholder tokens</p>
+          <span className="text-[11px] uppercase tracking-wide text-slate-400">
+            {placeholderTargetLabel}
+          </span>
+        </div>
+        <p className="mt-2 text-xs text-slate-500">
+          Merge tags pull live client, project, and pricing details into your template. Focus a title,
+          subtitle, or body field and tap a token to insert it.
+        </p>
+        <div className="mt-3 space-y-4">
+          {placeholderGroups.map((group) => (
+            <div key={group.category}>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                {group.label}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {group.tokens.map((token) => (
+                  <button
+                    key={token.token}
+                    type="button"
+                    className={clsx(
+                      "flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] font-medium text-slate-700 transition hover:border-slate-400 hover:bg-white focus:outline-none focus:ring-2 focus:ring-slate-300",
+                      !canInsertTokens && "pointer-events-none opacity-50",
+                    )}
+                    onClick={() => insertPlaceholder(token.token)}
+                    aria-disabled={!canInsertTokens}
+                    title={token.description}
+                  >
+                    <span className="font-mono text-[11px]">{token.token}</span>
+                    <span className="hidden text-[10px] uppercase tracking-wide text-slate-400 md:inline">
+                      {token.label}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+
+    const previewPanel = (
+      <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-sm font-semibold text-slate-900">Live preview</p>
+          <span className="text-[11px] uppercase tracking-wide text-slate-400">
+            {builder.styling.theme === "modern"
+              ? "Modern theme"
+              : builder.styling.theme === "spotlight"
+              ? "Spotlight theme"
+              : "Classic theme"}
+          </span>
+        </div>
+        <div className="mt-3">
+          <div className={previewSurfaceClass} style={previewSurfaceStyle}>
+            <span
+              className="inline-flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.32em]"
+              style={{
+                color:
+                  builder.styling.background === "gradient"
+                    ? "rgba(255,255,255,0.8)"
+                    : accentColor,
+              }}
+            >
+              <span
+                className="inline-block h-2 w-2 rounded-full"
+                style={{ backgroundColor: accentColor }}
+              />
+              {PAGE_TYPE_LABELS[activePage.type] || "Page"}
+            </span>
+            <h4 className={clsx("mt-3", titleClass)}>{previewTitle}</h4>
+            {activePage.type !== "contents" && (
+              <p className={clsx("mt-2", subtitleClass)}>{previewSubtitle}</p>
+            )}
+            <div className="mt-4 space-y-3">{layoutPreview}</div>
+            {builder.styling.includePageNumbers && (
+              <div className="mt-6 flex justify-end">
+                <span
+                  className={clsx(
+                    "rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-wide",
+                    builder.styling.background === "gradient"
+                      ? "border-white/40 text-white/80"
+                      : "border-slate-200 text-slate-500",
+                  )}
+                >
+                  {pageIndex >= 0 ? `Page ${pageIndex + 1}` : "Page"}
+                </span>
+              </div>
             )}
           </div>
         </div>
+        <p className="mt-2 text-[11px] text-slate-500">
+          Preview updates as you edit copy, placeholders, and styling controls.
+        </p>
+      </div>
+    );
 
-        <div className="grid gap-3">
-          <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Title
-            <input
-              className="input mt-1"
-              type="text"
-              value={activePage.title || ""}
-              onChange={(event) => handleFieldChange("title", event.target.value)}
-              disabled={activePage.autoContents}
-            />
-          </label>
-          {activePage.type !== "contents" && (
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Subtitle
-              <input
-                className="input mt-1"
-                type="text"
-                value={activePage.subtitle || ""}
-                onChange={(event) => handleFieldChange("subtitle", event.target.value)}
-              />
-            </label>
-          )}
-          {activePage.type === "contents" ? (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
-              <p className="font-medium text-slate-900">Contents preview</p>
-              {contentsEntries.length === 0 ? (
-                <p className="mt-1 text-xs text-slate-500">
-                  Pages marked for the table of contents will appear here once added.
-                </p>
-              ) : (
-                <ol className="mt-2 space-y-1 text-xs">
-                  {contentsEntries.map((entry) => (
-                    <li key={entry} className="rounded bg-slate-100 px-3 py-1">
-                      {entry}
-                    </li>
+    return (
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.45fr)]">
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">
+                {PAGE_TYPE_LABELS[activePage.type] || "Page"}
+              </h3>
+              <p className="text-xs text-slate-500">
+                Configure layout, copy, and visibility for this page.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <label className="text-xs text-slate-600">
+                Layout
+                <select
+                  className="input ml-2"
+                  value={activePage.layout}
+                  onChange={(event) => handleFieldChange("layout", event.target.value)}
+                >
+                  {layoutOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
                   ))}
-                </ol>
+                </select>
+              </label>
+              {activePage.type !== "cover" && (
+                <label className="flex items-center gap-2 text-xs text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={activePage.includeInContents !== false}
+                    onChange={(event) =>
+                      handleFieldChange("includeInContents", event.target.checked)
+                    }
+                  />
+                  Show in contents
+                </label>
               )}
             </div>
-          ) : (
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Body copy
-              <textarea
-                className="input mt-1 min-h-[120px]"
-                value={activePage.body || ""}
-                onChange={(event) => handleFieldChange("body", event.target.value)}
-              />
-            </label>
-          )}
+          </div>
 
-          {[
-            "service_overview",
-            "storyboard",
-            "operations",
-            "custom",
-          ].includes(activePage.type) && (
+          <div className="grid gap-3">
             <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Highlights / bullet points
-              <textarea
-                className="input mt-1 min-h-[100px]"
-                value={bulletPointValue}
-                onChange={(event) =>
-                  handleFieldChange(
-                    "bulletPoints",
-                    event.target.value
-                      .split("\n")
-                      .map((line) => line.trim())
-                      .filter(Boolean),
-                  )
+              Title
+              <input
+                ref={registerFieldRef("title")}
+                className="input mt-1"
+                type="text"
+                value={activePage.title || ""}
+                onFocus={() =>
+                  setActiveEditorField({ pageId: activePage.id, field: "title" })
                 }
+                onChange={(event) => handleFieldChange("title", event.target.value)}
+                disabled={activePage.autoContents}
               />
-              <span className="mt-1 block text-[10px] uppercase tracking-wide text-slate-400">
-                One item per line
-              </span>
             </label>
-          )}
+            {activePage.type !== "contents" && (
+              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Subtitle
+                <input
+                  ref={registerFieldRef("subtitle")}
+                  className="input mt-1"
+                  type="text"
+                  value={activePage.subtitle || ""}
+                  onFocus={() =>
+                    setActiveEditorField({ pageId: activePage.id, field: "subtitle" })
+                  }
+                  onChange={(event) => handleFieldChange("subtitle", event.target.value)}
+                />
+              </label>
+            )}
+            {activePage.type === "contents" ? (
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
+                <p className="font-medium text-slate-900">Contents preview</p>
+                {contentsEntries.length === 0 ? (
+                  <p className="mt-1 text-xs text-slate-500">
+                    Pages marked for the table of contents will appear here once added.
+                  </p>
+                ) : (
+                  <ol className="mt-2 space-y-1 text-xs">
+                    {contentsEntries.map((entry) => (
+                      <li key={entry} className="rounded bg-slate-100 px-3 py-1">
+                        {entry}
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+            ) : (
+              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Body copy
+                <textarea
+                  ref={registerFieldRef("body")}
+                  className="input mt-1 min-h-[120px]"
+                  value={activePage.body || ""}
+                  onFocus={() =>
+                    setActiveEditorField({ pageId: activePage.id, field: "body" })
+                  }
+                  onChange={(event) => handleFieldChange("body", event.target.value)}
+                />
+              </label>
+            )}
 
-          {[
-            "service_overview",
-            "storyboard",
-            "operations",
-            "custom",
-          ].includes(activePage.type) && (
+            {[
+              "service_overview",
+              "storyboard",
+              "operations",
+              "custom",
+            ].includes(activePage.type) && (
+              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Highlights / bullet points
+                <textarea
+                  className="input mt-1 min-h-[100px]"
+                  value={bulletPointValue}
+                  onChange={(event) =>
+                    handleFieldChange(
+                      "bulletPoints",
+                      event.target.value
+                        .split("\n")
+                        .map((line) => line.trim())
+                        .filter(Boolean),
+                    )
+                  }
+                />
+                <span className="mt-1 block text-[10px] uppercase tracking-wide text-slate-400">
+                  One item per line
+                </span>
+              </label>
+            )}
+
+            {[
+              "service_overview",
+              "storyboard",
+              "operations",
+              "custom",
+            ].includes(activePage.type) && (
+              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Reference product (optional)
+                <select
+                  className="input mt-1"
+                  value={activePage.productId || builder.baseProductId || ""}
+                  onChange={(event) => handleFieldChange("productId", event.target.value)}
+                >
+                  <option value="">No linked product</option>
+                  {products.map((product) => (
+                    <option key={product.id} value={product.id}>
+                      {product.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            {activePage.type === "quote" || activePage.type === "estimate" ? (
+              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Quote mode
+                <select
+                  className="input mt-1"
+                  value={activePage.displayMode || activePage.type}
+                  onChange={(event) => handleFieldChange("displayMode", event.target.value)}
+                >
+                  <option value="quote">Quote</option>
+                  <option value="estimate">Estimate</option>
+                </select>
+              </label>
+            ) : null}
+
             <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Reference product (optional)
-              <select
-                className="input mt-1"
-                value={activePage.productId || builder.baseProductId || ""}
-                onChange={(event) => handleFieldChange("productId", event.target.value)}
-              >
-                <option value="">No linked product</option>
-                {products.map((product) => (
-                  <option key={product.id} value={product.id}>
-                    {product.name}
-                  </option>
-                ))}
-              </select>
+              Notes for the proposal editor
+              <textarea
+                className="input mt-1 min-h-[80px]"
+                value={activePage.notes || ""}
+                onChange={(event) => handleFieldChange("notes", event.target.value)}
+              />
             </label>
-          )}
-
-          {activePage.type === "quote" || activePage.type === "estimate" ? (
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Quote mode
-              <select
-                className="input mt-1"
-                value={activePage.displayMode || activePage.type}
-                onChange={(event) => handleFieldChange("displayMode", event.target.value)}
-              >
-                <option value="quote">Quote</option>
-                <option value="estimate">Estimate</option>
-              </select>
-            </label>
-          ) : null}
-
-          <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Notes for the proposal editor
-            <textarea
-              className="input mt-1 min-h-[80px]"
-              value={activePage.notes || ""}
-              onChange={(event) => handleFieldChange("notes", event.target.value)}
-            />
-          </label>
+          </div>
+        </div>
+        <div className="space-y-4">
+          {placeholderPanel}
+          {previewPanel}
         </div>
       </div>
     );

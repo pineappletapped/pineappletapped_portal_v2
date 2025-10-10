@@ -17,6 +17,22 @@ export interface KitRoutingSettings {
   updatedAt?: string | null;
 }
 
+export interface RoutingCoverage {
+  type: 'franchise' | 'hq';
+  franchiseId?: string | null;
+  label?: string | null;
+}
+
+export interface RoutingAttemptSummary {
+  key: RoutingStageKey;
+  label: string;
+  requiresKit: boolean;
+  autoConfirm: boolean;
+  ownerType: 'company' | 'franchise' | 'user';
+  franchiseId: string | null;
+  description: string | null;
+}
+
 interface StageMeta {
   name: string;
   defaultLabel: string;
@@ -222,4 +238,67 @@ export function sanitiseKitRoutingSettings(settings: KitRoutingSettings): KitRou
     hqFlow: cleanFlow(settings.hqFlow, DEFAULT_KIT_ROUTING_SETTINGS.hqFlow),
     updatedAt: settings.updatedAt ?? null,
   };
+}
+
+export function resolveRoutingAttempts(
+  settings: KitRoutingSettings,
+  coverage: RoutingCoverage,
+): RoutingAttemptSummary[] {
+  const flowKey: "franchiseFlow" | "hqFlow" =
+    coverage.type === "franchise" && coverage.franchiseId ? "franchiseFlow" : "hqFlow";
+  const configuredFlow = flowKey === "franchiseFlow" ? settings.franchiseFlow : settings.hqFlow;
+  const attempts: RoutingAttemptSummary[] = [];
+
+  const addStage = (stage: RoutingStageConfig) => {
+    const meta = ROUTING_STAGE_META[stage.key];
+    if (!meta) return;
+    if (flowKey === "hqFlow" && stage.key !== "hq") return;
+    if (meta.ownerType !== "company" && (!coverage.franchiseId || coverage.type !== "franchise")) {
+      return;
+    }
+    if (attempts.some((entry) => entry.key === stage.key)) {
+      return;
+    }
+    const label = resolveStageLabel(stage, {
+      coverageLabel: coverage.label ?? null,
+      fallback: meta.defaultLabel,
+    });
+    const franchiseId =
+      meta.ownerType === "franchise" || meta.ownerType === "user" ? coverage.franchiseId ?? null : null;
+    attempts.push({
+      key: stage.key,
+      label,
+      requiresKit: stage.requiresKit === true,
+      autoConfirm: stage.autoConfirm === true,
+      ownerType: meta.ownerType,
+      franchiseId,
+      description: stage.description?.length ? stage.description : null,
+    });
+  };
+
+  const activeStages = configuredFlow.filter((stage) => stage.enabled !== false);
+  activeStages.forEach((stage) => addStage(stage));
+
+  if (attempts.length === 0) {
+    const allDisabled = configuredFlow.length > 0 && configuredFlow.every((stage) => stage.enabled === false);
+    if (allDisabled) {
+      const fallbackKey: RoutingStageKey =
+        coverage.type === "franchise" && coverage.franchiseId ? "franchise_primary" : "hq";
+      const fallbackFlow =
+        flowKey === "franchiseFlow"
+          ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
+          : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
+      const fallbackStage =
+        fallbackFlow.find((stage) => stage.key === fallbackKey) ?? createDefaultStage(fallbackKey);
+      addStage({ ...fallbackStage, enabled: true });
+    } else {
+      const fallbackFlow =
+        flowKey === "franchiseFlow"
+          ? DEFAULT_KIT_ROUTING_SETTINGS.franchiseFlow
+          : DEFAULT_KIT_ROUTING_SETTINGS.hqFlow;
+      fallbackFlow.forEach((stage) => addStage(stage));
+    }
+  }
+
+  return attempts;
 }

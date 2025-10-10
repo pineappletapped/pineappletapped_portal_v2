@@ -14,9 +14,8 @@ import {
   type ProductOrderFieldType,
 } from "@/lib/products";
 import { useCart } from "@/lib/cart";
-import { db, functions } from "@/lib/firebase";
+import { db, ensureFirebase } from "@/lib/firebase";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
 import {
   isOrganiserProgramEnabled,
   normaliseOrganiserId,
@@ -34,6 +33,13 @@ import {
   type PriceTierLevel,
   type PriceTiers,
 } from "@/lib/pricing";
+import {
+  DEFAULT_KIT_ROUTING_SETTINGS,
+  cloneKitRoutingSettings,
+  parseKitRoutingSettings,
+  resolveRoutingAttempts,
+  type KitRoutingSettings,
+} from "@/lib/kit-routing";
 
 interface ModifierOption {
   id: string;
@@ -849,6 +855,7 @@ export default function AddToCartWizard({
   const [coverage, setCoverage] = useState<CoverageAssignment | null>(null);
   const [coverageStatus, setCoverageStatus] = useState<CoverageStatus>("idle");
   const [coverageError, setCoverageError] = useState<string | null>(null);
+  const [kitRoutingSettings, setKitRoutingSettings] = useState<KitRoutingSettings | null>(null);
   const [campaignSlots, setCampaignSlots] = useState<CampaignSlotRecord[]>([]);
   const [campaignSlotStatus, setCampaignSlotStatus] =
     useState<CampaignSlotStatus>("idle");
@@ -859,6 +866,37 @@ export default function AddToCartWizard({
       setOverrideLocation(false);
     }
   }, [organiserActive]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await ensureFirebase();
+        if (cancelled || !db) {
+          if (!cancelled) {
+            setKitRoutingSettings(cloneKitRoutingSettings(DEFAULT_KIT_ROUTING_SETTINGS));
+          }
+          return;
+        }
+        const ref = doc(db, "settings", "kitRouting");
+        const snap = await getDoc(ref);
+        if (cancelled) {
+          return;
+        }
+        const parsed = snap.exists()
+          ? parseKitRoutingSettings(snap.data())
+          : cloneKitRoutingSettings(DEFAULT_KIT_ROUTING_SETTINGS);
+        setKitRoutingSettings(parsed);
+      } catch (err) {
+        console.error("Failed to load kit routing settings", err);
+        if (!cancelled) {
+          setKitRoutingSettings(cloneKitRoutingSettings(DEFAULT_KIT_ROUTING_SETTINGS));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const [availabilityOverrides, setAvailabilityOverrides] = useState<
     Record<string, ProductAvailabilityStatus>
@@ -1079,6 +1117,24 @@ export default function AddToCartWizard({
     }
     return { type: "hq", organisationId: null } satisfies ProductAvailabilityScope;
   }, [coverage, coverageStatus]);
+  const routingAttempts = useMemo(() => {
+    if (!coverage || coverageStatus !== "success") {
+      return [];
+    }
+    const settings = kitRoutingSettings ?? DEFAULT_KIT_ROUTING_SETTINGS;
+    return resolveRoutingAttempts(settings, {
+      type: coverage.type,
+      franchiseId: coverage.franchiseId,
+      label: coverage.label,
+    });
+  }, [coverage, coverageStatus, kitRoutingSettings]);
+  const skipAutomaticKitCheck = useMemo(() => {
+    if (!coverage || coverageStatus !== "success") {
+      return false;
+    }
+    const primary = routingAttempts[0];
+    return Boolean(primary && primary.requiresKit === false);
+  }, [coverage, coverageStatus, routingAttempts]);
   const announceSelection = useCallback(
     (startKey: string | null, span: number) => {
       if (!startKey) {
@@ -1783,26 +1839,107 @@ export default function AddToCartWizard({
       requestDateIso = new Date().toISOString();
     }
     setSubmitting(true);
-    setLiveMessage("Checking equipment availability");
+    setLiveMessage(
+      skipAutomaticKitCheck
+        ? "Routing to manual confirmation"
+        : "Checking equipment availability",
+    );
     try {
-      const reserve = httpsCallable(functions, "reserveKit");
-      const res: any = await reserve({
-        productId: product.id,
-        date: requestDateIso,
-        spanOverride: bookingSpan,
-        timeWindow,
-        coverage: coverage
-          ? {
-              type: coverage.type,
-              franchiseId: coverage.franchiseId,
-              territoryId: coverage.territoryId,
-              label: coverage.label,
-              territoryLabel: coverage.territoryLabel,
-              postalCode: coverage.postalCode,
-              matchType: coverage.matchType,
-            }
-          : null,
-      });
+      let reservePayload: any = null;
+
+      if (skipAutomaticKitCheck && routingAttempts.length > 0 && coverage) {
+        const selectBypassAttempt = () => routingAttempts[0] ?? null;
+        const manualAttempt =
+          routingAttempts.find((attempt) => attempt.requiresKit === false) ??
+          selectBypassAttempt();
+
+        if (manualAttempt) {
+          const coercedAttempt = manualAttempt.requiresKit
+            ? { ...manualAttempt, requiresKit: false }
+            : manualAttempt;
+          const manualStatus = coercedAttempt.autoConfirm ? "confirmed" : "pending";
+          reservePayload = {
+            conflicts: [],
+            kitItems: [],
+            rentalTotal: 0,
+            status: manualStatus,
+            missingStandards: [],
+            provider: {
+              level: coercedAttempt.key,
+              status: manualStatus,
+              label: coercedAttempt.label,
+              franchiseId:
+                coercedAttempt.ownerType === "company"
+                  ? null
+                  : coverage.franchiseId ?? null,
+              territoryId: coverage.territoryId ?? null,
+              requiresKit: false,
+              autoConfirm: coercedAttempt.autoConfirm,
+              description: coercedAttempt.description ?? null,
+            },
+          };
+        }
+      }
+
+      if (!reservePayload) {
+        const response = await fetch("/api/reserve-kit", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          credentials: "same-origin",
+          body: JSON.stringify({
+            productId: product.id,
+            date: requestDateIso,
+            spanOverride: bookingSpan,
+            timeWindow: timeWindow ?? null,
+            coverage: coverage
+              ? {
+                  type: coverage.type,
+                  franchiseId: coverage.franchiseId,
+                  territoryId: coverage.territoryId,
+                  label: coverage.label,
+                  territoryLabel: coverage.territoryLabel,
+                  postalCode: coverage.postalCode,
+                  matchType: coverage.matchType,
+                }
+              : null,
+            skipKitCheck: skipAutomaticKitCheck,
+          }),
+        });
+
+        const responseText = await response.text();
+        let parsed: any = null;
+
+        if (responseText) {
+          try {
+            parsed = JSON.parse(responseText);
+          } catch (parseError) {
+            throw {
+              code: "invalid-response",
+              message: "Kit availability response was not valid JSON.",
+              details: (parseError as Error)?.message ?? null,
+            } as FunctionsError;
+          }
+        }
+
+        if (!response.ok) {
+          const errorMessage =
+            (parsed && typeof parsed.error === "string" && parsed.error) ||
+            "reserve-kit-error";
+          const errorCode =
+            (parsed && typeof parsed.code === "string" && parsed.code) ||
+            "reserve-kit-error";
+          throw {
+            code: errorCode,
+            message: errorMessage,
+            details: parsed?.details ?? null,
+          } as FunctionsError;
+        }
+
+        reservePayload =
+          parsed && typeof parsed === "object" && "data" in parsed ? (parsed as any).data : parsed;
+      }
       const {
         conflicts = [],
         kitItems = [],
@@ -1810,7 +1947,7 @@ export default function AddToCartWizard({
         status,
         missingStandards = [],
         provider: providerInfo = null,
-      } = res.data || {};
+      } = (reservePayload && typeof reservePayload === "object" ? reservePayload : {}) as any;
       const reservationStatus = status === "pending" ? "pending" : "confirmed";
       if (reservationStatus === "confirmed" && conflicts.length > 0) {
         const conflictNames = conflicts
@@ -1905,6 +2042,7 @@ export default function AddToCartWizard({
         id: product.id,
         name: product.name,
         price,
+        category: product.category ?? null,
         date:
           showDateKey ||
           startDateKey ||

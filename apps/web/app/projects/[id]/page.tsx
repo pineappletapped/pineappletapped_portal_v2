@@ -26,6 +26,13 @@ import VenueMap from '@/components/VenueMap';
 import AssetReleaseBadge, { getAssetReleaseMeta } from '@/components/AssetReleaseBadge';
 import { summariseKitItems } from '@/lib/kit-summary';
 import type { Venue } from '@/lib/venues';
+import {
+  createCustomRiskDocumentsSample,
+  createGenericRiskDocumentsSample,
+  resolveRiskDocumentsForProject,
+  RISK_DOCUMENT_KIND_LABELS,
+} from '@/lib/risk-documents';
+import type { ResolvedRiskDocument } from '@/lib/risk-documents';
 
 const kitDateFormatter = new Intl.DateTimeFormat('en-GB', {
   day: 'numeric',
@@ -67,6 +74,10 @@ const brandGuidelinesTimestampFormatter = new Intl.DateTimeFormat('en-GB', {
   timeStyle: 'short',
 });
 
+const riskDocumentDateFormatter = new Intl.DateTimeFormat('en-GB', {
+  dateStyle: 'medium',
+});
+
 const BRAND_COLOR_LABELS: Record<keyof BrandGuidelineColors, string> = {
   primary: 'Primary',
   secondary: 'Secondary',
@@ -82,6 +93,14 @@ const coerceNumber = (value: any, fallback = 0) => {
 
 const parseIsoString = (value: unknown): Date | null => {
   if (typeof value !== 'string') return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const parseRiskDocumentDate = (value: string | null | undefined): Date | null => {
+  if (!value) {
+    return null;
+  }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
@@ -435,6 +454,8 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [savingVenue, setSavingVenue] = useState(false);
   const [order, setOrder] = useState<any | null>(null);
   const kitSummary = useMemo(() => summariseKitItems(order?.kitItems ?? []), [order?.kitItems]);
+  const genericRiskLibrary = useMemo(() => createGenericRiskDocumentsSample(), []);
+  const customRiskLibrary = useMemo(() => createCustomRiskDocumentsSample(), []);
   const deliverableAssets = useMemo(
     () =>
       assets.filter(
@@ -464,6 +485,31 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       })
     : false;
   const showFlightPlanSection = hasDroneAssignments || hasDroneLineItem || flightPlanAssets.length > 0;
+  const clientRiskDocuments = useMemo<ResolvedRiskDocument[]>(() => {
+    if (!project?.id) {
+      return [];
+    }
+    const productIds = Array.isArray(order?.items)
+      ? (order.items as any[])
+          .map((item) => (item && typeof item.id === 'string' ? item.id : null))
+          .filter((id): id is string => Boolean(id))
+      : [];
+    const categories = Array.isArray(order?.items)
+      ? (order.items as any[])
+          .map((item) => (item && typeof item.category === 'string' ? item.category : null))
+          .filter((category): category is string => Boolean(category))
+      : [];
+    return resolveRiskDocumentsForProject({
+      projectId: project.id,
+      projectName: typeof project.name === 'string' ? project.name : null,
+      projectReference: typeof project.reference === 'string' ? project.reference : null,
+      productIds,
+      categories,
+      audience: 'client',
+      genericLibrary: genericRiskLibrary,
+      customLibrary: customRiskLibrary,
+    });
+  }, [customRiskLibrary, genericRiskLibrary, order?.items, project?.id, project?.name, project?.reference]);
 
   // Signature request
   const [pendingSignature, setPendingSignature] = useState<any | null>(null);
@@ -1109,6 +1155,99 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
           <p className="text-sm text-gray-600">
             No equipment reservations are linked to this project yet.
           </p>
+        )}
+      </div>
+      <div className="card">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-base font-semibold text-gray-900">Risk assessments &amp; procedures</h2>
+          <span className="text-xs uppercase tracking-wide text-gray-500">
+            {clientRiskDocuments.length} {clientRiskDocuments.length === 1 ? 'document' : 'documents'}
+          </span>
+        </div>
+        {clientRiskDocuments.length === 0 ? (
+          <p className="text-sm text-gray-600">
+            We’ll publish the relevant RAMS here once HQ links them to your booking.
+          </p>
+        ) : (
+          <ul className="grid gap-3">
+            {clientRiskDocuments.map((doc) => {
+              const reviewedDate = parseRiskDocumentDate(doc.lastReviewedOn);
+              const reviewLabel = reviewedDate
+                ? riskDocumentDateFormatter.format(reviewedDate)
+                : 'Recently reviewed';
+              return (
+                <li key={doc.id} className="rounded border border-gray-200 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-gray-900">{doc.title}</p>
+                      <p className="text-xs uppercase tracking-wide text-gray-500">
+                        {RISK_DOCUMENT_KIND_LABELS[doc.kind]} · {doc.task}
+                        {doc.type === 'custom' && doc.projectName ? ` · ${doc.projectName}` : ''}
+                      </p>
+                      <p className="text-sm text-gray-600">{doc.summary}</p>
+                    </div>
+                    <div className="flex flex-col items-end gap-1 text-xs text-gray-500">
+                      <span>{reviewLabel}</span>
+                      <span>{doc.owner === 'hq' ? 'Issued by HQ' : 'Provided by franchise team'}</span>
+                    </div>
+                  </div>
+                  {doc.appliesToProducts.length > 0 ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {doc.appliesToProducts.map((product) => (
+                        <span
+                          key={`${doc.id}-${product.id}`}
+                          className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-medium text-slate-700"
+                        >
+                          {product.name}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-gray-500">Key hazards</p>
+                      <ul className="mt-1 list-disc space-y-1 pl-4 text-sm text-gray-700">
+                        {doc.hazards.map((hazard, index) => (
+                          <li key={`${doc.id}-hazard-${index}`}>{hazard}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-gray-500">Controls in place</p>
+                      <ul className="mt-1 list-disc space-y-1 pl-4 text-sm text-gray-700">
+                        {doc.controls.map((control, index) => (
+                          <li key={`${doc.id}-control-${index}`}>{control}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-blue-600">
+                    <Link href={doc.documentUrl || '#'} target="_blank" rel="noreferrer" className="font-medium underline">
+                      View document
+                    </Link>
+                    <span
+                      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                        doc.status === 'in-review'
+                          ? 'bg-amber-50 text-amber-700'
+                          : doc.status === 'archived'
+                            ? 'bg-gray-100 text-gray-600'
+                            : 'bg-emerald-50 text-emerald-700'
+                      }`}
+                    >
+                      {doc.status === 'in-review'
+                        ? 'In review'
+                        : doc.status === 'archived'
+                          ? 'Archived'
+                          : 'Current'}
+                    </span>
+                  </div>
+                  {doc.audienceNotes ? (
+                    <p className="mt-2 text-xs text-gray-500">{doc.audienceNotes}</p>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
         )}
       </div>
       <div className="card">

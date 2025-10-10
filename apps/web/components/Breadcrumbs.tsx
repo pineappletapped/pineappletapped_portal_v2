@@ -23,6 +23,7 @@ const LABELS: Record<string, string> = {
   crm: 'CRM',
   orders: 'Orders',
   projects: 'Projects',
+  'risk-assessments': 'Risk & Safety',
   'request-quote': 'Request Quote',
   'client-logos': 'Client Logos',
   analytics: 'Analytics',

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { db } from "@/lib/firebase";
+import AdminWorkspaceLayout, { AdminSection } from "@/components/admin/AdminWorkspaceLayout";
 import {
   addDoc,
   collection,
@@ -207,8 +208,31 @@ export default function AdminOrdersPage() {
     })();
   }, [allowed, guardLoading]);
 
-  if (guardLoading || loading) return <p>Loading…</p>;
-  if (!allowed) return <p>You do not have permission to view orders.</p>;
+  if (guardLoading || loading) {
+    return (
+      <AdminWorkspaceLayout
+        title="Order management"
+        description="Review customer orders, routing assignments, and payment status across the network."
+      >
+        <AdminSection>
+          <p className="text-sm text-gray-600">Loading orders…</p>
+        </AdminSection>
+      </AdminWorkspaceLayout>
+    );
+  }
+
+  if (!allowed) {
+    return (
+      <AdminWorkspaceLayout
+        title="Order management"
+        description="Review customer orders, routing assignments, and payment status across the network."
+      >
+        <AdminSection tone="danger">
+          <p className="text-sm font-medium text-rose-700">You do not have permission to view orders.</p>
+        </AdminSection>
+      </AdminWorkspaceLayout>
+    );
+  }
 
   const statusOptions = [
     "pending",
@@ -242,464 +266,446 @@ export default function AdminOrdersPage() {
   });
 
   return (
-    <div className="grid gap-4">
-      <h1 className="text-xl font-semibold">Order Management</h1>
-      <div className="grid w-full gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <label className="grid gap-1 text-sm">
-          <span>Status</span>
-          <select
-            className="input"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-          >
-            <option value="all">All</option>
-            {statuses.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="grid gap-1 text-sm">
-          <span>Email</span>
-          <input
-            className="input"
-            placeholder="Filter by email"
-            value={emailFilter}
-            onChange={(e) => setEmailFilter(e.target.value)}
-          />
-        </label>
-        <label className="grid gap-1 text-sm">
-          <span>Start date</span>
-          <input
-            type="date"
-            className="input"
-            value={startDate}
-            onChange={(e) => setStartDate(e.target.value)}
-          />
-        </label>
-        <label className="grid gap-1 text-sm">
-          <span>End date</span>
-          <input
-            type="date"
-            className="input"
-            value={endDate}
-            onChange={(e) => setEndDate(e.target.value)}
-          />
-        </label>
-      </div>
-      {filtered.length === 0 ? (
-        <p>No orders found.</p>
-      ) : (
-        <table className="w-full text-sm border">
-          <thead>
-            <tr className="bg-gray-100 text-left">
-              <th className="p-2">ID</th>
-              <th className="p-2">Customer</th>
-              <th className="p-2">Status</th>
-              <th className="p-2">Franchise Routing</th>
-              <th className="p-2">Created</th>
-              <th className="p-2">Project</th>
-              <th className="p-2">Items</th>
-              <th className="p-2">Payments</th>
-              <th className="p-2">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((o) => {
-              const name =
-                o.customerName ||
-                o.user?.displayName ||
-                o.user?.email ||
-                "-";
-              const company = o.companyName || o.user?.companyName;
-              const assignment = o.franchiseAssignment as
-                | {
-                    status?: string;
-                    matchType?: string;
-                    franchiseId?: string | null;
-                    territoryId?: string | null;
-                    territoryLabel?: string;
-                    territoryPostalCode?: string;
-                    normalizedPostalCode?: string;
-                    inputPostalCode?: string;
-                    hqFallback?: boolean;
-                  }
-                | null;
-              const assignmentStatus =
-                typeof assignment?.status === "string" ? (assignment.status as string) : null;
-              const assignmentStatusLabel =
-                assignmentStatus !== null ? assignmentStatus.replace(/_/g, " ") : null;
-              const assignmentMatchType = assignment?.matchType || null;
-              const franchiseId =
-                (o.franchiseId as string | undefined) ||
-                (assignment?.franchiseId as string | undefined) ||
-                null;
-              const franchiseDetails = franchiseId
-                ? franchiseMap[franchiseId]
-                : undefined;
-              const franchiseName =
-                franchiseDetails?.name ||
-                franchiseDetails?.code ||
-                franchiseId ||
-                null;
-              const territoryLabel =
-                assignment?.territoryLabel || assignment?.territoryPostalCode || null;
-              const hasTerritoryMatch = Boolean(
-                assignment?.territoryId || assignment?.territoryPostalCode || assignment?.territoryLabel
-              );
-              const isHqIntake =
-                !franchiseId &&
-                (assignmentStatus === "hq_unassigned" || assignment?.hqFallback === true ||
-                  (assignmentStatus === "matched" && hasTerritoryMatch));
-              const assignedOperator =
-                (o.franchiseAssignedUser?.displayName as string | undefined) ||
-                (o.franchiseAssignedUser?.email as string | undefined) ||
-                null;
-              const inputPostalCode =
-                (o.clientPostalCode as string | undefined) ||
-                assignment?.inputPostalCode ||
-                assignment?.normalizedPostalCode ||
-                null;
-              const royalty = (o.royalty as any) || null;
-              const royaltySource =
-                (royalty?.source as string | undefined) ||
-                (o.royaltySource as string | undefined) ||
-                (o.leadSource as string | undefined) ||
-                'hq';
-              const royaltyLabel = royaltySource === 'franchisee' ? 'Franchise-sourced' : 'HQ-sourced';
-              const leadSourceDescription = describeLeadSource(
-                (o.leadSource as string | undefined) || royaltySource
-              );
-              const royaltyPercentage =
-                typeof royalty?.percentage === 'number'
-                  ? royalty.percentage
-                  : typeof o.royaltyPercentage === 'number'
-                    ? o.royaltyPercentage
-                    : null;
-              const royaltyOrderIndex =
-                typeof royalty?.orderIndex === 'number'
-                  ? royalty.orderIndex
-                  : typeof o.clientRoyaltyOrderIndex === 'number'
-                    ? o.clientRoyaltyOrderIndex
-                    : null;
-              const royaltyTier = royalty?.tier as
-                | { minOrder?: number | null; maxOrder?: number | null }
-                | undefined;
-              const orderItems = Array.isArray(o.items)
-                ? (o.items as Array<Record<string, any>>)
-                : Array.isArray(o.budgetItems)
-                  ? (o.budgetItems as Array<Record<string, any>>)
-                  : [];
-              const projectId =
-                typeof o.projectId === "string" && o.projectId.trim().length > 0
-                  ? o.projectId
-                  : null;
-              const paymentSummary = (o.paymentSummary as Record<string, any> | undefined) || {};
-              const depositSummary = (paymentSummary.deposit as Record<string, any> | undefined) || {};
-              const balanceSummary = (paymentSummary.balance as Record<string, any> | undefined) || {};
-              const depositStatus = normaliseStatus(o.depositStatus) ?? normaliseStatus(depositSummary.status);
-              const balanceStatus = normaliseStatus(o.balanceStatus) ?? normaliseStatus(balanceSummary.status);
-              const depositPaidAt = depositSummary.paidAt ?? o.depositPaidAt;
-              const balancePaidAt = balanceSummary.paidAt ?? o.balancePaidAt;
-              const lastPayment = (o.lastStripePayment as Record<string, any> | undefined) || null;
-              const checkoutSessionsMap = o.stripeCheckoutSessions as Record<string, any> | undefined;
-              const checkoutSessions = checkoutSessionsMap ? Object.values(checkoutSessionsMap) : [];
-              const latestSession =
-                checkoutSessions
-                  .map((entry) => entry || {})
-                  .sort((a, b) => {
-                    const aDate =
-                      toDate(a.updatedAt) ?? toDate(a.completedAt) ?? toDate(a.createdAt);
-                    const bDate =
-                      toDate(b.updatedAt) ?? toDate(b.completedAt) ?? toDate(b.createdAt);
-                    const aMillis = aDate ? aDate.getTime() : 0;
-                    const bMillis = bDate ? bDate.getTime() : 0;
-                    return bMillis - aMillis;
-                  })[0] ?? null;
-              return (
-                <tr key={o.id} className="border-t">
-                  <td className="p-2">{o.id}</td>
-                  <td className="p-2">
-                    {o.userId ? (
-                      <Link
-                        href={`/admin/users?uid=${o.userId}`}
-                        className="text-orange underline"
-                      >
-                        {name}
-                      </Link>
-                    ) : (
-                      name
-                    )}
-                    {company && (
-                      <div className="text-xs text-gray-500">{company}</div>
-                    )}
-                  </td>
-                  <td className="p-2">
-                    <select
-                      className="input capitalize"
-                      value={o.status || "pending"}
-                      onChange={(e) => handleStatusChange(o, e.target.value)}
-                    >
-                      {statusOptions.map((s) => (
-                        <option key={s} value={s}>
-                          {s}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="p-2 align-top">
-                    {franchiseName ? (
-                      <div>
-                        <div className="font-medium">{franchiseName}</div>
-                        {territoryLabel && (
-                          <div className="text-xs text-gray-500">
-                            Territory: {territoryLabel}
-                          </div>
-                        )}
-                        {assignedOperator && (
-                          <div className="text-xs text-gray-500">
-                            Operator: {assignedOperator}
-                          </div>
-                        )}
-                      </div>
-                    ) : isHqIntake ? (
-                      <div className="grid gap-1">
-                        <div className="font-medium text-sm">
-                          {HQ_UNASSIGNED_TERRITORY_LABEL}
-                        </div>
-                        {territoryLabel && (
-                          <div className="text-xs text-gray-500">
-                            Territory: {territoryLabel}
-                          </div>
-                        )}
-                        <div className="text-xs text-gray-500">
-                          HQ can fulfil internally or assign to a franchisee with the 25% out-of-territory rate.
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-xs text-gray-500">
-                        {assignmentStatus === "unmatched"
-                          ? "No territory match"
-                          : "Not routed"}
-                      </div>
-                    )}
-                    {inputPostalCode && (
-                      <div className="text-[10px] uppercase text-gray-400 mt-1">
-                        Postcode: {inputPostalCode}
-                      </div>
-                    )}
-                    {assignmentStatusLabel && (
-                      <div className="text-[10px] uppercase text-gray-400">
-                        {assignmentStatusLabel}
-                        {assignmentMatchType ? ` · ${assignmentMatchType}` : ""}
-                      </div>
-                    )}
-                    <div className="mt-2 text-xs text-gray-500">
-                      Lead source: {leadSourceDescription}
-                    </div>
-                    {(royaltyPercentage !== null || royaltyOrderIndex !== null) && (
-                      <div className="mt-2 text-xs text-gray-500">
-                        Royalty: {royaltyPercentage !== null ? `${royaltyPercentage}%` : '—'} · {royaltyLabel}
-                        {royaltyOrderIndex ? ` · order #${royaltyOrderIndex}` : ''}
-                        {royaltyTier?.minOrder
-                          ? royaltyTier.maxOrder != null
-                            ? ` · tier ${royaltyTier.minOrder}-${royaltyTier.maxOrder}`
-                            : ` · tier ${royaltyTier.minOrder}+`
-                          : ''}
-                      </div>
-                    )}
-                  </td>
-                  <td className="p-2">
-                    {o.createdAt?.toDate
-                      ? o.createdAt.toDate().toLocaleDateString()
-                      : "-"}
-                  </td>
-                  <td className="p-2">
-                    {projectId ? (
-                      <Link
-                        href={`/projects/${projectId}`}
-                        className="text-orange underline"
-                      >
-                        View
-                      </Link>
-                    ) : (
-                      "-"
-                    )}
-                  </td>
-                  <td className="p-2 align-top">
-                    {orderItems.length === 0 ? (
-                      <span className="text-xs text-gray-500">No items</span>
-                    ) : (
-                      <ul className="grid gap-2">
-                        {orderItems.map((item, index) => {
-                          const itemId =
-                            typeof item?.id === "string" && item.id.trim().length > 0
-                              ? item.id
-                              : null;
-                          const quantity =
-                            typeof item?.quantity === "number" && Number.isFinite(item.quantity)
-                              ? item.quantity
-                              : null;
-                          const price =
-                            typeof item?.price === "number" && Number.isFinite(item.price)
-                              ? item.price
-                              : null;
-                          const rentalTotal =
-                            typeof item?.rentalTotal === "number" && Number.isFinite(item.rentalTotal)
-                              ? item.rentalTotal
-                              : null;
-                          const description =
-                            typeof item?.description === "string" ? item.description : null;
-                          const deliveryLink = projectId
-                            ? `/admin/deliveries/new?projectId=${encodeURIComponent(projectId)}${
-                                itemId ? `&itemId=${encodeURIComponent(itemId)}` : ""
-                              }${item?.name ? `&itemName=${encodeURIComponent(item.name)}` : ""}&orderId=${encodeURIComponent(o.id)}`
-                            : null;
-                          return (
-                            <li key={itemId || `${o.id}-item-${index}`} className="space-y-1">
-                              <div className="font-medium text-sm text-gray-900">
-                                {item?.name || "Line item"}
-                                {quantity ? (
-                                  <span className="text-xs text-gray-500"> · ×{quantity}</span>
-                                ) : null}
-                              </div>
-                              {description ? (
-                                <div className="text-xs text-gray-500 whitespace-pre-line">
-                                  {description}
-                                </div>
-                              ) : null}
-                              {(price || rentalTotal) && (
-                                <div className="text-xs text-gray-500">
-                                  {price ? `£${price.toFixed(2)}` : null}
-                                  {price && rentalTotal ? " · " : null}
-                                  {rentalTotal ? `Rental £${rentalTotal.toFixed(2)}` : null}
-                                </div>
-                              )}
-                              <div className="flex flex-wrap gap-2 text-xs">
-                                {projectId ? (
-                                  <Link
-                                    href={`/projects/${projectId}`}
-                                    className="text-orange underline"
-                                  >
-                                    Open project
-                                  </Link>
-                                ) : (
-                                  <span className="text-gray-400">Project pending</span>
-                                )}
-                                {deliveryLink ? (
-                                  <Link href={deliveryLink} className="btn btn-xs">
-                                    Delivery form
-                                  </Link>
-                                ) : null}
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    )}
-                  </td>
-                  <td className="p-2 align-top">
-                    <div className="space-y-2 text-xs text-gray-600">
-                      <div>
-                        <div className="font-semibold text-gray-800">Deposit</div>
-                        <div>
-                          {depositStatus === "paid"
-                            ? "Paid"
-                            : formatStatusLabel(depositStatus)}
-                          {formatDate(depositPaidAt)
-                            ? ` · ${formatDate(depositPaidAt)}`
-                            : ""}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="font-semibold text-gray-800">Balance</div>
-                        <div>
-                          {balanceStatus === "paid"
-                            ? "Paid"
-                            : formatStatusLabel(balanceStatus)}
-                          {formatDate(balancePaidAt)
-                            ? ` · ${formatDate(balancePaidAt)}`
-                            : ""}
-                        </div>
-                      </div>
-                      {lastPayment ? (
-                        <div className="space-y-1 rounded border border-slate-200 bg-white p-2 text-xs text-gray-600">
-                          <div className="font-medium text-gray-800">
-                            {formatStatusLabel(normaliseStatus(lastPayment.type), "Stripe")} payment
-                          </div>
-                          <div>
-                            {typeof lastPayment.amount === "number"
-                              ? `£${lastPayment.amount.toFixed(2)}`
-                              : "Amount pending"}
-                            {typeof lastPayment.currency === "string" && lastPayment.currency
-                              ? ` ${(lastPayment.currency as string).toUpperCase()}`
-                              : ""}
-                          </div>
-                          {formatDateTime(lastPayment.recordedAt) ? (
-                            <div>Recorded {formatDateTime(lastPayment.recordedAt)}</div>
-                          ) : null}
-                          {typeof lastPayment.receiptUrl === "string" && lastPayment.receiptUrl ? (
+    <AdminWorkspaceLayout
+      title="Order management"
+      description="Track customer purchases, update fulfilment status, and launch follow-on projects as payments clear."
+    >
+      <AdminSection title="Filters" description="Narrow the order list by payment state or booking window.">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <label className="grid gap-1 text-sm text-gray-700">
+            <span className="font-medium text-gray-900">Status</span>
+            <select
+              className="input"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+            >
+              <option value="all">All</option>
+              {statuses.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm text-gray-700">
+            <span className="font-medium text-gray-900">Email</span>
+            <input
+              className="input"
+              placeholder="Filter by email"
+              value={emailFilter}
+              onChange={(e) => setEmailFilter(e.target.value)}
+            />
+          </label>
+          <label className="grid gap-1 text-sm text-gray-700">
+            <span className="font-medium text-gray-900">Start date</span>
+            <input
+              type="date"
+              className="input"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+            />
+          </label>
+          <label className="grid gap-1 text-sm text-gray-700">
+            <span className="font-medium text-gray-900">End date</span>
+            <input
+              type="date"
+              className="input"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+            />
+          </label>
+        </div>
+      </AdminSection>
+      <AdminSection
+        title="Orders"
+        description="Latest bookings with routing details, payment milestones, and associated projects."
+      >
+        {filtered.length === 0 ? (
+          <p className="text-sm text-gray-600">No orders match the selected filters.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200 text-sm">
+              <thead className="bg-gray-50 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
+                <tr>
+                  <th className="px-4 py-3">ID</th>
+                  <th className="px-4 py-3">Customer</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Franchise routing</th>
+                  <th className="px-4 py-3">Created</th>
+                  <th className="px-4 py-3">Project</th>
+                  <th className="px-4 py-3">Items</th>
+                  <th className="px-4 py-3">Payments</th>
+                  <th className="px-4 py-3">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {filtered.map((o) => {
+                  const name =
+                    o.customerName ||
+                    o.user?.displayName ||
+                    o.user?.email ||
+                    "-";
+                  const company = o.companyName || o.user?.companyName;
+                  const assignment = o.franchiseAssignment as
+                    | {
+                        status?: string;
+                        matchType?: string;
+                        franchiseId?: string | null;
+                        territoryId?: string | null;
+                        territoryLabel?: string;
+                        territoryPostalCode?: string;
+                        normalizedPostalCode?: string;
+                        inputPostalCode?: string;
+                        hqFallback?: boolean;
+                      }
+                    | null;
+                  const assignmentStatus =
+                    typeof assignment?.status === "string" ? (assignment.status as string) : null;
+                  const assignmentStatusLabel =
+                    assignmentStatus !== null ? assignmentStatus.replace(/_/g, " ") : null;
+                  const assignmentMatchType = assignment?.matchType || null;
+                  const franchiseId =
+                    (o.franchiseId as string | undefined) ||
+                    (assignment?.franchiseId as string | undefined) ||
+                    null;
+                  const franchiseDetails = franchiseId ? franchiseMap[franchiseId] : undefined;
+                  const franchiseName =
+                    franchiseDetails?.name || franchiseDetails?.code || franchiseId || null;
+                  const territoryLabel =
+                    assignment?.territoryLabel || assignment?.territoryPostalCode || null;
+                  const hasTerritoryMatch = Boolean(
+                    assignment?.territoryId || assignment?.territoryPostalCode || assignment?.territoryLabel
+                  );
+                  const isHqIntake =
+                    !franchiseId &&
+                    (assignmentStatus === "hq_unassigned" || assignment?.hqFallback === true ||
+                      (assignmentStatus === "matched" && hasTerritoryMatch));
+                  const assignedOperator =
+                    (o.franchiseAssignedUser?.displayName as string | undefined) ||
+                    (o.franchiseAssignedUser?.email as string | undefined) ||
+                    null;
+                  const inputPostalCode =
+                    (o.clientPostalCode as string | undefined) ||
+                    assignment?.inputPostalCode ||
+                    assignment?.normalizedPostalCode ||
+                    null;
+                  const royalty = (o.royalty as any) || null;
+                  const royaltySource =
+                    (royalty?.source as string | undefined) ||
+                    (o.royaltySource as string | undefined) ||
+                    (o.leadSource as string | undefined) ||
+                    "hq";
+                  const royaltyLabel = royaltySource === "franchisee" ? "Franchise-sourced" : "HQ-sourced";
+                  const leadSourceDescription = describeLeadSource(
+                    (o.leadSource as string | undefined) || royaltySource
+                  );
+                  const royaltyPercentage =
+                    typeof royalty?.percentage === "number"
+                      ? royalty.percentage
+                      : typeof o.royaltyPercentage === "number"
+                        ? o.royaltyPercentage
+                        : null;
+                  const royaltyOrderIndex =
+                    typeof royalty?.orderIndex === "number"
+                      ? royalty.orderIndex
+                      : typeof o.clientRoyaltyOrderIndex === "number"
+                        ? o.clientRoyaltyOrderIndex
+                        : null;
+                  const royaltyTier = royalty?.tier as
+                    | { minOrder?: number | null; maxOrder?: number | null }
+                    | undefined;
+                  const orderItems = Array.isArray(o.items)
+                    ? (o.items as Array<Record<string, any>>)
+                    : Array.isArray(o.budgetItems)
+                      ? (o.budgetItems as Array<Record<string, any>>)
+                      : [];
+                  const projectId =
+                    typeof o.projectId === "string" && o.projectId.trim().length > 0
+                      ? o.projectId
+                      : null;
+                  const paymentSummary = (o.paymentSummary as Record<string, any> | undefined) || {};
+                  const depositSummary = (paymentSummary.deposit as Record<string, any> | undefined) || {};
+                  const balanceSummary = (paymentSummary.balance as Record<string, any> | undefined) || {};
+                  const depositStatus = normaliseStatus(o.depositStatus) ?? normaliseStatus(depositSummary.status);
+                  const balanceStatus = normaliseStatus(o.balanceStatus) ?? normaliseStatus(balanceSummary.status);
+                  const depositPaidAt = depositSummary.paidAt ?? o.depositPaidAt;
+                  const balancePaidAt = balanceSummary.paidAt ?? o.balancePaidAt;
+                  const lastPayment = (o.lastStripePayment as Record<string, any> | undefined) || null;
+                  const checkoutSessionsMap = o.stripeCheckoutSessions as Record<string, any> | undefined;
+                  const checkoutSessions = checkoutSessionsMap ? Object.values(checkoutSessionsMap) : [];
+                  const latestSession =
+                    checkoutSessions
+                      .map((entry) => entry || {})
+                      .sort((a, b) => {
+                        const aDate =
+                          toDate(a.updatedAt) ?? toDate(a.completedAt) ?? toDate(a.createdAt);
+                        const bDate =
+                          toDate(b.updatedAt) ?? toDate(b.completedAt) ?? toDate(b.createdAt);
+                        const aMillis = aDate ? aDate.getTime() : 0;
+                        const bMillis = bDate ? bDate.getTime() : 0;
+                        return bMillis - aMillis;
+                      })[0] ?? null;
+
+                  return (
+                    <tr key={o.id} className="align-top border-b last:border-b-0">
+                      <td className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                        {o.id}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="space-y-1">
+                          {o.userId ? (
                             <Link
-                              href={lastPayment.receiptUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-orange underline"
+                              href={`/admin/users?uid=${o.userId}`}
+                              className="font-medium text-orange-600 underline"
                             >
-                              Receipt
+                              {name}
                             </Link>
+                          ) : (
+                            <span className="font-medium text-gray-900">{name}</span>
+                          )}
+                          {company ? (
+                            <div className="text-xs text-gray-500">{company}</div>
                           ) : null}
                         </div>
-                      ) : null}
-                      {latestSession ? (
-                        <div className="space-y-1 rounded border border-dashed border-slate-300 bg-slate-50 p-2 text-xs text-gray-600">
-                          <div className="font-medium text-gray-800">
-                            Checkout
-                            {latestSession.type
-                              ? ` (${formatStatusLabel(normaliseStatus(latestSession.type), "")})`
-                              : ""}
-                          </div>
-                          <div>
-                            Status: {formatStatusLabel(normaliseStatus(latestSession.status), "Unknown")}
-                            {latestSession.paymentStatus
-                              ? ` · ${formatStatusLabel(normaliseStatus(latestSession.paymentStatus))}`
-                              : ""}
-                          </div>
-                          {formatDateTime(
-                            latestSession.updatedAt ?? latestSession.completedAt ?? latestSession.createdAt
-                          ) ? (
+                      </td>
+                      <td className="px-4 py-3">
+                        <select
+                          className="input w-full capitalize"
+                          value={o.status || "pending"}
+                          onChange={(e) => handleStatusChange(o, e.target.value)}
+                        >
+                          {statusOptions.map((s) => (
+                            <option key={s} value={s}>
+                              {s.replace(/_/g, " ")}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-4 py-3 text-sm">
+                        <div className="space-y-1">
+                          {franchiseName ? (
                             <div>
-                              Updated {formatDateTime(
-                                latestSession.updatedAt ?? latestSession.completedAt ?? latestSession.createdAt
-                              )}
+                              <div className="font-medium text-gray-900">{franchiseName}</div>
+                              {territoryLabel ? (
+                                <div className="text-xs text-gray-500">Territory: {territoryLabel}</div>
+                              ) : null}
+                              {assignedOperator ? (
+                                <div className="text-xs text-gray-500">Operator: {assignedOperator}</div>
+                              ) : null}
+                            </div>
+                          ) : isHqIntake ? (
+                            <div className="space-y-1">
+                              <div className="font-medium text-sm text-gray-900">
+                                {HQ_UNASSIGNED_TERRITORY_LABEL}
+                              </div>
+                              {territoryLabel ? (
+                                <div className="text-xs text-gray-500">Territory: {territoryLabel}</div>
+                              ) : null}
+                              <div className="text-xs text-gray-500">
+                                HQ can fulfil internally or assign to a franchisee with the 25% out-of-territory rate.
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-xs text-gray-500">
+                              {assignmentStatus === "unmatched" ? "No territory match" : "Not routed"}
+                            </div>
+                          )}
+                          {inputPostalCode ? (
+                            <div className="text-[10px] uppercase text-gray-400">Postcode: {inputPostalCode}</div>
+                          ) : null}
+                          {assignmentStatusLabel ? (
+                            <div className="text-[10px] uppercase text-gray-400">
+                              {assignmentStatusLabel}
+                              {assignmentMatchType ? ` · ${assignmentMatchType}` : ""}
                             </div>
                           ) : null}
-                          {typeof latestSession.url === "string" && latestSession.url ? (
-                            <Link
-                              href={latestSession.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-orange underline"
-                            >
-                              Open session
-                            </Link>
+                          <div className="text-xs text-gray-500">
+                            Lead source: {leadSourceDescription}
+                          </div>
+                          {(royaltyPercentage !== null || royaltyOrderIndex !== null) && (
+                            <div className="text-xs text-gray-500">
+                              Royalty: {royaltyPercentage !== null ? `${royaltyPercentage}%` : "—"} · {royaltyLabel}
+                              {royaltyOrderIndex ? ` · order #${royaltyOrderIndex}` : ""}
+                              {royaltyTier?.minOrder
+                                ? royaltyTier.maxOrder != null
+                                  ? ` · tier ${royaltyTier.minOrder}-${royaltyTier.maxOrder}`
+                                  : ` · tier ${royaltyTier.minOrder}+`
+                                : ""}
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-600">
+                        {o.createdAt?.toDate ? o.createdAt.toDate().toLocaleDateString() : "-"}
+                      </td>
+                      <td className="px-4 py-3 text-sm">
+                        {projectId ? (
+                          <Link href={`/projects/${projectId}`} className="text-orange-600 underline">
+                            View
+                          </Link>
+                        ) : (
+                          <span className="text-gray-400">-</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {orderItems.length === 0 ? (
+                          <span className="text-xs text-gray-500">No items</span>
+                        ) : (
+                          <ul className="grid gap-2 text-sm">
+                            {orderItems.map((item, index) => {
+                              const itemId =
+                                typeof item?.id === "string" && item.id.trim().length > 0 ? item.id : null;
+                              const quantity =
+                                typeof item?.quantity === "number" && Number.isFinite(item.quantity)
+                                  ? item.quantity
+                                  : null;
+                              const price =
+                                typeof item?.price === "number" && Number.isFinite(item.price) ? item.price : null;
+                              const rentalTotal =
+                                typeof item?.rentalTotal === "number" && Number.isFinite(item.rentalTotal)
+                                  ? item.rentalTotal
+                                  : null;
+                              const description =
+                                typeof item?.description === "string" ? item.description : null;
+                              const deliveryLink = projectId
+                                ? `/admin/deliveries/new?projectId=${encodeURIComponent(projectId)}${
+                                    itemId ? `&itemId=${encodeURIComponent(itemId)}` : ""
+                                  }${item?.name ? `&itemName=${encodeURIComponent(item.name)}` : ""}&orderId=${encodeURIComponent(o.id)}`
+                                : null;
+
+                              return (
+                                <li key={itemId || `${o.id}-item-${index}`} className="space-y-1">
+                                  <div className="font-medium text-gray-900">
+                                    {item?.name || "Line item"}
+                                    {quantity ? (
+                                      <span className="text-xs text-gray-500"> · ×{quantity}</span>
+                                    ) : null}
+                                  </div>
+                                  {description ? (
+                                    <div className="text-xs text-gray-500 whitespace-pre-line">{description}</div>
+                                  ) : null}
+                                  {(price || rentalTotal) && (
+                                    <div className="text-xs text-gray-500">
+                                      {price ? `£${price.toFixed(2)}` : null}
+                                      {price && rentalTotal ? " · " : null}
+                                      {rentalTotal ? `Rental £${rentalTotal.toFixed(2)}` : null}
+                                    </div>
+                                  )}
+                                  <div className="flex flex-wrap gap-2 text-xs">
+                                    {projectId ? (
+                                      <Link href={`/projects/${projectId}`} className="text-orange-600 underline">
+                                        Open project
+                                      </Link>
+                                    ) : (
+                                      <span className="text-gray-400">Project pending</span>
+                                    )}
+                                    {deliveryLink ? (
+                                      <Link href={deliveryLink} className="btn btn-xs">
+                                        Delivery form
+                                      </Link>
+                                    ) : null}
+                                  </div>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="space-y-3 text-xs text-gray-600">
+                          <div>
+                            <div className="font-semibold text-gray-800">Deposit</div>
+                            <div>
+                              {depositStatus === "paid" ? "Paid" : formatStatusLabel(depositStatus)}
+                              {formatDate(depositPaidAt) ? ` · ${formatDate(depositPaidAt)}` : ""}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="font-semibold text-gray-800">Balance</div>
+                            <div>
+                              {balanceStatus === "paid" ? "Paid" : formatStatusLabel(balanceStatus)}
+                              {formatDate(balancePaidAt) ? ` · ${formatDate(balancePaidAt)}` : ""}
+                            </div>
+                          </div>
+                          {lastPayment ? (
+                            <div className="space-y-1 rounded border border-slate-200 bg-white p-2">
+                              <div className="font-medium text-gray-800">
+                                {formatStatusLabel(normaliseStatus(lastPayment.type), "Stripe")} payment
+                              </div>
+                              <div>
+                                {typeof lastPayment.amount === "number"
+                                  ? `£${lastPayment.amount.toFixed(2)}`
+                                  : "Amount pending"}
+                                {typeof lastPayment.currency === "string" && lastPayment.currency
+                                  ? ` ${(lastPayment.currency as string).toUpperCase()}`
+                                  : ""}
+                              </div>
+                              {formatDateTime(lastPayment.recordedAt) ? (
+                                <div>Recorded {formatDateTime(lastPayment.recordedAt)}</div>
+                              ) : null}
+                              {typeof lastPayment.receiptUrl === "string" && lastPayment.receiptUrl ? (
+                                <Link
+                                  href={lastPayment.receiptUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-orange-600 underline"
+                                >
+                                  Receipt
+                                </Link>
+                              ) : null}
+                            </div>
+                          ) : null}
+                          {latestSession ? (
+                            <div className="space-y-1 rounded border border-dashed border-slate-300 bg-slate-50 p-2">
+                              <div className="font-medium text-gray-800">
+                                Checkout
+                                {latestSession.type
+                                  ? ` (${formatStatusLabel(normaliseStatus(latestSession.type), "")})`
+                                  : ""}
+                              </div>
+                              <div>
+                                Status: {formatStatusLabel(normaliseStatus(latestSession.status), "Unknown")}
+                                {latestSession.paymentStatus
+                                  ? ` · ${formatStatusLabel(normaliseStatus(latestSession.paymentStatus))}`
+                                  : ""}
+                              </div>
+                              {formatDateTime(
+                                latestSession.updatedAt ?? latestSession.completedAt ?? latestSession.createdAt
+                              ) ? (
+                                <div>
+                                  Updated {formatDateTime(
+                                    latestSession.updatedAt ?? latestSession.completedAt ?? latestSession.createdAt
+                                  )}
+                                </div>
+                              ) : null}
+                              {typeof latestSession.url === "string" && latestSession.url ? (
+                                <Link
+                                  href={latestSession.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-orange-600 underline"
+                                >
+                                  Open session
+                                </Link>
+                              ) : null}
+                            </div>
                           ) : null}
                         </div>
-                      ) : null}
-                    </div>
-                  </td>
-                  <td className="p-2">
-                    <Link href={`/orders/${o.id}`} className="btn-sm">
-                      Open
-                    </Link>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
-}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <Link href={`/orders/${o.id}`} className="btn-sm">
+                          Open
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </AdminSection>
+      </AdminWorkspaceLayout>
+    );
+  }
 
