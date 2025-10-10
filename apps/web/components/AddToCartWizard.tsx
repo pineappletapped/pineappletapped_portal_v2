@@ -2042,6 +2042,7 @@ export default function AddToCartWizard({
         id: product.id,
         name: product.name,
         price,
+        category: product.category ?? null,
         date:
           showDateKey ||
           startDateKey ||

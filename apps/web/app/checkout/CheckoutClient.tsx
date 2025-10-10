@@ -5,7 +5,15 @@ import { useRouter } from "next/navigation";
 import { Elements } from "@stripe/react-stripe-js";
 import { loadStripe } from "@stripe/stripe-js";
 import { httpsCallable, type Functions } from "firebase/functions";
-import { doc, getDoc } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  query,
+  where,
+} from "firebase/firestore";
 import { signInWithEmailAndPassword, type Auth, type User } from "firebase/auth";
 import type { FirebaseError } from "firebase/app";
 import { useCart } from "@/lib/cart";
@@ -27,6 +35,42 @@ const LEAD_SOURCE_OPTIONS: LeadSourceKind[] = [
   "other",
 ];
 
+const ZERO_BALANCE_TOLERANCE = 0.005;
+
+interface VoucherRecord {
+  type?: string | null;
+  amount?: number | null;
+  locations?: unknown;
+  productIds?: unknown;
+  categoryIds?: unknown;
+}
+
+interface VoucherFetchState {
+  code: string | null;
+  checking: boolean;
+  data: VoucherRecord | null;
+  error: string | null;
+}
+
+interface VoucherEvaluationResult {
+  status:
+    | "idle"
+    | "checking"
+    | "applied"
+    | "invalid"
+    | "ineligible"
+    | "error"
+    | "awaiting-location"
+    | "awaiting-items";
+  discount: number;
+  message: string | null;
+}
+
+interface VoucherFeedbackMessage {
+  text: string | null;
+  tone: "muted" | "success" | "warning" | "error";
+}
+
 interface CheckoutClientProps {
   publishableKey: string | null;
 }
@@ -39,10 +83,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     0
   );
   const [discount, setDiscount] = useState(0);
-  const discountAmount = productTotal * (discount / 100);
-  const finalTotal = productTotal - discountAmount + rentalTotal;
-  const vat = finalTotal * VAT_RATE;
-  const grandTotal = finalTotal + vat;
   const router = useRouter();
   const stripePromise = useMemo(
     () => (publishableKey ? loadStripe(publishableKey) : null),
@@ -59,6 +99,12 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const [projectName, setProjectName] = useState("");
   const [voucher, setVoucher] = useState("");
   const [allowLocationOverride, setAllowLocationOverride] = useState(false);
+  const [voucherFetch, setVoucherFetch] = useState<VoucherFetchState>({
+    code: null,
+    checking: false,
+    data: null,
+    error: null,
+  });
   const {
     state: leadSourceState,
     setState: setLeadSourceState,
@@ -107,7 +153,241 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       setAllowLocationOverride(false);
     }
   }, [venueLocked]);
+
+  useEffect(() => {
+    const trimmed = voucher.trim();
+    if (!trimmed) {
+      setVoucherFetch({ code: null, checking: false, data: null, error: null });
+      return;
+    }
+
+    let cancelled = false;
+    const requestCode = trimmed;
+    setVoucherFetch((prev) => ({
+      code: requestCode,
+      checking: true,
+      data: prev.code === requestCode ? prev.data : null,
+      error: null,
+    }));
+
+    const timeoutId = setTimeout(async () => {
+      try {
+        const { db } = await ensureFirebase();
+        if (cancelled) {
+          return;
+        }
+        if (!db) {
+          throw new Error("Firebase database is unavailable.");
+        }
+        const voucherQuery = query(
+          collection(db, "vouchers"),
+          where("code", "==", requestCode),
+          limit(1)
+        );
+        const snapshot = await getDocs(voucherQuery);
+        if (cancelled) {
+          return;
+        }
+        if (snapshot.empty) {
+          setVoucherFetch({ code: requestCode, checking: false, data: null, error: null });
+          return;
+        }
+        const record = snapshot.docs[0].data() as VoucherRecord;
+        setVoucherFetch({ code: requestCode, checking: false, data: record, error: null });
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        const message =
+          error instanceof Error
+            ? error.message
+            : "We couldn't validate that voucher. Try again.";
+        setVoucherFetch({ code: requestCode, checking: false, data: null, error: message });
+      }
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [voucher]);
   const shouldShowLocationInput = !venueLocked || allowLocationOverride;
+  const voucherEvaluation: VoucherEvaluationResult = useMemo(() => {
+    const trimmedVoucher = voucher.trim();
+    if (!trimmedVoucher) {
+      return { status: "idle", discount: 0, message: null };
+    }
+    if (voucherFetch.code !== trimmedVoucher) {
+      return { status: "checking", discount: 0, message: null };
+    }
+    if (voucherFetch.checking) {
+      return { status: "checking", discount: 0, message: null };
+    }
+    if (voucherFetch.error) {
+      return { status: "error", discount: 0, message: voucherFetch.error };
+    }
+    const data = voucherFetch.data;
+    if (!data) {
+      return {
+        status: "invalid",
+        discount: 0,
+        message: "Voucher code not recognised.",
+      };
+    }
+    if (items.length === 0) {
+      return {
+        status: "awaiting-items",
+        discount: 0,
+        message: "Add items to your cart to use this voucher.",
+      };
+    }
+    const record = data as Record<string, unknown>;
+    const rawLocations = Array.isArray(record.locations)
+      ? (record.locations as unknown[])
+          .map((value) =>
+            typeof value === "string" ? value.trim().toLowerCase() : ""
+          )
+          .filter((value) => value.length > 0)
+      : [];
+    const trimmedLocation = location.trim();
+    const normalisedLocation = trimmedLocation.toLowerCase();
+    if (rawLocations.length > 0) {
+      if (!normalisedLocation) {
+        return {
+          status: "awaiting-location",
+          discount: 0,
+          message: "Enter the shoot location to use this voucher.",
+        };
+      }
+      if (!rawLocations.includes(normalisedLocation)) {
+        return {
+          status: "ineligible",
+          discount: 0,
+          message: "This voucher is not valid for the selected location.",
+        };
+      }
+    }
+    const rawProductIds = Array.isArray(record.productIds)
+      ? (record.productIds as unknown[])
+          .map((value) => (typeof value === "string" ? value.trim() : ""))
+          .filter((value) => value.length > 0)
+      : [];
+    const rawCategoryIds = Array.isArray(record.categoryIds)
+      ? (record.categoryIds as unknown[])
+          .map((value) => (typeof value === "string" ? value.trim() : ""))
+          .filter((value) => value.length > 0)
+      : [];
+    let eligibleSubtotal = 0;
+    items.forEach((item) => {
+      const matchesProduct =
+        rawProductIds.length === 0 || rawProductIds.includes(item.id);
+      const matchesCategory =
+        rawCategoryIds.length === 0 ||
+        (typeof item.category === "string" &&
+          rawCategoryIds.includes(item.category));
+      if (matchesProduct && matchesCategory) {
+        eligibleSubtotal += item.price * item.quantity;
+      }
+    });
+    if (eligibleSubtotal <= 0) {
+      return {
+        status: "ineligible",
+        discount: 0,
+        message: "This voucher does not apply to the items in your cart.",
+      };
+    }
+    const amountValue = (record.amount ?? 0) as unknown;
+    const amount =
+      typeof amountValue === "number" ? amountValue : Number(amountValue);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return {
+        status: "ineligible",
+        discount: 0,
+        message: "This voucher is not currently offering a discount.",
+      };
+    }
+    const typeValue = record.type;
+    const voucherType =
+      typeof typeValue === "string" ? typeValue : "percentage";
+    let computedDiscount = 0;
+    if (voucherType === "percentage") {
+      computedDiscount = eligibleSubtotal * (amount / 100);
+    } else if (voucherType === "fixed") {
+      computedDiscount = Math.min(amount, eligibleSubtotal);
+    } else {
+      computedDiscount = eligibleSubtotal * (amount / 100);
+    }
+    if (computedDiscount <= 0) {
+      return {
+        status: "ineligible",
+        discount: 0,
+        message: "This voucher has no eligible value for your cart.",
+      };
+    }
+    const normalisedDiscount = Math.min(productTotal, computedDiscount);
+    return { status: "applied", discount: normalisedDiscount, message: null };
+  }, [items, location, productTotal, voucher, voucherFetch]);
+  const voucherDiscount = Math.min(
+    productTotal,
+    Math.max(0, voucherEvaluation.discount)
+  );
+  const subtotalAfterVoucher = Math.max(0, productTotal - voucherDiscount);
+  const discountAmount = Math.min(
+    subtotalAfterVoucher,
+    subtotalAfterVoucher * (discount / 100)
+  );
+  const finalTotal = Math.max(
+    0,
+    subtotalAfterVoucher - discountAmount + rentalTotal
+  );
+  const vat = finalTotal * VAT_RATE;
+  const rawGrandTotal = finalTotal + vat;
+  const hasZeroBalance = rawGrandTotal <= ZERO_BALANCE_TOLERANCE;
+  const grandTotal = hasZeroBalance ? 0 : rawGrandTotal;
+  const voucherFeedback: VoucherFeedbackMessage = useMemo(() => {
+    const appliedCode = voucherFetch.code;
+    switch (voucherEvaluation.status) {
+      case "checking":
+        return { text: "Checking voucher…", tone: "muted" };
+      case "error":
+        return {
+          text:
+            voucherEvaluation.message ||
+            "We couldn't validate that voucher. Try again.",
+          tone: "error",
+        };
+      case "invalid":
+        return {
+          text: voucherEvaluation.message || "Voucher code not recognised.",
+          tone: "error",
+        };
+      case "awaiting-location":
+      case "awaiting-items":
+      case "ineligible":
+        return {
+          text: voucherEvaluation.message,
+          tone: "warning",
+        };
+      case "applied":
+        return {
+          text: `Voucher applied${
+            appliedCode ? ` (${appliedCode})` : ""
+          } – £${voucherDiscount.toFixed(2)} off.`,
+          tone: "success",
+        };
+      default:
+        return { text: null, tone: "muted" };
+    }
+  }, [voucherEvaluation, voucherDiscount, voucherFetch.code]);
+  const voucherLabel = voucherFetch.code ?? (voucher.trim() || null);
+  const voucherFeedbackClass =
+    voucherFeedback.tone === "success"
+      ? "text-emerald-600"
+      : voucherFeedback.tone === "error"
+        ? "text-red-600"
+        : voucherFeedback.tone === "warning"
+          ? "text-amber-600"
+          : "text-gray-500";
   const orderInput = useMemo(() => {
     type OrganiserLineRole = "organiser" | "exhibitor";
     type OrganiserAccumulator = {
@@ -405,6 +685,27 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       }),
     [orderInput]
   );
+  const zeroBalanceBlockingMessage = useMemo(() => {
+    if (items.length === 0) {
+      return "Add items to your cart to continue.";
+    }
+    if (!currentUser) {
+      return "Sign in to continue to checkout.";
+    }
+    if (!name) {
+      return "Enter your name to continue.";
+    }
+    if (!orderInput.postalCode) {
+      return "Enter a postcode for the shoot location.";
+    }
+    return null;
+  }, [currentUser, items.length, name, orderInput.postalCode]);
+  const zeroBalanceMessage = zeroBalanceBlockingMessage
+    ? zeroBalanceBlockingMessage
+    : "Your voucher covers the full balance. Confirm your order to continue.";
+  const zeroBalanceMessageClass = zeroBalanceBlockingMessage
+    ? "text-sm text-gray-500"
+    : "text-sm text-emerald-700";
   const paymentDetailsStale =
     lastIntentPayload.current !== null &&
     lastIntentPayload.current !== currentIntentPayload;
@@ -551,6 +852,12 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     if (initializingPayment) {
       return false;
     }
+    if (hasZeroBalance) {
+      setPaymentError(
+        "This order no longer requires payment. Proceed with the order instead."
+      );
+      return false;
+    }
     if (!currentUser) {
       setPaymentError("Sign in to continue to payment.");
       return false;
@@ -629,6 +936,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     orderInput,
     stripePromise,
     stripeConfigError,
+    hasZeroBalance,
   ]);
 
   useEffect(() => {
@@ -639,7 +947,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       !initializingPayment &&
       items.length > 0 &&
       name &&
-      stripePromise
+      stripePromise &&
+      !hasZeroBalance
     ) {
       void initializePaymentIntent();
     }
@@ -652,6 +961,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     items.length,
     name,
     stripePromise,
+    hasZeroBalance,
   ]);
 
   const handlePaymentSuccess = useCallback(
@@ -661,6 +971,103 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     },
     [clear, router]
   );
+
+  const completeZeroBalanceOrder = useCallback(async () => {
+    if (initializingPayment) {
+      return false;
+    }
+    if (!currentUser) {
+      setPaymentError("Sign in to continue to checkout.");
+      return false;
+    }
+    if (items.length === 0) {
+      setPaymentError("Your cart is empty.");
+      return false;
+    }
+    if (!orderInput.customerName) {
+      setPaymentError("Please enter your name before continuing.");
+      return false;
+    }
+    if (!orderInput.postalCode) {
+      setPaymentError("Please provide a postcode for the shoot location.");
+      return false;
+    }
+
+    setInitializingPayment(true);
+    setPaymentError(null);
+
+    try {
+      const { db, functions } = await ensureFirebase();
+      const functionsInstance = functionsRef.current ?? functions ?? null;
+      if (!functionsInstance) {
+        throw new Error("Firebase functions are unavailable.");
+      }
+      functionsRef.current = functionsInstance;
+
+      const createOrder = httpsCallable(functionsInstance, "createOrder");
+      const orderRes: any = await createOrder(orderInput);
+      const createdOrderId: string | undefined = orderRes.data?.orderId;
+      if (!createdOrderId) {
+        throw new Error("Failed to create order.");
+      }
+
+      if (!db) {
+        throw new Error("We couldn't verify the order total. Please try again.");
+      }
+      const orderSnap = await getDoc(doc(db, "orders", createdOrderId));
+      if (!orderSnap.exists) {
+        throw new Error("Order could not be verified. Please try again.");
+      }
+      const priceValue = Number(orderSnap.data()?.price ?? 0);
+      const normalisedPrice = Number.isFinite(priceValue) ? priceValue : 0;
+      if (normalisedPrice <= ZERO_BALANCE_TOLERANCE) {
+        setOrderId(createdOrderId);
+        setClientSecret(null);
+        lastIntentPayload.current = currentIntentPayload;
+        handlePaymentSuccess(createdOrderId);
+        return true;
+      }
+
+      const createIntent = httpsCallable(
+        functionsInstance,
+        "stripe_createPaymentIntent"
+      );
+      const intentRes: any = await createIntent({
+        orderId: createdOrderId,
+        type: "deposit",
+      });
+      const secret: string | undefined = intentRes.data?.clientSecret;
+      if (!secret) {
+        throw new Error("Payment session could not be created.");
+      }
+      setOrderId(createdOrderId);
+      setClientSecret(secret);
+      lastIntentPayload.current = currentIntentPayload;
+      setPaymentError(
+        "Voucher no longer covers the full balance. Complete the payment below to finish your order."
+      );
+      return false;
+    } catch (error) {
+      console.error("Failed to finalise zero-balance order", error);
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Could not complete your order. Please try again.";
+      setPaymentError(message);
+      setOrderId(null);
+      setClientSecret(null);
+      return false;
+    } finally {
+      setInitializingPayment(false);
+    }
+  }, [
+    currentIntentPayload,
+    currentUser,
+    handlePaymentSuccess,
+    initializingPayment,
+    items.length,
+    orderInput,
+  ]);
 
   const handleLeadSourceKindChange = (kind: LeadSourceKind) => {
     setLeadSourceState((prev) => {
@@ -894,6 +1301,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             <span>£{rentalTotal.toFixed(2)}</span>
           </div>
         )}
+        {voucherDiscount > 0 && (
+          <div className="flex justify-between text-sm text-emerald-700">
+            <span>
+              Voucher discount{voucherLabel ? ` (${voucherLabel})` : ""}
+            </span>
+            <span>-£{voucherDiscount.toFixed(2)}</span>
+          </div>
+        )}
         {discount > 0 && (
           <div className="flex justify-between text-sm">
             <span>Discount ({discount}%)</span>
@@ -914,6 +1329,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           value={voucher}
           onChange={(e) => setVoucher(e.target.value)}
         />
+        <div className={`min-h-[1.25rem] text-xs ${voucherFeedbackClass}`}>
+          {voucherFeedback.text ?? "\u00a0"}
+        </div>
         <div className="border rounded p-4 space-y-4">
           {paymentError ? (
             <div
@@ -923,7 +1341,21 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
               {paymentError}
             </div>
           ) : null}
-          {clientSecret && orderId && stripePromise ? (
+          {hasZeroBalance ? (
+            <>
+              <p className={zeroBalanceMessageClass}>{zeroBalanceMessage}</p>
+              <button
+                type="button"
+                className="btn w-full"
+                onClick={completeZeroBalanceOrder}
+                disabled={Boolean(zeroBalanceBlockingMessage) || initializingPayment}
+              >
+                {initializingPayment
+                  ? "Submitting order..."
+                  : "Proceed with order"}
+              </button>
+            </>
+          ) : clientSecret && orderId && stripePromise ? (
             <>
               {paymentDetailsStale ? (
                 <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
@@ -958,14 +1390,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 {items.length === 0
                   ? "Add items to your cart to continue."
                   : !currentUser
-                  ? "Sign in to continue to payment."
-                  : !name
-                  ? "Enter your name to continue."
-                  : stripeConfigError
-                  ? stripeConfigError
-                  : !stripePromise
-                  ? "Payment is currently unavailable."
-                  : "Prepare your payment details to enter card information."}
+                    ? "Sign in to continue to payment."
+                    : !name
+                      ? "Enter your name to continue."
+                      : stripeConfigError
+                        ? stripeConfigError
+                        : !stripePromise
+                          ? "Payment is currently unavailable."
+                          : "Prepare your payment details to enter card information."}
               </p>
               <button
                 type="button"
