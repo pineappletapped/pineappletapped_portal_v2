@@ -198,6 +198,7 @@ export default function ModifiersPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [loading, setLoading] = useState(true);
   const [groups, setGroups] = useState<ModifierGroup[]>([]);
+  const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [newMultiple, setNewMultiple] = useState(false);
   const [templates, setTemplates] = useState<CrewRoleTemplate[]>([]);
@@ -241,6 +242,7 @@ export default function ModifiersPage() {
       ...g,
       { id: docRef.id, name: newName, multiple: newMultiple, options: [] },
     ]);
+    setExpandedGroupId(docRef.id);
     setNewName("");
     setNewMultiple(false);
   };
@@ -310,6 +312,7 @@ export default function ModifiersPage() {
     }
     await deleteDoc(doc(db, "modifiers", groupId));
     setGroups((gs) => gs.filter((g) => g.id !== groupId));
+    setExpandedGroupId((current) => (current === groupId ? null : current));
   };
 
   const updateOption = async (groupId: string, option: ModifierOption) => {
@@ -340,7 +343,7 @@ export default function ModifiersPage() {
   if (!allowed) return <p>You do not have permission to manage modifiers.</p>;
 
   return (
-    <div className="grid gap-6 max-w-2xl">
+    <div className="grid gap-6 max-w-5xl">
       <h1 className="text-xl font-semibold">Modifiers</h1>
       <form onSubmit={addGroup} className="grid gap-2 border p-4 rounded">
         <input
@@ -363,11 +366,18 @@ export default function ModifiersPage() {
         </button>
       </form>
       <div className="grid gap-4">
+        {groups.length === 0 && (
+          <p className="text-sm text-gray-600">
+            No modifier groups created yet.
+          </p>
+        )}
         {groups.map((g) => (
-          <ModifierGroupCard
+          <ModifierGroupPanel
             key={g.id}
             group={g}
             templates={templates}
+            expanded={expandedGroupId === g.id}
+            onToggle={(open) => setExpandedGroupId(open ? g.id : null)}
             onAddOption={addOption}
             onUpdateGroup={updateGroupMeta}
             onDeleteGroup={removeGroup}
@@ -964,9 +974,11 @@ function EditableOptionRow({
   );
 }
 
-function ModifierGroupCard({
+function ModifierGroupPanel({
   group,
   templates,
+  expanded,
+  onToggle,
   onAddOption,
   onUpdateGroup,
   onDeleteGroup,
@@ -975,6 +987,8 @@ function ModifierGroupCard({
 }: {
   group: ModifierGroup;
   templates: CrewRoleTemplate[];
+  expanded: boolean;
+  onToggle: (open: boolean) => void;
   onAddOption: (
     groupId: string,
     name: string,
@@ -998,60 +1012,87 @@ function ModifierGroupCard({
   }, [group.id, group.name, group.multiple]);
 
   return (
-    <div className="border p-4 rounded grid gap-3">
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          onUpdateGroup(group.id, name, multiple);
-        }}
-        className="grid gap-2"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <input
-            className="input flex-1 min-w-[180px]"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-          />
-          <div className="flex items-center gap-2">
-            <label className="flex items-center gap-2 text-sm">
+    <details
+      className="overflow-hidden rounded border bg-white"
+      open={expanded}
+      onToggle={(event) => onToggle(event.currentTarget.open)}
+    >
+      <summary className="flex cursor-pointer items-center justify-between gap-3 bg-gray-50 px-4 py-3 text-sm font-medium">
+        <span className="truncate text-base font-semibold text-gray-900">
+          {group.name}
+        </span>
+        <span className="flex shrink-0 items-center gap-3 text-xs font-medium text-gray-600">
+          <span className="rounded-full bg-gray-200 px-2 py-1 text-[11px] uppercase tracking-wide">
+            {group.multiple ? "Multiple" : "Single"}
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block h-2 w-2 rounded-full bg-gray-400" />
+            {group.options.length} option{group.options.length === 1 ? "" : "s"}
+          </span>
+        </span>
+      </summary>
+      <div className="grid gap-4 border-t px-4 py-4">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            onUpdateGroup(group.id, name, multiple);
+          }}
+          className="grid gap-3 rounded border border-gray-200 bg-white p-3"
+        >
+          <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-center md:gap-3">
+            <label className="grid gap-1 text-xs font-medium text-gray-600">
+              Group name
               <input
-                type="checkbox"
-                checked={multiple}
-                onChange={(e) => setMultiple(e.target.checked)}
+                className="input"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
               />
-              Allow multiple
             </label>
-            <button type="submit" className="btn btn-sm w-fit">
-              Save
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm w-fit bg-red-600 text-white"
-              onClick={() => onDeleteGroup(group.id)}
-            >
-              Delete
-            </button>
+            <div className="flex flex-wrap items-center justify-end gap-3">
+              <label className="flex items-center gap-2 text-xs font-medium text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={multiple}
+                  onChange={(e) => setMultiple(e.target.checked)}
+                />
+                Allow multiple selections
+              </label>
+              <div className="flex gap-2">
+                <button type="submit" className="btn btn-sm w-fit">
+                  Save changes
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm w-fit bg-red-600 text-white"
+                  onClick={() => onDeleteGroup(group.id)}
+                >
+                  Delete group
+                </button>
+              </div>
+            </div>
           </div>
+        </form>
+        <div className="grid gap-3">
+          {group.options.length === 0 ? (
+            <p className="rounded border border-dashed p-3 text-sm text-gray-600">
+              No options yet.
+            </p>
+          ) : (
+            group.options.map((option) => (
+              <EditableOptionRow
+                key={option.id}
+                groupId={group.id}
+                option={option}
+                templates={templates}
+                onUpdate={onUpdateOption}
+                onDelete={onDeleteOption}
+              />
+            ))
+          )}
         </div>
-      </form>
-      <div className="grid gap-2">
-        {group.options.length === 0 ? (
-          <p className="text-sm text-gray-600">No options yet.</p>
-        ) : (
-          group.options.map((option) => (
-            <EditableOptionRow
-              key={option.id}
-              groupId={group.id}
-              option={option}
-              templates={templates}
-              onUpdate={onUpdateOption}
-              onDelete={onDeleteOption}
-            />
-          ))
-      )}
+        <OptionForm groupId={group.id} onAdd={onAddOption} />
       </div>
-      <OptionForm groupId={group.id} onAdd={onAddOption} />
-    </div>
+    </details>
   );
 }
