@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import type { User } from "firebase/auth";
 import {
   Timestamp,
@@ -35,6 +35,8 @@ import {
   parseAffiliateCommissionDoc,
   buildAffiliateCommissionCsv,
   parseAffiliateResourceDoc,
+  describeAffiliateStripeStatus,
+  normaliseAffiliateStripeStatus,
 } from "@/lib/affiliates";
 
 interface OrderSummary {
@@ -59,25 +61,41 @@ type PortalTabKey = "overview" | "account" | "payout" | "remittances" | "resourc
 const PORTAL_TABS: Array<{ key: PortalTabKey; label: string }> = [
   { key: "overview", label: "Overview" },
   { key: "account", label: "Account" },
-  { key: "payout", label: "Payout details" },
+  { key: "payout", label: "Stripe payouts" },
   { key: "remittances", label: "Remittances" },
   { key: "resources", label: "Resources" },
 ];
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 
-const digitsOnly = (value: string) => value.replace(/\D+/g, "");
+const digitsOnly = (value: string): string => value.replace(/\D+/g, "");
 
-const formatSortCode = (value: string) => {
-  const digits = digitsOnly(value).slice(0, 6);
-  if (digits.length <= 2) return digits;
-  if (digits.length <= 4) {
-    return `${digits.slice(0, 2)}-${digits.slice(2)}`;
+const formatDateTime = (value: Timestamp | Date | null | undefined): string => {
+  let date: Date | null = null;
+  if (!value) {
+    return "—";
   }
-  return `${digits.slice(0, 2)}-${digits.slice(2, 4)}-${digits.slice(4)}`;
+  if (value instanceof Date) {
+    date = value;
+  } else if (typeof value.toDate === "function") {
+    try {
+      date = value.toDate();
+    } catch {
+      date = null;
+    }
+  }
+  if (!date) {
+    return "—";
+  }
+  try {
+    return date.toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+  } catch {
+    return date.toISOString();
+  }
 };
-
-const formatAccountNumber = (value: string) => digitsOnly(value).slice(0, 8);
 
 const MAX_ORDERS = 20;
 const MAX_CLIENTS = 12;
@@ -110,17 +128,10 @@ export default function AffiliatePortal() {
   const [accountSaving, setAccountSaving] = useState(false);
   const [accountFeedback, setAccountFeedback] = useState<string | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
-  const [payoutForm, setPayoutForm] = useState({
-    accountName: "",
-    bankName: "",
-    sortCode: "",
-    accountNumber: "",
-    notes: "",
-  });
-  const [payoutErrors, setPayoutErrors] = useState<Record<string, string>>({});
-  const [payoutSaving, setPayoutSaving] = useState(false);
-  const [payoutFeedback, setPayoutFeedback] = useState<string | null>(null);
-  const [payoutError, setPayoutError] = useState<string | null>(null);
+  const [stripeActionLoading, setStripeActionLoading] = useState(false);
+  const [stripeActionMessage, setStripeActionMessage] = useState<
+    { tone: "success" | "error"; text: string } | null
+  >(null);
   const [remittanceUrls, setRemittanceUrls] = useState<Record<string, string | null>>({});
   const [remittanceErrors, setRemittanceErrors] = useState<Record<string, string | null>>({});
   const [resources, setResources] = useState<AffiliateResourceRecord[]>([]);
@@ -351,29 +362,6 @@ export default function AffiliatePortal() {
   }, [affiliate]);
 
   useEffect(() => {
-    if (!affiliate) {
-      setPayoutForm({ accountName: "", bankName: "", sortCode: "", accountNumber: "", notes: "" });
-      return;
-    }
-    const payout = affiliate.payout ?? {
-      accountName: null,
-      bankName: null,
-      sortCode: null,
-      accountNumber: null,
-      notes: null,
-    };
-    setPayoutForm({
-      accountName: payout.accountName ?? "",
-      bankName: payout.bankName ?? "",
-      sortCode: payout.sortCode ? formatSortCode(payout.sortCode) : "",
-      accountNumber: payout.accountNumber ? formatAccountNumber(payout.accountNumber) : "",
-      notes: payout.notes ?? "",
-    });
-    setPayoutErrors({});
-    setPayoutError(null);
-  }, [affiliate]);
-
-  useEffect(() => {
     let unsubscribeResources: (() => void) | undefined;
     let cancelled = false;
 
@@ -571,6 +559,13 @@ export default function AffiliatePortal() {
 
   const overviewResources = useMemo(() => orderedResources.slice(0, 2), [orderedResources]);
 
+  const stripeDetails = affiliate?.stripe ?? null;
+  const stripeAccountId = stripeDetails?.accountId ?? null;
+  const stripeStatusLabel = describeAffiliateStripeStatus(stripeDetails?.status ?? "not_connected");
+  const stripeRequirementsDue = stripeDetails?.requirementsDue ?? [];
+  const stripeRequirementsPastDue = stripeDetails?.requirementsPastDue ?? [];
+  const stripeRequirementsEventuallyDue = stripeDetails?.requirementsEventuallyDue ?? [];
+
   const handleAccountFieldChange = (field: "name" | "email" | "company" | "phone") =>
     (event: ChangeEvent<HTMLInputElement>) => {
       const { value } = event.target;
@@ -584,28 +579,6 @@ export default function AffiliatePortal() {
         return next;
       });
       setAccountError(null);
-    };
-
-  const handlePayoutFieldChange = (
-    field: "accountName" | "bankName" | "sortCode" | "accountNumber" | "notes"
-  ) =>
-    (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      let { value } = event.target;
-      if (field === "sortCode") {
-        value = formatSortCode(value);
-      } else if (field === "accountNumber") {
-        value = formatAccountNumber(value);
-      }
-      setPayoutForm((prev) => ({ ...prev, [field]: value }));
-      setPayoutErrors((prev) => {
-        if (!prev[field]) {
-          return prev;
-        }
-        const next = { ...prev };
-        delete next[field];
-        return next;
-      });
-      setPayoutError(null);
     };
 
   const validateAccountForm = () => {
@@ -622,30 +595,6 @@ export default function AffiliatePortal() {
       nextErrors.phone = "Phone number looks too short";
     }
     setAccountErrors(nextErrors);
-    return Object.keys(nextErrors).length === 0;
-  };
-
-  const validatePayoutForm = () => {
-    const nextErrors: Record<string, string> = {};
-    if (!payoutForm.accountName.trim()) {
-      nextErrors.accountName = "Account name is required";
-    }
-    if (!payoutForm.bankName.trim()) {
-      nextErrors.bankName = "Bank name is required";
-    }
-    const sortDigits = digitsOnly(payoutForm.sortCode).slice(0, 6);
-    if (!sortDigits) {
-      nextErrors.sortCode = "Sort code is required";
-    } else if (sortDigits.length !== 6) {
-      nextErrors.sortCode = "Sort code must be 6 digits";
-    }
-    const accountDigits = digitsOnly(payoutForm.accountNumber).slice(0, 8);
-    if (!accountDigits) {
-      nextErrors.accountNumber = "Account number is required";
-    } else if (accountDigits.length < 6 || accountDigits.length > 8) {
-      nextErrors.accountNumber = "Account number should be 6–8 digits";
-    }
-    setPayoutErrors(nextErrors);
     return Object.keys(nextErrors).length === 0;
   };
 
@@ -680,39 +629,115 @@ export default function AffiliatePortal() {
     }
   };
 
-  const handlePayoutSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!affiliate) {
-      return;
-    }
-    setPayoutError(null);
-    if (!validatePayoutForm()) {
-      return;
-    }
-    setPayoutSaving(true);
-    try {
-      const { db } = await ensureFirebase();
-      if (!db) {
-        throw new Error("Firestore is unavailable");
+  const launchStripeConnect = useCallback(
+    async (mode: "onboarding" | "login" = "onboarding") => {
+      if (!affiliate) {
+        setStripeActionMessage({
+          tone: "error",
+          text: "Your affiliate profile hasn’t finished loading yet.",
+        });
+        return;
       }
-      const sortDigits = digitsOnly(payoutForm.sortCode).slice(0, 6);
-      const accountDigits = digitsOnly(payoutForm.accountNumber).slice(0, 8);
-      await updateDoc(doc(db, "affiliates", affiliate.id), {
-        "payout.accountName": payoutForm.accountName.trim(),
-        "payout.bankName": payoutForm.bankName.trim(),
-        "payout.sortCode": sortDigits,
-        "payout.accountNumber": accountDigits,
-        "payout.notes": payoutForm.notes.trim() || null,
-        updatedAt: serverTimestamp(),
-      });
-      setPayoutFeedback("Payout details saved.");
-    } catch (err) {
-      console.error("Failed to update affiliate payout details", err);
-      setPayoutError("Unable to save payout details right now. Please try again.");
-    } finally {
-      setPayoutSaving(false);
-    }
-  };
+      setStripeActionLoading(true);
+      setStripeActionMessage(null);
+      try {
+        const response = await fetch("/api/affiliates/stripe/connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ affiliateId: affiliate.id, mode }),
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          const message =
+            typeof payload?.error === "string"
+              ? payload.error
+              : "We couldn’t reach Stripe Connect right now. Please try again.";
+          throw new Error(message);
+        }
+        const payload = (await response.json()) as Record<string, any>;
+        const linkUrl =
+          typeof payload.linkUrl === "string" && payload.linkUrl.trim().length > 0
+            ? payload.linkUrl.trim()
+            : null;
+        const linkType: "onboarding" | "login" =
+          payload.linkType === "login" || payload.linkType === "onboarding"
+            ? payload.linkType
+            : mode;
+        const accountId =
+          typeof payload.accountId === "string" && payload.accountId.trim().length > 0
+            ? payload.accountId.trim()
+            : null;
+        const status = normaliseAffiliateStripeStatus(payload.status);
+        const payoutsEnabled =
+          typeof payload.payoutsEnabled === "boolean"
+            ? payload.payoutsEnabled
+            : affiliate.stripe.payoutsEnabled;
+        const chargesEnabled =
+          typeof payload.chargesEnabled === "boolean"
+            ? payload.chargesEnabled
+            : affiliate.stripe.chargesEnabled;
+        const requirementsDue = Array.isArray(payload.requirementsDue)
+          ? payload.requirementsDue.filter((item: unknown): item is string => typeof item === "string")
+          : affiliate.stripe.requirementsDue;
+        const requirementsPastDue = Array.isArray(payload.requirementsPastDue)
+          ? payload.requirementsPastDue.filter((item: unknown): item is string => typeof item === "string")
+          : affiliate.stripe.requirementsPastDue;
+        const requirementsEventuallyDue = Array.isArray(payload.requirementsEventuallyDue)
+          ? payload.requirementsEventuallyDue.filter(
+              (item: unknown): item is string => typeof item === "string"
+            )
+          : affiliate.stripe.requirementsEventuallyDue;
+        const disabledReason =
+          typeof payload.disabledReason === "string" && payload.disabledReason.trim().length > 0
+            ? payload.disabledReason.trim()
+            : null;
+
+        setAffiliate((prev) => {
+          if (!prev) {
+            return prev;
+          }
+          return {
+            ...prev,
+            stripe: {
+              ...prev.stripe,
+              accountId: accountId ?? prev.stripe.accountId,
+              status,
+              payoutsEnabled,
+              chargesEnabled,
+              requirementsDue,
+              requirementsPastDue,
+              requirementsEventuallyDue,
+              disabledReason,
+            },
+          } satisfies AffiliateRecord;
+        });
+
+        if (linkUrl && typeof window !== "undefined") {
+          window.open(linkUrl, "_blank", "noopener,noreferrer");
+        }
+
+        setStripeActionMessage({
+          tone: "success",
+          text:
+            linkType === "login"
+              ? "Stripe Express dashboard opened in a new tab."
+              : "Stripe Connect onboarding launched in a new tab.",
+        });
+      } catch (err) {
+        console.error("Failed to prepare Stripe Connect for affiliate", err);
+        setStripeActionMessage({
+          tone: "error",
+          text:
+            err instanceof Error
+              ? err.message
+              : "We couldn’t contact Stripe right now. Please try again shortly.",
+        });
+      } finally {
+        setStripeActionLoading(false);
+      }
+    },
+    [affiliate]
+  );
 
   useEffect(() => {
     if (!accountFeedback) {
@@ -723,12 +748,12 @@ export default function AffiliatePortal() {
   }, [accountFeedback]);
 
   useEffect(() => {
-    if (!payoutFeedback) {
+    if (!stripeActionMessage) {
       return;
     }
-    const timer = window.setTimeout(() => setPayoutFeedback(null), 4000);
+    const timer = window.setTimeout(() => setStripeActionMessage(null), 5000);
     return () => window.clearTimeout(timer);
-  }, [payoutFeedback]);
+  }, [stripeActionMessage]);
 
   const handleExportLedger = () => {
     if (typeof window === "undefined") {
@@ -1165,96 +1190,110 @@ export default function AffiliatePortal() {
         {activeTab === 'payout' ? (
           <section className='grid gap-4 rounded-3xl border border-gray-200 bg-white p-6 shadow-sm'>
             <div className='space-y-1'>
-              <h2 className='text-lg font-semibold text-gray-900'>Payout details</h2>
+              <h2 className='text-lg font-semibold text-gray-900'>Stripe payouts</h2>
               <p className='text-sm text-gray-600'>
-                We process affiliate payouts on the first working day each month for balances over £50 net once orders are
-                delivered. Enter the bank account you’d like us to use.
+                We use Stripe Connect to transfer your commissions securely. Connect an account to enable automated payouts.
               </p>
             </div>
-            {payoutFeedback ? <p className='text-sm text-emerald-600'>{payoutFeedback}</p> : null}
-            {payoutError ? <p className='text-sm text-red-600'>{payoutError}</p> : null}
-            <form className='grid gap-4' onSubmit={handlePayoutSubmit}>
-              <div className='grid gap-4 md:grid-cols-2'>
-                <label className='grid gap-1 text-sm text-gray-700'>
-                  <span className='font-medium'>Account name</span>
-                  <input
-                    type='text'
-                    value={payoutForm.accountName}
-                    onChange={handlePayoutFieldChange('accountName')}
-                    className='w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-gray-500 focus:outline-none focus:ring-2 focus:ring-gray-200'
-                    autoComplete='name'
-                    aria-invalid={payoutErrors.accountName ? 'true' : 'false'}
-                  />
-                  {payoutErrors.accountName ? (
-                    <span className='text-xs text-red-600'>{payoutErrors.accountName}</span>
-                  ) : null}
-                </label>
-                <label className='grid gap-1 text-sm text-gray-700'>
-                  <span className='font-medium'>Bank name</span>
-                  <input
-                    type='text'
-                    value={payoutForm.bankName}
-                    onChange={handlePayoutFieldChange('bankName')}
-                    className='w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-gray-500 focus:outline-none focus:ring-2 focus:ring-gray-200'
-                    autoComplete='organization'
-                    aria-invalid={payoutErrors.bankName ? 'true' : 'false'}
-                  />
-                  {payoutErrors.bankName ? (
-                    <span className='text-xs text-red-600'>{payoutErrors.bankName}</span>
-                  ) : null}
-                </label>
-                <label className='grid gap-1 text-sm text-gray-700'>
-                  <span className='font-medium'>Sort code</span>
-                  <input
-                    type='text'
-                    value={payoutForm.sortCode}
-                    onChange={handlePayoutFieldChange('sortCode')}
-                    className='w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-gray-500 focus:outline-none focus:ring-2 focus:ring-gray-200'
-                    inputMode='numeric'
-                    placeholder='12-34-56'
-                    aria-invalid={payoutErrors.sortCode ? 'true' : 'false'}
-                  />
-                  {payoutErrors.sortCode ? (
-                    <span className='text-xs text-red-600'>{payoutErrors.sortCode}</span>
-                  ) : (
-                    <span className='text-xs text-gray-500'>UK bank sort code (6 digits).</span>
-                  )}
-                </label>
-                <label className='grid gap-1 text-sm text-gray-700'>
-                  <span className='font-medium'>Account number</span>
-                  <input
-                    type='text'
-                    value={payoutForm.accountNumber}
-                    onChange={handlePayoutFieldChange('accountNumber')}
-                    className='w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-gray-500 focus:outline-none focus:ring-2 focus:ring-gray-200'
-                    inputMode='numeric'
-                    placeholder='12345678'
-                    aria-invalid={payoutErrors.accountNumber ? 'true' : 'false'}
-                  />
-                  {payoutErrors.accountNumber ? (
-                    <span className='text-xs text-red-600'>{payoutErrors.accountNumber}</span>
-                  ) : (
-                    <span className='text-xs text-gray-500'>We support 6–8 digit UK account numbers.</span>
-                  )}
-                </label>
+            {stripeActionMessage ? (
+              <p
+                className={`text-sm ${
+                  stripeActionMessage.tone === "error" ? "text-red-600" : "text-emerald-600"
+                }`}
+              >
+                {stripeActionMessage.text}
+              </p>
+            ) : null}
+            <dl className='grid gap-4 md:grid-cols-2'>
+              <div className='rounded-lg border border-gray-100 bg-gray-50 p-4'>
+                <dt className='text-xs font-semibold uppercase tracking-wide text-gray-500'>Status</dt>
+                <dd className='mt-1 text-sm font-medium text-gray-900'>{stripeStatusLabel}</dd>
+                {stripeDetails?.disabledReason ? (
+                  <p className='mt-2 text-xs text-red-600'>{stripeDetails.disabledReason}</p>
+                ) : null}
               </div>
-              <label className='grid gap-1 text-sm text-gray-700'>
-                <span className='font-medium'>Notes for finance (optional)</span>
-                <textarea
-                  value={payoutForm.notes}
-                  onChange={handlePayoutFieldChange('notes')}
-                  className='w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-gray-500 focus:outline-none focus:ring-2 focus:ring-gray-200'
-                  rows={3}
-                />
-                <span className='text-xs text-gray-500'>Add any special instructions for remittance references.</span>
-              </label>
-              <div className='flex flex-wrap items-center gap-3'>
-                <button type='submit' className='btn btn-primary' disabled={payoutSaving}>
-                  {payoutSaving ? 'Saving…' : 'Save payout details'}
-                </button>
-                <p className='text-xs text-gray-500'>We encrypt your bank details before storing them.</p>
+              <div className='rounded-lg border border-gray-100 bg-gray-50 p-4'>
+                <dt className='text-xs font-semibold uppercase tracking-wide text-gray-500'>Stripe account</dt>
+                <dd className='mt-1 text-sm font-medium text-gray-900'>
+                  {stripeAccountId ?? 'Not connected'}
+                </dd>
+                <p className='mt-2 text-xs text-gray-500'>
+                  Payouts enabled: {stripeDetails?.payoutsEnabled ? 'Yes' : 'No'} · Charges enabled: {stripeDetails?.chargesEnabled ? 'Yes' : 'No'}
+                </p>
               </div>
-            </form>
+              <div className='rounded-lg border border-gray-100 bg-gray-50 p-4'>
+                <dt className='text-xs font-semibold uppercase tracking-wide text-gray-500'>Last onboarding link</dt>
+                <dd className='mt-1 text-sm text-gray-900'>
+                  {stripeDetails?.lastOnboardedAt ? formatDateTime(stripeDetails.lastOnboardedAt) : 'Not sent yet'}
+                </dd>
+              </div>
+              <div className='rounded-lg border border-gray-100 bg-gray-50 p-4'>
+                <dt className='text-xs font-semibold uppercase tracking-wide text-gray-500'>Last dashboard access</dt>
+                <dd className='mt-1 text-sm text-gray-900'>
+                  {stripeDetails?.lastLoginAt ? formatDateTime(stripeDetails.lastLoginAt) : 'Not opened yet'}
+                </dd>
+              </div>
+            </dl>
+            {stripeRequirementsPastDue.length > 0 ? (
+              <div className='rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700'>
+                <p className='font-semibold'>Action required</p>
+                <ul className='mt-2 list-disc space-y-1 pl-5'>
+                  {stripeRequirementsPastDue.map((item, index) => (
+                    <li key={`past-${index}`}>{item.replace(/_/g, ' ')}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {stripeRequirementsDue.length > 0 && stripeRequirementsPastDue.length === 0 ? (
+              <div className='rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800'>
+                <p className='font-semibold'>Complete the following in Stripe</p>
+                <ul className='mt-2 list-disc space-y-1 pl-5'>
+                  {stripeRequirementsDue.map((item, index) => (
+                    <li key={`due-${index}`}>{item.replace(/_/g, ' ')}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {stripeRequirementsEventuallyDue.length > 0 ? (
+              <div className='rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700'>
+                <p className='font-semibold'>Upcoming Stripe checks</p>
+                <ul className='mt-2 list-disc space-y-1 pl-5'>
+                  {stripeRequirementsEventuallyDue.map((item, index) => (
+                    <li key={`event-${index}`}>{item.replace(/_/g, ' ')}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            <div className='flex flex-wrap items-center gap-3'>
+              <button
+                type='button'
+                className='btn btn-primary'
+                onClick={() => launchStripeConnect('onboarding')}
+                disabled={stripeActionLoading}
+              >
+                {stripeActionLoading
+                  ? 'Preparing Stripe…'
+                  : stripeAccountId
+                    ? 'Resume Stripe onboarding'
+                    : 'Start Stripe Connect onboarding'}
+              </button>
+              <button
+                type='button'
+                className='btn btn-outline'
+                onClick={() => launchStripeConnect('login')}
+                disabled={stripeActionLoading || !stripeAccountId}
+              >
+                Open Stripe dashboard
+              </button>
+            </div>
+            <div className='rounded-2xl bg-slate-50 p-4 text-sm text-slate-600'>
+              <p>
+                Once your Stripe Express account is connected, Pineapple Tapped finance will send commission payouts automatically.
+              </p>
+              <p className='mt-2'>
+                Need to update your bank details? Open the dashboard to make changes directly with Stripe.
+              </p>
+            </div>
           </section>
         ) : null}
 
