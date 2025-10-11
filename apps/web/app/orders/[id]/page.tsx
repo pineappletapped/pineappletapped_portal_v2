@@ -6,6 +6,7 @@ import { doc, getDoc, onSnapshot, updateDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import Link from 'next/link';
 import PortalContainer from '@/components/PortalContainer';
+import { resolveOrderIdentifier } from '@/lib/orders';
 
 /**
  * Order detail page.
@@ -111,12 +112,25 @@ export default function OrderDetailPage() {
   if (loading || !order) return <p>Loading…</p>;
   const totals = order.budgetTotals || null;
   const budgetItems = Array.isArray(order.items) ? order.items : [];
+  const orderIdentifier = resolveOrderIdentifier(order);
   return (
     <PortalContainer>
       <div className="grid gap-6">
         <h1 className="text-2xl font-bold">Order for {service?.name || 'Service'}</h1>
         <div className="card p-4">
           <p className="mb-2">Status: {order.status}</p>
+          {orderIdentifier.friendlyDisplay ? (
+            <p className="mb-2">Order number: {orderIdentifier.friendlyDisplay}</p>
+          ) : (
+            <p className="mb-2">Order ID: {order.id}</p>
+          )}
+          {orderIdentifier.originalId &&
+          orderIdentifier.friendlyDisplay &&
+          orderIdentifier.friendlyDisplay !== orderIdentifier.originalId ? (
+            <p className="mb-2 text-xs uppercase tracking-wide text-gray-500">
+              Internal ID: {orderIdentifier.originalId}
+            </p>
+          ) : null}
           <p className="mb-2 flex items-center">
             <span>Project Name: </span>
             {editingName ? (

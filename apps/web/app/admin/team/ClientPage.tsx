@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { db, functions } from '@/lib/firebase';
+import { ensureFirebase } from '@/lib/firebase';
 import { httpsCallable } from 'firebase/functions';
 import { doc, collection, getDocs, updateDoc } from 'firebase/firestore';
 import { adminListUsers, adminUpdateUser } from '@/lib/admin';
@@ -13,6 +14,13 @@ import {
   type RoleKey,
   type UserRoles,
 } from '@/lib/roles';
+import {
+  getCoverageStatusLabel,
+  getCoverageStatusTone,
+  parseInsuranceAssignmentDoc,
+  parseInsurancePolicyDoc,
+  type InsuranceCoverageStatus,
+} from '@/lib/insurance';
 
 interface User {
   id: string;
@@ -25,6 +33,51 @@ interface User {
   displayName?: string | null;
   contractorInfo?: { name?: string | null } | null;
 }
+
+interface CoverageEntry {
+  policyId: string;
+  policyName: string;
+  status: InsuranceCoverageStatus;
+  expiresAt: Date | null;
+}
+
+const coverageToneClass = (status: InsuranceCoverageStatus) => {
+  const tone = getCoverageStatusTone(status);
+  const mapping: Record<string, string> = {
+    success: 'bg-emerald-100 text-emerald-700',
+    info: 'bg-blue-100 text-blue-700',
+    danger: 'bg-rose-100 text-rose-700',
+    muted: 'bg-slate-200 text-slate-700',
+    default: 'bg-slate-100 text-slate-700',
+  };
+  return `inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+    mapping[tone] ?? mapping.default
+  }`;
+};
+
+const formatCoverageExpiry = (value: Date | null) => {
+  if (!value || Number.isNaN(value.getTime())) return '';
+  return `Expires ${value.toLocaleDateString()}`;
+};
+
+const renderCoverage = (entries: CoverageEntry[]) => {
+  if (entries.length === 0) {
+    return <span className="text-gray-400">No cover recorded</span>;
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      {entries.map((entry) => (
+        <div key={`${entry.policyId}-${entry.status}`} className="flex flex-col">
+          <span className={coverageToneClass(entry.status)}>{getCoverageStatusLabel(entry.status)}</span>
+          <span className="text-[10px] text-gray-500">
+            {entry.policyName}
+            {entry.expiresAt ? ` · ${formatCoverageExpiry(entry.expiresAt)}` : ''}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+};
 
 export default function AdminTeamPage() {
   const { allowed, roles, loading: guardLoading } = useRoleGate('admin');
@@ -43,6 +96,7 @@ export default function AdminTeamPage() {
     contractor: false,
     roles: {} as UserRoles,
   });
+  const [coverageMap, setCoverageMap] = useState<Map<string, CoverageEntry[]>>(new Map());
 
   useEffect(() => {
     (async () => {
@@ -93,6 +147,55 @@ export default function AdminTeamPage() {
     });
     setIsEditingPanel(false);
   }, [selectedUser]);
+
+  useEffect(() => {
+    if (guardLoading || !allowed) return;
+
+    let isMounted = true;
+
+    (async () => {
+      try {
+        const { db } = await ensureFirebase();
+        if (!db || !isMounted) return;
+
+        const [assignmentSnap, policySnap] = await Promise.all([
+          getDocs(collection(db, 'insuranceAssignments')),
+          getDocs(collection(db, 'insurancePolicies')),
+        ]);
+
+        const policyNames = new Map<string, string>();
+        policySnap.docs.forEach((docSnap) => {
+          const policy = parseInsurancePolicyDoc(docSnap.id, docSnap.data() as Record<string, unknown>);
+          policyNames.set(docSnap.id, policy.name);
+        });
+
+        const map = new Map<string, CoverageEntry[]>();
+        assignmentSnap.docs.forEach((docSnap) => {
+          const assignment = parseInsuranceAssignmentDoc(docSnap.id, docSnap.data() as Record<string, unknown>);
+          if (assignment.targetType !== 'user') return;
+
+          const entries = map.get(assignment.targetId) ?? [];
+          entries.push({
+            policyId: assignment.policyId,
+            policyName: policyNames.get(assignment.policyId) ?? assignment.policyId,
+            status: assignment.status,
+            expiresAt: assignment.expiresAt ?? null,
+          });
+          map.set(assignment.targetId, entries);
+        });
+
+        if (isMounted) {
+          setCoverageMap(map);
+        }
+      } catch (err) {
+        console.error('Failed to load insurance coverage for team manager', err);
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [allowed, guardLoading]);
 
   if (guardLoading) return <p>Loading…</p>;
   if (!allowed) return <p>You do not have permission to view this page.</p>;
@@ -209,6 +312,7 @@ export default function AdminTeamPage() {
           <tr className="bg-gray-100 text-left">
             <th className="p-2">Email</th>
             <th className="p-2">Name</th>
+            <th className="p-2">Insurance</th>
             <th className="p-2">Disabled</th>
             <th className="p-2 text-right">Actions</th>
           </tr>
@@ -218,6 +322,9 @@ export default function AdminTeamPage() {
             <tr key={user.id} className="border-t">
               <td className="p-2">{user.email}</td>
               <td className="p-2">{resolveName(user) || '-'}</td>
+              <td className="p-2 text-xs text-gray-600">
+                {renderCoverage(coverageMap.get(user.id) ?? [])}
+              </td>
               <td className="p-2">{user.disabled ? 'Yes' : 'No'}</td>
               <td className="p-2 text-right">
                 <button onClick={() => setSelectedUserId(user.id)} className="btn btn-sm">Manage</button>

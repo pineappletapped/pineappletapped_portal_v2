@@ -10,7 +10,7 @@ connections remain for the roadmap. Use it alongside the feature connection revi
 | Welcome & quick actions | Hero banner summarising active work, direct links to project creation, bookings, catalogue, analytics, shared inbox and organisation management. | `apps/web/app/dashboard/ClientPage.tsx` hero metrics and quick action nav. |
 | Tasks | Filterable list of outstanding customer tasks with direct action buttons. | Project task sub-collections, surfaced in `ClientPage.tsx`. |
 | Projects | Snapshot of live projects with status and milestone context plus “view all” CTA. | Firestore `projects` collection. |
-| Orders & billing | Latest orders with status + placed date and a link to full details. | Firestore `orders` collection. |
+| Orders & billing | Latest orders with status + placed date and a link to full details, including those teammates raised under the same organisation. | Firestore `orders` collection filtered by user ID and organisation membership. |
 | Asset deliveries | Quick access to newly uploaded assets and approvals. | Firestore `assets` collection. |
 | Bookings | Upcoming shoot schedule with manage CTA. | Firestore `bookings` collection. |
 | Growth opportunities | Remarketing suggestions and campaign recommendations to drive upsells. | `remarketingSuggestions` and `recommendations` collections. |
@@ -23,7 +23,7 @@ connections remain for the roadmap. Use it alongside the feature connection revi
 | Feature | Current state | Connection tasks |
 | --- | --- | --- |
 | Analytics dashboard (`/analytics`) | Fully functional but historically hidden; now linked from dashboard quick actions. | Verify eligibility gating and capture onboarding copy for analytics usage. |
-| Shared email workspace (`/emails`) | Callable-backed email hub; now accessible via quick actions. | Add empty-state guidance and adoption telemetry after launch. |
+| Shared email workspace (`/emails`) | Callable-backed email hub; now accessible via quick actions. | Adoption telemetry after launch. |
 | Organisation manager (`/orgs`) | Allows switching and creating organisations; now discoverable via quick actions. | Review role gating and document when to create a new org. |
 | Storage automation (`/admin/storage`) | Admin-only but referenced in sales conversations. | Expose relevant read-only summary in client portal once integration supports it. |
 | CRM light-touch view | Leads/opportunities live under `/crm` for eligible roles. | Evaluate a read-only funnel snapshot card for client admins inside the portal. |

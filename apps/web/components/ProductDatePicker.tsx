@@ -256,10 +256,14 @@ export default function ProductDatePicker({
         "border-emerald-500 text-emerald-700 bg-emerald-50 hover:bg-emerald-100",
       pending: "border-amber-500 text-amber-700 bg-amber-50 hover:bg-amber-100",
       booked: "border-red-400 text-red-600 bg-red-50",
-      unavailable: "border-gray-300 text-gray-500 bg-gray-100",
+      unavailable: "border-gray-400 text-gray-600 bg-gray-200",
     };
     const allowedClass = options.isAllowed ? palette[status] : palette.unavailable;
-    const disabled = isDisabled ? " cursor-not-allowed opacity-70" : "";
+    const disabled = isDisabled
+      ? status === "unavailable"
+        ? " cursor-not-allowed"
+        : " cursor-not-allowed opacity-70"
+      : "";
     const highlight = options.isHighlighted ? " outline outline-1 outline-orange-300" : "";
     const selectedClass = options.isSelected ? " ring-2 ring-orange-500" : "";
     return `${base} ${allowedClass}${disabled}${highlight}${selectedClass}`;

@@ -36,6 +36,13 @@ import {
   territorySummary,
 } from "@/lib/franchises";
 import { DEFAULT_PRICE_TIER, PRICE_TIER_OPTIONS, normalisePriceTierLevel } from "@/lib/pricing";
+import {
+  getCoverageStatusLabel,
+  getCoverageStatusTone,
+  parseInsuranceAssignmentDoc,
+  parseInsurancePolicyDoc,
+  type InsuranceCoverageStatus,
+} from "@/lib/insurance";
 
 interface UserSummary {
   id: string;
@@ -285,6 +292,46 @@ interface FranchiseApplicationRecord {
   reviewNotes: string;
 }
 
+interface FranchiseCoverageEntry {
+  policyId: string;
+  policyName: string;
+  status: InsuranceCoverageStatus;
+  expiresAt: Date | null;
+}
+
+const franchiseCoverageTone = (status: InsuranceCoverageStatus) => {
+  const tone = getCoverageStatusTone(status);
+  const mapping: Record<string, string> = {
+    success: 'bg-emerald-100 text-emerald-700',
+    info: 'bg-blue-100 text-blue-700',
+    danger: 'bg-rose-100 text-rose-700',
+    muted: 'bg-slate-200 text-slate-700',
+    default: 'bg-slate-100 text-slate-700',
+  };
+  return `inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+    mapping[tone] ?? mapping.default
+  }`;
+};
+
+const franchiseCoverageSummary = (entries: FranchiseCoverageEntry[]) => {
+  if (entries.length === 0) {
+    return <span className="text-xs text-gray-400">No cover recorded</span>;
+  }
+  return (
+    <div className="flex flex-wrap gap-2">
+      {entries.map((entry) => (
+        <div key={`${entry.policyId}-${entry.status}`} className="flex flex-col text-xs">
+          <span className={franchiseCoverageTone(entry.status)}>{getCoverageStatusLabel(entry.status)}</span>
+          <span className="text-[10px] text-gray-500">
+            {entry.policyName}
+            {entry.expiresAt ? ` · Expires ${entry.expiresAt.toLocaleDateString()}` : ''}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 const ordinal = (value: number) => {
   const remainder = value % 10;
   const isTeen = value % 100 >= 11 && value % 100 <= 13;
@@ -429,6 +476,7 @@ export default function AdminFranchisesPage() {
   const [users, setUsers] = useState<UserSummary[]>([]);
   const [categoryOptions, setCategoryOptions] = useState<CategoryOption[]>([]);
   const [applications, setApplications] = useState<FranchiseApplicationRecord[]>([]);
+  const [coverageMap, setCoverageMap] = useState<Map<string, FranchiseCoverageEntry[]>>(new Map());
   const [applicationNotes, setApplicationNotes] = useState<Record<string, string>>({});
   const [savingApplications, setSavingApplications] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
@@ -783,6 +831,39 @@ export default function AdminFranchisesPage() {
       cancelRef.current = true;
     };
   }, [allowed, guardLoading, loadAll]);
+
+  useEffect(() => {
+    if (guardLoading || !allowed) return;
+    (async () => {
+      try {
+        const [assignmentSnap, policySnap] = await Promise.all([
+          getDocs(collection(db, 'insuranceAssignments')),
+          getDocs(collection(db, 'insurancePolicies')),
+        ]);
+        const policyNames = new Map<string, string>();
+        policySnap.docs.forEach((docSnap) => {
+          const policy = parseInsurancePolicyDoc(docSnap.id, docSnap.data() as Record<string, unknown>);
+          policyNames.set(docSnap.id, policy.name);
+        });
+        const map = new Map<string, FranchiseCoverageEntry[]>();
+        assignmentSnap.docs.forEach((docSnap) => {
+          const assignment = parseInsuranceAssignmentDoc(docSnap.id, docSnap.data() as Record<string, unknown>);
+          if (assignment.targetType !== 'franchise') return;
+          const entries = map.get(assignment.targetId) ?? [];
+          entries.push({
+            policyId: assignment.policyId,
+            policyName: policyNames.get(assignment.policyId) ?? assignment.policyId,
+            status: assignment.status,
+            expiresAt: assignment.expiresAt ?? null,
+          });
+          map.set(assignment.targetId, entries);
+        });
+        setCoverageMap(map);
+      } catch (err) {
+        console.error('Failed to load franchise coverage', err);
+      }
+    })();
+  }, [allowed, guardLoading]);
 
   useEffect(() => {
     setStripeActionMessage(null);
@@ -1504,6 +1585,7 @@ export default function AdminFranchisesPage() {
               ) : (
                 franchises.map((franchise) => {
                   const assignedTerritories = territoryByFranchise.get(franchise.id) ?? [];
+                  const coverageEntries = coverageMap.get(franchise.id) ?? [];
                   return (
                     <div key={franchise.id} className="rounded border p-4">
                       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
@@ -1520,6 +1602,7 @@ export default function AdminFranchisesPage() {
                           </a>
                         )}
                       </div>
+                      <div className="mt-3">{franchiseCoverageSummary(coverageEntries)}</div>
                       {assignedTerritories.length === 0 ? (
                         <p className="mt-3 text-sm text-gray-500">No territories assigned.</p>
                       ) : (

@@ -10,6 +10,26 @@ export interface AffiliatePayoutDetails {
   notes: string | null;
 }
 
+export type AffiliateStripeStatus =
+  | 'not_connected'
+  | 'in_progress'
+  | 'pending_verification'
+  | 'restricted'
+  | 'active';
+
+export interface AffiliateStripeDetails {
+  accountId: string | null;
+  status: AffiliateStripeStatus;
+  payoutsEnabled: boolean | null;
+  chargesEnabled: boolean | null;
+  requirementsDue: string[];
+  requirementsPastDue: string[];
+  requirementsEventuallyDue: string[];
+  disabledReason: string | null;
+  lastOnboardedAt: Timestamp | null;
+  lastLoginAt: Timestamp | null;
+}
+
 export interface AffiliateMetrics {
   totalOrders: number;
   totalRevenueGross: number;
@@ -43,6 +63,7 @@ export interface AffiliateRecord {
   commissionRate: number;
   metrics: AffiliateMetrics;
   payout: AffiliatePayoutDetails;
+  stripe: AffiliateStripeDetails;
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
   lastReferralAt: Timestamp | null;
@@ -294,6 +315,81 @@ const normaliseRefCode = (value: unknown, fallback: string): string => {
   return fallback;
 };
 
+const normaliseStringList = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : null))
+      .filter((entry): entry is string => Boolean(entry));
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[\n,]+/)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  }
+  return [];
+};
+
+const booleanOrNull = (value: unknown): boolean | null => {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim().toLowerCase();
+    if (trimmed === 'true' || trimmed === 'yes' || trimmed === '1') {
+      return true;
+    }
+    if (trimmed === 'false' || trimmed === 'no' || trimmed === '0') {
+      return false;
+    }
+  }
+  return null;
+};
+
+export function normaliseAffiliateStripeStatus(value: unknown): AffiliateStripeStatus {
+  if (typeof value !== 'string') {
+    return 'not_connected';
+  }
+  const normalised = value.trim().toLowerCase();
+  if (
+    normalised === 'in_progress' ||
+    normalised === 'pending' ||
+    normalised === 'onboarding' ||
+    normalised === 'under_review'
+  ) {
+    return 'in_progress';
+  }
+  if (
+    normalised === 'pending_verification' ||
+    normalised === 'requirements_due' ||
+    normalised === 'verification_needed'
+  ) {
+    return 'pending_verification';
+  }
+  if (normalised === 'restricted' || normalised === 'disabled' || normalised === 'payouts_disabled') {
+    return 'restricted';
+  }
+  if (normalised === 'active' || normalised === 'complete' || normalised === 'enabled') {
+    return 'active';
+  }
+  return 'not_connected';
+}
+
+export function describeAffiliateStripeStatus(status: AffiliateStripeStatus): string {
+  switch (status) {
+    case 'active':
+      return 'Active — payouts enabled';
+    case 'restricted':
+      return 'Restricted — action required';
+    case 'pending_verification':
+      return 'Verification required';
+    case 'in_progress':
+      return 'Onboarding in progress';
+    default:
+      return 'Not connected';
+  }
+}
+
 const extractMetrics = (data: Record<string, any>): AffiliateMetrics => {
   const metrics = (data.metrics ?? {}) as Record<string, any>;
   return {
@@ -330,6 +426,57 @@ const extractPayoutDetails = (data: Record<string, any>): AffiliatePayoutDetails
   };
 };
 
+const extractStripeDetails = (data: Record<string, any>): AffiliateStripeDetails => {
+  const stripe = (data.stripe ?? {}) as Record<string, any>;
+  const accountId =
+    stringOrNull(data.stripeAccountId ?? stripe.accountId ?? data.connectAccountId) ?? null;
+  const status = normaliseAffiliateStripeStatus(data.stripeStatus ?? stripe.status);
+  const payoutsEnabled = booleanOrNull(
+    data.stripePayoutsEnabled ?? stripe.payoutsEnabled ?? data.payoutsEnabled
+  );
+  const chargesEnabled = booleanOrNull(
+    data.stripeChargesEnabled ?? stripe.chargesEnabled ?? data.chargesEnabled
+  );
+  const requirementsDue = normaliseStringList(
+    data.stripeRequirementsDue ?? stripe.requirementsDue ?? stripe.requirements?.due
+  );
+  const requirementsPastDue = normaliseStringList(
+    data.stripeRequirementsPastDue ?? stripe.requirementsPastDue ?? stripe.requirements?.pastDue
+  );
+  const requirementsEventuallyDue = normaliseStringList(
+    data.stripeRequirementsEventuallyDue ?? stripe.requirementsEventuallyDue ?? []
+  );
+  const disabledReason =
+    stringOrNull(
+      data.stripeDisabledReason ??
+        stripe.disabledReason ??
+        stripe.requirements?.disabledReason ??
+        data.disabledReason
+    ) ?? null;
+  const lastOnboardedAt = parseTimestamp(
+    stripe.lastOnboardedAt ??
+      stripe.lastOnboardingAt ??
+      data.stripeLastOnboardedAt ??
+      data.stripeLastOnboardingAt
+  );
+  const lastLoginAt = parseTimestamp(
+    stripe.lastLoginAt ?? data.stripeLastLoginAt ?? stripe.lastDashboardLoginAt
+  );
+
+  return {
+    accountId,
+    status: accountId ? status : 'not_connected',
+    payoutsEnabled,
+    chargesEnabled,
+    requirementsDue,
+    requirementsPastDue,
+    requirementsEventuallyDue,
+    disabledReason,
+    lastOnboardedAt,
+    lastLoginAt,
+  };
+};
+
 export function parseAffiliateDoc(doc: QueryDocumentSnapshot<DocumentData>): AffiliateRecord {
   const data = doc.data() as Record<string, any>;
   const fallbackCode = doc.id.replace(/[^a-z0-9]/gi, '').toLowerCase() || `aff-${doc.id.slice(0, 6)}`;
@@ -344,6 +491,7 @@ export function parseAffiliateDoc(doc: QueryDocumentSnapshot<DocumentData>): Aff
     commissionRate: normaliseCommissionRate(data.commissionRate),
     metrics: extractMetrics(data),
     payout: extractPayoutDetails(data),
+    stripe: extractStripeDetails(data),
     createdAt: parseTimestamp(data.createdAt),
     updatedAt: parseTimestamp(data.updatedAt),
     lastReferralAt: parseTimestamp(data.lastReferralAt),

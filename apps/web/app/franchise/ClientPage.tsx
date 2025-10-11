@@ -3,8 +3,11 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import PortalContainer from "@/components/PortalContainer";
+import ExpoLeadOutreachManager from "@/components/admin/expo/ExpoLeadOutreachManager";
 import PortalHero from "@/components/PortalHero";
+import FranchiseNoticeBoardManager from "@/components/franchise/FranchiseNoticeBoardManager";
 import CrmPipelineBoard from "@/components/CrmPipelineBoard";
+import InsurancePortalPanel from "@/components/insurance/InsurancePortalPanel";
 import { CRM_PIPELINE_STATUSES, normaliseCrmStatus } from "@/lib/crm";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import type { User } from "firebase/auth";
@@ -205,6 +208,7 @@ export default function FranchisePortalPage() {
   const [user, setUser] = useState<User | null>(null);
   const [franchises, setFranchises] = useState<FranchiseSummary[]>([]);
   const [activeFranchiseId, setActiveFranchiseId] = useState<string | null>(null);
+  const [manageableFranchiseIds, setManageableFranchiseIds] = useState<string[]>([]);
   const [crmRecords, setCrmRecords] = useState<any[]>([]);
   const [crmLoading, setCrmLoading] = useState(false);
   const [crmError, setCrmError] = useState<string | null>(null);
@@ -450,6 +454,7 @@ export default function FranchisePortalPage() {
         if (ids.size === 0) {
           setFranchises([]);
           setActiveFranchiseId(null);
+          setManageableFranchiseIds([]);
           setOrders([]);
           setProjects([]);
           setUploads([]);
@@ -503,6 +508,8 @@ export default function FranchisePortalPage() {
         );
 
         summaries.sort((a, b) => a.name.localeCompare(b.name));
+        const idArray = Array.from(ids);
+        setManageableFranchiseIds(idArray);
         setFranchises(summaries);
         setActiveFranchiseId((current) => {
           if (current && ids.has(current)) {
@@ -514,6 +521,7 @@ export default function FranchisePortalPage() {
         console.error("Failed to load franchise membership", err);
         setFranchises([]);
         setActiveFranchiseId(null);
+        setManageableFranchiseIds([]);
         setOrders([]);
         setProjects([]);
         setUploads([]);
@@ -914,6 +922,11 @@ export default function FranchisePortalPage() {
       href: "#orders-earnings",
     },
     {
+      label: "Review insurance cover",
+      description: "Check franchise policies and outstanding requirements.",
+      href: "#insurance-coverage",
+    },
+    {
       label: "Stage Drive files",
       description: "Import deliverables from your shared folders.",
       href: "/franchise/drive-staging",
@@ -1020,6 +1033,21 @@ export default function FranchisePortalPage() {
               </div>
             </section>
 
+            <section id="insurance-coverage" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+              {activeFranchiseId ? (
+                <InsurancePortalPanel
+                  targetType="franchise"
+                  targetId={activeFranchiseId}
+                  heading="Franchise insurance cover"
+                  description="Confirm which HQ policies extend to your franchise, review required training modules, and acknowledge updates so crews remain covered."
+                />
+              ) : (
+                <p className="text-sm text-gray-600">
+                  Select a franchise to review the policies and requirements that apply to your territory.
+                </p>
+              )}
+            </section>
+
             <section id="operations-toolkit" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">
                 <div>
@@ -1105,6 +1133,16 @@ export default function FranchisePortalPage() {
                   Open full CRM workspace
                 </Link>
               </div>
+            </section>
+
+            <section id="team-notice-board" className="space-y-4">
+              <div className="rounded-3xl border border-indigo-100 bg-indigo-50 p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-indigo-900">Team notice board</h2>
+                <p className="mt-2 text-sm text-indigo-800">
+                  Publish updates for your crews and restrict posting access if you need to moderate the feed.
+                </p>
+              </div>
+              <FranchiseNoticeBoardManager franchiseIds={manageableFranchiseIds} />
             </section>
 
             <section id="orders-pipeline" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
@@ -1378,6 +1416,20 @@ export default function FranchisePortalPage() {
                 </div>
               )}
             </section>
+
+            <div id="expo-leads">
+              <ExpoLeadOutreachManager
+                variant="franchise"
+                heading="Event leads & follow-up"
+                description={
+                  <p className="text-sm text-gray-600">
+                    See every lead captured on your expo landing pages and send tailored follow-ups once you&apos;re back
+                    from the stand.
+                  </p>
+                }
+                className="rounded-3xl border border-gray-200 bg-white shadow-sm"
+              />
+            </div>
 
             <section id="upload-deliverables" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-4">

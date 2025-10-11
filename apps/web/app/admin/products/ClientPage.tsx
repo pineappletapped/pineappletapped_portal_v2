@@ -21,6 +21,8 @@ import type { Product } from "@/lib/products";
 import { getProductEventRangeLabel, formatProductOnsiteDuration } from "@/lib/products";
 import type { Category } from "@/lib/categories";
 
+const PAGE_SIZE = 12;
+
 export default function AdminProductsPage() {
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const router = useRouter();
@@ -30,6 +32,7 @@ export default function AdminProductsPage() {
   const [catFilter, setCatFilter] = useState<string>("all");
   const [venueFilter, setVenueFilter] = useState("");
   const [loading, setLoading] = useState(true);
+  const [currentPage, setCurrentPage] = useState(1);
   useEffect(() => {
     (async () => {
       if (guardLoading) return;
@@ -72,6 +75,7 @@ export default function AdminProductsPage() {
         name: duplicatedName,
       };
       setProducts((prev) => [newProduct, ...prev]);
+      setCurrentPage(1);
       router.push(`/admin/products/${ref.id}`);
     } catch (error) {
       console.error("Failed to duplicate product", error);
@@ -148,6 +152,23 @@ export default function AdminProductsPage() {
       return matchesSearch && matchesCat && matchesVenue;
     });
   }, [products, search, catFilter, venueFilter]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, catFilter, venueFilter]);
+
+  const totalPages = filtered.length === 0 ? 0 : Math.ceil(filtered.length / PAGE_SIZE);
+
+  useEffect(() => {
+    if (currentPage > (totalPages || 1)) {
+      setCurrentPage(totalPages === 0 ? 1 : totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const paginated = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }, [filtered, currentPage]);
 
   if (guardLoading || loading) {
     return (
@@ -230,7 +251,7 @@ export default function AdminProductsPage() {
           <p className="text-sm text-gray-600">No products match the selected filters.</p>
         ) : (
           <div className="grid gap-3">
-            {filtered.map((p) => {
+            {paginated.map((p) => {
               const eventLabel = getProductEventRangeLabel(p);
               const onsiteLabel = formatProductOnsiteDuration(p);
               const coverImage =
@@ -243,13 +264,18 @@ export default function AdminProductsPage() {
                 >
                   <div className="flex items-center gap-4">
                     {coverImage && (
-                      <Image
-                        src={coverImage}
-                        alt={p.name}
-                        width={64}
-                        height={64}
-                        className="h-16 w-16 rounded object-cover"
-                      />
+                      <div
+                        className="relative w-40 overflow-hidden rounded-xl bg-gray-100"
+                        style={{ aspectRatio: "16 / 9" }}
+                      >
+                        <Image
+                          src={coverImage}
+                          alt={p.name}
+                          fill
+                          className="object-cover"
+                          sizes="160px"
+                        />
+                      </div>
                     )}
                     <div>
                       <p className="font-medium text-gray-900">{p.name}</p>
@@ -265,22 +291,80 @@ export default function AdminProductsPage() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <button onClick={() => toggleHidden(p.id, p.hidden)} className="btn btn-sm">
+                    <button
+                      onClick={() => toggleHidden(p.id, p.hidden)}
+                      className={`btn btn-sm text-white ${
+                        p.hidden
+                          ? "bg-emerald-600 hover:bg-emerald-700 focus-visible:ring-emerald-500"
+                          : "bg-rose-600 hover:bg-rose-700 focus-visible:ring-rose-500"
+                      }`}
+                    >
                       {p.hidden ? "Show" : "Hide"}
                     </button>
-                    <Link href={`/admin/products/${p.id}`} className="btn btn-sm">
+                    <Link
+                      href={`/admin/products/${p.id}`}
+                      className="btn btn-sm bg-orange-500 text-white hover:bg-orange-600 focus-visible:ring-orange-500"
+                    >
                       Edit
                     </Link>
-                    <button onClick={() => duplicate(p)} className="btn btn-sm">
+                    <button
+                      onClick={() => duplicate(p)}
+                      className="btn btn-sm bg-blue-900 text-white hover:bg-blue-950 focus-visible:ring-blue-900"
+                    >
                       Duplicate
                     </button>
-                    <button onClick={() => remove(p.id)} className="btn btn-sm bg-rose-600 text-white">
+                    <button
+                      onClick={() => remove(p.id)}
+                      className="btn btn-sm bg-black text-white hover:bg-gray-900 focus-visible:ring-gray-900"
+                    >
                       Delete
                     </button>
                   </div>
                 </div>
               );
             })}
+            {totalPages > 1 ? (
+              <div className="flex items-center justify-between border-t border-gray-200 pt-4 text-sm text-gray-700">
+                <p>
+                  Showing
+                  {" "}
+                  <span className="font-medium">
+                    {(currentPage - 1) * PAGE_SIZE + 1}
+                  </span>
+                  {" "}
+                  to
+                  {" "}
+                  <span className="font-medium">
+                    {Math.min(currentPage * PAGE_SIZE, filtered.length)}
+                  </span>
+                  {" "}
+                  of
+                  {" "}
+                  <span className="font-medium">{filtered.length}</span>
+                  {" "}
+                  products
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                    disabled={currentPage === 1}
+                  >
+                    Previous
+                  </button>
+                  <p className="font-medium">
+                    Page {currentPage} of {totalPages}
+                  </p>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                    disabled={currentPage === totalPages}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
       </AdminSection>

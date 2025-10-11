@@ -372,46 +372,58 @@ export default function WorkflowStepsEditor({
   };
 
   return (
-    <div className="grid gap-4">
+    <div className="space-y-6">
       {(title || description) && (
-        <div className="grid gap-1">
-          {title && <h3 className="text-lg font-semibold">{title}</h3>}
+        <div className="space-y-2">
+          {title && <h3 className="text-lg font-semibold text-gray-900">{title}</h3>}
           {description && <p className="text-sm text-gray-600">{description}</p>}
         </div>
       )}
-      <button className="btn w-fit" type="button" onClick={addStep}>
-        {addButtonLabel}
-      </button>
-      <div className="grid gap-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+        <button className="btn btn-primary w-full sm:w-auto" type="button" onClick={addStep}>
+          {addButtonLabel}
+        </button>
+      </div>
+      <div className="space-y-6">
         {steps.length === 0 ? (
-          <p className="text-sm text-neutral-500">{emptyHelp}</p>
+          <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-6 text-center text-sm text-gray-500">
+            {emptyHelp}
+          </div>
         ) : (
           steps.map((step, idx) => (
-            <div key={step.id || idx} className="card grid gap-3 p-4">
-              <div className="grid gap-1">
-                <label className="text-sm font-medium" htmlFor={`step-title-${step.id ?? idx}`}>
-                  Title
-                </label>
-                <input
-                  id={`step-title-${step.id ?? idx}`}
-                  className="input"
-                  value={step.title}
-                  onChange={(event) => updateStepValue(step.id, "title", event.target.value)}
-                />
+            <div
+              key={step.id || idx}
+              className="space-y-5 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm"
+            >
+              <div className="grid gap-3 sm:grid-cols-2 sm:gap-6">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-gray-700" htmlFor={`step-title-${step.id ?? idx}`}>
+                    Title
+                  </label>
+                  <input
+                    id={`step-title-${step.id ?? idx}`}
+                    className="input"
+                    value={step.title}
+                    onChange={(event) => updateStepValue(step.id, "title", event.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label
+                    className="text-sm font-medium text-gray-700"
+                    htmlFor={`step-description-${step.id ?? idx}`}
+                  >
+                    Description
+                  </label>
+                  <textarea
+                    id={`step-description-${step.id ?? idx}`}
+                    className="input min-h-[96px]"
+                    value={step.description}
+                    onChange={(event) => updateStepValue(step.id, "description", event.target.value)}
+                  />
+                </div>
               </div>
-              <div className="grid gap-1">
-                <label className="text-sm font-medium" htmlFor={`step-description-${step.id ?? idx}`}>
-                  Description
-                </label>
-                <textarea
-                  id={`step-description-${step.id ?? idx}`}
-                  className="input"
-                  value={step.description}
-                  onChange={(event) => updateStepValue(step.id, "description", event.target.value)}
-                />
-              </div>
-              <div className="grid gap-1">
-                <label className="text-sm font-medium" htmlFor={`step-media-${step.id ?? idx}`}>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-gray-700" htmlFor={`step-media-${step.id ?? idx}`}>
                   Media URL
                 </label>
                 <input
@@ -420,25 +432,39 @@ export default function WorkflowStepsEditor({
                   value={step.mediaUrl ?? ""}
                   onChange={(event) => updateStepValue(step.id, "mediaUrl", event.target.value)}
                 />
+                <p className="text-xs text-gray-500">
+                  Paste a hosted image or video link to enrich the step with supporting visuals.
+                </p>
               </div>
-              <div className="grid gap-2">
-                <div className="flex items-center justify-between">
-                  <h4 className="font-semibold">Fields</h4>
-                  <button type="button" className="btn btn-xs" onClick={() => addField(step.id)}>
+              <div className="space-y-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="space-y-1">
+                    <h4 className="text-base font-semibold text-gray-900">Fields</h4>
+                    <p className="text-sm text-gray-600">
+                      Map inputs to saved profile details or craft custom questions for applicants.
+                    </p>
+                  </div>
+                  <button type="button" className="btn btn-outline btn-sm" onClick={() => addField(step.id)}>
                     Add field
                   </button>
                 </div>
                 {step.fields && step.fields.length > 0 ? (
-                  <div className="grid gap-3">
+                  <div className="space-y-4">
                     {step.fields.map((field, fieldIndex) => {
                       const hasPresetType = FIELD_TYPES.some((option) => option.value === field.type);
                       const selectedProfileField = field.profileFieldKey && PROFILE_OPTION_BY_VALUE[field.profileFieldKey]
                         ? field.profileFieldKey
                         : PROFILE_OPTION_BY_FORM_KEY[field.key]?.value ?? "";
                       return (
-                        <div key={`${step.id}-field-${fieldIndex}`} className="rounded-md border border-neutral-200 p-3">
-                          <div className="grid gap-1">
-                            <label className="text-sm font-medium" htmlFor={`field-profile-${step.id}-${fieldIndex}`}>
+                        <div
+                          key={`${step.id}-field-${fieldIndex}`}
+                          className="space-y-4 rounded-xl border border-gray-200 bg-gray-50 p-4"
+                        >
+                          <div className="space-y-2">
+                            <label
+                              className="text-sm font-medium text-gray-700"
+                              htmlFor={`field-profile-${step.id}-${fieldIndex}`}
+                            >
                               Profile field mapping
                             </label>
                             <select
@@ -458,61 +484,71 @@ export default function WorkflowStepsEditor({
                                 </optgroup>
                               ))}
                             </select>
-                            <p className="text-xs text-neutral-500">
+                            <p className="text-xs text-gray-500">
                               Selecting a saved profile field will prefill the key, label, and input type.
                             </p>
                           </div>
-                          <div className="mt-3 grid gap-1">
-                            <label className="text-sm font-medium" htmlFor={`field-key-${step.id}-${fieldIndex}`}>
-                              Field key
-                            </label>
-                            <input
-                              id={`field-key-${step.id}-${fieldIndex}`}
-                              className="input"
-                              value={field.key}
-                              onChange={(event) => updateField(step.id, fieldIndex, { key: event.target.value })}
-                            />
+                          <div className="grid gap-4 sm:grid-cols-2">
+                            <div className="space-y-2">
+                              <label className="text-sm font-medium text-gray-700" htmlFor={`field-key-${step.id}-${fieldIndex}`}>
+                                Field key
+                              </label>
+                              <input
+                                id={`field-key-${step.id}-${fieldIndex}`}
+                                className="input"
+                                value={field.key}
+                                onChange={(event) => updateField(step.id, fieldIndex, { key: event.target.value })}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <label
+                                className="text-sm font-medium text-gray-700"
+                                htmlFor={`field-label-${step.id}-${fieldIndex}`}
+                              >
+                                Field label
+                              </label>
+                              <input
+                                id={`field-label-${step.id}-${fieldIndex}`}
+                                className="input"
+                                value={field.label}
+                                onChange={(event) => updateField(step.id, fieldIndex, { label: event.target.value })}
+                              />
+                            </div>
                           </div>
-                          <div className="mt-2 grid gap-1">
-                            <label className="text-sm font-medium" htmlFor={`field-label-${step.id}-${fieldIndex}`}>
-                              Field label
+                          <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                            <div className="space-y-2">
+                              <label
+                                className="text-sm font-medium text-gray-700"
+                                htmlFor={`field-type-${step.id}-${fieldIndex}`}
+                              >
+                                Field type
+                              </label>
+                              <select
+                                id={`field-type-${step.id}-${fieldIndex}`}
+                                className="input"
+                                value={field.type}
+                                onChange={(event) => updateField(step.id, fieldIndex, { type: event.target.value })}
+                              >
+                                {!hasPresetType && field.type ? <option value={field.type}>{field.type}</option> : null}
+                                {FIELD_TYPES.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <label className="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(field.required)}
+                                onChange={(event) => updateField(step.id, fieldIndex, { required: event.target.checked })}
+                              />
+                              Required field
                             </label>
-                            <input
-                              id={`field-label-${step.id}-${fieldIndex}`}
-                              className="input"
-                              value={field.label}
-                              onChange={(event) => updateField(step.id, fieldIndex, { label: event.target.value })}
-                            />
                           </div>
-                          <div className="mt-2 grid gap-2 sm:flex sm:items-center">
-                            <label className="text-sm font-medium" htmlFor={`field-type-${step.id}-${fieldIndex}`}>
-                              Field type
-                            </label>
-                            <select
-                              id={`field-type-${step.id}-${fieldIndex}`}
-                              className="input max-w-[12rem]"
-                              value={field.type}
-                              onChange={(event) => updateField(step.id, fieldIndex, { type: event.target.value })}
-                            >
-                              {!hasPresetType && field.type ? <option value={field.type}>{field.type}</option> : null}
-                              {FIELD_TYPES.map((option) => (
-                                <option key={option.value} value={option.value}>
-                                  {option.label}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <label className="mt-2 inline-flex items-center gap-2 text-sm font-medium">
-                            <input
-                              type="checkbox"
-                              checked={Boolean(field.required)}
-                              onChange={(event) => updateField(step.id, fieldIndex, { required: event.target.checked })}
-                            />
-                            Required field
-                          </label>
                           <button
                             type="button"
-                            className="btn btn-ghost btn-xs mt-3 text-red-600 hover:text-red-700"
+                            className="btn btn-ghost btn-sm text-rose-600 hover:text-rose-700"
                             onClick={() => removeField(step.id, fieldIndex)}
                           >
                             Remove field
@@ -522,25 +558,29 @@ export default function WorkflowStepsEditor({
                     })}
                   </div>
                 ) : (
-                  <p className="text-sm text-neutral-500">No fields added yet.</p>
+                  <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-500">
+                    No fields added yet.
+                  </div>
                 )}
               </div>
               {step.agreementText !== undefined && (
-                <div className="grid gap-1">
-                  <label className="text-sm font-medium" htmlFor={`agreement-${step.id ?? idx}`}>
-                    Agreement Text
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-gray-700" htmlFor={`agreement-${step.id ?? idx}`}>
+                    Agreement text
                   </label>
                   <textarea
                     id={`agreement-${step.id ?? idx}`}
-                    className="input"
+                    className="input min-h-[120px]"
                     value={step.agreementText}
                     onChange={(event) => updateStepValue(step.id, "agreementText", event.target.value)}
                   />
                 </div>
               )}
-              <button className="btn btn-sm w-fit" type="button" onClick={() => saveStep(step)}>
-                Save
-              </button>
+              <div className="flex justify-end">
+                <button className="btn btn-primary btn-sm" type="button" onClick={() => saveStep(step)}>
+                  Save step
+                </button>
+              </div>
             </div>
           ))
         )}

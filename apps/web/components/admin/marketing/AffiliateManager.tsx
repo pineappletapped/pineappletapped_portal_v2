@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Timestamp,
   addDoc,
@@ -33,6 +33,8 @@ import {
   buildAffiliateShareLink,
   describeCommissionRate,
   formatCurrencyGBP,
+  normaliseAffiliateStripeStatus,
+  describeAffiliateStripeStatus,
   parseAffiliateApplicationDoc,
   parseAffiliateDoc,
   parseAffiliatePayoutDoc,
@@ -56,11 +58,6 @@ interface AffiliateFormState {
   commissionRate: number;
   refCode: string;
   notes: string;
-  bankName: string;
-  accountName: string;
-  sortCode: string;
-  accountNumber: string;
-  payoutNotes: string;
 }
 
 interface PayoutFormState {
@@ -145,11 +142,6 @@ export default function AffiliateManager() {
     commissionRate: AFFILIATE_DEFAULT_COMMISSION_RATE,
     refCode: generateAffiliateCode("affiliate"),
     notes: "",
-    bankName: "",
-    accountName: "",
-    sortCode: "",
-    accountNumber: "",
-    payoutNotes: "",
   }));
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<AffiliateRecord | null>(null);
@@ -162,6 +154,10 @@ export default function AffiliateManager() {
   const [payoutCandidatePayoutId, setPayoutCandidatePayoutId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
+  const [stripeActionLoadingMap, setStripeActionLoadingMap] = useState<Record<string, boolean>>({});
+  const [stripeActionFeedback, setStripeActionFeedback] = useState<
+    Record<string, { tone: "success" | "error"; text: string } | null>
+  >({});
   const [reviewTarget, setReviewTarget] = useState<AffiliateApplicationRecord | null>(null);
   const [reviewAction, setReviewAction] = useState<AffiliateApplicationDecisionAction>("approve");
   const [reviewNotes, setReviewNotes] = useState("");
@@ -507,11 +503,6 @@ export default function AffiliateManager() {
       commissionRate: prefill?.commissionRate ?? AFFILIATE_DEFAULT_COMMISSION_RATE,
       refCode: generateAffiliateCode(prefill?.name || "affiliate"),
       notes: prefill?.notes ?? "",
-      bankName: prefill?.bankName ?? "",
-      accountName: prefill?.accountName ?? "",
-      sortCode: prefill?.sortCode ?? "",
-      accountNumber: prefill?.accountNumber ?? "",
-      payoutNotes: prefill?.payoutNotes ?? "",
     });
   };
 
@@ -542,13 +533,6 @@ export default function AffiliateManager() {
         refCode: payload.refCode.trim(),
         refCodeLower: payload.refCode.trim().toLowerCase(),
         notes: payload.notes.trim() || null,
-        payout: {
-          bankName: payload.bankName.trim() || null,
-          accountName: payload.accountName.trim() || null,
-          sortCode: payload.sortCode.trim() || null,
-          accountNumber: payload.accountNumber.trim() || null,
-          notes: payload.payoutNotes.trim() || null,
-        },
         metrics: {
           totalOrders: 0,
           totalRevenueGross: 0,
@@ -593,11 +577,6 @@ export default function AffiliateManager() {
       commissionRate: record.commissionRate || AFFILIATE_DEFAULT_COMMISSION_RATE,
       refCode: record.refCode,
       notes: record.notes ?? "",
-      bankName: record.payout.bankName ?? "",
-      accountName: record.payout.accountName ?? "",
-      sortCode: record.payout.sortCode ?? "",
-      accountNumber: record.payout.accountNumber ?? "",
-      payoutNotes: record.payout.notes ?? "",
     });
     setActionError(null);
   };
@@ -621,13 +600,6 @@ export default function AffiliateManager() {
         refCode: editingForm.refCode.trim() || editing.refCode,
         refCodeLower: (editingForm.refCode.trim() || editing.refCode).toLowerCase(),
         notes: editingForm.notes.trim() || null,
-        payout: {
-          bankName: editingForm.bankName.trim() || null,
-          accountName: editingForm.accountName.trim() || null,
-          sortCode: editingForm.sortCode.trim() || null,
-          accountNumber: editingForm.accountNumber.trim() || null,
-          notes: editingForm.payoutNotes.trim() || null,
-        },
         updatedAt: serverTimestamp(),
       });
 
@@ -1001,6 +973,120 @@ export default function AffiliateManager() {
       });
   };
 
+  const launchAffiliateStripeConnect = useCallback(
+    async (affiliate: AffiliateRecord, mode: "onboarding" | "login" = "onboarding") => {
+      const affiliateId = affiliate.id;
+      setStripeActionLoadingMap((prev) => ({ ...prev, [affiliateId]: true }));
+      setStripeActionFeedback((prev) => ({ ...prev, [affiliateId]: null }));
+      try {
+        const response = await fetch("/api/affiliates/stripe/connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ affiliateId, mode }),
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          const message =
+            typeof payload?.error === "string"
+              ? payload.error
+              : "We couldn’t prepare a Stripe Connect link right now.";
+          throw new Error(message);
+        }
+        const payload = (await response.json()) as Record<string, any>;
+        const accountId =
+          typeof payload.accountId === "string" && payload.accountId.trim().length > 0
+            ? payload.accountId.trim()
+            : null;
+        const status = normaliseAffiliateStripeStatus(payload.status);
+        const payoutsEnabled =
+          typeof payload.payoutsEnabled === "boolean"
+            ? payload.payoutsEnabled
+            : affiliate.stripe.payoutsEnabled;
+        const chargesEnabled =
+          typeof payload.chargesEnabled === "boolean"
+            ? payload.chargesEnabled
+            : affiliate.stripe.chargesEnabled;
+        const requirementsDue = Array.isArray(payload.requirementsDue)
+          ? payload.requirementsDue.filter((item: unknown): item is string => typeof item === "string")
+          : affiliate.stripe.requirementsDue;
+        const requirementsPastDue = Array.isArray(payload.requirementsPastDue)
+          ? payload.requirementsPastDue.filter((item: unknown): item is string => typeof item === "string")
+          : affiliate.stripe.requirementsPastDue;
+        const requirementsEventuallyDue = Array.isArray(payload.requirementsEventuallyDue)
+          ? payload.requirementsEventuallyDue.filter(
+              (item: unknown): item is string => typeof item === "string"
+            )
+          : affiliate.stripe.requirementsEventuallyDue;
+        const disabledReason =
+          typeof payload.disabledReason === "string" && payload.disabledReason.trim().length > 0
+            ? payload.disabledReason.trim()
+            : null;
+
+        setAffiliates((prev) =>
+          prev.map((record) =>
+            record.id === affiliateId
+              ? {
+                  ...record,
+                  stripe: {
+                    ...record.stripe,
+                    accountId: accountId ?? record.stripe.accountId,
+                    status,
+                    payoutsEnabled,
+                    chargesEnabled,
+                    requirementsDue,
+                    requirementsPastDue,
+                    requirementsEventuallyDue,
+                    disabledReason,
+                  },
+                }
+              : record
+          )
+        );
+
+        const linkUrl =
+          typeof payload.linkUrl === "string" && payload.linkUrl.trim().length > 0
+            ? payload.linkUrl.trim()
+            : null;
+        if (linkUrl && typeof window !== "undefined") {
+          window.open(linkUrl, "_blank", "noopener,noreferrer");
+        }
+
+        const linkType: "onboarding" | "login" =
+          payload.linkType === "login" || payload.linkType === "onboarding"
+            ? payload.linkType
+            : mode;
+        setStripeActionFeedback((prev) => ({
+          ...prev,
+          [affiliateId]: {
+            tone: "success",
+            text:
+              linkType === "login"
+                ? "Stripe Express dashboard opened in a new tab."
+                : "Stripe Connect onboarding link opened in a new tab.",
+          },
+        }));
+        window.setTimeout(() => {
+          setStripeActionFeedback((prev) => ({ ...prev, [affiliateId]: null }));
+        }, 6000);
+      } catch (err) {
+        console.error("Failed to prepare affiliate Stripe link", err);
+        setStripeActionFeedback((prev) => ({
+          ...prev,
+          [affiliateId]: {
+            tone: "error",
+            text:
+              err instanceof Error
+                ? err.message
+                : "Unable to contact Stripe Connect. Please try again shortly.",
+          },
+        }));
+      } finally {
+        setStripeActionLoadingMap((prev) => ({ ...prev, [affiliateId]: false }));
+      }
+    },
+    [setAffiliates]
+  );
+
   const openReviewModal = (
     application: AffiliateApplicationRecord,
     action: AffiliateApplicationDecisionAction
@@ -1180,53 +1266,6 @@ export default function AffiliateManager() {
               onChange={(event) => setNewAffiliate((prev) => ({ ...prev, notes: event.target.value }))}
             />
           </label>
-          <details className="rounded-lg border border-dashed border-gray-300 p-4">
-            <summary className="cursor-pointer text-sm font-semibold text-gray-700">
-              Payout details (optional)
-            </summary>
-            <div className="mt-3 grid gap-3 md:grid-cols-2">
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Bank name</span>
-                <input
-                  className="input"
-                  value={newAffiliate.bankName}
-                  onChange={(event) => setNewAffiliate((prev) => ({ ...prev, bankName: event.target.value }))}
-                />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Account name</span>
-                <input
-                  className="input"
-                  value={newAffiliate.accountName}
-                  onChange={(event) => setNewAffiliate((prev) => ({ ...prev, accountName: event.target.value }))}
-                />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Sort code</span>
-                <input
-                  className="input"
-                  value={newAffiliate.sortCode}
-                  onChange={(event) => setNewAffiliate((prev) => ({ ...prev, sortCode: event.target.value }))}
-                />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Account number</span>
-                <input
-                  className="input"
-                  value={newAffiliate.accountNumber}
-                  onChange={(event) => setNewAffiliate((prev) => ({ ...prev, accountNumber: event.target.value }))}
-                />
-              </label>
-              <label className="md:col-span-2 grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Payout notes</span>
-                <textarea
-                  className="input min-h-[60px]"
-                  value={newAffiliate.payoutNotes}
-                  onChange={(event) => setNewAffiliate((prev) => ({ ...prev, payoutNotes: event.target.value }))}
-                />
-              </label>
-            </div>
-          </details>
           <div className="flex items-center gap-3">
             <button type="submit" className="btn" disabled={creating}>
               {creating ? "Creating…" : "Add affiliate"}
@@ -1265,6 +1304,12 @@ export default function AffiliateManager() {
                 const hasPendingLedgerLines = (ledgerPending?.net ?? 0) > 0;
                 const eligibleForPayout =
                   hasPendingLedgerLines && pendingNet >= AFFILIATE_MIN_WITHDRAWAL_NET;
+                const stripeStatusText = describeAffiliateStripeStatus(affiliate.stripe.status);
+                const stripeAccountId = affiliate.stripe.accountId;
+                const stripeActionLoading = Boolean(stripeActionLoadingMap[affiliate.id]);
+                const stripeFeedbackEntry = stripeActionFeedback[affiliate.id];
+                const stripeRequirementsDue = affiliate.stripe.requirementsDue;
+                const stripeRequirementsPastDue = affiliate.stripe.requirementsPastDue;
                 return (
                   <article
                     key={affiliate.id}
@@ -1325,6 +1370,59 @@ export default function AffiliateManager() {
                             ? `Need £${AFFILIATE_MIN_WITHDRAWAL_NET.toFixed(0)}+ net`
                             : 'Awaiting delivered orders'}
                       </button>
+                    </div>
+                    <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900">Stripe Connect</p>
+                          <p className="mt-1 text-xs text-slate-600">
+                            {stripeAccountId ? `Account ${stripeAccountId}` : 'Not connected'}
+                          </p>
+                          <p className="text-xs text-slate-600">Status: {stripeStatusText}</p>
+                        </div>
+                        <div className="flex flex-col gap-2">
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-xs"
+                            onClick={() => launchAffiliateStripeConnect(affiliate, 'onboarding')}
+                            disabled={stripeActionLoading}
+                          >
+                            {stripeActionLoading
+                              ? 'Preparing…'
+                              : stripeAccountId
+                                ? 'Resend onboarding'
+                                : 'Launch onboarding'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-outline btn-xs"
+                            onClick={() => launchAffiliateStripeConnect(affiliate, 'login')}
+                            disabled={stripeActionLoading || !stripeAccountId}
+                          >
+                            Open dashboard
+                          </button>
+                        </div>
+                      </div>
+                      {stripeRequirementsPastDue.length > 0 ? (
+                        <p className="mt-2 text-xs text-red-600">
+                          Action required:{' '}
+                          {stripeRequirementsPastDue.map((item) => item.replace(/_/g, ' ')).join(', ')}
+                        </p>
+                      ) : stripeRequirementsDue.length > 0 ? (
+                        <p className="mt-2 text-xs text-amber-700">
+                          Complete in Stripe:{' '}
+                          {stripeRequirementsDue.map((item) => item.replace(/_/g, ' ')).join(', ')}
+                        </p>
+                      ) : null}
+                      {stripeFeedbackEntry ? (
+                        <p
+                          className={`mt-2 text-xs ${
+                            stripeFeedbackEntry.tone === 'error' ? 'text-red-600' : 'text-emerald-600'
+                          }`}
+                        >
+                          {stripeFeedbackEntry.text}
+                        </p>
+                      ) : null}
                     </div>
                     <div className="mt-4 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
                       <p className="font-medium text-gray-700">Share link</p>
@@ -1870,58 +1968,6 @@ export default function AffiliateManager() {
                 }
               />
             </label>
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Bank name</span>
-                <input
-                  className="input"
-                  value={editingForm.bankName}
-                  onChange={(event) =>
-                    setEditingForm((prev) => prev && { ...prev, bankName: event.target.value })
-                  }
-                />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Account name</span>
-                <input
-                  className="input"
-                  value={editingForm.accountName}
-                  onChange={(event) =>
-                    setEditingForm((prev) => prev && { ...prev, accountName: event.target.value })
-                  }
-                />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Sort code</span>
-                <input
-                  className="input"
-                  value={editingForm.sortCode}
-                  onChange={(event) =>
-                    setEditingForm((prev) => prev && { ...prev, sortCode: event.target.value })
-                  }
-                />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Account number</span>
-                <input
-                  className="input"
-                  value={editingForm.accountNumber}
-                  onChange={(event) =>
-                    setEditingForm((prev) => prev && { ...prev, accountNumber: event.target.value })
-                  }
-                />
-              </label>
-              <label className="md:col-span-2 grid gap-1 text-sm">
-                <span className="font-medium text-gray-700">Payout notes</span>
-                <textarea
-                  className="input min-h-[60px]"
-                  value={editingForm.payoutNotes}
-                  onChange={(event) =>
-                    setEditingForm((prev) => prev && { ...prev, payoutNotes: event.target.value })
-                  }
-                />
-              </label>
-            </div>
             <div className="mt-6 flex flex-wrap gap-3">
               <button type="submit" className="btn">
                 Save changes

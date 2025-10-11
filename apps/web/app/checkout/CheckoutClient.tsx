@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useRouter } from "next/navigation";
 import { Elements } from "@stripe/react-stripe-js";
 import { loadStripe } from "@stripe/stripe-js";
-import { httpsCallable, type Functions } from "firebase/functions";
+import { httpsCallable, httpsCallableFromURL, type Functions } from "firebase/functions";
 import {
   collection,
   doc,
@@ -14,10 +14,16 @@ import {
   query,
   where,
 } from "firebase/firestore";
-import { signInWithEmailAndPassword, type Auth, type User } from "firebase/auth";
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  updateProfile,
+  type Auth,
+  type User,
+} from "firebase/auth";
 import type { FirebaseError } from "firebase/app";
 import { useCart } from "@/lib/cart";
-import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
+import { ensureFirebase, functionsBaseUrl, loadAuthModule } from "@/lib/firebase";
 import { useLeadSourceTag } from "@/hooks/useLeadSourceTag";
 import {
   leadSourceDetailPlaceholder,
@@ -25,6 +31,13 @@ import {
   type LeadSourceKind,
 } from "@/lib/lead-source";
 import { VAT_RATE } from "@/lib/vat";
+import {
+  DEFAULT_FUNCTION_BASE,
+  buildCallableEndpointsFromBases,
+  normaliseBaseUrl,
+  normaliseCallableEndpoint,
+  resolveHostedAppBase,
+} from "@/lib/callableEndpoints";
 import CheckoutPaymentForm from "./CheckoutPaymentForm";
 
 const LEAD_SOURCE_OPTIONS: LeadSourceKind[] = [
@@ -36,6 +49,13 @@ const LEAD_SOURCE_OPTIONS: LeadSourceKind[] = [
 ];
 
 const ZERO_BALANCE_TOLERANCE = 0.005;
+const MIN_ACCOUNT_PASSWORD_LENGTH = 8;
+
+const EXPLICIT_CREATE_ORDER_ENDPOINT = process.env.NEXT_PUBLIC_CREATE_ORDER_ENDPOINT;
+const PUBLIC_FUNCTIONS_BASE_URL = process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL;
+const PUBLIC_FIREBASE_FUNCTIONS_URL = process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_URL;
+const LEGACY_BACKEND_FUNCTION_BASE =
+  "https://us-central1-ptfbportalbackend.cloudfunctions.net";
 
 interface VoucherRecord {
   type?: string | null;
@@ -100,7 +120,10 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const stripeConfigError = publishableKey ? null : "Stripe publishable key is not configured.";
 
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "register">("register");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [registerPassword, setRegisterPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [name, setName] = useState("");
   const [company, setCompany] = useState("");
   const [location, setLocation] = useState("");
@@ -127,11 +150,32 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const [initializingPayment, setInitializingPayment] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [isRegistering, setIsRegistering] = useState(false);
   const authRef = useRef<Auth | null>(null);
   const functionsRef = useRef<Functions | null>(null);
   const lastIntentPayload = useRef<string | null>(null);
   const loginErrorRef = useRef<HTMLDivElement | null>(null);
   const authEmail = currentUser?.email || "";
+  const switchToLogin = useCallback(() => {
+    setAuthMode("login");
+    setAccountError(null);
+    setRegisterPassword("");
+    setConfirmPassword("");
+  }, [setAccountError, setAuthMode, setConfirmPassword, setRegisterPassword]);
+  const switchToRegister = useCallback(() => {
+    setAuthMode("register");
+    setLoginError(null);
+    setAccountError(null);
+    setRegisterPassword("");
+    setConfirmPassword("");
+  }, [
+    setAccountError,
+    setAuthMode,
+    setConfirmPassword,
+    setLoginError,
+    setRegisterPassword,
+  ]);
   const venueLocked = useMemo(
     () =>
       items.length > 0 &&
@@ -897,7 +941,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       if (!instance) {
         throw new Error("Firebase auth is unavailable.");
       }
-      await signInWithEmailAndPassword(instance, email, password);
+      await signInWithEmailAndPassword(instance, email, loginPassword);
     } catch (err) {
       console.error(err);
       let message = "We couldn't sign you in. Check your email and password, then try again.";
@@ -978,7 +1022,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     return "We couldn't complete your order. Please try again.";
   }, []);
 
-  const callCreateOrder = useCallback(
+  const callCreateOrderViaApi = useCallback(
     async (token: string | null): Promise<CreateOrderResult> => {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
@@ -1038,18 +1082,259 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     [orderInput],
   );
 
+  const callCreateOrderViaCallable = useCallback(async (): Promise<CreateOrderResult> => {
+    const { functions } = await ensureFirebase();
+    const functionsInstance = functionsRef.current ?? functions ?? null;
+    if (!functionsInstance) {
+      throw Object.assign(new Error("Firebase functions are unavailable."), {
+        code: "create-order-functions-unavailable",
+      });
+    }
+
+    functionsRef.current = functionsInstance;
+
+    const extractCallableResult = (result: any): CreateOrderResult => {
+      const data =
+        (result && typeof result === "object"
+          ? result.data ?? result.result?.data ?? result.result ?? null
+          : null) ?? null;
+
+      if (!data || typeof data !== "object") {
+        return {};
+      }
+
+      return data as CreateOrderResult;
+    };
+
+    const attemptErrors: Array<{ endpoint: string | null; error: unknown }> = [];
+
+    const invokeCallable = async (
+      callable: ReturnType<typeof httpsCallable>,
+      endpoint: string | null,
+    ): Promise<CreateOrderResult | null> => {
+      try {
+        const result: any = await callable(orderInput);
+        return extractCallableResult(result);
+      } catch (error) {
+        console.warn(
+          endpoint
+            ? `createOrder callable attempt via ${endpoint} failed`
+            : "createOrder callable default attempt failed",
+          error,
+        );
+        attemptErrors.push({ endpoint, error });
+        return null;
+      }
+    };
+
+    const defaultResult = await invokeCallable(
+      httpsCallable(functionsInstance, "createOrder"),
+      null,
+    );
+    if (defaultResult !== null) {
+      return defaultResult;
+    }
+
+    const explicitEndpoint = normaliseCallableEndpoint(
+      EXPLICIT_CREATE_ORDER_ENDPOINT,
+      "createOrder",
+    );
+    const host = typeof window !== "undefined" ? window.location.host : null;
+    const hostBase = resolveHostedAppBase(host);
+    const defaultBase = normaliseBaseUrl(functionsBaseUrl);
+
+    let candidateEndpoints: string[];
+    if (explicitEndpoint) {
+      candidateEndpoints = [explicitEndpoint];
+    } else {
+      candidateEndpoints = buildCallableEndpointsFromBases("createOrder", [
+        functionsBaseUrl,
+        PUBLIC_FUNCTIONS_BASE_URL,
+        PUBLIC_FIREBASE_FUNCTIONS_URL,
+        hostBase,
+        DEFAULT_FUNCTION_BASE,
+        LEGACY_BACKEND_FUNCTION_BASE,
+      ]);
+
+      if (defaultBase) {
+        candidateEndpoints = candidateEndpoints.filter(
+          (endpoint) => !endpoint.startsWith(`${defaultBase}/`),
+        );
+      }
+    }
+
+    for (const endpoint of candidateEndpoints) {
+      const callable = httpsCallableFromURL(functionsInstance, endpoint);
+      const result = await invokeCallable(callable, endpoint);
+      if (result !== null) {
+        return result;
+      }
+    }
+
+    const lastError = attemptErrors.length ? attemptErrors[attemptErrors.length - 1].error : null;
+    if (lastError instanceof Error) {
+      if (!("details" in lastError)) {
+        (lastError as Error & { details?: unknown }).details = attemptErrors;
+      }
+      throw lastError;
+    }
+
+    const aggregatedError = Object.assign(
+      new Error("Failed to create order via callable endpoints."),
+      { code: "create-order-callable-failed", details: attemptErrors },
+    );
+    throw aggregatedError;
+  }, [orderInput]);
+
+  const callCreateOrder = useCallback(
+    async (token: string | null): Promise<CreateOrderResult> => {
+      try {
+        return await callCreateOrderViaApi(token);
+      } catch (apiError) {
+        console.warn("createOrder API proxy failed, retrying callable", apiError);
+        try {
+          return await callCreateOrderViaCallable();
+        } catch (callableError) {
+          console.error("createOrder callable fallback failed", callableError);
+          if (callableError instanceof Error) {
+            if (!("cause" in callableError)) {
+              (callableError as Error & { cause?: unknown }).cause = apiError;
+            }
+            throw callableError;
+          }
+          throw apiError instanceof Error ? apiError : new Error("Failed to create order.");
+        }
+      }
+    },
+    [callCreateOrderViaApi, callCreateOrderViaCallable],
+  );
+
+  const ensureCheckoutUser = useCallback(async (): Promise<User | null> => {
+    if (currentUser) {
+      return currentUser;
+    }
+    if (authMode === "login") {
+      return null;
+    }
+
+    const trimmedEmail = email.trim().toLowerCase();
+    if (!trimmedEmail) {
+      setAccountError("Enter your email address to create an account.");
+      return null;
+    }
+    if (registerPassword.length < MIN_ACCOUNT_PASSWORD_LENGTH) {
+      setAccountError(
+        `Password must be at least ${MIN_ACCOUNT_PASSWORD_LENGTH} characters long.`,
+      );
+      return null;
+    }
+    if (registerPassword !== confirmPassword) {
+      setAccountError("Passwords do not match. Check and try again.");
+      return null;
+    }
+    if (isRegistering) {
+      return null;
+    }
+
+    setAccountError(null);
+    setIsRegistering(true);
+
+    try {
+      let instance = authRef.current;
+      if (!instance) {
+        const { auth } = await ensureFirebase();
+        instance = auth ?? null;
+        authRef.current = instance;
+      }
+      if (!instance) {
+        throw new Error("Firebase auth is unavailable.");
+      }
+      const credential = await createUserWithEmailAndPassword(
+        instance,
+        trimmedEmail,
+        registerPassword,
+      );
+      const createdUser = credential.user;
+      if (!createdUser) {
+        throw new Error("Account was created without a user session.");
+      }
+
+      if (trimmedEmail !== email) {
+        setEmail(trimmedEmail);
+      }
+
+      const displayName = name.trim();
+      if (displayName.length > 0) {
+        try {
+          await updateProfile(createdUser, { displayName });
+        } catch (profileError) {
+          console.warn("Failed to update display name after registration", profileError);
+        }
+      }
+
+      setAccountError(null);
+      return createdUser;
+    } catch (error) {
+      console.error("Failed to register checkout account", error);
+      let message =
+        "We couldn't create your account. Try again or contact support for help.";
+      const firebaseErr = error as Partial<FirebaseError> | null;
+      if (firebaseErr && typeof firebaseErr === "object" && "code" in firebaseErr) {
+        switch (firebaseErr.code) {
+          case "auth/email-already-in-use":
+            message = "An account already exists for that email. Sign in instead.";
+            setAuthMode("login");
+            setLoginError(message);
+            break;
+          case "auth/weak-password":
+            message =
+              firebaseErr.message ||
+              `Password must be at least ${MIN_ACCOUNT_PASSWORD_LENGTH} characters long.`;
+            break;
+          case "auth/invalid-email":
+            message = "Enter a valid email address.";
+            break;
+          default:
+            message = firebaseErr.message || message;
+            break;
+        }
+      } else if (error instanceof Error && error.message) {
+        message = error.message;
+      }
+      setAccountError(message);
+      return null;
+    } finally {
+      setIsRegistering(false);
+    }
+  }, [
+    authMode,
+    confirmPassword,
+    currentUser,
+    email,
+    isRegistering,
+    name,
+    registerPassword,
+    setAccountError,
+    setAuthMode,
+    setEmail,
+    setIsRegistering,
+    setLoginError,
+  ]);
+
   const initializePaymentIntent = useCallback(async () => {
     if (initializingPayment) {
       return false;
     }
-    if (hasZeroBalance) {
+    if (isRegistering) {
       setPaymentError(
-        "This order no longer requires payment. Proceed with the order instead."
+        "We're creating your account. Please wait a moment and try again.",
       );
       return false;
     }
-    if (!currentUser) {
-      setPaymentError("Sign in to continue to payment.");
+    if (hasZeroBalance) {
+      setPaymentError(
+        "This order no longer requires payment. Proceed with the order instead.",
+      );
       return false;
     }
     if (items.length === 0) {
@@ -1073,6 +1358,20 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     setPaymentError(null);
 
     try {
+      let authUser = currentUser;
+      if (!authUser) {
+        authUser = await ensureCheckoutUser();
+      }
+      if (!authUser) {
+        setPaymentError(
+          authMode === "register"
+            ? accountError ||
+                "Create your portal account by setting a password before continuing."
+            : "Sign in to continue to payment.",
+        );
+        return false;
+      }
+
       let functionsInstance = functionsRef.current;
       if (!functionsInstance) {
         const { functions } = await ensureFirebase();
@@ -1083,7 +1382,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         throw new Error("Firebase functions are unavailable.");
       }
 
-      const token = await currentUser.getIdToken();
+      const token = await authUser.getIdToken();
       const orderData = await callCreateOrder(token);
       const createdOrderId: string | undefined =
         typeof orderData.orderId === "string" ? orderData.orderId : undefined;
@@ -1119,17 +1418,22 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       setInitializingPayment(false);
     }
   }, [
+    accountError,
+    authMode,
     callCreateOrder,
-    currentUser,
     currentIntentPayload,
+    currentUser,
     describeCallableError,
+    ensureCheckoutUser,
+    hasZeroBalance,
     initializingPayment,
+    isRegistering,
     items.length,
     orderInput,
     stripePromise,
     stripeConfigError,
-    hasZeroBalance,
   ]);
+
 
   useEffect(() => {
     if (
@@ -1168,8 +1472,10 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     if (initializingPayment) {
       return false;
     }
-    if (!currentUser) {
-      setPaymentError("Sign in to continue to checkout.");
+    if (isRegistering) {
+      setPaymentError(
+        "We're creating your account. Please wait a moment and try again.",
+      );
       return false;
     }
     if (items.length === 0) {
@@ -1189,6 +1495,20 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     setPaymentError(null);
 
     try {
+      let authUser = currentUser;
+      if (!authUser) {
+        authUser = await ensureCheckoutUser();
+      }
+      if (!authUser) {
+        setPaymentError(
+          authMode === "register"
+            ? accountError ||
+                "Create your portal account by setting a password before continuing."
+            : "Sign in to continue to checkout.",
+        );
+        return false;
+      }
+
       const { db, functions } = await ensureFirebase();
       const functionsInstance = functionsRef.current ?? functions ?? null;
       if (!functionsInstance) {
@@ -1196,7 +1516,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       }
       functionsRef.current = functionsInstance;
 
-      const token = await currentUser.getIdToken();
+      const token = await authUser.getIdToken();
       const orderData = await callCreateOrder(token);
       const createdOrderId: string | undefined =
         typeof orderData.orderId === "string" ? orderData.orderId : undefined;
@@ -1297,15 +1617,20 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       setInitializingPayment(false);
     }
   }, [
+    accountError,
+    authMode,
     callCreateOrder,
     currentIntentPayload,
     currentUser,
     describeCallableError,
+    ensureCheckoutUser,
     handlePaymentSuccess,
     initializingPayment,
+    isRegistering,
     items.length,
     orderInput,
   ]);
+
 
   const handleLeadSourceKindChange = (kind: LeadSourceKind) => {
     setLeadSourceState((prev) => {
@@ -1323,50 +1648,86 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     <div className="max-w-5xl mx-auto grid md:grid-cols-2 gap-8">
       <div className="space-y-6">
         {authReady && !currentUser && (
-          <form onSubmit={login} className="space-y-2 border p-4 rounded" noValidate>
-            <h2 className="font-semibold">Login</h2>
-            {loginError ? (
-              <div
-                ref={loginErrorRef}
-                className="rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700 focus:outline-none focus:ring-2 focus:ring-red-400"
-                role="alert"
-                tabIndex={-1}
-              >
-                {loginError}
+          authMode === "login" ? (
+            <form
+              onSubmit={login}
+              className="space-y-3 rounded border p-4"
+              noValidate
+            >
+              <div className="flex items-start justify-between gap-2">
+                <h2 className="font-semibold">Login</h2>
+                <button
+                  type="button"
+                  className="text-sm font-semibold text-orange"
+                  onClick={switchToRegister}
+                >
+                  New customer? Create an account
+                </button>
               </div>
-            ) : null}
-            <input
-              className="input input-bordered w-full"
-              type="email"
-              placeholder="Email"
-              value={email}
-              onChange={(e) => {
-                setEmail(e.target.value);
-                if (loginError) {
-                  setLoginError(null);
-                }
-              }}
-              autoComplete="email"
-              required
-            />
-            <input
-              className="input input-bordered w-full"
-              type="password"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => {
-                setPassword(e.target.value);
-                if (loginError) {
-                  setLoginError(null);
-                }
-              }}
-              autoComplete="current-password"
-              required
-            />
-            <button className="btn w-full" type="submit" disabled={isLoggingIn}>
-              {isLoggingIn ? "Signing in..." : "Sign In"}
-            </button>
-          </form>
+              {loginError ? (
+                <div
+                  ref={loginErrorRef}
+                  className="rounded border border-red-200 bg-red-50 p-2 text-sm text-red-700 focus:outline-none focus:ring-2 focus:ring-red-400"
+                  role="alert"
+                  tabIndex={-1}
+                >
+                  {loginError}
+                </div>
+              ) : null}
+              <input
+                className="input input-bordered w-full"
+                type="email"
+                placeholder="Email"
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (loginError) {
+                    setLoginError(null);
+                  }
+                }}
+                autoComplete="email"
+                required
+              />
+              <input
+                className="input input-bordered w-full"
+                type="password"
+                placeholder="Password"
+                value={loginPassword}
+                onChange={(e) => {
+                  setLoginPassword(e.target.value);
+                  if (loginError) {
+                    setLoginError(null);
+                  }
+                }}
+                autoComplete="current-password"
+                required
+              />
+              <button className="btn w-full" type="submit" disabled={isLoggingIn}>
+                {isLoggingIn ? "Signing in..." : "Sign In"}
+              </button>
+            </form>
+          ) : (
+            <div className="space-y-3 rounded border p-4">
+              <div className="flex items-start justify-between gap-2">
+                <h2 className="font-semibold">Create Account</h2>
+                <button
+                  type="button"
+                  className="text-sm font-semibold text-orange"
+                  onClick={switchToLogin}
+                >
+                  Already registered? Sign in
+                </button>
+              </div>
+              <p className="text-sm text-gray-600">
+                Enter your email and customer details below, then set a password to
+                create your Pineapple Tapped portal account during checkout.
+              </p>
+              <p className="text-xs text-gray-500">
+                We&apos;ll confirm your order and send account access details to the
+                email you provide.
+              </p>
+            </div>
+          )
         )}
 
         <div className="space-y-2">
@@ -1382,9 +1743,55 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 if (loginError) {
                   setLoginError(null);
                 }
+                if (accountError) {
+                  setAccountError(null);
+                }
               }}
               required
             />
+          )}
+          {!currentUser && authMode === "register" && (
+            <div className="space-y-2">
+              <div className="grid gap-2 sm:grid-cols-2">
+                <input
+                  className="input input-bordered w-full"
+                  type="password"
+                  placeholder="Create password"
+                  value={registerPassword}
+                  onChange={(e) => {
+                    setRegisterPassword(e.target.value);
+                    if (accountError) {
+                      setAccountError(null);
+                    }
+                  }}
+                  autoComplete="new-password"
+                  minLength={MIN_ACCOUNT_PASSWORD_LENGTH}
+                  required
+                />
+                <input
+                  className="input input-bordered w-full"
+                  type="password"
+                  placeholder="Confirm password"
+                  value={confirmPassword}
+                  onChange={(e) => {
+                    setConfirmPassword(e.target.value);
+                    if (accountError) {
+                      setAccountError(null);
+                    }
+                  }}
+                  autoComplete="new-password"
+                  required
+                />
+              </div>
+              <p className="text-xs text-gray-500">
+                Password must be at least {MIN_ACCOUNT_PASSWORD_LENGTH} characters long.
+              </p>
+              {accountError ? (
+                <div className="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                  {accountError}
+                </div>
+              ) : null}
+            </div>
           )}
           <input
             className="input input-bordered w-full"
@@ -1561,7 +1968,11 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 type="button"
                 className="btn w-full"
                 onClick={completeZeroBalanceOrder}
-                disabled={Boolean(zeroBalanceBlockingMessage) || initializingPayment}
+                disabled={
+                  Boolean(zeroBalanceBlockingMessage) ||
+                  initializingPayment ||
+                  isRegistering
+                }
               >
                 {initializingPayment
                   ? "Submitting order..."
@@ -1602,15 +2013,17 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
               <p className="text-sm text-gray-500">
                 {items.length === 0
                   ? "Add items to your cart to continue."
-                  : !currentUser
+                  : !currentUser && authMode === "login"
                     ? "Sign in to continue to payment."
-                    : !name
-                      ? "Enter your name to continue."
-                      : stripeConfigError
-                        ? stripeConfigError
-                        : !stripePromise
-                          ? "Payment is currently unavailable."
-                          : "Prepare your payment details to enter card information."}
+                    : !currentUser && authMode === "register"
+                      ? "Set your password to create an account before continuing."
+                      : !name
+                        ? "Enter your name to continue."
+                        : stripeConfigError
+                          ? stripeConfigError
+                          : !stripePromise
+                            ? "Payment is currently unavailable."
+                            : "Prepare your payment details to enter card information."}
               </p>
               <button
                 type="button"
@@ -1619,10 +2032,11 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 disabled={
                   initializingPayment ||
                   items.length === 0 ||
-                  !currentUser ||
+                  (authMode === "login" && !currentUser) ||
                   !name ||
                   Boolean(stripeConfigError) ||
-                  !stripePromise
+                  !stripePromise ||
+                  isRegistering
                 }
               >
                 {initializingPayment

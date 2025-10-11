@@ -85,6 +85,16 @@ export default function AdminPage() {
       href: '/admin/training',
     },
     {
+      label: 'Insurance cover',
+      description: 'Upload policies, enforce standards, and monitor franchise coverage.',
+      href: '/admin/insurance',
+    },
+    {
+      label: 'Team notice board',
+      description: 'Publish crew updates and control who can post to the portal.',
+      href: '/admin/team/notice-board',
+    },
+    {
       label: 'Launch analytics',
       description: 'Monitor marketing and production performance.',
       href: '/admin/analytics',

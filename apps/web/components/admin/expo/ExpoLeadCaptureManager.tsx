@@ -24,6 +24,7 @@ import {
 import Link from "next/link";
 import { ensureFirebase } from "@/lib/firebase";
 import { useRoleGate } from "@/hooks/useRoleGate";
+import ExpoLeadOutreachManager from "./ExpoLeadOutreachManager";
 
 interface ExpoLeadPageRecord {
   id: string;
@@ -453,17 +454,17 @@ export default function ExpoLeadCaptureManager({
   const panel = !panelOpen
     ? null
     : (
-        <div className="fixed inset-0 z-[60] flex items-stretch justify-end">
+        <div className="fixed inset-0 z-[70] flex items-stretch justify-end">
           <button
             type="button"
             aria-label="Close landing page manager"
-            className="absolute inset-0 bg-black/40"
+            className="absolute inset-0 bg-gray-900/60"
             onClick={closePanel}
           />
           <aside
             role="dialog"
             aria-modal="true"
-            className="ml-auto flex h-full w-full max-w-3xl flex-col bg-base-100 shadow-xl"
+            className="relative z-[1] ml-auto flex h-full w-full max-w-3xl flex-col bg-white shadow-2xl"
           >
             <header className="flex items-start justify-between border-b px-6 py-4">
               <div>
@@ -678,8 +679,8 @@ export default function ExpoLeadCaptureManager({
       {HeadingTag ? <HeadingTag className="text-xl font-semibold">{heading}</HeadingTag> : null}
       {description}
 
-      <section className="rounded border p-4 shadow-sm">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+      <section className="rounded-2xl border border-base-200 bg-white shadow-sm">
+        <div className="flex flex-col gap-4 border-b border-base-200 p-6 md:flex-row md:items-center md:justify-between">
           <div>
             <h2 className="text-lg font-semibold">Landing pages</h2>
             <p className="text-sm text-gray-600">
@@ -693,59 +694,63 @@ export default function ExpoLeadCaptureManager({
           </div>
         </div>
 
-        {error && !panelOpen && <p className="mt-4 text-sm text-red-600">{error}</p>}
+        <div className="p-6">
+          {error && !panelOpen && <p className="mb-4 text-sm text-red-600">{error}</p>}
 
-        {loading ? (
-          <p className="mt-4 text-sm text-gray-500">Loading landing pages…</p>
-        ) : pages.length === 0 ? (
-          <p className="mt-4 text-sm text-gray-500">No exhibition landing pages yet.</p>
-        ) : (
-          <div className="mt-4 overflow-x-auto">
-            <table className="table table-zebra">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Event</th>
-                  <th>Status</th>
-                  <th>Updated</th>
-                  <th className="text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pages.map((page) => (
-                  <tr key={page.id}>
-                    <td className="font-medium">{page.name}</td>
-                    <td>{page.eventName || "—"}</td>
-                    <td>
-                      <span className={`badge ${page.isActive ? "badge-success" : "badge-ghost"}`}>
-                        {page.isActive ? "Active" : "Inactive"}
-                      </span>
-                    </td>
-                    <td>{formatDateTime(page.updatedAt ?? page.createdAt)}</td>
-                    <td className="text-right">
-                      <div className="flex justify-end gap-2">
-                        {page.slug ? (
-                          <Link
-                            href={`/expo/${page.slug}`}
-                            className="btn btn-ghost btn-xs"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            View
-                          </Link>
-                        ) : null}
-                        <button type="button" className="btn btn-outline btn-xs" onClick={() => openEditPanel(page.id)}>
-                          Manage
-                        </button>
-                      </div>
-                    </td>
+          {loading ? (
+            <p className="text-sm text-gray-500">Loading landing pages…</p>
+          ) : pages.length === 0 ? (
+            <p className="text-sm text-gray-500">No exhibition landing pages yet.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="table table-zebra w-full min-w-[720px]">
+                <thead>
+                  <tr>
+                    <th className="w-1/4">Name</th>
+                    <th className="w-1/4">Event</th>
+                    <th className="w-24">Status</th>
+                    <th className="w-32">Updated</th>
+                    <th className="w-32 text-right">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                </thead>
+                <tbody>
+                  {pages.map((page) => (
+                    <tr key={page.id}>
+                      <td className="font-medium">{page.name}</td>
+                      <td>{page.eventName || "—"}</td>
+                      <td>
+                        <span className={`badge ${page.isActive ? "badge-success" : "badge-ghost"}`}>
+                          {page.isActive ? "Active" : "Inactive"}
+                        </span>
+                      </td>
+                      <td>{formatDateTime(page.updatedAt ?? page.createdAt)}</td>
+                      <td className="text-right">
+                        <div className="flex justify-end gap-2">
+                          {page.slug ? (
+                            <Link
+                              href={`/expo/${page.slug}`}
+                              className="btn btn-ghost btn-xs"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              View
+                            </Link>
+                          ) : null}
+                          <button type="button" className="btn btn-outline btn-xs" onClick={() => openEditPanel(page.id)}>
+                            Manage
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </section>
+
+      <ExpoLeadOutreachManager variant="admin" className="rounded-2xl border border-base-200 bg-white shadow-sm" />
 
       {portalTarget ? createPortal(panel, portalTarget) : panel}
     </div>

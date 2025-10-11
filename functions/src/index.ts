@@ -38,13 +38,64 @@ const ANALYTICS_ALLOWED_ORIGINS = [
   'http://localhost:3000',
 ];
 
-function applyRecordLoginCors(req: functions.Request, res: functions.Response) {
-  const origin = req.get('origin');
-  const allowedOrigin = origin && ANALYTICS_ALLOWED_ORIGINS.includes(origin) ? origin : '*';
-  res.set('Access-Control-Allow-Origin', allowedOrigin);
+function resolveAllowedOrigin(origin?: string | null): string | null {
+  if (!origin) {
+    return null;
+  }
+  return ANALYTICS_ALLOWED_ORIGINS.includes(origin) ? origin : null;
+}
+
+function applyCorsHeaders(
+  req: functions.Request,
+  res: functions.Response,
+  methods: string,
+  headers: string,
+) {
+  const allowedOrigin = resolveAllowedOrigin(req.get('origin'));
+  if (allowedOrigin) {
+    res.set('Access-Control-Allow-Origin', allowedOrigin);
+    res.set('Access-Control-Allow-Credentials', 'true');
+  } else {
+    res.set('Access-Control-Allow-Origin', '*');
+  }
   res.set('Vary', 'Origin');
-  res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.set('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+  res.set('Access-Control-Allow-Methods', methods);
+  const headerMap = new Map<string, string>();
+  const appendHeaders = (value?: string | null) => {
+    if (!value) {
+      return;
+    }
+    value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .forEach((item) => {
+        const key = item.toLowerCase();
+        if (!headerMap.has(key)) {
+          headerMap.set(key, item);
+        }
+      });
+  };
+
+  appendHeaders(headers);
+  appendHeaders(req.get('access-control-request-headers'));
+  ['Authorization', 'Content-Type', 'X-Firebase-AppCheck', 'X-Firebase-Installations-Auth', 'X-Client-Version', 'X-Firebase-GMPID'].forEach((header) => {
+    const key = header.toLowerCase();
+    if (!headerMap.has(key)) {
+      headerMap.set(key, header);
+    }
+  });
+
+  res.set('Access-Control-Allow-Headers', Array.from(headerMap.values()).join(', '));
+  res.set('Access-Control-Max-Age', '3600');
+}
+
+function applyRecordLoginCors(req: functions.Request, res: functions.Response) {
+  applyCorsHeaders(req, res, 'POST,OPTIONS', 'Authorization,Content-Type');
+}
+
+function applyAnalyticsCors(req: functions.Request, res: functions.Response) {
+  applyCorsHeaders(req, res, 'POST,OPTIONS', 'Authorization,Content-Type');
 }
 
 // TODO: wrap all http functions with the cors handler, for example:
@@ -60,6 +111,83 @@ admin.initializeApp({
     'pineapple-tapped---portal.firebasestorage.app',
 });
 const db = admin.firestore();
+
+const ORDER_SEQUENCE_COLLECTION = 'settings';
+const ORDER_SEQUENCE_DOC_ID = 'orderSequence';
+const ORDER_NUMBER_PAD_LENGTH = 5;
+
+function parseOrderNumberValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const integer = Math.trunc(value);
+    return integer >= 0 ? integer : null;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      const integer = Math.trunc(parsed);
+      return integer >= 0 ? integer : null;
+    }
+  }
+  return null;
+}
+
+function formatOrderNumberLabel(value: number | null, padLength = ORDER_NUMBER_PAD_LENGTH): string | null {
+  if (value === null) {
+    return null;
+  }
+  const safeValue = Math.max(0, Math.trunc(value));
+  return safeValue.toString().padStart(padLength, '0');
+}
+
+function resolveStoredOrderNumber(
+  data: Record<string, any> | null | undefined,
+): { number: number | null; label: string | null } {
+  if (!data) {
+    return { number: null, label: null };
+  }
+  const number = parseOrderNumberValue(data.orderNumber ?? data.internalOrderNumber);
+  const labelCandidates = [
+    normaliseString(data.orderNumberFormatted),
+    normaliseString(data.orderNumberLabel),
+    normaliseString(data.orderFriendlyId),
+    normaliseString(data.orderNumberString),
+    normaliseString(data.orderNumberDisplay),
+  ];
+  let label: string | null = null;
+  for (const candidate of labelCandidates) {
+    if (candidate) {
+      label = candidate;
+      break;
+    }
+  }
+  if (!label && number !== null) {
+    label = formatOrderNumberLabel(number);
+  }
+  return { number, label };
+}
+
+async function allocateOrderNumber(): Promise<{ number: number | null; label: string | null }> {
+  try {
+    const sequenceRef = db.collection(ORDER_SEQUENCE_COLLECTION).doc(ORDER_SEQUENCE_DOC_ID);
+    await sequenceRef.set(
+      {
+        current: admin.firestore.FieldValue.increment(1),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+    const sequenceSnap = await sequenceRef.get();
+    const sequenceData = sequenceSnap.exists
+      ? ((sequenceSnap.data() as Record<string, any>) ?? {})
+      : {};
+    const nextValue = parseOrderNumberValue(sequenceData.current);
+    const label = formatOrderNumberLabel(nextValue);
+    return { number: nextValue, label };
+  } catch (error) {
+    console.error('Failed to allocate sequential order number', error);
+    return { number: null, label: null };
+  }
+}
 
 type StripeSplitTermConfig = {
   label: string;
@@ -2784,6 +2912,7 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
     throw new functions.https.HttpsError('not-found', 'Linked order not found');
   }
   const orderData = orderSnap.data() as Record<string, any>;
+  const storedOrderNumber = resolveStoredOrderNumber(orderData);
   const driveInfo = (orderData.drive as Record<string, any>) || {};
   const orderItems = Array.isArray(orderData.items)
     ? (orderData.items as Array<Record<string, any>>)
@@ -3022,6 +3151,9 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
       id: orderId,
       status: typeof orderData.status === 'string' ? orderData.status : null,
       items: orderItems,
+      number: storedOrderNumber.number,
+      numberLabel: storedOrderNumber.label,
+      numberDisplay: storedOrderNumber.label ? `#${storedOrderNumber.label}` : null,
     },
     drive: {
       orderFolderId: normaliseDriveId(driveInfo.orderFolderId),
@@ -5487,77 +5619,86 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
 });
 
 // Track page view analytics from the public site
-export const analytics_track = onRequest(
-  { region: 'us-central1', cors: ANALYTICS_ALLOWED_ORIGINS },
-  async (req, res) => {
-    try {
-      let uid: string | null = null;
-      let userName: string | null = null;
-      const authHeader = req.get('authorization');
-      if (authHeader?.startsWith('Bearer ')) {
-        try {
-          const decoded = await admin
-            .auth()
-            .verifyIdToken(authHeader.split('Bearer ')[1]);
-          uid = decoded.uid;
-          const userSnap = await db.collection('users').doc(uid).get();
-          const udata = userSnap.data() as any;
-          if (udata) {
-            userName = udata.fullName || udata.email || null;
-          }
-        } catch (err) {
-          console.error('verifyIdToken failed', err);
-        }
-      }
+export const analytics_track = onRequest({ region: 'us-central1' }, async (req, res) => {
+  applyAnalyticsCors(req, res);
 
-      const rawBody = req.body;
-      let data: Record<string, any> = {};
-      if (typeof rawBody === 'string') {
-        if (rawBody.trim()) {
-          try {
-            data = JSON.parse(rawBody);
-          } catch (err) {
-            console.error('analytics_track invalid JSON payload', err);
-          }
-        }
-      } else if (rawBody && typeof rawBody === 'object') {
-        data = rawBody as Record<string, any>;
-      }
-
-      const visitorId = data.visitorId ?? null;
-      if (!uid && visitorId) {
-        const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
-        const mapData = mapSnap.data() as any;
-        if (mapData) {
-          uid = mapData.uid || null;
-          userName = mapData.userName || null;
-        }
-      }
-      if (visitorId && uid && userName) {
-        await db
-          .collection('analyticsVisitors')
-          .doc(visitorId)
-          .set({ uid, userName }, { merge: true });
-      }
-      const event = {
-        uid,
-        userName,
-        path: data.path || null,
-        referrer: data.referrer || null,
-        userAgent: data.userAgent || req.get('user-agent') || null,
-        visitorId,
-        duration: data.duration || null,
-        ip: req.ip,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      };
-      await db.collection('analyticsEvents').add(event);
-      res.json({ ok: true });
-    } catch (err) {
-      console.error('analytics_track error', err);
-      res.status(500).json({ error: 'internal' });
-    }
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
   }
-);
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  try {
+    let uid: string | null = null;
+    let userName: string | null = null;
+    const authHeader = req.get('authorization');
+    if (authHeader?.startsWith('Bearer ')) {
+      try {
+        const decoded = await admin
+          .auth()
+          .verifyIdToken(authHeader.split('Bearer ')[1]);
+        uid = decoded.uid;
+        const userSnap = await db.collection('users').doc(uid).get();
+        const udata = userSnap.data() as any;
+        if (udata) {
+          userName = udata.fullName || udata.email || null;
+        }
+      } catch (err) {
+        console.error('verifyIdToken failed', err);
+      }
+    }
+
+    const rawBody = req.body;
+    let data: Record<string, any> = {};
+    if (typeof rawBody === 'string') {
+      if (rawBody.trim()) {
+        try {
+          data = JSON.parse(rawBody);
+        } catch (err) {
+          console.error('analytics_track invalid JSON payload', err);
+        }
+      }
+    } else if (rawBody && typeof rawBody === 'object') {
+      data = rawBody as Record<string, any>;
+    }
+
+    const visitorId = data.visitorId ?? null;
+    if (!uid && visitorId) {
+      const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
+      const mapData = mapSnap.data() as any;
+      if (mapData) {
+        uid = mapData.uid || null;
+        userName = mapData.userName || null;
+      }
+    }
+    if (visitorId && uid && userName) {
+      await db
+        .collection('analyticsVisitors')
+        .doc(visitorId)
+        .set({ uid, userName }, { merge: true });
+    }
+    const event = {
+      uid,
+      userName,
+      path: data.path || null,
+      referrer: data.referrer || null,
+      userAgent: data.userAgent || req.get('user-agent') || null,
+      visitorId,
+      duration: data.duration || null,
+      ip: req.ip,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    await db.collection('analyticsEvents').add(event);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('analytics_track error', err);
+    res.status(500).json({ error: 'internal' });
+  }
+});
 
 export const bookings_confirm = functions.https.onCall(async (data, context) => {
   if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
@@ -7396,16 +7537,29 @@ export const expo_lead_submit = functions.https.onCall(async (data) => {
     throw new functions.https.HttpsError('failed-precondition', 'Consent must be provided.');
   }
 
+  const eventSlug =
+    typeof pageData.slug === 'string' && pageData.slug.trim().length > 0
+      ? pageData.slug.trim()
+      : slugInput || null;
+  const eventName = typeof pageData.eventName === 'string' && pageData.eventName.trim().length > 0
+    ? pageData.eventName.trim()
+    : null;
+  const eventTag = eventSlug || (eventName ? eventName.toLowerCase().replace(/[^a-z0-9]+/gi, '-') : null);
+
   const leadDoc = {
     pageId: pageDoc.id,
-    slug: (pageData.slug as string) || slugInput,
-    eventName: (pageData.eventName as string) || null,
+    slug: eventSlug || slugInput,
+    eventSlug,
+    eventName,
+    eventTag: eventTag || null,
+    source: 'expo',
     firstName,
     lastName: lastName || null,
     email,
     phone: phone || null,
     company: company || null,
     consented: true,
+    lastFollowUpAt: null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -7420,8 +7574,21 @@ export const expo_lead_submit = functions.https.onCall(async (data) => {
       company: company || null,
       status: 'new',
       source: 'expo',
-      leadSource: (pageData.slug as string) || slugInput || 'expo',
+      leadSource: eventSlug || slugInput || 'expo',
+      leadSourceCapturedAt: timestamp,
       updatedAt: timestamp,
+      lastExpoInteractionAt: timestamp,
+      eventName,
+      eventSlug,
+      tags: Array.from(
+        new Set(
+          [
+            'expo',
+            eventSlug ? `expo:${eventSlug}` : null,
+            eventName ? `event:${eventName}` : null,
+          ].filter((value): value is string => typeof value === 'string')
+        )
+      ),
     };
     if (existingLead.empty) {
       await db.collection('leads').add({ ...leadBase, createdAt: timestamp });
@@ -7482,6 +7649,92 @@ export const expo_lead_submit = functions.https.onCall(async (data) => {
           })
         )
     );
+  }
+
+  return { ok: true };
+});
+
+export const expo_lead_sendFollowUp = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Sign in required.');
+  }
+
+  const leadId = typeof data.leadId === 'string' ? data.leadId.trim() : '';
+  const subject = typeof data.subject === 'string' ? data.subject.trim() : '';
+  const body = typeof data.body === 'string' ? data.body.trim() : '';
+
+  if (!leadId) {
+    throw new functions.https.HttpsError('invalid-argument', 'leadId is required.');
+  }
+  if (!subject) {
+    throw new functions.https.HttpsError('invalid-argument', 'subject is required.');
+  }
+  if (!body) {
+    throw new functions.https.HttpsError('invalid-argument', 'body is required.');
+  }
+
+  const leadSnap = await db.collection('expoLeads').doc(leadId).get();
+  if (!leadSnap.exists) {
+    throw new functions.https.HttpsError('not-found', 'Expo lead not found.');
+  }
+
+  const leadData = leadSnap.data() ?? {};
+  const email = typeof leadData.email === 'string' ? leadData.email.trim() : '';
+  if (!email) {
+    throw new functions.https.HttpsError('failed-precondition', 'Lead has no email address.');
+  }
+
+  await sendEmail(email, subject, body);
+
+  const timestamp = admin.firestore.FieldValue.serverTimestamp();
+  const followUpLog = {
+    leadId,
+    subject,
+    body,
+    sentTo: email,
+    sentByUid: context.auth.uid ?? null,
+    sentByEmail: typeof context.auth.token?.email === 'string' ? context.auth.token.email : null,
+    eventName: typeof leadData.eventName === 'string' ? leadData.eventName : null,
+    eventSlug:
+      typeof leadData.eventSlug === 'string'
+        ? leadData.eventSlug
+        : typeof leadData.slug === 'string'
+          ? leadData.slug
+          : null,
+    createdAt: timestamp,
+  };
+
+  await Promise.all([
+    db.collection('expoLeads').doc(leadId).set(
+      {
+        lastFollowUpAt: timestamp,
+        lastFollowUpByUid: context.auth.uid ?? null,
+        lastFollowUpByEmail: typeof context.auth.token?.email === 'string' ? context.auth.token.email : null,
+        lastFollowUpSubject: subject,
+        updatedAt: timestamp,
+      },
+      { merge: true }
+    ),
+    db.collection('expoLeadFollowUps').add(followUpLog),
+  ]);
+
+  try {
+    const crmSnap = await db.collection('leads').where('email', '==', email).limit(1).get();
+    if (!crmSnap.empty) {
+      const crmUpdate: Record<string, unknown> = {
+        status: 'outreach',
+        lastFollowUpAt: timestamp,
+        lastFollowUpByUid: context.auth.uid ?? null,
+        lastFollowUpByEmail: typeof context.auth.token?.email === 'string' ? context.auth.token.email : null,
+        lastFollowUpSource: 'expo',
+        updatedAt: timestamp,
+      };
+      if (followUpLog.eventName) crmUpdate.eventName = followUpLog.eventName;
+      if (followUpLog.eventSlug) crmUpdate.eventSlug = followUpLog.eventSlug;
+      await crmSnap.docs[0].ref.set(crmUpdate, { merge: true });
+    }
+  } catch (err) {
+    console.error('Failed to update CRM lead after expo follow-up', err);
   }
 
   return { ok: true };
@@ -10561,6 +10814,16 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     } catch (scheduleError) {
       console.warn('Failed to apply default Stripe payment schedule', scheduleError);
     }
+  }
+
+  const allocatedOrderNumber = await allocateOrderNumber();
+  if (allocatedOrderNumber.number !== null) {
+    orderData.orderNumber = allocatedOrderNumber.number;
+  }
+  if (allocatedOrderNumber.label) {
+    orderData.orderNumberFormatted = allocatedOrderNumber.label;
+    orderData.orderNumberLabel = allocatedOrderNumber.label;
+    orderData.orderNumberDisplay = `#${allocatedOrderNumber.label}`;
   }
 
   const orderRef = await db.collection('orders').add(orderData);
@@ -15598,7 +15861,7 @@ export const admin_acceptProposal = functions.https.onCall(
       throw new functions.https.HttpsError('failed-precondition', 'proposal not sent');
     }
 
-    const order = {
+    const order: Record<string, any> = {
       orgId: proposal.orgId,
       clientEmail: proposal.clientEmail || null,
       items: proposal.items || [],
@@ -15606,6 +15869,15 @@ export const admin_acceptProposal = functions.https.onCall(
       proposalId,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     };
+    const orderNumberAllocation = await allocateOrderNumber();
+    if (orderNumberAllocation.number !== null) {
+      order.orderNumber = orderNumberAllocation.number;
+    }
+    if (orderNumberAllocation.label) {
+      order.orderNumberFormatted = orderNumberAllocation.label;
+      order.orderNumberLabel = orderNumberAllocation.label;
+      order.orderNumberDisplay = `#${orderNumberAllocation.label}`;
+    }
     const orderRef = await db.collection('orders').add(order);
 
     await proposalRef.set({ status: 'accepted', orderId: orderRef.id }, { merge: true });
