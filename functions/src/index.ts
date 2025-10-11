@@ -10534,24 +10534,28 @@ export const createOrder = functions.https.onCall(async (data, context) => {
       .get();
     if (!vSnap.empty) {
       const v = vSnap.docs[0].data() as any;
-      const locs: string[] = v.locations || [];
+      const locs: string[] = Array.isArray(v.locations) ? v.locations : [];
       const locAllowed =
         locs.length === 0 ||
-        (location && locs.map((l) => l.toLowerCase()).includes(String(location).toLowerCase()));
+        (location &&
+          locs
+            .map((l) => (typeof l === 'string' ? l.toLowerCase() : ''))
+            .includes(String(location).toLowerCase()));
       if (locAllowed) {
-        const prodIds: string[] = v.productIds || [];
-        const catIds: string[] = v.categoryIds || [];
+        const prodIds: string[] = Array.isArray(v.productIds) ? v.productIds : [];
+        const catIds: string[] = Array.isArray(v.categoryIds) ? v.categoryIds : [];
         let eligibleSubtotal = 0;
         orderItems.forEach((item) => {
           const prodOk = prodIds.length === 0 || prodIds.includes(item.id);
           const catOk = catIds.length === 0 || catIds.includes(item.category);
           if (prodOk && catOk) eligibleSubtotal += item.price * item.quantity;
         });
-        if (eligibleSubtotal > 0) {
+        const voucherAmount = parseNumber(v.amount);
+        if (eligibleSubtotal > 0 && voucherAmount !== null && Number.isFinite(voucherAmount)) {
           if (v.type === 'percentage') {
-            voucherDiscount = eligibleSubtotal * (v.amount / 100);
+            voucherDiscount = eligibleSubtotal * (voucherAmount / 100);
           } else if (v.type === 'fixed') {
-            voucherDiscount = Math.min(v.amount, eligibleSubtotal);
+            voucherDiscount = Math.min(voucherAmount, eligibleSubtotal);
           }
           voucherCode = voucher;
         }
@@ -10559,17 +10563,26 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     }
   }
 
-  const subtotalAfterVoucher = productSubtotal - voucherDiscount;
+  voucherDiscount = Number.isFinite(voucherDiscount) ? roundCurrency(voucherDiscount) : 0;
+  const subtotalAfterVoucherRaw = productSubtotal - voucherDiscount;
+  const subtotalAfterVoucher = subtotalAfterVoucherRaw > 0 ? roundCurrency(subtotalAfterVoucherRaw) : 0;
 
   let discountPct = 0;
   if (context.auth?.uid) {
     const userSnap = await db.collection('users').doc(context.auth.uid).get();
-    discountPct = (userSnap.data()?.discount as number) || 0;
+    const rawDiscount = parseNumber((userSnap.data() as Record<string, unknown> | undefined)?.discount);
+    discountPct = rawDiscount !== null && Number.isFinite(rawDiscount) ? rawDiscount : 0;
   }
-  const discountAmount = subtotalAfterVoucher * (discountPct / 100);
-  const finalTotal = subtotalAfterVoucher - discountAmount + rentalSubtotal;
-  const vat = finalTotal * VAT_RATE;
-  const price = finalTotal + vat;
+  const rawDiscountAmount = subtotalAfterVoucher * (discountPct / 100);
+  const discountAmount = rawDiscountAmount > 0 && Number.isFinite(rawDiscountAmount)
+    ? roundCurrency(Math.min(subtotalAfterVoucher, rawDiscountAmount))
+    : 0;
+  const subtotalAfterAllDiscountsRaw = subtotalAfterVoucher - discountAmount;
+  const subtotalAfterAllDiscounts =
+    subtotalAfterAllDiscountsRaw > 0 ? roundCurrency(subtotalAfterAllDiscountsRaw) : 0;
+  const finalTotal = roundCurrency(subtotalAfterAllDiscounts + rentalSubtotal);
+  const vat = roundCurrency(finalTotal * VAT_RATE);
+  const price = roundCurrency(finalTotal + vat);
   const budgetSubtotal =
     labourSubtotal + kitSubtotal + travelSubtotal + parkingSubtotal;
   const profit = finalTotal - (budgetSubtotal + rentalSubtotal);
