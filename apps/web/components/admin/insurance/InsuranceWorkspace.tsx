@@ -668,8 +668,8 @@ export default function InsuranceWorkspace() {
             cleared before assigning on-site work.
           </p>
           <p>
-            Coverage automatically drops to "needs action" when requirements lapse so franchises and crew know when they need to
-            refresh their documents or training modules.
+            Coverage automatically drops to &ldquo;needs action&rdquo; when requirements lapse so franchises and crew know when they need
+            to refresh their documents or training modules.
           </p>
         </>
       }

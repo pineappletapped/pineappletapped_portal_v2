@@ -148,6 +148,55 @@ export default function AdminTeamPage() {
     setIsEditingPanel(false);
   }, [selectedUser]);
 
+  useEffect(() => {
+    if (guardLoading || !allowed) return;
+
+    let isMounted = true;
+
+    (async () => {
+      try {
+        const { db } = await ensureFirebase();
+        if (!db || !isMounted) return;
+
+        const [assignmentSnap, policySnap] = await Promise.all([
+          getDocs(collection(db, 'insuranceAssignments')),
+          getDocs(collection(db, 'insurancePolicies')),
+        ]);
+
+        const policyNames = new Map<string, string>();
+        policySnap.docs.forEach((docSnap) => {
+          const policy = parseInsurancePolicyDoc(docSnap.id, docSnap.data() as Record<string, unknown>);
+          policyNames.set(docSnap.id, policy.name);
+        });
+
+        const map = new Map<string, CoverageEntry[]>();
+        assignmentSnap.docs.forEach((docSnap) => {
+          const assignment = parseInsuranceAssignmentDoc(docSnap.id, docSnap.data() as Record<string, unknown>);
+          if (assignment.targetType !== 'user') return;
+
+          const entries = map.get(assignment.targetId) ?? [];
+          entries.push({
+            policyId: assignment.policyId,
+            policyName: policyNames.get(assignment.policyId) ?? assignment.policyId,
+            status: assignment.status,
+            expiresAt: assignment.expiresAt ?? null,
+          });
+          map.set(assignment.targetId, entries);
+        });
+
+        if (isMounted) {
+          setCoverageMap(map);
+        }
+      } catch (err) {
+        console.error('Failed to load insurance coverage for team manager', err);
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [allowed, guardLoading]);
+
   if (guardLoading) return <p>Loading…</p>;
   if (!allowed) return <p>You do not have permission to view this page.</p>;
 
@@ -544,37 +593,3 @@ export default function AdminTeamPage() {
     </div>
   );
 }
-  useEffect(() => {
-    if (guardLoading || !allowed) return;
-    (async () => {
-      try {
-        const { db } = await ensureFirebase();
-        if (!db) return;
-        const [assignmentSnap, policySnap] = await Promise.all([
-          getDocs(collection(db, 'insuranceAssignments')),
-          getDocs(collection(db, 'insurancePolicies')),
-        ]);
-        const policyNames = new Map<string, string>();
-        policySnap.docs.forEach((docSnap) => {
-          const policy = parseInsurancePolicyDoc(docSnap.id, docSnap.data() as Record<string, unknown>);
-          policyNames.set(docSnap.id, policy.name);
-        });
-        const map = new Map<string, CoverageEntry[]>();
-        assignmentSnap.docs.forEach((docSnap) => {
-          const assignment = parseInsuranceAssignmentDoc(docSnap.id, docSnap.data() as Record<string, unknown>);
-          if (assignment.targetType !== 'user') return;
-          const entries = map.get(assignment.targetId) ?? [];
-          entries.push({
-            policyId: assignment.policyId,
-            policyName: policyNames.get(assignment.policyId) ?? assignment.policyId,
-            status: assignment.status,
-            expiresAt: assignment.expiresAt ?? null,
-          });
-          map.set(assignment.targetId, entries);
-        });
-        setCoverageMap(map);
-      } catch (err) {
-        console.error('Failed to load insurance coverage for team manager', err);
-      }
-    })();
-  }, [allowed, guardLoading]);

@@ -5,7 +5,7 @@ import Stripe from "stripe";
 
 import { getFirebaseAdminFirestore } from "@/lib/firebase-admin";
 import { getStripeClient } from "@/lib/stripe-config";
-import { decodeRolesCookie } from "@/lib/roles";
+import { decodeRolesCookie, type RoleKey } from "@/lib/roles";
 import { resolveAppOrigin } from "@/lib/origin";
 import {
   describeAffiliateStripeStatus,
@@ -13,7 +13,7 @@ import {
   type AffiliateStripeStatus,
 } from "@/lib/affiliates";
 
-const ALLOWED_ADMIN_ROLES = new Set(["admin", "marketing", "sales"]);
+const ALLOWED_ADMIN_ROLES: RoleKey[] = ["admin", "marketing", "sales"];
 
 type StripeLinkMode = "onboarding" | "login";
 
@@ -64,7 +64,7 @@ async function resolveAffiliateContext() {
   }
   const roles = new Set(decodeRolesCookie(cookieStore.get("roles")?.value));
   const isAffiliate = roles.has("affiliate");
-  const isAdmin = Array.from(ALLOWED_ADMIN_ROLES).some((role) => roles.has(role));
+  const isAdmin = ALLOWED_ADMIN_ROLES.some((role) => roles.has(role));
   if (!isAffiliate && !isAdmin) {
     return null;
   }
@@ -72,9 +72,9 @@ async function resolveAffiliateContext() {
 }
 
 function deriveAffiliateStripeStatus(account: Stripe.Account): AffiliateStripeStatus {
-  const requirements = account.requirements ?? { currently_due: [], past_due: [], eventually_due: [] };
-  const disabledReason =
-    requirements.disabled_reason ?? account.future_requirements?.disabled_reason ?? null;
+  const requirements = account.requirements ?? ({} as Stripe.Account.Requirements);
+  const futureRequirements = account.future_requirements ?? ({} as Stripe.Account.FutureRequirements);
+  const disabledReason = requirements.disabled_reason ?? futureRequirements.disabled_reason ?? null;
   if (disabledReason || (requirements.past_due?.length ?? 0) > 0) {
     return "restricted";
   }
@@ -97,19 +97,14 @@ function buildStripeResponse(
   linkUrl: string | null,
   linkType: StripeLinkMode
 ): StripeLinkResponse {
-  const requirements = account.requirements ?? { currently_due: [], past_due: [], eventually_due: [] };
-  const futureRequirements = account.future_requirements ?? {
-    currently_due: [],
-    eventually_due: [],
-    past_due: [],
-  };
+  const requirements = account.requirements ?? ({} as Stripe.Account.Requirements);
+  const futureRequirements = account.future_requirements ?? ({} as Stripe.Account.FutureRequirements);
   const requirementsDue = requirements.currently_due ?? [];
   const requirementsPastDue = requirements.past_due ?? [];
   const requirementsEventuallyDue = (
     requirements.eventually_due ?? []
   ).concat(futureRequirements.eventually_due ?? []);
-  const disabledReason =
-    requirements.disabled_reason ?? account.future_requirements?.disabled_reason ?? null;
+  const disabledReason = requirements.disabled_reason ?? futureRequirements.disabled_reason ?? null;
   const status = deriveAffiliateStripeStatus(account);
 
   return {

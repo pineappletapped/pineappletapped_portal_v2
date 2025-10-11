@@ -165,45 +165,56 @@ export const parseInsurancePolicyDoc = (
 ): InsurancePolicyRecord => {
   const attachments = Array.isArray(data.attachments)
     ? data.attachments
-        .map((attachment) => {
+        .map((attachment): InsuranceAttachmentRecord | null => {
           if (!attachment || typeof attachment !== "object") return null;
           const record = attachment as Record<string, unknown>;
           const attachmentId =
             typeof record.id === "string" && record.id.trim().length > 0
               ? record.id.trim()
               : randomId("attachment");
-          const label = typeof record.label === "string" ? record.label.trim() : "Untitled attachment";
-          const fileName = typeof record.fileName === "string" ? record.fileName : label;
-          const url = typeof record.url === "string" ? record.url : "";
-          const storagePath = typeof record.storagePath === "string" ? record.storagePath : "";
+          const label =
+            typeof record.label === "string" && record.label.trim().length > 0
+              ? record.label.trim()
+              : "Untitled attachment";
+          const fileName =
+            typeof record.fileName === "string" && record.fileName.trim().length > 0
+              ? record.fileName.trim()
+              : label;
+          const url = typeof record.url === "string" && record.url.trim().length > 0 ? record.url.trim() : "";
+          const storagePath =
+            typeof record.storagePath === "string" && record.storagePath.trim().length > 0
+              ? record.storagePath.trim()
+              : "";
           if (!url || !storagePath) {
             return null;
           }
+          const description =
+            typeof record.description === "string" && record.description.trim().length > 0
+              ? record.description.trim()
+              : null;
+          const coverageLevel =
+            typeof record.coverageLevel === "string" && record.coverageLevel.trim().length > 0
+              ? record.coverageLevel.trim()
+              : null;
           return {
             id: attachmentId,
             label,
             fileName,
             url,
             storagePath,
-            description:
-              typeof record.description === "string" && record.description.trim().length > 0
-                ? record.description.trim()
-                : null,
+            description,
             requireAcknowledgement: record.requireAcknowledgement === true,
             renewalDays: normaliseRenewalDays(record.renewalDays),
-            coverageLevel:
-              typeof record.coverageLevel === "string" && record.coverageLevel.trim().length > 0
-                ? record.coverageLevel.trim()
-                : null,
+            coverageLevel,
             lastUpdatedAt: timestampToDate(record.lastUpdatedAt as TimestampLike) ?? null,
-          } satisfies InsuranceAttachmentRecord;
+          };
         })
-        .filter((attachment): attachment is InsuranceAttachmentRecord => Boolean(attachment))
+        .filter((attachment): attachment is InsuranceAttachmentRecord => attachment !== null)
     : [];
 
   const trainingRequirements = Array.isArray(data.trainingRequirements)
     ? data.trainingRequirements
-        .map((raw) => {
+        .map((raw): InsuranceTrainingRequirement | null => {
           if (!raw || typeof raw !== "object") return null;
           const record = raw as Record<string, unknown>;
           const moduleId = typeof record.moduleId === "string" ? record.moduleId.trim() : "";
@@ -212,22 +223,23 @@ export const parseInsurancePolicyDoc = (
             typeof record.id === "string" && record.id.trim().length > 0
               ? record.id.trim()
               : `${moduleId}-${randomId("training")}`;
+          const moduleTitle =
+            typeof record.moduleTitle === "string" && record.moduleTitle.trim().length > 0
+              ? record.moduleTitle.trim()
+              : "Training module";
           return {
             id: requirementId,
             moduleId,
-            moduleTitle:
-              typeof record.moduleTitle === "string" && record.moduleTitle.trim().length > 0
-                ? record.moduleTitle.trim()
-                : "Training module",
+            moduleTitle,
             renewalDays: normaliseRenewalDays(record.renewalDays),
-          } satisfies InsuranceTrainingRequirement;
+          };
         })
-        .filter((requirement): requirement is InsuranceTrainingRequirement => Boolean(requirement))
+        .filter((requirement): requirement is InsuranceTrainingRequirement => requirement !== null)
     : [];
 
   const acknowledgementRequirements = Array.isArray(data.acknowledgementRequirements)
     ? data.acknowledgementRequirements
-        .map((raw) => {
+        .map((raw): InsuranceAcknowledgementRequirement | null => {
           if (!raw || typeof raw !== "object") return null;
           const record = raw as Record<string, unknown>;
           const attachmentId = typeof record.attachmentId === "string" ? record.attachmentId.trim() : "";
@@ -236,39 +248,38 @@ export const parseInsurancePolicyDoc = (
             typeof record.id === "string" && record.id.trim().length > 0
               ? record.id.trim()
               : `${attachmentId}-${randomId("ack")}`;
+          const label =
+            typeof record.label === "string" && record.label.trim().length > 0
+              ? record.label.trim()
+              : "Policy acknowledgement";
           return {
             id: requirementId,
             attachmentId,
-            label:
-              typeof record.label === "string" && record.label.trim().length > 0
-                ? record.label.trim()
-                : "Policy acknowledgement",
+            label,
             renewalDays: normaliseRenewalDays(record.renewalDays),
-          } satisfies InsuranceAcknowledgementRequirement;
+          };
         })
-        .filter((requirement): requirement is InsuranceAcknowledgementRequirement => Boolean(requirement))
+        .filter((requirement): requirement is InsuranceAcknowledgementRequirement => requirement !== null)
     : [];
 
   const activityValidations = Array.isArray(data.activityValidations)
     ? data.activityValidations
-        .map((raw) => {
+        .map((raw): InsurancePolicyActivityValidation | null => {
           if (!raw || typeof raw !== "object") return null;
           const record = raw as Record<string, unknown>;
           const activity = typeof record.activity === "string" ? record.activity.trim() : "";
           if (!activity) return null;
+          const id =
+            typeof record.id === "string" && record.id.trim().length > 0 ? record.id.trim() : randomId("activity");
+          const notes =
+            typeof record.notes === "string" && record.notes.trim().length > 0 ? record.notes.trim() : null;
           return {
-            id:
-              typeof record.id === "string" && record.id.trim().length > 0
-                ? record.id.trim()
-                : randomId("activity"),
+            id,
             activity,
-            notes:
-              typeof record.notes === "string" && record.notes.trim().length > 0
-                ? record.notes.trim()
-                : null,
-          } satisfies InsurancePolicyActivityValidation;
+            notes,
+          };
         })
-        .filter((item): item is InsurancePolicyActivityValidation => Boolean(item))
+        .filter((item): item is InsurancePolicyActivityValidation => item !== null)
     : [];
 
   return {
@@ -324,26 +335,25 @@ export const parseInsuranceAssignmentDoc = (
   data: Record<string, unknown>
 ): InsuranceAssignmentRecord => {
   const overrideRaw = data.manualOverride;
-  const manualOverride: InsuranceAssignmentManualOverride | null =
-    overrideRaw && typeof overrideRaw === "object"
-      ? {
-          status:
-            (overrideRaw as Record<string, unknown>).status === "revoked"
-              ? "revoked"
-              : (overrideRaw as Record<string, unknown>).status === "external"
-                ? "external"
-                : "covered",
-          note:
-            typeof (overrideRaw as Record<string, unknown>).note === "string"
-              ? (overrideRaw as Record<string, unknown>).note
-              : null,
-          updatedAt: timestampToDate((overrideRaw as Record<string, unknown>).updatedAt as TimestampLike),
-          updatedBy:
-            typeof (overrideRaw as Record<string, unknown>).updatedBy === "string"
-              ? (overrideRaw as Record<string, unknown>).updatedBy
-              : null,
-        }
-      : null;
+  let manualOverride: InsuranceAssignmentManualOverride | null = null;
+  if (overrideRaw && typeof overrideRaw === "object") {
+    const record = overrideRaw as Record<string, unknown>;
+    const status =
+      record.status === "revoked"
+        ? "revoked"
+        : record.status === "external"
+          ? "external"
+          : "covered";
+    const note =
+      typeof record.note === "string" && record.note.trim().length > 0 ? record.note.trim() : null;
+    const updatedBy = typeof record.updatedBy === "string" ? record.updatedBy : null;
+    manualOverride = {
+      status,
+      note,
+      updatedAt: timestampToDate(record.updatedAt as TimestampLike),
+      updatedBy,
+    };
+  }
 
   const statusValue =
     data.status === "revoked"
