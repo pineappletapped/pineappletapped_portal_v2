@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useRouter } from "next/navigation";
 import { Elements } from "@stripe/react-stripe-js";
 import { loadStripe } from "@stripe/stripe-js";
-import { httpsCallable, type Functions } from "firebase/functions";
+import { httpsCallable, httpsCallableFromURL, type Functions } from "firebase/functions";
 import {
   collection,
   doc,
@@ -17,7 +17,7 @@ import {
 import { signInWithEmailAndPassword, type Auth, type User } from "firebase/auth";
 import type { FirebaseError } from "firebase/app";
 import { useCart } from "@/lib/cart";
-import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
+import { ensureFirebase, functionsBaseUrl, loadAuthModule } from "@/lib/firebase";
 import { useLeadSourceTag } from "@/hooks/useLeadSourceTag";
 import {
   leadSourceDetailPlaceholder,
@@ -25,6 +25,12 @@ import {
   type LeadSourceKind,
 } from "@/lib/lead-source";
 import { VAT_RATE } from "@/lib/vat";
+import {
+  DEFAULT_FUNCTION_BASE,
+  buildCallableEndpointsFromBases,
+  normaliseBaseUrl,
+  resolveHostedAppBase,
+} from "@/lib/callableEndpoints";
 import CheckoutPaymentForm from "./CheckoutPaymentForm";
 
 const LEAD_SOURCE_OPTIONS: LeadSourceKind[] = [
@@ -36,6 +42,12 @@ const LEAD_SOURCE_OPTIONS: LeadSourceKind[] = [
 ];
 
 const ZERO_BALANCE_TOLERANCE = 0.005;
+
+const EXPLICIT_CREATE_ORDER_ENDPOINT = process.env.NEXT_PUBLIC_CREATE_ORDER_ENDPOINT;
+const PUBLIC_FUNCTIONS_BASE_URL = process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL;
+const PUBLIC_FIREBASE_FUNCTIONS_URL = process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_URL;
+const LEGACY_BACKEND_FUNCTION_BASE =
+  "https://us-central1-ptfbportalbackend.cloudfunctions.net";
 
 interface VoucherRecord {
   type?: string | null;
@@ -1040,7 +1052,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
 
   const callCreateOrderViaCallable = useCallback(async (): Promise<CreateOrderResult> => {
     const { functions } = await ensureFirebase();
-    let functionsInstance = functionsRef.current ?? functions ?? null;
+    const functionsInstance = functionsRef.current ?? functions ?? null;
     if (!functionsInstance) {
       throw Object.assign(new Error("Firebase functions are unavailable."), {
         code: "create-order-functions-unavailable",
@@ -1048,18 +1060,95 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     }
 
     functionsRef.current = functionsInstance;
-    const createOrderCallable = httpsCallable(functionsInstance, "createOrder");
-    const result: any = await createOrderCallable(orderInput);
-    const data =
-      (result && typeof result === "object"
-        ? result.data ?? result.result?.data ?? result.result ?? null
-        : null) ?? null;
 
-    if (!data || typeof data !== "object") {
-      return {};
+    const extractCallableResult = (result: any): CreateOrderResult => {
+      const data =
+        (result && typeof result === "object"
+          ? result.data ?? result.result?.data ?? result.result ?? null
+          : null) ?? null;
+
+      if (!data || typeof data !== "object") {
+        return {};
+      }
+
+      return data as CreateOrderResult;
+    };
+
+    const attemptErrors: Array<{ endpoint: string | null; error: unknown }> = [];
+
+    const invokeCallable = async (
+      callable: ReturnType<typeof httpsCallable>,
+      endpoint: string | null,
+    ): Promise<CreateOrderResult | null> => {
+      try {
+        const result: any = await callable(orderInput);
+        return extractCallableResult(result);
+      } catch (error) {
+        console.warn(
+          endpoint
+            ? `createOrder callable attempt via ${endpoint} failed`
+            : "createOrder callable default attempt failed",
+          error,
+        );
+        attemptErrors.push({ endpoint, error });
+        return null;
+      }
+    };
+
+    const defaultResult = await invokeCallable(
+      httpsCallable(functionsInstance, "createOrder"),
+      null,
+    );
+    if (defaultResult !== null) {
+      return defaultResult;
     }
 
-    return data as CreateOrderResult;
+    const explicitEndpoint = normaliseBaseUrl(EXPLICIT_CREATE_ORDER_ENDPOINT);
+    const host = typeof window !== "undefined" ? window.location.host : null;
+    const hostBase = resolveHostedAppBase(host);
+    const defaultBase = normaliseBaseUrl(functionsBaseUrl);
+
+    let candidateEndpoints: string[];
+    if (explicitEndpoint) {
+      candidateEndpoints = [`${explicitEndpoint}/createOrder`];
+    } else {
+      candidateEndpoints = buildCallableEndpointsFromBases("createOrder", [
+        functionsBaseUrl,
+        PUBLIC_FUNCTIONS_BASE_URL,
+        PUBLIC_FIREBASE_FUNCTIONS_URL,
+        hostBase,
+        DEFAULT_FUNCTION_BASE,
+        LEGACY_BACKEND_FUNCTION_BASE,
+      ]);
+
+      if (defaultBase) {
+        candidateEndpoints = candidateEndpoints.filter(
+          (endpoint) => !endpoint.startsWith(`${defaultBase}/`),
+        );
+      }
+    }
+
+    for (const endpoint of candidateEndpoints) {
+      const callable = httpsCallableFromURL(functionsInstance, endpoint);
+      const result = await invokeCallable(callable, endpoint);
+      if (result !== null) {
+        return result;
+      }
+    }
+
+    const lastError = attemptErrors.length ? attemptErrors[attemptErrors.length - 1].error : null;
+    if (lastError instanceof Error) {
+      if (!("details" in lastError)) {
+        (lastError as Error & { details?: unknown }).details = attemptErrors;
+      }
+      throw lastError;
+    }
+
+    const aggregatedError = Object.assign(
+      new Error("Failed to create order via callable endpoints."),
+      { code: "create-order-callable-failed", details: attemptErrors },
+    );
+    throw aggregatedError;
   }, [orderInput]);
 
   const callCreateOrder = useCallback(

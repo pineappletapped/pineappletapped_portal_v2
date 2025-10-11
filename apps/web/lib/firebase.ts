@@ -127,7 +127,7 @@ async function initBrowserFirebase() {
 
   auth = authMod.getAuth(app);
   storage = storageMod.getStorage(app);
-  functions = functionsMod.getFunctions(app);
+  functions = functionsMod.getFunctions(app, functionsBaseUrl);
   ({ httpsCallable } = functionsMod);
 
   ({

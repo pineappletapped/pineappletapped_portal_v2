@@ -60,7 +60,33 @@ function applyCorsHeaders(
   }
   res.set('Vary', 'Origin');
   res.set('Access-Control-Allow-Methods', methods);
-  res.set('Access-Control-Allow-Headers', headers);
+  const headerMap = new Map<string, string>();
+  const appendHeaders = (value?: string | null) => {
+    if (!value) {
+      return;
+    }
+    value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .forEach((item) => {
+        const key = item.toLowerCase();
+        if (!headerMap.has(key)) {
+          headerMap.set(key, item);
+        }
+      });
+  };
+
+  appendHeaders(headers);
+  appendHeaders(req.get('access-control-request-headers'));
+  ['Authorization', 'Content-Type', 'X-Firebase-AppCheck', 'X-Firebase-Installations-Auth', 'X-Client-Version', 'X-Firebase-GMPID'].forEach((header) => {
+    const key = header.toLowerCase();
+    if (!headerMap.has(key)) {
+      headerMap.set(key, header);
+    }
+  });
+
+  res.set('Access-Control-Allow-Headers', Array.from(headerMap.values()).join(', '));
   res.set('Access-Control-Max-Age', '3600');
 }
 

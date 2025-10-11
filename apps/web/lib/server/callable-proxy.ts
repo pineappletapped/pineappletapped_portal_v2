@@ -1,4 +1,10 @@
 import { functionsBaseUrl } from "@/lib/firebase";
+import {
+  DEFAULT_FUNCTION_BASE,
+  buildCallableEndpointsFromBases,
+  normaliseBaseUrl,
+  resolveHostedAppBase,
+} from "@/lib/callableEndpoints";
 
 export type CallableSuccessEnvelope = {
   result?: { data?: unknown } | null;
@@ -17,7 +23,6 @@ export type CallableEnvelope = (CallableSuccessEnvelope & CallableErrorEnvelope)
   code?: string;
 };
 
-const DEFAULT_FUNCTION_BASE = "https://us-central1-pineapple-tapped---portal.cloudfunctions.net";
 const DEFAULT_BASE_ENV_VARS = [
   "NEXT_PUBLIC_FUNCTIONS_BASE_URL",
   "FUNCTIONS_BASE_URL",
@@ -26,45 +31,6 @@ const DEFAULT_BASE_ENV_VARS = [
 
 export const JSON_CONTENT_TYPE = "application/json";
 const MAX_INLINE_DETAILS = 600;
-
-export const normaliseBaseUrl = (value: unknown): string | null => {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
-};
-
-export const resolveHostedAppBase = (host: string | null | undefined): string | null => {
-  if (!host) {
-    return null;
-  }
-
-  const trimmed = host.trim().toLowerCase();
-  if (!trimmed.endsWith(".hosted.app")) {
-    return null;
-  }
-
-  const [subdomain] = trimmed.split(".");
-  if (!subdomain) {
-    return null;
-  }
-
-  const parts = subdomain.split("--");
-  if (parts.length < 2) {
-    return null;
-  }
-
-  const appIdCandidate = parts[parts.length - 1];
-  if (!appIdCandidate) {
-    return null;
-  }
-
-  return `https://us-central1-${appIdCandidate}.cloudfunctions.net`;
-};
 
 export interface EndpointOptions {
   explicitEndpointEnvVar?: string;
@@ -77,25 +43,30 @@ export const buildCallableEndpointCandidates = (
   request: Request,
   { explicitEndpointEnvVar, additionalBaseEnvVars, defaultBaseUrl }: EndpointOptions = {},
 ) => {
-  const explicitEndpoint = normaliseBaseUrl(
-    explicitEndpointEnvVar ? process.env[explicitEndpointEnvVar] : undefined,
-  );
+  const explicitEnvNames = [
+    explicitEndpointEnvVar,
+    explicitEndpointEnvVar ? `NEXT_PUBLIC_${explicitEndpointEnvVar}` : undefined,
+  ];
 
-  if (explicitEndpoint) {
-    return [explicitEndpoint];
+  for (const envName of explicitEnvNames) {
+    if (!envName) {
+      continue;
+    }
+    const explicit = normaliseBaseUrl(process.env[envName]);
+    if (explicit) {
+      return [`${explicit}/${functionName}`];
+    }
   }
 
   const baseEnvVars = [...DEFAULT_BASE_ENV_VARS, ...(additionalBaseEnvVars ?? [])];
+  const hostHeader = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
 
-  const candidateBases = [
-    normaliseBaseUrl(functionsBaseUrl),
-    ...baseEnvVars.map((name) => normaliseBaseUrl(process.env[name])),
-    resolveHostedAppBase(request.headers.get("host")),
-    normaliseBaseUrl(defaultBaseUrl ?? DEFAULT_FUNCTION_BASE),
-  ];
-
-  const uniqueBases = new Set(candidateBases.filter((value): value is string => Boolean(value)));
-  return Array.from(uniqueBases).map((base) => `${base}/${functionName}`);
+  return buildCallableEndpointsFromBases(functionName, [
+    functionsBaseUrl,
+    ...baseEnvVars.map((name) => process.env[name]),
+    resolveHostedAppBase(hostHeader),
+    defaultBaseUrl ?? DEFAULT_FUNCTION_BASE,
+  ]);
 };
 
 export const summariseDetails = (value: string | null | undefined) => {
