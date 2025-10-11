@@ -79,6 +79,9 @@ interface NoticeRecord {
   message?: string | null;
   createdAt?: any;
   authorUid?: string | null;
+  status?: string | null;
+  updatedAt?: any;
+  updatedBy?: string | null;
 }
 
 const parseDate = (value: any): Date | null => {
@@ -171,7 +174,8 @@ export default function ContractorPortal() {
   const [availability, setAvailability] = useState<Record<string, AvailabilityStatus>>({});
   const [products, setProducts] = useState<ProductRecord[]>([]);
   const [notices, setNotices] = useState<NoticeRecord[]>([]);
-  const [isStaff, setIsStaff] = useState(false);
+  const [canPostNotices, setCanPostNotices] = useState(false);
+  const [noticePostingOverride, setNoticePostingOverride] = useState<boolean | null>(null);
   const [noticeTitle, setNoticeTitle] = useState("");
   const [noticeMessage, setNoticeMessage] = useState("");
   const [complianceRecord, setComplianceRecord] = useState<ComplianceRecord | null>(null);
@@ -203,7 +207,7 @@ export default function ContractorPortal() {
           email: profile?.email ?? user.email ?? null,
         };
         const roles = extractUserRoles(profileDoc);
-        setIsStaff(hasRole(roles, ["admin", "operations", "projects"]));
+        const allowedByRole = hasRole(roles, ["admin", "operations", "projects"]);
 
         const [
           taskSnap,
@@ -211,6 +215,7 @@ export default function ContractorPortal() {
           openSnap,
           availabilitySnap,
           noticeSnap,
+          permissionSnap,
           productSnap,
           complianceSnap,
         ] = await Promise.all([
@@ -219,6 +224,10 @@ export default function ContractorPortal() {
           getDocs(query(collection(db, "bookings"), where("contractorUid", "==", null))),
           getDocs(query(collection(db, "availability"), where("uid", "==", user.uid))),
           getDocs(query(collection(db, "teamNotices"), orderBy("createdAt", "desc"))),
+          getDoc(doc(db, "teamNoticePermissions", user.uid)).catch((error) => {
+            console.warn("Failed to load notice permission", error);
+            return null;
+          }),
           getDocs(query(collection(db, "contractorProducts"), where("uid", "==", user.uid))).catch((error) => {
             console.warn("Failed to load contractor products", error);
             return { docs: [] } as any;
@@ -243,7 +252,24 @@ export default function ContractorPortal() {
         });
         setAvailability(availabilityMap);
 
-        setNotices(noticeSnap.docs.map((d) => ({ ...(d.data() as NoticeRecord), id: d.id })));
+        const noticeRecords = noticeSnap.docs
+          .map((d) => ({ ...(d.data() as NoticeRecord), id: d.id }))
+          .filter((notice) => {
+            const status = (notice.status || "active").toString().toLowerCase();
+            return status !== "hidden" && status !== "archived";
+          });
+        setNotices(noticeRecords);
+
+        if (permissionSnap && "exists" in permissionSnap && permissionSnap?.exists()) {
+          const permissionData = permissionSnap.data() as any;
+          const override =
+            typeof permissionData?.allowPost === "boolean" ? (permissionData.allowPost as boolean) : null;
+          setNoticePostingOverride(override);
+          setCanPostNotices(override === true || (override !== false && allowedByRole));
+        } else {
+          setNoticePostingOverride(null);
+          setCanPostNotices(allowedByRole);
+        }
 
         if ("docs" in productSnap) {
           setProducts(productSnap.docs.map((d: any) => ({ ...(d.data() as ProductRecord), id: d.id })));
@@ -311,7 +337,7 @@ export default function ContractorPortal() {
   const submitNotice = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const user = auth.currentUser;
-    if (!user || !isStaff) return;
+    if (!user || !canPostNotices) return;
     try {
       await addDoc(collection(db, "teamNotices"), {
         title: noticeTitle.trim(),
@@ -322,7 +348,13 @@ export default function ContractorPortal() {
       setNoticeTitle("");
       setNoticeMessage("");
       const refresh = await getDocs(query(collection(db, "teamNotices"), orderBy("createdAt", "desc")));
-      setNotices(refresh.docs.map((d) => ({ ...(d.data() as NoticeRecord), id: d.id })));
+      const filtered = refresh.docs
+        .map((d) => ({ ...(d.data() as NoticeRecord), id: d.id }))
+        .filter((notice) => {
+          const status = (notice.status || "active").toString().toLowerCase();
+          return status !== "hidden" && status !== "archived";
+        });
+      setNotices(filtered);
     } catch (error) {
       console.warn("submitNotice failed", error);
     }
@@ -825,7 +857,7 @@ export default function ContractorPortal() {
                 <p className="text-sm text-slate-500">HQ and franchise managers post important updates here.</p>
               </div>
             </div>
-            {isStaff && (
+            {canPostNotices ? (
               <form onSubmit={submitNotice} className="mb-6 grid gap-3">
                 <div className="grid gap-2">
                   <label className="text-sm font-medium text-slate-700" htmlFor="notice-title">
@@ -860,7 +892,12 @@ export default function ContractorPortal() {
                   </button>
                 </div>
               </form>
-            )}
+            ) : noticePostingOverride === false ? (
+              <p className="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                Notice posting has been disabled for your account. Please contact HQ if you need to share an
+                urgent update.
+              </p>
+            ) : null}
 
             <div className="space-y-4">
               {notices.length ? (

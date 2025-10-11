@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import PortalContainer from "@/components/PortalContainer";
 import ExpoLeadOutreachManager from "@/components/admin/expo/ExpoLeadOutreachManager";
 import PortalHero from "@/components/PortalHero";
+import FranchiseNoticeBoardManager from "@/components/franchise/FranchiseNoticeBoardManager";
 import CrmPipelineBoard from "@/components/CrmPipelineBoard";
 import { CRM_PIPELINE_STATUSES, normaliseCrmStatus } from "@/lib/crm";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
@@ -206,6 +207,7 @@ export default function FranchisePortalPage() {
   const [user, setUser] = useState<User | null>(null);
   const [franchises, setFranchises] = useState<FranchiseSummary[]>([]);
   const [activeFranchiseId, setActiveFranchiseId] = useState<string | null>(null);
+  const [manageableFranchiseIds, setManageableFranchiseIds] = useState<string[]>([]);
   const [crmRecords, setCrmRecords] = useState<any[]>([]);
   const [crmLoading, setCrmLoading] = useState(false);
   const [crmError, setCrmError] = useState<string | null>(null);
@@ -451,6 +453,7 @@ export default function FranchisePortalPage() {
         if (ids.size === 0) {
           setFranchises([]);
           setActiveFranchiseId(null);
+          setManageableFranchiseIds([]);
           setOrders([]);
           setProjects([]);
           setUploads([]);
@@ -504,6 +507,8 @@ export default function FranchisePortalPage() {
         );
 
         summaries.sort((a, b) => a.name.localeCompare(b.name));
+        const idArray = Array.from(ids);
+        setManageableFranchiseIds(idArray);
         setFranchises(summaries);
         setActiveFranchiseId((current) => {
           if (current && ids.has(current)) {
@@ -515,6 +520,7 @@ export default function FranchisePortalPage() {
         console.error("Failed to load franchise membership", err);
         setFranchises([]);
         setActiveFranchiseId(null);
+        setManageableFranchiseIds([]);
         setOrders([]);
         setProjects([]);
         setUploads([]);
@@ -1106,6 +1112,16 @@ export default function FranchisePortalPage() {
                   Open full CRM workspace
                 </Link>
               </div>
+            </section>
+
+            <section id="team-notice-board" className="space-y-4">
+              <div className="rounded-3xl border border-indigo-100 bg-indigo-50 p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-indigo-900">Team notice board</h2>
+                <p className="mt-2 text-sm text-indigo-800">
+                  Publish updates for your crews and restrict posting access if you need to moderate the feed.
+                </p>
+              </div>
+              <FranchiseNoticeBoardManager franchiseIds={manageableFranchiseIds} />
             </section>
 
             <section id="orders-pipeline" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
