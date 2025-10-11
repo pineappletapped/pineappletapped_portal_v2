@@ -48,6 +48,8 @@ interface QuoteRequestRecord {
 }
 
 const PROJECTS_PER_ORG = 25;
+const ORDERS_PER_ORG = 25;
+const QUOTES_PER_ORG = 25;
 
 const normaliseDate = (value: unknown): Date | null => {
   if (!value) return null;
@@ -185,21 +187,23 @@ export default function ProjectsPage() {
           ),
         ]);
 
-        const orderRecords: OrderRecord[] = ordersSnapshot.docs.map((docSnap) => {
+        const orderRecords = new Map<string, OrderRecord>();
+        ordersSnapshot.docs.forEach((docSnap) => {
           const data = docSnap.data() as Record<string, any>;
-          return {
+          orderRecords.set(docSnap.id, {
             id: docSnap.id,
             status: extractStatus(data.status, "processing"),
             friendlyId: formatOrderDisplayId({ id: docSnap.id, ...data }, { fallbackToOriginal: true }),
             projectId:
               (typeof data.projectId === "string" && data.projectId.trim().length > 0 && data.projectId.trim()) || null,
             createdAt: normaliseDate(data.createdAt ?? data.placedAt ?? null),
-          };
+          });
         });
 
-        const quoteRecords: QuoteRequestRecord[] = quotesSnapshot.docs.map((docSnap) => {
+        const quoteRecords = new Map<string, QuoteRequestRecord>();
+        quotesSnapshot.docs.forEach((docSnap) => {
           const data = docSnap.data() as Record<string, any>;
-          return {
+          quoteRecords.set(docSnap.id, {
             id: docSnap.id,
             name:
               (typeof data.projectName === "string" && data.projectName.trim().length > 0 && data.projectName.trim()) ||
@@ -207,7 +211,7 @@ export default function ProjectsPage() {
               `Request ${docSnap.id}`,
             status: extractStatus(data.status, "pending"),
             createdAt: normaliseDate(data.createdAt ?? data.submittedAt ?? null),
-          };
+          });
         });
 
         const membershipsSnapshot = await getDocs(
@@ -240,6 +244,49 @@ export default function ProjectsPage() {
               }
             } catch (orgError) {
               console.warn("Failed to load organisation", orgId, orgError);
+            }
+          })
+        );
+
+        await Promise.all(
+          uniqueOrgIds.map(async (orgId) => {
+            try {
+              const orgOrdersSnapshot = await getDocs(
+                query(collection(db, "orders"), where("orgId", "==", orgId), limit(ORDERS_PER_ORG))
+              );
+              orgOrdersSnapshot.docs.forEach((docSnap) => {
+                const data = docSnap.data() as Record<string, any>;
+                orderRecords.set(docSnap.id, {
+                  id: docSnap.id,
+                  status: extractStatus(data.status, "processing"),
+                  friendlyId: formatOrderDisplayId({ id: docSnap.id, ...data }, { fallbackToOriginal: true }),
+                  projectId:
+                    (typeof data.projectId === "string" && data.projectId.trim().length > 0 && data.projectId.trim()) || null,
+                  createdAt: normaliseDate(data.createdAt ?? data.placedAt ?? null),
+                });
+              });
+            } catch (orgOrdersError) {
+              console.warn("Failed to load orders for org", orgId, orgOrdersError);
+            }
+
+            try {
+              const orgQuotesSnapshot = await getDocs(
+                query(collection(db, "quoteRequests"), where("orgId", "==", orgId), limit(QUOTES_PER_ORG))
+              );
+              orgQuotesSnapshot.docs.forEach((docSnap) => {
+                const data = docSnap.data() as Record<string, any>;
+                quoteRecords.set(docSnap.id, {
+                  id: docSnap.id,
+                  name:
+                    (typeof data.projectName === "string" && data.projectName.trim().length > 0 && data.projectName.trim()) ||
+                    (typeof data.name === "string" && data.name.trim().length > 0 && data.name.trim()) ||
+                    `Request ${docSnap.id}`,
+                  status: extractStatus(data.status, "pending"),
+                  createdAt: normaliseDate(data.createdAt ?? data.submittedAt ?? null),
+                });
+              });
+            } catch (orgQuotesError) {
+              console.warn("Failed to load quote requests for org", orgId, orgQuotesError);
             }
           })
         );
@@ -289,8 +336,19 @@ export default function ProjectsPage() {
         });
 
         if (!cancelled) {
-          setOrders(orderRecords);
-          setQuotes(quoteRecords);
+          const dedupedOrders = Array.from(orderRecords.values()).sort((a, b) => {
+            const aTime = a.createdAt ? a.createdAt.getTime() : 0;
+            const bTime = b.createdAt ? b.createdAt.getTime() : 0;
+            return bTime - aTime;
+          });
+          const dedupedQuotes = Array.from(quoteRecords.values()).sort((a, b) => {
+            const aTime = a.createdAt ? a.createdAt.getTime() : 0;
+            const bTime = b.createdAt ? b.createdAt.getTime() : 0;
+            return bTime - aTime;
+          });
+
+          setOrders(dedupedOrders);
+          setQuotes(dedupedQuotes);
           setProjects(dedupedProjects);
         }
       } catch (err: any) {
