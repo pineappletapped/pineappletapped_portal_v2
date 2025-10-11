@@ -3,6 +3,7 @@ import {
   DEFAULT_FUNCTION_BASE,
   buildCallableEndpointsFromBases,
   normaliseBaseUrl,
+  normaliseCallableEndpoint,
   resolveHostedAppBase,
 } from "@/lib/callableEndpoints";
 
@@ -52,9 +53,12 @@ export const buildCallableEndpointCandidates = (
     if (!envName) {
       continue;
     }
-    const explicit = normaliseBaseUrl(process.env[envName]);
+    const explicit = normaliseCallableEndpoint(
+      process.env[envName],
+      functionName,
+    );
     if (explicit) {
-      return [`${explicit}/${functionName}`];
+      return [explicit];
     }
   }
 

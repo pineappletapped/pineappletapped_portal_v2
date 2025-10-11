@@ -44,18 +44,47 @@ export const resolveHostedAppBase = (
   return `https://us-central1-${appIdCandidate}.cloudfunctions.net`;
 };
 
+const looksLikeExplicitEndpoint = (
+  value: string,
+  functionName: string,
+) => {
+  if (value.includes("?")) {
+    return true;
+  }
+
+  const lowerValue = value.toLowerCase();
+  const suffix = `/${functionName.toLowerCase()}`;
+  return lowerValue.endsWith(suffix);
+};
+
+export const normaliseCallableEndpoint = (
+  value: string | null | undefined,
+  functionName: string,
+): string | null => {
+  const normalised = normaliseBaseUrl(value);
+  if (!normalised) {
+    return null;
+  }
+
+  if (looksLikeExplicitEndpoint(normalised, functionName)) {
+    return normalised;
+  }
+
+  return `${normalised}/${functionName}`;
+};
+
 export const buildCallableEndpointsFromBases = (
   functionName: string,
   baseUrls: Array<string | null | undefined>,
 ): string[] => {
-  const uniqueBases = new Set<string>();
+  const uniqueEndpoints = new Set<string>();
 
   for (const base of baseUrls) {
-    const normalised = normaliseBaseUrl(base);
-    if (normalised) {
-      uniqueBases.add(normalised);
+    const endpoint = normaliseCallableEndpoint(base, functionName);
+    if (endpoint) {
+      uniqueEndpoints.add(endpoint);
     }
   }
 
-  return Array.from(uniqueBases).map((base) => `${base}/${functionName}`);
+  return Array.from(uniqueEndpoints);
 };

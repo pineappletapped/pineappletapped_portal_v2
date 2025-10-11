@@ -29,6 +29,7 @@ import {
   DEFAULT_FUNCTION_BASE,
   buildCallableEndpointsFromBases,
   normaliseBaseUrl,
+  normaliseCallableEndpoint,
   resolveHostedAppBase,
 } from "@/lib/callableEndpoints";
 import CheckoutPaymentForm from "./CheckoutPaymentForm";
@@ -1103,14 +1104,17 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       return defaultResult;
     }
 
-    const explicitEndpoint = normaliseBaseUrl(EXPLICIT_CREATE_ORDER_ENDPOINT);
+    const explicitEndpoint = normaliseCallableEndpoint(
+      EXPLICIT_CREATE_ORDER_ENDPOINT,
+      "createOrder",
+    );
     const host = typeof window !== "undefined" ? window.location.host : null;
     const hostBase = resolveHostedAppBase(host);
     const defaultBase = normaliseBaseUrl(functionsBaseUrl);
 
     let candidateEndpoints: string[];
     if (explicitEndpoint) {
-      candidateEndpoints = [`${explicitEndpoint}/createOrder`];
+      candidateEndpoints = [explicitEndpoint];
     } else {
       candidateEndpoints = buildCallableEndpointsFromBases("createOrder", [
         functionsBaseUrl,
