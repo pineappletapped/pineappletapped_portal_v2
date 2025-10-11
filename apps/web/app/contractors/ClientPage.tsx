@@ -15,6 +15,7 @@ import {
   deriveComplianceState,
   type ComplianceRecord,
 } from "@/lib/compliance";
+import InsurancePortalPanel from "@/components/insurance/InsurancePortalPanel";
 import { auth, db, ensureFirebase, functions } from "@/lib/firebase";
 import {
   addDoc,
@@ -39,6 +40,7 @@ type TeamTab =
   | "projects"
   | "compliance"
   | "kit"
+  | "insurance"
   | "workwear"
   | "profile";
 
@@ -186,6 +188,7 @@ export default function ContractorPortal() {
   const [licenceExpiry, setLicenceExpiry] = useState("");
   const [insuranceExpiry, setInsuranceExpiry] = useState("");
   const [submittingCompliance, setSubmittingCompliance] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -194,6 +197,7 @@ export default function ContractorPortal() {
         setLoading(false);
         return;
       }
+      setUserId(user.uid);
 
       try {
         setComplianceLoading(true);
@@ -571,6 +575,7 @@ export default function ContractorPortal() {
     { id: "availability", label: "Availability" },
     { id: "projects", label: "Projects" },
     { id: "compliance", label: "Compliance" },
+    { id: "insurance", label: "Insurance" },
     { id: "kit", label: "My Kit" },
     { id: "workwear", label: "Order Workwear" },
     { id: "profile", label: "My Profile" },
@@ -581,6 +586,11 @@ export default function ContractorPortal() {
       tab: "compliance",
       title: "Compliance",
       description: "Upload your drone licence and insurance for HQ approval.",
+    },
+    {
+      tab: "insurance",
+      title: "Insurance",
+      description: "Check HQ cover, review policies, and acknowledge new documents.",
     },
     {
       tab: "projects",
@@ -627,6 +637,11 @@ export default function ContractorPortal() {
       onClick: () => setActiveTab("compliance"),
     },
     {
+      label: "Review insurance cover",
+      description: "Confirm you meet the requirements for HQ-backed policies.",
+      onClick: () => setActiveTab("insurance"),
+    },
+    {
       label: "Review projects",
       description: "Check briefs, files, and tasks for current shoots.",
       onClick: () => setActiveTab("projects"),
@@ -671,6 +686,11 @@ export default function ContractorPortal() {
         return {
           title: "Project pipeline",
           description: "Review briefs, tasks, and delivery status for every booking you&apos;re involved in.",
+        } as const;
+      case "insurance":
+        return {
+          title: "Insurance cover",
+          description: "Check which HQ policies cover you and action anything needed to stay eligible for work.",
         } as const;
       case "compliance":
         return {
@@ -1216,6 +1236,28 @@ export default function ContractorPortal() {
                   </div>
                 </form>
               </>
+            )}
+          </article>
+        </section>
+
+        <section
+          id={panelId("insurance")}
+          role="tabpanel"
+          aria-labelledby={tabId("insurance")}
+          className={activeTab === "insurance" ? "flex flex-col gap-6" : "hidden"}
+        >
+          <article className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+            {userId ? (
+              <InsurancePortalPanel
+                targetType="user"
+                targetId={userId}
+                heading="HQ insurance cover"
+                description="See the policies you&apos;re covered by, complete required training acknowledgements, and stay compliant for upcoming assignments."
+              />
+            ) : (
+              <p className="text-sm text-slate-500">
+                Sign in to review insurance policies and acknowledgement requirements.
+              </p>
             )}
           </article>
         </section>

@@ -7,6 +7,7 @@ import ExpoLeadOutreachManager from "@/components/admin/expo/ExpoLeadOutreachMan
 import PortalHero from "@/components/PortalHero";
 import FranchiseNoticeBoardManager from "@/components/franchise/FranchiseNoticeBoardManager";
 import CrmPipelineBoard from "@/components/CrmPipelineBoard";
+import InsurancePortalPanel from "@/components/insurance/InsurancePortalPanel";
 import { CRM_PIPELINE_STATUSES, normaliseCrmStatus } from "@/lib/crm";
 import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import type { User } from "firebase/auth";
@@ -921,6 +922,11 @@ export default function FranchisePortalPage() {
       href: "#orders-earnings",
     },
     {
+      label: "Review insurance cover",
+      description: "Check franchise policies and outstanding requirements.",
+      href: "#insurance-coverage",
+    },
+    {
       label: "Stage Drive files",
       description: "Import deliverables from your shared folders.",
       href: "/franchise/drive-staging",
@@ -1025,6 +1031,21 @@ export default function FranchisePortalPage() {
                   {currencyFormatter.format(orderMetrics.averageNet || 0)}
                 </p>
               </div>
+            </section>
+
+            <section id="insurance-coverage" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+              {activeFranchiseId ? (
+                <InsurancePortalPanel
+                  targetType="franchise"
+                  targetId={activeFranchiseId}
+                  heading="Franchise insurance cover"
+                  description="Confirm which HQ policies extend to your franchise, review required training modules, and acknowledge updates so crews remain covered."
+                />
+              ) : (
+                <p className="text-sm text-gray-600">
+                  Select a franchise to review the policies and requirements that apply to your territory.
+                </p>
+              )}
             </section>
 
             <section id="operations-toolkit" className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
