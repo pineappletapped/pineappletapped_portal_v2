@@ -38,13 +38,38 @@ const ANALYTICS_ALLOWED_ORIGINS = [
   'http://localhost:3000',
 ];
 
-function applyRecordLoginCors(req: functions.Request, res: functions.Response) {
-  const origin = req.get('origin');
-  const allowedOrigin = origin && ANALYTICS_ALLOWED_ORIGINS.includes(origin) ? origin : '*';
-  res.set('Access-Control-Allow-Origin', allowedOrigin);
+function resolveAllowedOrigin(origin?: string | null): string | null {
+  if (!origin) {
+    return null;
+  }
+  return ANALYTICS_ALLOWED_ORIGINS.includes(origin) ? origin : null;
+}
+
+function applyCorsHeaders(
+  req: functions.Request,
+  res: functions.Response,
+  methods: string,
+  headers: string,
+) {
+  const allowedOrigin = resolveAllowedOrigin(req.get('origin'));
+  if (allowedOrigin) {
+    res.set('Access-Control-Allow-Origin', allowedOrigin);
+    res.set('Access-Control-Allow-Credentials', 'true');
+  } else {
+    res.set('Access-Control-Allow-Origin', '*');
+  }
   res.set('Vary', 'Origin');
-  res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
-  res.set('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+  res.set('Access-Control-Allow-Methods', methods);
+  res.set('Access-Control-Allow-Headers', headers);
+  res.set('Access-Control-Max-Age', '3600');
+}
+
+function applyRecordLoginCors(req: functions.Request, res: functions.Response) {
+  applyCorsHeaders(req, res, 'POST,OPTIONS', 'Authorization,Content-Type');
+}
+
+function applyAnalyticsCors(req: functions.Request, res: functions.Response) {
+  applyCorsHeaders(req, res, 'POST,OPTIONS', 'Authorization,Content-Type');
 }
 
 // TODO: wrap all http functions with the cors handler, for example:
@@ -5568,77 +5593,86 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
 });
 
 // Track page view analytics from the public site
-export const analytics_track = onRequest(
-  { region: 'us-central1', cors: ANALYTICS_ALLOWED_ORIGINS },
-  async (req, res) => {
-    try {
-      let uid: string | null = null;
-      let userName: string | null = null;
-      const authHeader = req.get('authorization');
-      if (authHeader?.startsWith('Bearer ')) {
-        try {
-          const decoded = await admin
-            .auth()
-            .verifyIdToken(authHeader.split('Bearer ')[1]);
-          uid = decoded.uid;
-          const userSnap = await db.collection('users').doc(uid).get();
-          const udata = userSnap.data() as any;
-          if (udata) {
-            userName = udata.fullName || udata.email || null;
-          }
-        } catch (err) {
-          console.error('verifyIdToken failed', err);
-        }
-      }
+export const analytics_track = onRequest({ region: 'us-central1' }, async (req, res) => {
+  applyAnalyticsCors(req, res);
 
-      const rawBody = req.body;
-      let data: Record<string, any> = {};
-      if (typeof rawBody === 'string') {
-        if (rawBody.trim()) {
-          try {
-            data = JSON.parse(rawBody);
-          } catch (err) {
-            console.error('analytics_track invalid JSON payload', err);
-          }
-        }
-      } else if (rawBody && typeof rawBody === 'object') {
-        data = rawBody as Record<string, any>;
-      }
-
-      const visitorId = data.visitorId ?? null;
-      if (!uid && visitorId) {
-        const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
-        const mapData = mapSnap.data() as any;
-        if (mapData) {
-          uid = mapData.uid || null;
-          userName = mapData.userName || null;
-        }
-      }
-      if (visitorId && uid && userName) {
-        await db
-          .collection('analyticsVisitors')
-          .doc(visitorId)
-          .set({ uid, userName }, { merge: true });
-      }
-      const event = {
-        uid,
-        userName,
-        path: data.path || null,
-        referrer: data.referrer || null,
-        userAgent: data.userAgent || req.get('user-agent') || null,
-        visitorId,
-        duration: data.duration || null,
-        ip: req.ip,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      };
-      await db.collection('analyticsEvents').add(event);
-      res.json({ ok: true });
-    } catch (err) {
-      console.error('analytics_track error', err);
-      res.status(500).json({ error: 'internal' });
-    }
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
   }
-);
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' });
+    return;
+  }
+
+  try {
+    let uid: string | null = null;
+    let userName: string | null = null;
+    const authHeader = req.get('authorization');
+    if (authHeader?.startsWith('Bearer ')) {
+      try {
+        const decoded = await admin
+          .auth()
+          .verifyIdToken(authHeader.split('Bearer ')[1]);
+        uid = decoded.uid;
+        const userSnap = await db.collection('users').doc(uid).get();
+        const udata = userSnap.data() as any;
+        if (udata) {
+          userName = udata.fullName || udata.email || null;
+        }
+      } catch (err) {
+        console.error('verifyIdToken failed', err);
+      }
+    }
+
+    const rawBody = req.body;
+    let data: Record<string, any> = {};
+    if (typeof rawBody === 'string') {
+      if (rawBody.trim()) {
+        try {
+          data = JSON.parse(rawBody);
+        } catch (err) {
+          console.error('analytics_track invalid JSON payload', err);
+        }
+      }
+    } else if (rawBody && typeof rawBody === 'object') {
+      data = rawBody as Record<string, any>;
+    }
+
+    const visitorId = data.visitorId ?? null;
+    if (!uid && visitorId) {
+      const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
+      const mapData = mapSnap.data() as any;
+      if (mapData) {
+        uid = mapData.uid || null;
+        userName = mapData.userName || null;
+      }
+    }
+    if (visitorId && uid && userName) {
+      await db
+        .collection('analyticsVisitors')
+        .doc(visitorId)
+        .set({ uid, userName }, { merge: true });
+    }
+    const event = {
+      uid,
+      userName,
+      path: data.path || null,
+      referrer: data.referrer || null,
+      userAgent: data.userAgent || req.get('user-agent') || null,
+      visitorId,
+      duration: data.duration || null,
+      ip: req.ip,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    await db.collection('analyticsEvents').add(event);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('analytics_track error', err);
+    res.status(500).json({ error: 'internal' });
+  }
+});
 
 export const bookings_confirm = functions.https.onCall(async (data, context) => {
   if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'Sign in required');

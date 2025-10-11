@@ -978,7 +978,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     return "We couldn't complete your order. Please try again.";
   }, []);
 
-  const callCreateOrder = useCallback(
+  const callCreateOrderViaApi = useCallback(
     async (token: string | null): Promise<CreateOrderResult> => {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
@@ -1036,6 +1036,53 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       return data as CreateOrderResult;
     },
     [orderInput],
+  );
+
+  const callCreateOrderViaCallable = useCallback(async (): Promise<CreateOrderResult> => {
+    const { functions } = await ensureFirebase();
+    let functionsInstance = functionsRef.current ?? functions ?? null;
+    if (!functionsInstance) {
+      throw Object.assign(new Error("Firebase functions are unavailable."), {
+        code: "create-order-functions-unavailable",
+      });
+    }
+
+    functionsRef.current = functionsInstance;
+    const createOrderCallable = httpsCallable(functionsInstance, "createOrder");
+    const result: any = await createOrderCallable(orderInput);
+    const data =
+      (result && typeof result === "object"
+        ? result.data ?? result.result?.data ?? result.result ?? null
+        : null) ?? null;
+
+    if (!data || typeof data !== "object") {
+      return {};
+    }
+
+    return data as CreateOrderResult;
+  }, [orderInput]);
+
+  const callCreateOrder = useCallback(
+    async (token: string | null): Promise<CreateOrderResult> => {
+      try {
+        return await callCreateOrderViaApi(token);
+      } catch (apiError) {
+        console.warn("createOrder API proxy failed, retrying callable", apiError);
+        try {
+          return await callCreateOrderViaCallable();
+        } catch (callableError) {
+          console.error("createOrder callable fallback failed", callableError);
+          if (callableError instanceof Error) {
+            if (!("cause" in callableError)) {
+              (callableError as Error & { cause?: unknown }).cause = apiError;
+            }
+            throw callableError;
+          }
+          throw apiError instanceof Error ? apiError : new Error("Failed to create order.");
+        }
+      }
+    },
+    [callCreateOrderViaApi, callCreateOrderViaCallable],
   );
 
   const initializePaymentIntent = useCallback(async () => {
