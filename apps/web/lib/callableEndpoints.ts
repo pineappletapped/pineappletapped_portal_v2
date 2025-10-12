@@ -6,7 +6,7 @@ export const LEGACY_FUNCTION_BASES = [
 ];
 
 const CLOUD_FUNCTION_REGION_HOST_PATTERN =
-  /^https:\/\/([a-z0-9-]+)-([a-z0-9-]+)\.cloudfunctions\.net$/i;
+  /^https:\/\/((?:[a-z]+(?:-[a-z]+)*)[0-9])-([a-z0-9-]+)\.cloudfunctions\.net$/i;
 
 const REGION_FALLBACKS = ["us-central1", "europe-west2"];
 const CODEBASE_ENV_VARS = [
