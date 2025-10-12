@@ -57,6 +57,18 @@ const PUBLIC_FIREBASE_FUNCTIONS_URL = process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS
 const LEGACY_BACKEND_FUNCTION_BASE =
   "https://us-central1-ptfbportalbackend.cloudfunctions.net";
 
+type AccountRequirementReason =
+  | "login-required"
+  | "email-missing"
+  | "password-too-short"
+  | "password-mismatch"
+  | null;
+
+interface AccountRequirementState {
+  ready: boolean;
+  reason: AccountRequirementReason;
+}
+
 interface VoucherRecord {
   type?: string | null;
   amount?: number | null;
@@ -157,6 +169,52 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const lastIntentPayload = useRef<string | null>(null);
   const loginErrorRef = useRef<HTMLDivElement | null>(null);
   const authEmail = currentUser?.email || "";
+  const accountRequirement = useMemo<AccountRequirementState>(() => {
+    if (currentUser) {
+      return { ready: true, reason: null };
+    }
+    if (authMode === "login") {
+      return { ready: false, reason: "login-required" };
+    }
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      return { ready: false, reason: "email-missing" };
+    }
+    if (registerPassword.length < MIN_ACCOUNT_PASSWORD_LENGTH) {
+      return { ready: false, reason: "password-too-short" };
+    }
+    if (registerPassword !== confirmPassword) {
+      return { ready: false, reason: "password-mismatch" };
+    }
+    return { ready: true, reason: null };
+  }, [
+    authMode,
+    confirmPassword,
+    currentUser,
+    email,
+    registerPassword,
+  ]);
+  const describeAccountRequirement = useCallback(
+    (reason: AccountRequirementReason, context: "payment" | "checkout") => {
+      switch (reason) {
+        case "login-required":
+          return context === "payment"
+            ? "Sign in to continue to payment."
+            : "Sign in to continue to checkout.";
+        case "email-missing":
+          return "Enter your email to continue.";
+        case "password-too-short":
+          return `Create a password with at least ${MIN_ACCOUNT_PASSWORD_LENGTH} characters to continue.`;
+        case "password-mismatch":
+          return "Confirm your password to continue.";
+        default:
+          return context === "payment"
+            ? "Complete your account details to continue to payment."
+            : "Complete your account details to continue to checkout.";
+      }
+    },
+    [],
+  );
   const switchToLogin = useCallback(() => {
     setAuthMode("login");
     setAccountError(null);
@@ -812,8 +870,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     if (items.length === 0) {
       return "Add items to your cart to continue.";
     }
-    if (!currentUser) {
-      return "Sign in to continue to checkout.";
+    if (!accountRequirement.ready) {
+      return describeAccountRequirement(accountRequirement.reason, "checkout");
     }
     if (!name) {
       return "Enter your name to continue.";
@@ -822,7 +880,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       return "Enter a postcode for the shoot location.";
     }
     return null;
-  }, [currentUser, items.length, name, orderInput.postalCode]);
+  }, [
+    accountRequirement.ready,
+    accountRequirement.reason,
+    describeAccountRequirement,
+    items.length,
+    name,
+    orderInput.postalCode,
+  ]);
   const zeroBalanceMessage = zeroBalanceBlockingMessage
     ? zeroBalanceBlockingMessage
     : "Your voucher covers the full balance. Confirm your order to continue.";
@@ -972,8 +1037,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   };
 
   const describeCallableError = useCallback((error: unknown): string => {
+    const fallbackMessage = "We couldn't complete your order. Please try again.";
     if (!error) {
-      return "We couldn't complete your order. Please try again.";
+      return fallbackMessage;
     }
     if (typeof error === "string") {
       return error;
@@ -1009,8 +1075,33 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       if (detailObject) {
         return detailObject;
       }
-      if (firebaseError.message && firebaseError.message.trim().length > 0) {
-        return firebaseError.message;
+      if (Array.isArray(details) && details.length > 0) {
+        for (let idx = details.length - 1; idx >= 0; idx -= 1) {
+          const attempt = details[idx];
+          if (!attempt || typeof attempt !== "object") {
+            continue;
+          }
+          const attemptRecord = attempt as Record<string, unknown>;
+          const attemptError = attemptRecord.error;
+          if (attemptError && attemptError === error) {
+            continue;
+          }
+          const attemptMessage = describeCallableError(attemptError ?? null);
+          if (attemptMessage && attemptMessage !== fallbackMessage) {
+            const endpoint = attemptRecord.endpoint;
+            if (typeof endpoint === "string" && endpoint.trim().length > 0) {
+              return `Order service at ${endpoint} responded: ${attemptMessage}`;
+            }
+            return attemptMessage;
+          }
+        }
+      }
+      const rawMessage = firebaseError.message?.trim();
+      if (rawMessage) {
+        const normalised = rawMessage.replace(/^firebaseerror:\s*/i, "");
+        if (normalised && normalised.toLowerCase() !== "internal") {
+          return normalised;
+        }
       }
     }
     if (typeof error === "object" && error !== null && "message" in error) {
@@ -1019,7 +1110,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return messageValue;
       }
     }
-    return "We couldn't complete your order. Please try again.";
+    return fallbackMessage;
   }, []);
 
   const callCreateOrderViaApi = useCallback(
@@ -2013,12 +2104,12 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
               <p className="text-sm text-gray-500">
                 {items.length === 0
                   ? "Add items to your cart to continue."
-                  : !currentUser && authMode === "login"
-                    ? "Sign in to continue to payment."
-                    : !currentUser && authMode === "register"
-                      ? "Set your password to create an account before continuing."
-                      : !name
-                        ? "Enter your name to continue."
+                  : !accountRequirement.ready
+                    ? describeAccountRequirement(accountRequirement.reason, "payment")
+                    : !name
+                      ? "Enter your name to continue."
+                      : !orderInput.postalCode
+                        ? "Enter a postcode for the shoot location."
                         : stripeConfigError
                           ? stripeConfigError
                           : !stripePromise
@@ -2032,8 +2123,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 disabled={
                   initializingPayment ||
                   items.length === 0 ||
-                  (authMode === "login" && !currentUser) ||
+                  !accountRequirement.ready ||
                   !name ||
+                  !orderInput.postalCode ||
                   Boolean(stripeConfigError) ||
                   !stripePromise ||
                   isRegistering

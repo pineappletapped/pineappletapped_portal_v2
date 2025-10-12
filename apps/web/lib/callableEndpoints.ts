@@ -31,22 +31,33 @@ export const resolveHostedAppBase = (
     return null;
   }
 
-  const [subdomain] = trimmed.split(".");
+  const segments = trimmed.split(".");
+  if (segments.length < 3) {
+    return null;
+  }
+
+  const subdomain = segments[0];
+  const regionSegment = segments[1];
   if (!subdomain) {
     return null;
   }
 
-  const parts = subdomain.split("--");
-  if (parts.length < 2) {
+  const separatorIndex = subdomain.indexOf("--");
+  if (separatorIndex < 0) {
     return null;
   }
 
-  const appIdCandidate = parts[parts.length - 1];
-  if (!appIdCandidate) {
+  const projectFragment = subdomain.slice(separatorIndex + 2);
+  if (!projectFragment) {
     return null;
   }
 
-  return `https://us-central1-${appIdCandidate}.cloudfunctions.net`;
+  const regionCandidate =
+    typeof regionSegment === "string" && /^[a-z0-9-]+$/.test(regionSegment)
+      ? regionSegment
+      : "us-central1";
+
+  return `https://${regionCandidate}-${projectFragment}.cloudfunctions.net`;
 };
 
 const looksLikeExplicitEndpoint = (
