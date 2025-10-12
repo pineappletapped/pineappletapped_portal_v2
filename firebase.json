@@ -1,8 +1,8 @@
 {
   "functions": [
     {
-      "source": "ptfbportal",
-      "codebase": "ptfbportal",
+      "source": "functions",
+      "codebase": "default",
       "ignore": [
         "node_modules",
         ".git",
