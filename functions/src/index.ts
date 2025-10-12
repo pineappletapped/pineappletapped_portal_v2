@@ -591,7 +591,8 @@ function roundCurrency(value: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return 0;
   }
-  return Number(value.toFixed(2));
+  const rounded = Math.round(value * 100) / 100;
+  return Math.abs(rounded) < 0.005 ? 0 : rounded;
 }
 
 function buildBookingInviteUrl(token: string): string {
@@ -10527,43 +10528,58 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   let voucherDiscount = 0;
   let voucherCode: string | null = null;
   if (voucher) {
-    const vSnap = await db
-      .collection('vouchers')
-      .where('code', '==', voucher)
-      .limit(1)
-      .get();
-    if (!vSnap.empty) {
-      const v = vSnap.docs[0].data() as any;
-      const locs: string[] = Array.isArray(v.locations) ? v.locations : [];
-      const locAllowed =
-        locs.length === 0 ||
-        (location &&
-          locs
-            .map((l) => (typeof l === 'string' ? l.toLowerCase() : ''))
-            .includes(String(location).toLowerCase()));
-      if (locAllowed) {
-        const prodIds: string[] = Array.isArray(v.productIds) ? v.productIds : [];
-        const catIds: string[] = Array.isArray(v.categoryIds) ? v.categoryIds : [];
-        let eligibleSubtotal = 0;
-        orderItems.forEach((item) => {
-          const prodOk = prodIds.length === 0 || prodIds.includes(item.id);
-          const catOk = catIds.length === 0 || catIds.includes(item.category);
-          if (prodOk && catOk) eligibleSubtotal += item.price * item.quantity;
-        });
-        const voucherAmount = parseNumber(v.amount);
-        if (eligibleSubtotal > 0 && voucherAmount !== null && Number.isFinite(voucherAmount)) {
-          if (v.type === 'percentage') {
-            voucherDiscount = eligibleSubtotal * (voucherAmount / 100);
-          } else if (v.type === 'fixed') {
-            voucherDiscount = Math.min(voucherAmount, eligibleSubtotal);
+    try {
+      const vSnap = await db
+        .collection('vouchers')
+        .where('code', '==', voucher)
+        .limit(1)
+        .get();
+      if (!vSnap.empty) {
+        const v = vSnap.docs[0].data() as any;
+        const locs: string[] = Array.isArray(v.locations) ? v.locations : [];
+        const locAllowed =
+          locs.length === 0 ||
+          (location &&
+            locs
+              .map((l) => (typeof l === 'string' ? l.toLowerCase() : ''))
+              .includes(String(location).toLowerCase()));
+        if (locAllowed) {
+          const prodIds: string[] = Array.isArray(v.productIds) ? v.productIds : [];
+          const catIds: string[] = Array.isArray(v.categoryIds) ? v.categoryIds : [];
+          let eligibleSubtotal = 0;
+          orderItems.forEach((item) => {
+            const prodOk = prodIds.length === 0 || prodIds.includes(item.id);
+            const catOk = catIds.length === 0 || catIds.includes(item.category);
+            if (prodOk && catOk) {
+              const lineTotal = Number(item.price) * Number(item.quantity ?? 0);
+              if (Number.isFinite(lineTotal)) {
+                eligibleSubtotal += lineTotal;
+              }
+            }
+          });
+          const voucherAmount = parseNumber(v.amount);
+          const voucherType = typeof v.type === 'string' ? v.type.toLowerCase() : '';
+          if (eligibleSubtotal > 0 && voucherAmount !== null && Number.isFinite(voucherAmount)) {
+            if (voucherType === 'percentage') {
+              const safePercent = Math.max(0, voucherAmount);
+              voucherDiscount = eligibleSubtotal * (safePercent / 100);
+            } else if (voucherType === 'fixed') {
+              const safeFixed = Math.max(0, voucherAmount);
+              voucherDiscount = Math.min(safeFixed, eligibleSubtotal);
+            }
+            voucherCode = voucher;
           }
-          voucherCode = voucher;
         }
       }
+    } catch (voucherError) {
+      console.error('Failed to resolve voucher', voucher, voucherError);
     }
   }
 
-  voucherDiscount = Number.isFinite(voucherDiscount) ? roundCurrency(voucherDiscount) : 0;
+  voucherDiscount =
+    Number.isFinite(voucherDiscount) && voucherDiscount > 0
+      ? roundCurrency(Math.min(voucherDiscount, productSubtotal))
+      : 0;
   const subtotalAfterVoucherRaw = productSubtotal - voucherDiscount;
   const subtotalAfterVoucher = subtotalAfterVoucherRaw > 0 ? roundCurrency(subtotalAfterVoucherRaw) : 0;
 
@@ -10574,18 +10590,20 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     discountPct = rawDiscount !== null && Number.isFinite(rawDiscount) ? rawDiscount : 0;
   }
   const rawDiscountAmount = subtotalAfterVoucher * (discountPct / 100);
-  const discountAmount = rawDiscountAmount > 0 && Number.isFinite(rawDiscountAmount)
-    ? roundCurrency(Math.min(subtotalAfterVoucher, rawDiscountAmount))
-    : 0;
+  const discountAmount =
+    rawDiscountAmount > 0 && Number.isFinite(rawDiscountAmount)
+      ? roundCurrency(Math.min(subtotalAfterVoucher, rawDiscountAmount))
+      : 0;
   const subtotalAfterAllDiscountsRaw = subtotalAfterVoucher - discountAmount;
   const subtotalAfterAllDiscounts =
     subtotalAfterAllDiscountsRaw > 0 ? roundCurrency(subtotalAfterAllDiscountsRaw) : 0;
-  const finalTotal = roundCurrency(subtotalAfterAllDiscounts + rentalSubtotal);
-  const vat = roundCurrency(finalTotal * VAT_RATE);
-  const price = roundCurrency(finalTotal + vat);
+  const netTotalRaw = subtotalAfterAllDiscounts + rentalSubtotal;
+  const netTotal = netTotalRaw > 0 && Number.isFinite(netTotalRaw) ? roundCurrency(netTotalRaw) : 0;
+  const vat = netTotal > 0 ? roundCurrency(netTotal * VAT_RATE) : 0;
+  const price = netTotal > 0 ? roundCurrency(netTotal + vat) : 0;
   const budgetSubtotal =
     labourSubtotal + kitSubtotal + travelSubtotal + parkingSubtotal;
-  const profit = finalTotal - (budgetSubtotal + rentalSubtotal);
+  const profit = netTotal - (budgetSubtotal + rentalSubtotal);
   const affiliateCommission = affiliateContext
     ? computeAffiliateCommission(profit, affiliateContext.commissionRate)
     : null;
@@ -10611,7 +10629,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     parking: parkingSubtotal,
     rental: rentalSubtotal,
     totalCost: budgetSubtotal + rentalSubtotal,
-    netRevenue: finalTotal,
+    netRevenue: netTotal,
     grossRevenue: price,
     profit,
   };
@@ -10698,7 +10716,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     voucherDiscount,
     discountPct,
     discountAmount,
-    netTotal: finalTotal,
+    netTotal: netTotal,
     vat,
     price,
     profit,
@@ -10794,13 +10812,17 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     orderData.royaltyPercentage = null;
   }
 
-  if (!Array.isArray(orderData.paymentSchedule) || orderData.paymentSchedule.length === 0) {
+  if (
+    (!Array.isArray(orderData.paymentSchedule) || orderData.paymentSchedule.length === 0) &&
+    price > 0 &&
+    netTotal > 0
+  ) {
     try {
       const { splitTerms } = await getStripeOperationalSettings();
       if (splitTerms.length > 0) {
         const scheduleEntries = splitTerms.map((term, index) => {
           const grossAmount = Number((price * (term.percentage / 100)).toFixed(2));
-          const netAmount = Number((finalTotal * (term.percentage / 100)).toFixed(2));
+          const netAmount = Number((netTotal * (term.percentage / 100)).toFixed(2));
           let dueAt: admin.firestore.Timestamp | admin.firestore.FieldValue | null = null;
           if (term.dueDays !== null) {
             if (term.dueDays <= 0) {
@@ -10827,6 +10849,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     } catch (scheduleError) {
       console.warn('Failed to apply default Stripe payment schedule', scheduleError);
     }
+  } else if (!Array.isArray(orderData.paymentSchedule)) {
+    orderData.paymentSchedule = [];
   }
 
   const allocatedOrderNumber = await allocateOrderNumber();
@@ -10973,7 +10997,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   return {
     orderId: orderRef.id,
     price,
-    netTotal: finalTotal,
+    netTotal: netTotal,
     voucherDiscount,
     discountAmount,
   };
