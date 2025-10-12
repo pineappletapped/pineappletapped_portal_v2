@@ -118,6 +118,13 @@ export const resolveHostedAppBases = (
 
   const bases = new Set<string>();
 
+  const addBase = (candidate: string | null | undefined) => {
+    const normalised = normaliseBaseUrl(candidate);
+    if (normalised) {
+      bases.add(normalised);
+    }
+  };
+
   let separatorIndex = -1;
   let searchIndex = 0;
   while (searchIndex >= 0) {
@@ -141,7 +148,7 @@ export const resolveHostedAppBases = (
       return;
     }
 
-    bases.add(`https://${regionCandidate}-${sanitised}.cloudfunctions.net`);
+    addBase(`https://${regionCandidate}-${sanitised}.cloudfunctions.net`);
   };
 
   if (separatorIndex >= 0) {
@@ -150,6 +157,8 @@ export const resolveHostedAppBases = (
   } else {
     addBaseForFragment(subdomain);
   }
+
+  addBase(`https://${trimmed}/_firebase/functions/v1`);
 
   return Array.from(bases);
 };
