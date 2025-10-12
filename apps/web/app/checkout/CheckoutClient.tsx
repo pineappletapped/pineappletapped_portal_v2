@@ -1246,8 +1246,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       ]);
 
       if (defaultBase) {
-        candidateEndpoints = candidateEndpoints.filter(
-          (endpoint) => !endpoint.startsWith(`${defaultBase}/`),
+        const defaultEndpoint = normaliseCallableEndpoint(defaultBase, "createOrder");
+        candidateEndpoints = candidateEndpoints.filter((endpoint) =>
+          defaultEndpoint ? endpoint !== defaultEndpoint : true,
         );
       }
     }

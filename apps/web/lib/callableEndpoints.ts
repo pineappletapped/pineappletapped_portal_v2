@@ -9,6 +9,17 @@ const CLOUD_FUNCTION_REGION_HOST_PATTERN =
   /^https:\/\/([a-z0-9-]+)-([a-z0-9-]+)\.cloudfunctions\.net$/i;
 
 const REGION_FALLBACKS = ["us-central1", "europe-west2"];
+const CODEBASE_ENV_VARS = [
+  "FUNCTIONS_CODEBASE",
+  "NEXT_PUBLIC_FUNCTIONS_CODEBASE",
+  "FUNCTION_CODEBASE",
+  "NEXT_PUBLIC_FUNCTION_CODEBASE",
+  "FUNCTIONS_CODEBASES",
+  "NEXT_PUBLIC_FUNCTIONS_CODEBASES",
+  "FUNCTION_CODEBASES",
+  "NEXT_PUBLIC_FUNCTION_CODEBASES",
+];
+const CODEBASE_DELIMITER = /[\s,;]+/;
 
 export const normaliseBaseUrl = (value: unknown): string | null => {
   if (typeof value !== "string") {
@@ -34,6 +45,47 @@ const sanitiseProjectFragment = (value: string | null | undefined) => {
   }
 
   return trimmed;
+};
+
+const sanitiseCodebase = (value: string | null | undefined) => {
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim().replace(/^\/+|\/+$/g, "");
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed;
+};
+
+export const resolveFunctionCodebases = (): string[] => {
+  const codebases: string[] = [""];
+  const unique = new Set(codebases);
+
+  const append = (candidate: string | null) => {
+    if (!candidate || unique.has(candidate)) {
+      return;
+    }
+    unique.add(candidate);
+    codebases.push(candidate);
+  };
+
+  for (const envName of CODEBASE_ENV_VARS) {
+    const raw = process.env[envName];
+    if (!raw) {
+      continue;
+    }
+
+    for (const part of raw.split(CODEBASE_DELIMITER)) {
+      append(sanitiseCodebase(part));
+    }
+  }
+
+  append("default");
+
+  return codebases;
 };
 
 export const resolveHostedAppBases = (
@@ -172,11 +224,15 @@ export const buildCallableEndpointsFromBases = (
   baseUrls: Array<string | null | undefined>,
 ): string[] => {
   const uniqueEndpoints = new Set<string>();
+  const codebases = resolveFunctionCodebases();
 
   for (const base of expandRegionalBases(baseUrls)) {
-    const endpoint = normaliseCallableEndpoint(base, functionName);
-    if (endpoint) {
-      uniqueEndpoints.add(endpoint);
+    for (const codebase of codebases) {
+      const candidateBase = codebase ? `${base}/${codebase}` : base;
+      const endpoint = normaliseCallableEndpoint(candidateBase, functionName);
+      if (endpoint) {
+        uniqueEndpoints.add(endpoint);
+      }
     }
   }
 
