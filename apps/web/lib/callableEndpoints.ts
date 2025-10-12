@@ -42,13 +42,29 @@ export const resolveHostedAppBase = (
     return null;
   }
 
-  const separatorIndex = subdomain.indexOf("--");
+  let separatorIndex = -1;
+  let searchIndex = 0;
+  while (searchIndex >= 0) {
+    const candidate = subdomain.indexOf("--", searchIndex);
+    if (candidate < 0) {
+      break;
+    }
+
+    const nextChar = subdomain.charAt(candidate + 2);
+    if (nextChar && nextChar !== "-") {
+      separatorIndex = candidate;
+      break;
+    }
+
+    searchIndex = candidate + 2;
+  }
+
   if (separatorIndex < 0) {
     return null;
   }
 
   const projectFragment = subdomain.slice(separatorIndex + 2);
-  if (!projectFragment) {
+  if (!projectFragment || projectFragment === "-") {
     return null;
   }
 
