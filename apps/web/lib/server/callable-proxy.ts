@@ -1,10 +1,10 @@
 import { functionsBaseUrl } from "@/lib/firebase";
 import {
   DEFAULT_FUNCTION_BASE,
+  LEGACY_FUNCTION_BASES,
   buildCallableEndpointsFromBases,
-  normaliseBaseUrl,
   normaliseCallableEndpoint,
-  resolveHostedAppBase,
+  resolveHostedAppBases,
 } from "@/lib/callableEndpoints";
 
 export type CallableSuccessEnvelope = {
@@ -68,8 +68,9 @@ export const buildCallableEndpointCandidates = (
   return buildCallableEndpointsFromBases(functionName, [
     functionsBaseUrl,
     ...baseEnvVars.map((name) => process.env[name]),
-    resolveHostedAppBase(hostHeader),
+    ...resolveHostedAppBases(hostHeader),
     defaultBaseUrl ?? DEFAULT_FUNCTION_BASE,
+    ...LEGACY_FUNCTION_BASES,
   ]);
 };
 

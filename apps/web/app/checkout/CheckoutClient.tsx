@@ -33,10 +33,11 @@ import {
 import { VAT_RATE } from "@/lib/vat";
 import {
   DEFAULT_FUNCTION_BASE,
+  LEGACY_FUNCTION_BASES,
   buildCallableEndpointsFromBases,
   normaliseBaseUrl,
   normaliseCallableEndpoint,
-  resolveHostedAppBase,
+  resolveHostedAppBases,
 } from "@/lib/callableEndpoints";
 import CheckoutPaymentForm from "./CheckoutPaymentForm";
 
@@ -54,9 +55,6 @@ const MIN_ACCOUNT_PASSWORD_LENGTH = 8;
 const EXPLICIT_CREATE_ORDER_ENDPOINT = process.env.NEXT_PUBLIC_CREATE_ORDER_ENDPOINT;
 const PUBLIC_FUNCTIONS_BASE_URL = process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL;
 const PUBLIC_FIREBASE_FUNCTIONS_URL = process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_URL;
-const LEGACY_BACKEND_FUNCTION_BASE =
-  "https://us-central1-ptfbportalbackend.cloudfunctions.net";
-
 type AccountRequirementReason =
   | "login-required"
   | "email-missing"
@@ -1231,7 +1229,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       "createOrder",
     );
     const host = typeof window !== "undefined" ? window.location.host : null;
-    const hostBase = resolveHostedAppBase(host);
+    const hostBases = resolveHostedAppBases(host);
     const defaultBase = normaliseBaseUrl(functionsBaseUrl);
 
     let candidateEndpoints: string[];
@@ -1242,9 +1240,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         functionsBaseUrl,
         PUBLIC_FUNCTIONS_BASE_URL,
         PUBLIC_FIREBASE_FUNCTIONS_URL,
-        hostBase,
+        ...hostBases,
         DEFAULT_FUNCTION_BASE,
-        LEGACY_BACKEND_FUNCTION_BASE,
+        ...LEGACY_FUNCTION_BASES,
       ]);
 
       if (defaultBase) {

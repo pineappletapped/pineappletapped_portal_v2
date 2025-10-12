@@ -1,6 +1,10 @@
 export const DEFAULT_FUNCTION_BASE =
   "https://us-central1-pineapple-tapped---portal.cloudfunctions.net";
 
+export const LEGACY_FUNCTION_BASES = [
+  "https://us-central1-ptfbportalbackend.cloudfunctions.net",
+];
+
 const CLOUD_FUNCTION_REGION_HOST_PATTERN =
   /^https:\/\/([a-z0-9-]+)-([a-z0-9-]+)\.cloudfunctions\.net$/i;
 
@@ -19,28 +23,48 @@ export const normaliseBaseUrl = (value: unknown): string | null => {
   return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
 };
 
-export const resolveHostedAppBase = (
-  host: string | null | undefined,
-): string | null => {
-  if (!host) {
+const sanitiseProjectFragment = (value: string | null | undefined) => {
+  if (!value) {
     return null;
+  }
+
+  const trimmed = value.trim().replace(/^[-]+/, "");
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed;
+};
+
+export const resolveHostedAppBases = (
+  host: string | null | undefined,
+): string[] => {
+  if (!host) {
+    return [];
   }
 
   const trimmed = host.trim().toLowerCase();
   if (!trimmed.endsWith(".hosted.app")) {
-    return null;
+    return [];
   }
 
   const segments = trimmed.split(".");
   if (segments.length < 3) {
-    return null;
+    return [];
   }
 
   const subdomain = segments[0];
   const regionSegment = segments[1];
   if (!subdomain) {
-    return null;
+    return [];
   }
+
+  const regionCandidate =
+    typeof regionSegment === "string" && /^[a-z0-9-]+$/.test(regionSegment)
+      ? regionSegment
+      : "us-central1";
+
+  const bases = new Set<string>();
 
   let separatorIndex = -1;
   let searchIndex = 0;
@@ -59,21 +83,30 @@ export const resolveHostedAppBase = (
     searchIndex = candidate + 2;
   }
 
-  if (separatorIndex < 0) {
-    return null;
+  const addBaseForFragment = (fragment: string | null | undefined) => {
+    const sanitised = sanitiseProjectFragment(fragment);
+    if (!sanitised) {
+      return;
+    }
+
+    bases.add(`https://${regionCandidate}-${sanitised}.cloudfunctions.net`);
+  };
+
+  if (separatorIndex >= 0) {
+    addBaseForFragment(subdomain.slice(separatorIndex + 2));
+    addBaseForFragment(subdomain.slice(0, separatorIndex));
+  } else {
+    addBaseForFragment(subdomain);
   }
 
-  const projectFragment = subdomain.slice(separatorIndex + 2);
-  if (!projectFragment || projectFragment === "-") {
-    return null;
-  }
+  return Array.from(bases);
+};
 
-  const regionCandidate =
-    typeof regionSegment === "string" && /^[a-z0-9-]+$/.test(regionSegment)
-      ? regionSegment
-      : "us-central1";
-
-  return `https://${regionCandidate}-${projectFragment}.cloudfunctions.net`;
+export const resolveHostedAppBase = (
+  host: string | null | undefined,
+): string | null => {
+  const [base] = resolveHostedAppBases(host);
+  return base ?? null;
 };
 
 const looksLikeExplicitEndpoint = (
