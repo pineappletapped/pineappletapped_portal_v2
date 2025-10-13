@@ -209,8 +209,26 @@ const looksLikeExplicitEndpoint = (
   }
 
   const lowerValue = value.toLowerCase();
-  const suffix = `/${functionName.toLowerCase()}`;
-  return lowerValue.endsWith(suffix);
+  const baseSuffix = `/${functionName.toLowerCase()}`;
+  if (lowerValue.endsWith(baseSuffix)) {
+    return true;
+  }
+
+  const callableSuffix = `${baseSuffix}:call`;
+  return lowerValue.endsWith(callableSuffix);
+};
+
+const requiresCallableSuffix = (value: string) => {
+  const lowerValue = value.toLowerCase();
+  if (lowerValue.includes("/_firebase/functions/")) {
+    return true;
+  }
+
+  if (lowerValue.includes("/functions/")) {
+    return true;
+  }
+
+  return false;
 };
 
 export const normaliseCallableEndpoint = (
@@ -226,7 +244,8 @@ export const normaliseCallableEndpoint = (
     return normalised;
   }
 
-  return `${normalised}/${functionName}`;
+  const callableSuffix = requiresCallableSuffix(normalised) ? ":call" : "";
+  return `${normalised}/${functionName}${callableSuffix}`;
 };
 
 const expandRegionalBases = (baseUrls: Array<string | null | undefined>) => {
