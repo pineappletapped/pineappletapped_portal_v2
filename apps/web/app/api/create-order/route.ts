@@ -164,12 +164,22 @@ export async function POST(request: Request) {
       return;
     }
 
-    if (normalisedBase.toLowerCase().endsWith("/createorder")) {
+    const lowerBase = normalisedBase.toLowerCase();
+    if (lowerBase.endsWith("/createorder") || lowerBase.endsWith("/create-order")) {
       addEndpoint(normalisedBase);
       return;
     }
 
-    addEndpoint(`${normalisedBase}/createOrder`);
+    const variants = new Set<string>(["createOrder", "create-order"]);
+    if (lowerBase.includes("/_firebase/functions/") || lowerBase.includes("/functions/")) {
+      for (const variant of Array.from(variants)) {
+        variants.add(`${variant}:call`);
+      }
+    }
+
+    for (const variant of variants) {
+      addEndpoint(`${normalisedBase}/${variant}`);
+    }
   };
 
   const hostHeader =
@@ -216,8 +226,8 @@ export async function POST(request: Request) {
   }
 
   if (!explicitCreateOrderEndpoint) {
-    const defaultEndpoint = `https://${configuredRegion}-${projectId}.cloudfunctions.net/createOrder`;
-    addEndpoint(defaultEndpoint);
+    const defaultEndpoint = `https://${configuredRegion}-${projectId}.cloudfunctions.net`;
+    addBaseEndpoint(defaultEndpoint);
   }
 
   if (endpointCandidates.length === 0) {
