@@ -30,72 +30,34 @@ import {
   type RoutingStageKey,
 } from './utils/routing.js';
 
-const corsHandler = cors.default({ origin: true });
-
-const ANALYTICS_ALLOWED_ORIGINS = [
+const SHARED_ALLOWED_ORIGINS = new Set([
   'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
   'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
   'http://localhost:3000',
-];
+]);
 
-function resolveAllowedOrigin(origin?: string | null): string | null {
-  if (!origin) {
-    return null;
-  }
-  return ANALYTICS_ALLOWED_ORIGINS.includes(origin) ? origin : null;
-}
-
-function applyCorsHeaders(
-  req: functions.Request,
-  res: functions.Response,
-  methods: string,
-  headers: string,
-) {
-  const allowedOrigin = resolveAllowedOrigin(req.get('origin'));
-  if (allowedOrigin) {
-    res.set('Access-Control-Allow-Origin', allowedOrigin);
-    res.set('Access-Control-Allow-Credentials', 'true');
-  } else {
-    res.set('Access-Control-Allow-Origin', '*');
-  }
-  res.set('Vary', 'Origin');
-  res.set('Access-Control-Allow-Methods', methods);
-  const headerMap = new Map<string, string>();
-  const appendHeaders = (value?: string | null) => {
-    if (!value) {
+const sharedCors = cors.default({
+  origin(origin, callback) {
+    if (!origin) {
+      callback(null, true);
       return;
     }
-    value
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean)
-      .forEach((item) => {
-        const key = item.toLowerCase();
-        if (!headerMap.has(key)) {
-          headerMap.set(key, item);
-        }
-      });
-  };
 
-  appendHeaders(headers);
-  appendHeaders(req.get('access-control-request-headers'));
-  ['Authorization', 'Content-Type', 'X-Firebase-AppCheck', 'X-Firebase-Installations-Auth', 'X-Client-Version', 'X-Firebase-GMPID'].forEach((header) => {
-    const key = header.toLowerCase();
-    if (!headerMap.has(key)) {
-      headerMap.set(key, header);
-    }
+    callback(null, SHARED_ALLOWED_ORIGINS.has(origin));
+  },
+  credentials: true,
+});
+
+function runSharedCors(req: functions.Request, res: functions.Response): Promise<void> {
+  return new Promise((resolve, reject) => {
+    sharedCors(req, res, (error) => {
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    });
   });
-
-  res.set('Access-Control-Allow-Headers', Array.from(headerMap.values()).join(', '));
-  res.set('Access-Control-Max-Age', '3600');
-}
-
-function applyRecordLoginCors(req: functions.Request, res: functions.Response) {
-  applyCorsHeaders(req, res, 'POST,OPTIONS', 'Authorization,Content-Type');
-}
-
-function applyAnalyticsCors(req: functions.Request, res: functions.Response) {
-  applyCorsHeaders(req, res, 'POST,OPTIONS', 'Authorization,Content-Type');
 }
 
 // TODO: wrap all http functions with the cors handler, for example:
@@ -5620,8 +5582,14 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
 });
 
 // Track page view analytics from the public site
-export const analytics_track = onRequest({ region: 'us-central1' }, async (req, res) => {
-  applyAnalyticsCors(req, res);
+export const analytics_track = onRequest({ region: 'europe-west2' }, async (req, res) => {
+  try {
+    await runSharedCors(req, res);
+  } catch (error) {
+    console.error('analytics_track CORS failure', error);
+    res.status(500).json({ error: 'Failed to configure CORS.' });
+    return;
+  }
 
   if (req.method === 'OPTIONS') {
     res.status(204).send('');
@@ -9426,7 +9394,35 @@ export const esign_request = functions.https.onCall(async (data, context) => {
  * pricing server-side and writes the order document with status 'pending'. Returns
  * the created order ID.
  */
-export const createOrder = functions.https.onCall(async (data, context) => {
+type CallableAuthContext = {
+  uid: string;
+  token: admin.auth.DecodedIdToken;
+};
+
+type CallableContextLike = {
+  auth: CallableAuthContext | null;
+};
+
+const HTTPS_ERROR_STATUS_MAP: Record<string, number> = {
+  cancelled: 499,
+  unknown: 500,
+  invalid_argument: 400,
+  deadline_exceeded: 504,
+  not_found: 404,
+  already_exists: 409,
+  permission_denied: 403,
+  resource_exhausted: 429,
+  failed_precondition: 412,
+  aborted: 409,
+  out_of_range: 400,
+  unimplemented: 501,
+  internal: 500,
+  unavailable: 503,
+  data_loss: 500,
+  unauthenticated: 401,
+};
+
+async function executeCreateOrder(data: any, context: CallableContextLike) {
   const toNumber = (value: any, fallback = 0) => {
     const num = Number(value);
     return Number.isFinite(num) ? num : fallback;
@@ -11001,6 +10997,87 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     voucherDiscount,
     discountAmount,
   };
+}
+
+async function resolveAuthContextFromRequest(
+  req: functions.Request,
+): Promise<CallableAuthContext | null> {
+  const header = req.get('authorization') ?? req.get('Authorization');
+  if (!header) {
+    return null;
+  }
+
+  const [scheme, token] = header.split(' ');
+  if (!token || scheme.toLowerCase() !== 'bearer') {
+    throw new functions.https.HttpsError('unauthenticated', 'Invalid authorization header.');
+  }
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(token.trim());
+    return { uid: decoded.uid, token: decoded };
+  } catch (error) {
+    console.error('createOrder verifyIdToken failed', error);
+    throw new functions.https.HttpsError('unauthenticated', 'Failed to verify authentication token.');
+  }
+}
+
+export const createOrder = onRequest({ region: 'europe-west2' }, async (req, res) => {
+  try {
+    await runSharedCors(req, res);
+  } catch (error) {
+    console.error('createOrder CORS failure', error);
+    res.status(500).json({ code: 'cors-error', error: 'Failed to configure CORS.' });
+    return;
+  }
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ code: 'method-not-allowed', error: 'Method not allowed.' });
+    return;
+  }
+
+  const rawBody = req.body ?? null;
+  const payloadCandidate = (
+    rawBody && typeof rawBody === 'object' && rawBody !== null && 'data' in (rawBody as Record<string, unknown>)
+      ? (rawBody as Record<string, unknown>).data
+      : rawBody
+  ) as Record<string, unknown> | null;
+
+  if (!payloadCandidate || typeof payloadCandidate !== 'object') {
+    res.status(400).json({ code: 'invalid-argument', error: 'Order payload is required.' });
+    return;
+  }
+
+  let auth: CallableAuthContext | null = null;
+  try {
+    auth = await resolveAuthContextFromRequest(req);
+  } catch (authError) {
+    const message = authError instanceof Error ? authError.message : 'Authentication failed.';
+    res.status(401).json({ code: 'unauthenticated', error: message });
+    return;
+  }
+
+  try {
+    const result = await executeCreateOrder(payloadCandidate, { auth });
+    res.status(200).json({ data: result ?? null });
+  } catch (error) {
+    if (error instanceof functions.https.HttpsError) {
+      const status = HTTPS_ERROR_STATUS_MAP[error.code] ?? 500;
+      res.status(status).json({
+        code: error.code,
+        error: error.message,
+        ...(error.details === undefined ? null : { details: error.details }),
+      });
+      return;
+    }
+
+    console.error('createOrder handler failed', error);
+    res.status(500).json({ code: 'internal', error: 'Failed to create order.' });
+  }
 });
 
 export const clientResearch_onOrderCreated = functions.firestore
@@ -14211,7 +14288,7 @@ function parseRequestBody(req: functions.Request): Record<string, unknown> {
 /**
  * Record a user login event via HTTPS callable. Stores loginHistory for the current user.
  */
-export const recordLogin = functions.https.onCall(async (data, context) => {
+export const recordLogin = functions.region('europe-west2').https.onCall(async (data, context) => {
   if (!context.auth?.uid) {
     throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
   }
@@ -14219,8 +14296,15 @@ export const recordLogin = functions.https.onCall(async (data, context) => {
   return { ok: true };
 });
 
-export const recordLoginEvent = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
-  applyRecordLoginCors(req, res);
+export const recordLoginEvent = onRequest({ region: 'europe-west2' }, async (req, res) => {
+  try {
+    await runSharedCors(req, res);
+  } catch (error) {
+    console.error('recordLoginEvent CORS failure', error);
+    res.status(500).json({ error: 'Failed to configure CORS.' });
+    return;
+  }
+
   if (req.method === 'OPTIONS') {
     res.status(204).send('');
     return;
