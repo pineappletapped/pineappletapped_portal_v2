@@ -19,7 +19,7 @@ const projectId =
 const region = cleanEnv(process.env.NEXT_PUBLIC_FUNCTIONS_REGION) || "europe-west2";
 const createOrderEndpoint =
   cleanEnv(process.env.CREATE_ORDER_ENDPOINT) ||
-  `https://${region}-${projectId}.cloudfunctions.net/createOrder:call`;
+  `https://${region}-${projectId}.cloudfunctions.net/createOrder`;
 
 const CALLABLE_ERROR_STATUS: Record<string, number> = {
   cancelled: 499,
@@ -133,12 +133,13 @@ export async function POST(request: Request) {
     try {
       json = JSON.parse(text);
     } catch (error) {
-      return createErrorResponse(
-        502,
-        "invalid-response",
-        "Order service returned invalid JSON",
-        (error as Error)?.message ?? text,
-      );
+      const status = response.status || 502;
+      const code = response.ok ? "invalid-response" : "order-service-error";
+      const message = response.ok
+        ? "Order service returned invalid JSON"
+        : `Order service responded with status ${status}`;
+
+      return createErrorResponse(status, code, message, (error as Error)?.message ?? text);
     }
 
     const jsonRecord = json && typeof json === "object" ? (json as Record<string, unknown>) : null;
