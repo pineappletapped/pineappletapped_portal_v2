@@ -1,3 +1,9 @@
+import {
+  DEFAULT_FUNCTION_BASE,
+  LEGACY_FUNCTION_BASES,
+  resolveHostedAppContext,
+} from "@/lib/callableEndpoints";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -16,10 +22,8 @@ const projectId =
   cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID) ||
   cleanEnv(process.env.FIREBASE_ADMIN_PROJECT_ID) ||
   "pineapple-tapped---portal";
-const region = cleanEnv(process.env.NEXT_PUBLIC_FUNCTIONS_REGION) || "europe-west2";
-const createOrderEndpoint =
-  cleanEnv(process.env.CREATE_ORDER_ENDPOINT) ||
-  `https://${region}-${projectId}.cloudfunctions.net/createOrder`;
+const configuredRegion = cleanEnv(process.env.NEXT_PUBLIC_FUNCTIONS_REGION) || "europe-west2";
+const explicitCreateOrderEndpoint = cleanEnv(process.env.CREATE_ORDER_ENDPOINT);
 
 const CALLABLE_ERROR_STATUS: Record<string, number> = {
   cancelled: 499,
@@ -113,81 +117,214 @@ export async function POST(request: Request) {
     return createErrorResponse(400, "invalid-argument", "Order payload is required");
   }
 
-  try {
-    const response = await fetch(createOrderEndpoint, {
-      method: "POST",
-      headers: {
-        "content-type": JSON_CONTENT_TYPE,
-        accept: JSON_CONTENT_TYPE,
-        ...(request.headers.get("authorization")
-          ? { authorization: request.headers.get("authorization") as string }
-          : {}),
-      },
-      body: JSON.stringify(payload),
-      cache: "no-store",
-    });
+  const normaliseUrl = (value: string | null | undefined) => {
+    if (!value) {
+      return null;
+    }
 
-    const text = await response.text();
-    if (!text) {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+  };
+
+  const endpointCandidates: string[] = [];
+  const seen = new Set<string>();
+  const addEndpoint = (candidate: string | null | undefined) => {
+    const normalised = normaliseUrl(candidate);
+    if (!normalised || seen.has(normalised)) {
+      return;
+    }
+    seen.add(normalised);
+    endpointCandidates.push(normalised);
+  };
+  const addBaseEndpoint = (base: string | null | undefined) => {
+    const normalisedBase = normaliseUrl(base);
+    if (!normalisedBase) {
+      return;
+    }
+
+    if (normalisedBase.toLowerCase().endsWith("/createorder")) {
+      addEndpoint(normalisedBase);
+      return;
+    }
+
+    addEndpoint(`${normalisedBase}/createOrder`);
+  };
+
+  const hostHeader =
+    request.headers.get("x-forwarded-host") ?? request.headers.get("host") ?? null;
+  const hostContext = resolveHostedAppContext(hostHeader);
+
+  if (explicitCreateOrderEndpoint) {
+    addEndpoint(explicitCreateOrderEndpoint);
+  }
+
+  const regionCandidates = new Set<string>();
+  if (configuredRegion) {
+    regionCandidates.add(configuredRegion);
+  }
+  if (hostContext.region) {
+    regionCandidates.add(hostContext.region);
+  }
+  regionCandidates.add("us-central1");
+  regionCandidates.add("europe-west2");
+
+  addBaseEndpoint(DEFAULT_FUNCTION_BASE);
+  for (const legacyBase of LEGACY_FUNCTION_BASES) {
+    addBaseEndpoint(legacyBase);
+  }
+
+  const baseEnvVars = [
+    "CREATE_ORDER_BASE_URL",
+    "NEXT_PUBLIC_CREATE_ORDER_BASE_URL",
+    "FUNCTIONS_BASE_URL",
+    "NEXT_PUBLIC_FUNCTIONS_BASE_URL",
+    "FIREBASE_FUNCTIONS_URL",
+  ];
+
+  for (const envVar of baseEnvVars) {
+    addBaseEndpoint(cleanEnv(process.env[envVar]));
+  }
+
+  for (const base of hostContext.bases) {
+    addBaseEndpoint(base);
+  }
+
+  for (const region of regionCandidates) {
+    addBaseEndpoint(`https://${region}-${projectId}.cloudfunctions.net`);
+  }
+
+  if (!explicitCreateOrderEndpoint) {
+    const defaultEndpoint = `https://${configuredRegion}-${projectId}.cloudfunctions.net/createOrder`;
+    addEndpoint(defaultEndpoint);
+  }
+
+  if (endpointCandidates.length === 0) {
+    return createErrorResponse(
+      502,
+      "order-service-unconfigured",
+      "No order service endpoints are configured",
+    );
+  }
+
+  const attempts: string[] = [];
+
+  for (let index = 0; index < endpointCandidates.length; index += 1) {
+    const endpoint = endpointCandidates[index];
+    const isLastAttempt = index >= endpointCandidates.length - 1;
+
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": JSON_CONTENT_TYPE,
+          accept: JSON_CONTENT_TYPE,
+          ...(request.headers.get("authorization")
+            ? { authorization: request.headers.get("authorization") as string }
+            : {}),
+        },
+        body: JSON.stringify(payload),
+        cache: "no-store",
+      });
+
+      const text = await response.text();
+      if (!text) {
+        if (!response.ok) {
+          if (response.status === 404 && !isLastAttempt) {
+            attempts.push(`${endpoint} → 404 (empty response)`);
+            continue;
+          }
+
+          return createErrorResponse(
+            response.status,
+            "empty-response",
+            `Order service returned status ${response.status}`,
+          );
+        }
+
+        return new Response(JSON.stringify({ data: null }), {
+          status: response.status,
+          headers: { "content-type": JSON_CONTENT_TYPE },
+        });
+      }
+
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch (error) {
+        const status = response.status || 502;
+        const code = response.ok ? "invalid-response" : "order-service-error";
+        const message = response.ok
+          ? "Order service returned invalid JSON"
+          : `Order service responded with status ${status}`;
+
+        if (!response.ok && response.status === 404 && !isLastAttempt) {
+          attempts.push(`${endpoint} → 404 (${(error as Error)?.message ?? "invalid JSON"})`);
+          continue;
+        }
+
+        return createErrorResponse(status, code, message, (error as Error)?.message ?? text);
+      }
+
+      const jsonRecord = json && typeof json === "object" ? (json as Record<string, unknown>) : null;
+      if (!jsonRecord) {
+        if (!response.ok && response.status === 404 && !isLastAttempt) {
+          attempts.push(`${endpoint} → 404 (non-object payload)`);
+          continue;
+        }
+
+        return createErrorResponse(502, "invalid-response", "Callable returned invalid payload", json);
+      }
+
+      const callableError = normaliseCallableError(jsonRecord);
+      if (callableError) {
+        const status = response.status || CALLABLE_ERROR_STATUS[callableError.code] || 400;
+        if (status === 404 && !isLastAttempt) {
+          attempts.push(`${endpoint} → 404 (${callableError.message})`);
+          continue;
+        }
+
+        return createErrorResponse(status, callableError.code, callableError.message, callableError.details);
+      }
+
       if (!response.ok) {
+        if (response.status === 404 && !isLastAttempt) {
+          attempts.push(`${endpoint} → 404 (error response)`);
+          continue;
+        }
+
         return createErrorResponse(
           response.status,
-          "empty-response",
-          `Order service returned status ${response.status}`,
+          "order-service-error",
+          "Order service request failed",
+          jsonRecord,
         );
       }
 
-      return new Response(JSON.stringify({ data: null }), {
+      const result = normaliseCallableSuccess(jsonRecord);
+
+      return new Response(JSON.stringify({ data: result ?? null }), {
         status: response.status,
         headers: { "content-type": JSON_CONTENT_TYPE },
       });
-    }
-
-    let json: unknown;
-    try {
-      json = JSON.parse(text);
     } catch (error) {
-      const status = response.status || 502;
-      const code = response.ok ? "invalid-response" : "order-service-error";
-      const message = response.ok
-        ? "Order service returned invalid JSON"
-        : `Order service responded with status ${status}`;
+      const message = (error as Error)?.message ?? "Unknown error";
+      attempts.push(`${endpoint} → ${message}`);
+      if (!isLastAttempt) {
+        continue;
+      }
 
-      return createErrorResponse(status, code, message, (error as Error)?.message ?? text);
+      return createErrorResponse(502, "order-service-unreachable", "Failed to contact the order service", attempts);
     }
-
-    const jsonRecord = json && typeof json === "object" ? (json as Record<string, unknown>) : null;
-    if (!jsonRecord) {
-      return createErrorResponse(502, "invalid-response", "Callable returned invalid payload", json);
-    }
-
-    const callableError = normaliseCallableError(jsonRecord);
-    if (callableError) {
-      const status = response.status || CALLABLE_ERROR_STATUS[callableError.code] || 400;
-      return createErrorResponse(status, callableError.code, callableError.message, callableError.details);
-    }
-
-    if (!response.ok) {
-      return createErrorResponse(
-        response.status,
-        "order-service-error",
-        "Order service request failed",
-        jsonRecord,
-      );
-    }
-
-    const result = normaliseCallableSuccess(jsonRecord);
-
-    return new Response(JSON.stringify({ data: result ?? null }), {
-      status: response.status,
-      headers: { "content-type": JSON_CONTENT_TYPE },
-    });
-  } catch (error) {
-    return createErrorResponse(
-      502,
-      "order-service-unreachable",
-      "Failed to contact the order service",
-      (error as Error)?.message ?? "Unknown error",
-    );
   }
+
+  return createErrorResponse(
+    502,
+    "order-service-unreachable",
+    "Failed to contact the order service",
+    attempts,
+  );
 }
