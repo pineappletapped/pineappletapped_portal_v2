@@ -88,6 +88,25 @@ export const resolveFunctionCodebases = (): string[] => {
   return codebases;
 };
 
+export const resolveCallableFunctionIds = (functionName: string): string[] => {
+  const trimmed = typeof functionName === "string" ? functionName.trim() : "";
+  if (!trimmed) {
+    return [];
+  }
+
+  const identifiers = new Set<string>([trimmed]);
+
+  for (const codebase of resolveFunctionCodebases()) {
+    if (!codebase) {
+      continue;
+    }
+
+    identifiers.add(`${codebase}-${trimmed}`);
+  }
+
+  return Array.from(identifiers);
+};
+
 export interface HostedAppContext {
   bases: string[];
   projectFragments: string[];
@@ -376,11 +395,28 @@ export const buildCallableEndpointsFromBases = (
 ): string[] => {
   const uniqueEndpoints = new Set<string>();
   const codebases = resolveFunctionCodebases();
+  const functionIds = resolveCallableFunctionIds(functionName);
 
   for (const base of expandRegionalBases(baseUrls)) {
+    const primaryEndpoint = normaliseCallableEndpoint(base, functionName);
+    if (primaryEndpoint) {
+      uniqueEndpoints.add(primaryEndpoint);
+    }
+
     for (const codebase of codebases) {
-      const candidateBase = codebase ? `${base}/${codebase}` : base;
+      if (!codebase) {
+        continue;
+      }
+
+      const candidateBase = `${base}/${codebase}`;
       const endpoint = normaliseCallableEndpoint(candidateBase, functionName);
+      if (endpoint) {
+        uniqueEndpoints.add(endpoint);
+      }
+    }
+
+    for (const functionId of functionIds) {
+      const endpoint = normaliseCallableEndpoint(base, functionId);
       if (endpoint) {
         uniqueEndpoints.add(endpoint);
       }

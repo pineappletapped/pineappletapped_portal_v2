@@ -8,6 +8,7 @@ import {
   type CallableEnvelope,
   type CallableErrorEnvelope,
 } from "@/lib/server/callable-proxy";
+import { resolveCallableFunctionIds } from "@/lib/callableEndpoints";
 import { getFirebaseAdminApp } from "@/lib/firebase-admin";
 
 const createErrorResponse = (
@@ -142,6 +143,7 @@ export async function POST(request: Request) {
       explicitEndpointEnvVar: "CREATE_ORDER_ENDPOINT",
     },
   );
+  const functionIds = resolveCallableFunctionIds("createOrder");
   const apiTargets = collectCallableApiTargets(bases, hostContext, [
     process.env.CREATE_ORDER_FUNCTION_PROJECT,
   ]);
@@ -242,33 +244,42 @@ export async function POST(request: Request) {
   const describeTarget = (target: { projectId: string; location: string }) =>
     `${target.projectId}/${target.location}`;
 
+  let lastApiError: unknown = null;
+
   for (let index = 0; index < apiTargets.length; index += 1) {
     const target = apiTargets[index];
-    try {
-      const data = await invokeCallableViaGoogleApi("createOrder", payload, target);
-      return NextResponse.json({ data });
-    } catch (error) {
-      attemptLogger.push(
-        `gcf://${describeTarget(target)} → ${(error as Error)?.message ?? "request failed"}`,
-      );
-      if (index < apiTargets.length - 1) {
-        continue;
-      }
 
-      const errorDetails =
-        error instanceof Error && "details" in error
-          ? (error as Error & { details?: unknown }).details
-          : null;
-      return createErrorResponse(
-        502,
-        "create-order-api-call-failed",
-        (error as Error)?.message ?? "Callable API invocation failed",
-        {
-          target: describeTarget(target),
-          details: errorDetails,
-        },
-      );
+    for (const functionId of functionIds.length ? functionIds : ["createOrder"]) {
+      try {
+        const data = await invokeCallableViaGoogleApi(functionId, payload, target);
+        return NextResponse.json({ data });
+      } catch (error) {
+        lastApiError = error;
+        attemptLogger.push(
+          `gcf://${describeTarget(target)}/${functionId} → ${(error as Error)?.message ?? "request failed"}`,
+        );
+      }
     }
+
+    if (index < apiTargets.length - 1) {
+      continue;
+    }
+  }
+
+  if (lastApiError instanceof Error) {
+    const errorDetails =
+      "details" in lastApiError
+        ? (lastApiError as Error & { details?: unknown }).details
+        : null;
+    return createErrorResponse(
+      502,
+      "create-order-api-call-failed",
+      lastApiError.message ?? "Callable API invocation failed",
+      {
+        target: apiTargets.length ? describeTarget(apiTargets[apiTargets.length - 1]) : null,
+        details: errorDetails,
+      },
+    );
   }
 
   return createErrorResponse(
