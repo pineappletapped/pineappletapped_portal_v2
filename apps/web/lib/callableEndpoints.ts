@@ -34,7 +34,7 @@ export const normaliseBaseUrl = (value: unknown): string | null => {
   return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
 };
 
-const sanitiseProjectFragment = (value: string | null | undefined) => {
+export const sanitiseProjectFragment = (value: string | null | undefined) => {
   if (!value) {
     return null;
   }
@@ -88,27 +88,33 @@ export const resolveFunctionCodebases = (): string[] => {
   return codebases;
 };
 
-export const resolveHostedAppBases = (
+export interface HostedAppContext {
+  bases: string[];
+  projectFragments: string[];
+  region: string | null;
+}
+
+export const resolveHostedAppContext = (
   host: string | null | undefined,
-): string[] => {
+): HostedAppContext => {
   if (!host) {
-    return [];
+    return { bases: [], projectFragments: [], region: null };
   }
 
   const trimmed = host.trim().toLowerCase();
   if (!trimmed.endsWith(".hosted.app")) {
-    return [];
+    return { bases: [], projectFragments: [], region: null };
   }
 
   const segments = trimmed.split(".");
   if (segments.length < 3) {
-    return [];
+    return { bases: [], projectFragments: [], region: null };
   }
 
   const subdomain = segments[0];
   const regionSegment = segments[1];
   if (!subdomain) {
-    return [];
+    return { bases: [], projectFragments: [], region: null };
   }
 
   const regionCandidate =
@@ -190,13 +196,22 @@ export const resolveHostedAppBases = (
     }
   }
 
-  return Array.from(bases);
+  return {
+    bases: Array.from(bases),
+    projectFragments: Array.from(projectFragments),
+    region: regionCandidate,
+  };
 };
+
+export const resolveHostedAppBases = (
+  host: string | null | undefined,
+): string[] => resolveHostedAppContext(host).bases;
 
 export const resolveHostedAppBase = (
   host: string | null | undefined,
 ): string | null => {
-  const [base] = resolveHostedAppBases(host);
+  const context = resolveHostedAppContext(host);
+  const [base] = context.bases;
   return base ?? null;
 };
 
@@ -246,6 +261,84 @@ export const normaliseCallableEndpoint = (
 
   const callableSuffix = requiresCallableSuffix(normalised) ? ":call" : "";
   return `${normalised}/${functionName}${callableSuffix}`;
+};
+
+const normaliseProjectId = (value: string | null | undefined) =>
+  sanitiseProjectFragment(value);
+
+export interface CallableTarget {
+  projectId: string;
+  location: string;
+}
+
+export interface CallableTargetOptions {
+  hostContext?: HostedAppContext | null;
+  additionalProjects?: Array<string | null | undefined>;
+}
+
+export const collectCallableTargets = (
+  baseUrls: Array<string | null | undefined>,
+  { hostContext, additionalProjects }: CallableTargetOptions = {},
+): CallableTarget[] => {
+  const targets = new Map<string, CallableTarget>();
+
+  const appendTarget = (
+    projectCandidate: string | null | undefined,
+    locationCandidate: string | null | undefined,
+  ) => {
+    const projectId = normaliseProjectId(projectCandidate);
+    const location = locationCandidate?.trim();
+    if (!projectId || !location) {
+      return;
+    }
+
+    const key = `${projectId}::${location}`;
+    if (!targets.has(key)) {
+      targets.set(key, { projectId, location });
+    }
+  };
+
+  for (const base of baseUrls) {
+    const normalised = normaliseBaseUrl(base);
+    if (!normalised) {
+      continue;
+    }
+
+    const match = normalised.match(CLOUD_FUNCTION_REGION_HOST_PATTERN);
+    if (!match) {
+      continue;
+    }
+
+    const [, region, project] = match;
+    appendTarget(project, region);
+  }
+
+  const context = hostContext ?? null;
+  if (context) {
+    const regionCandidates = context.region
+      ? new Set([context.region, ...REGION_FALLBACKS])
+      : new Set(REGION_FALLBACKS);
+
+    for (const project of context.projectFragments) {
+      for (const region of regionCandidates) {
+        appendTarget(project, region);
+      }
+    }
+  }
+
+  if (additionalProjects?.length) {
+    const regions = context?.region
+      ? new Set([context.region, ...REGION_FALLBACKS])
+      : new Set(REGION_FALLBACKS);
+
+    for (const project of additionalProjects) {
+      for (const region of regions) {
+        appendTarget(project, region);
+      }
+    }
+  }
+
+  return Array.from(targets.values());
 };
 
 const expandRegionalBases = (baseUrls: Array<string | null | undefined>) => {
