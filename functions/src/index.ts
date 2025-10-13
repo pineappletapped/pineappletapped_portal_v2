@@ -2,6 +2,7 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { onRequest } from 'firebase-functions/v2/https';
+import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import Stripe from 'stripe';
 import type { DocumentData, DocumentReference, DocumentSnapshot } from 'firebase-admin/firestore';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
@@ -48,7 +49,7 @@ const sharedCors = cors.default({
   credentials: true,
 });
 
-function runSharedCors(req: functions.Request, res: functions.Response): Promise<void> {
+function runSharedCors(req: ExpressRequest, res: ExpressResponse): Promise<void> {
   return new Promise((resolve, reject) => {
     sharedCors(req, res, (error) => {
       if (error) {
@@ -59,6 +60,25 @@ function runSharedCors(req: functions.Request, res: functions.Response): Promise
     });
   });
 }
+
+const CALLABLE_ERROR_STATUS: Record<string, number> = {
+  cancelled: 499,
+  unknown: 500,
+  "invalid-argument": 400,
+  "deadline-exceeded": 504,
+  "not-found": 404,
+  "already-exists": 409,
+  "permission-denied": 403,
+  "resource-exhausted": 429,
+  "failed-precondition": 412,
+  aborted: 409,
+  "out-of-range": 400,
+  unimplemented: 501,
+  internal: 500,
+  unavailable: 503,
+  "data-loss": 500,
+  unauthenticated: 401,
+};
 
 // TODO: wrap all http functions with the cors handler, for example:
 // exports.myFunction = functions.https.onRequest((req, res) => {
@@ -10980,25 +11000,98 @@ async function executeCreateOrder(data: any, context: CallableContextLike) {
   };
 }
 
-export const createOrder = functions
-  .region('europe-west2')
-  .https.onCall(async (data: any, context: functions.https.CallableContext) => {
-    const authContext: CallableAuthContext | null = context.auth
-      ? { uid: context.auth.uid, token: context.auth.token as admin.auth.DecodedIdToken }
-      : null;
+export const createOrder = onRequest({ region: 'europe-west2' }, async (req, res) => {
+  try {
+    await runSharedCors(req, res);
+  } catch (error) {
+    console.error('createOrder CORS failure', error);
+    res.status(500).json({ error: 'Failed to configure CORS.', code: 'cors-error' });
+    return;
+  }
 
-    try {
-      const result = await executeCreateOrder(data, { auth: authContext });
-      return result ?? null;
-    } catch (error) {
-      if (error instanceof functions.https.HttpsError) {
-        throw error;
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed', code: 'method-not-allowed' });
+    return;
+  }
+
+  const authHeader = req.get('authorization') ?? req.get('Authorization');
+  let authContext: CallableAuthContext | null = null;
+
+  if (authHeader?.startsWith('Bearer ')) {
+    const token = authHeader.slice('Bearer '.length).trim();
+    if (token) {
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        authContext = { uid: decoded.uid, token: decoded };
+      } catch (error) {
+        console.error('createOrder verifyIdToken failed', error);
+        res.status(401).json({ error: 'Invalid authentication token', code: 'unauthenticated' });
+        return;
       }
-
-      console.error('createOrder handler failed', error);
-      throw new functions.https.HttpsError('internal', 'Failed to create order.');
     }
-  });
+  }
+
+  let body: unknown = req.body;
+  if (Buffer.isBuffer(body)) {
+    const text = body.toString('utf8');
+    if (text.trim()) {
+      try {
+        body = JSON.parse(text);
+      } catch (error) {
+        console.error('createOrder invalid buffer body', error);
+        res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
+        return;
+      }
+    } else {
+      body = null;
+    }
+  } else if (typeof body === 'string') {
+    if (body.trim()) {
+      try {
+        body = JSON.parse(body);
+      } catch (error) {
+        console.error('createOrder invalid string body', error);
+        res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
+        return;
+      }
+    } else {
+      body = null;
+    }
+  }
+
+  const payloadCandidate =
+    body && typeof body === 'object' && body !== null && 'data' in (body as Record<string, unknown>)
+      ? (body as { data?: unknown }).data
+      : body;
+
+  if (!payloadCandidate || typeof payloadCandidate !== 'object') {
+    res.status(400).json({ error: 'Order payload is required', code: 'invalid-argument' });
+    return;
+  }
+
+  try {
+    const result = await executeCreateOrder(payloadCandidate, { auth: authContext });
+    res.status(200).json({ data: result ?? null });
+  } catch (error) {
+    if (error instanceof functions.https.HttpsError) {
+      const status = CALLABLE_ERROR_STATUS[error.code] ?? 500;
+      res.status(status).json({
+        error: error.message || 'Failed to create order.',
+        code: error.code,
+        ...(error.details === undefined ? {} : { details: error.details }),
+      });
+      return;
+    }
+
+    console.error('createOrder handler failed', error);
+    res.status(500).json({ error: 'Failed to create order.', code: 'internal' });
+  }
+});
 
 export const clientResearch_onOrderCreated = functions.firestore
   .document('orders/{orderId}')

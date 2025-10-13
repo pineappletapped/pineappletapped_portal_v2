@@ -41,16 +41,30 @@ const CALLABLE_ERROR_STATUS: Record<string, number> = {
 };
 
 const normaliseCallableError = (payload: Record<string, unknown>) => {
-  const error = payload.error as Record<string, unknown> | undefined;
-  if (!error) {
+  if (!("error" in payload)) {
     return null;
   }
 
-  const status = typeof error.status === "string" ? error.status : undefined;
-  const message = typeof error.message === "string" ? error.message : "Callable request failed";
-  const details = "details" in error ? (error as { details?: unknown }).details : undefined;
-  const code = status ? status.toLowerCase().replace(/_/g, "-") : "callable-error";
-  return { code, message, details };
+  const errorValue = (payload as { error?: unknown }).error;
+  const details = (payload as { details?: unknown }).details;
+  if (typeof errorValue === "string" && errorValue.trim().length > 0) {
+    const code =
+      typeof (payload as { code?: unknown }).code === "string"
+        ? ((payload as { code?: string }).code ?? "callable-error")
+        : "callable-error";
+    return { code, message: errorValue, details };
+  }
+
+  if (errorValue && typeof errorValue === "object") {
+    const error = errorValue as Record<string, unknown>;
+    const status = typeof error.status === "string" ? error.status : undefined;
+    const message = typeof error.message === "string" ? error.message : "Callable request failed";
+    const nestedDetails = "details" in error ? (error as { details?: unknown }).details : undefined;
+    const code = status ? status.toLowerCase().replace(/_/g, "-") : "callable-error";
+    return { code, message, details: nestedDetails ?? details };
+  }
+
+  return null;
 };
 
 const normaliseCallableSuccess = (payload: Record<string, unknown>) => {
@@ -109,7 +123,7 @@ export async function POST(request: Request) {
           ? { authorization: request.headers.get("authorization") as string }
           : {}),
       },
-      body: JSON.stringify({ data: payload }),
+      body: JSON.stringify(payload),
       cache: "no-store",
     });
 
@@ -149,7 +163,7 @@ export async function POST(request: Request) {
 
     const callableError = normaliseCallableError(jsonRecord);
     if (callableError) {
-      const status = CALLABLE_ERROR_STATUS[callableError.code] ?? 400;
+      const status = response.status || CALLABLE_ERROR_STATUS[callableError.code] || 400;
       return createErrorResponse(status, callableError.code, callableError.message, callableError.details);
     }
 
