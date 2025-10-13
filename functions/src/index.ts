@@ -2,6 +2,7 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { onRequest } from 'firebase-functions/v2/https';
+import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import Stripe from 'stripe';
 import type { DocumentData, DocumentReference, DocumentSnapshot } from 'firebase-admin/firestore';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
@@ -30,73 +31,54 @@ import {
   type RoutingStageKey,
 } from './utils/routing.js';
 
-const corsHandler = cors.default({ origin: true });
-
-const ANALYTICS_ALLOWED_ORIGINS = [
+const SHARED_ALLOWED_ORIGINS = new Set([
   'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
   'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
   'http://localhost:3000',
-];
+]);
 
-function resolveAllowedOrigin(origin?: string | null): string | null {
-  if (!origin) {
-    return null;
-  }
-  return ANALYTICS_ALLOWED_ORIGINS.includes(origin) ? origin : null;
-}
-
-function applyCorsHeaders(
-  req: functions.Request,
-  res: functions.Response,
-  methods: string,
-  headers: string,
-) {
-  const allowedOrigin = resolveAllowedOrigin(req.get('origin'));
-  if (allowedOrigin) {
-    res.set('Access-Control-Allow-Origin', allowedOrigin);
-    res.set('Access-Control-Allow-Credentials', 'true');
-  } else {
-    res.set('Access-Control-Allow-Origin', '*');
-  }
-  res.set('Vary', 'Origin');
-  res.set('Access-Control-Allow-Methods', methods);
-  const headerMap = new Map<string, string>();
-  const appendHeaders = (value?: string | null) => {
-    if (!value) {
+const sharedCors = cors.default({
+  origin(origin, callback) {
+    if (!origin) {
+      callback(null, true);
       return;
     }
-    value
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean)
-      .forEach((item) => {
-        const key = item.toLowerCase();
-        if (!headerMap.has(key)) {
-          headerMap.set(key, item);
-        }
-      });
-  };
 
-  appendHeaders(headers);
-  appendHeaders(req.get('access-control-request-headers'));
-  ['Authorization', 'Content-Type', 'X-Firebase-AppCheck', 'X-Firebase-Installations-Auth', 'X-Client-Version', 'X-Firebase-GMPID'].forEach((header) => {
-    const key = header.toLowerCase();
-    if (!headerMap.has(key)) {
-      headerMap.set(key, header);
-    }
+    callback(null, SHARED_ALLOWED_ORIGINS.has(origin));
+  },
+  credentials: true,
+});
+
+function runSharedCors(req: ExpressRequest, res: ExpressResponse): Promise<void> {
+  return new Promise((resolve, reject) => {
+    sharedCors(req, res, (error) => {
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    });
   });
-
-  res.set('Access-Control-Allow-Headers', Array.from(headerMap.values()).join(', '));
-  res.set('Access-Control-Max-Age', '3600');
 }
 
-function applyRecordLoginCors(req: functions.Request, res: functions.Response) {
-  applyCorsHeaders(req, res, 'POST,OPTIONS', 'Authorization,Content-Type');
-}
-
-function applyAnalyticsCors(req: functions.Request, res: functions.Response) {
-  applyCorsHeaders(req, res, 'POST,OPTIONS', 'Authorization,Content-Type');
-}
+const CALLABLE_ERROR_STATUS: Record<string, number> = {
+  cancelled: 499,
+  unknown: 500,
+  "invalid-argument": 400,
+  "deadline-exceeded": 504,
+  "not-found": 404,
+  "already-exists": 409,
+  "permission-denied": 403,
+  "resource-exhausted": 429,
+  "failed-precondition": 412,
+  aborted: 409,
+  "out-of-range": 400,
+  unimplemented: 501,
+  internal: 500,
+  unavailable: 503,
+  "data-loss": 500,
+  unauthenticated: 401,
+};
 
 // TODO: wrap all http functions with the cors handler, for example:
 // exports.myFunction = functions.https.onRequest((req, res) => {
@@ -591,7 +573,8 @@ function roundCurrency(value: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return 0;
   }
-  return Number(value.toFixed(2));
+  const rounded = Math.round(value * 100) / 100;
+  return Math.abs(rounded) < 0.005 ? 0 : rounded;
 }
 
 function buildBookingInviteUrl(token: string): string {
@@ -5619,8 +5602,14 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
 });
 
 // Track page view analytics from the public site
-export const analytics_track = onRequest({ region: 'us-central1' }, async (req, res) => {
-  applyAnalyticsCors(req, res);
+export const analytics_track = onRequest({ region: 'europe-west2' }, async (req, res) => {
+  try {
+    await runSharedCors(req, res);
+  } catch (error) {
+    console.error('analytics_track CORS failure', error);
+    res.status(500).json({ error: 'Failed to configure CORS.' });
+    return;
+  }
 
   if (req.method === 'OPTIONS') {
     res.status(204).send('');
@@ -9425,7 +9414,16 @@ export const esign_request = functions.https.onCall(async (data, context) => {
  * pricing server-side and writes the order document with status 'pending'. Returns
  * the created order ID.
  */
-export const createOrder = functions.https.onCall(async (data, context) => {
+type CallableAuthContext = {
+  uid: string;
+  token: admin.auth.DecodedIdToken;
+};
+
+type CallableContextLike = {
+  auth: CallableAuthContext | null;
+};
+
+async function executeCreateOrder(data: any, context: CallableContextLike) {
   const toNumber = (value: any, fallback = 0) => {
     const num = Number(value);
     return Number.isFinite(num) ? num : fallback;
@@ -10527,52 +10525,82 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   let voucherDiscount = 0;
   let voucherCode: string | null = null;
   if (voucher) {
-    const vSnap = await db
-      .collection('vouchers')
-      .where('code', '==', voucher)
-      .limit(1)
-      .get();
-    if (!vSnap.empty) {
-      const v = vSnap.docs[0].data() as any;
-      const locs: string[] = v.locations || [];
-      const locAllowed =
-        locs.length === 0 ||
-        (location && locs.map((l) => l.toLowerCase()).includes(String(location).toLowerCase()));
-      if (locAllowed) {
-        const prodIds: string[] = v.productIds || [];
-        const catIds: string[] = v.categoryIds || [];
-        let eligibleSubtotal = 0;
-        orderItems.forEach((item) => {
-          const prodOk = prodIds.length === 0 || prodIds.includes(item.id);
-          const catOk = catIds.length === 0 || catIds.includes(item.category);
-          if (prodOk && catOk) eligibleSubtotal += item.price * item.quantity;
-        });
-        if (eligibleSubtotal > 0) {
-          if (v.type === 'percentage') {
-            voucherDiscount = eligibleSubtotal * (v.amount / 100);
-          } else if (v.type === 'fixed') {
-            voucherDiscount = Math.min(v.amount, eligibleSubtotal);
+    try {
+      const vSnap = await db
+        .collection('vouchers')
+        .where('code', '==', voucher)
+        .limit(1)
+        .get();
+      if (!vSnap.empty) {
+        const v = vSnap.docs[0].data() as any;
+        const locs: string[] = Array.isArray(v.locations) ? v.locations : [];
+        const locAllowed =
+          locs.length === 0 ||
+          (location &&
+            locs
+              .map((l) => (typeof l === 'string' ? l.toLowerCase() : ''))
+              .includes(String(location).toLowerCase()));
+        if (locAllowed) {
+          const prodIds: string[] = Array.isArray(v.productIds) ? v.productIds : [];
+          const catIds: string[] = Array.isArray(v.categoryIds) ? v.categoryIds : [];
+          let eligibleSubtotal = 0;
+          orderItems.forEach((item) => {
+            const prodOk = prodIds.length === 0 || prodIds.includes(item.id);
+            const catOk = catIds.length === 0 || catIds.includes(item.category);
+            if (prodOk && catOk) {
+              const lineTotal = Number(item.price) * Number(item.quantity ?? 0);
+              if (Number.isFinite(lineTotal)) {
+                eligibleSubtotal += lineTotal;
+              }
+            }
+          });
+          const voucherAmount = parseNumber(v.amount);
+          const voucherType = typeof v.type === 'string' ? v.type.toLowerCase() : '';
+          if (eligibleSubtotal > 0 && voucherAmount !== null && Number.isFinite(voucherAmount)) {
+            if (voucherType === 'percentage') {
+              const safePercent = Math.max(0, voucherAmount);
+              voucherDiscount = eligibleSubtotal * (safePercent / 100);
+            } else if (voucherType === 'fixed') {
+              const safeFixed = Math.max(0, voucherAmount);
+              voucherDiscount = Math.min(safeFixed, eligibleSubtotal);
+            }
+            voucherCode = voucher;
           }
-          voucherCode = voucher;
         }
       }
+    } catch (voucherError) {
+      console.error('Failed to resolve voucher', voucher, voucherError);
     }
   }
 
-  const subtotalAfterVoucher = productSubtotal - voucherDiscount;
+  voucherDiscount =
+    Number.isFinite(voucherDiscount) && voucherDiscount > 0
+      ? roundCurrency(Math.min(voucherDiscount, productSubtotal))
+      : 0;
+  const subtotalAfterVoucherRaw = productSubtotal - voucherDiscount;
+  const subtotalAfterVoucher = subtotalAfterVoucherRaw > 0 ? roundCurrency(subtotalAfterVoucherRaw) : 0;
 
   let discountPct = 0;
   if (context.auth?.uid) {
     const userSnap = await db.collection('users').doc(context.auth.uid).get();
-    discountPct = (userSnap.data()?.discount as number) || 0;
+    const rawDiscount = parseNumber((userSnap.data() as Record<string, unknown> | undefined)?.discount);
+    discountPct = rawDiscount !== null && Number.isFinite(rawDiscount) ? rawDiscount : 0;
   }
-  const discountAmount = subtotalAfterVoucher * (discountPct / 100);
-  const finalTotal = subtotalAfterVoucher - discountAmount + rentalSubtotal;
-  const vat = finalTotal * VAT_RATE;
-  const price = finalTotal + vat;
+  const rawDiscountAmount = subtotalAfterVoucher * (discountPct / 100);
+  const discountAmount =
+    rawDiscountAmount > 0 && Number.isFinite(rawDiscountAmount)
+      ? roundCurrency(Math.min(subtotalAfterVoucher, rawDiscountAmount))
+      : 0;
+  const subtotalAfterAllDiscountsRaw = subtotalAfterVoucher - discountAmount;
+  const subtotalAfterAllDiscounts =
+    subtotalAfterAllDiscountsRaw > 0 ? roundCurrency(subtotalAfterAllDiscountsRaw) : 0;
+  const netTotalRaw = subtotalAfterAllDiscounts + rentalSubtotal;
+  const netTotal = netTotalRaw > 0 && Number.isFinite(netTotalRaw) ? roundCurrency(netTotalRaw) : 0;
+  const vat = netTotal > 0 ? roundCurrency(netTotal * VAT_RATE) : 0;
+  const price = netTotal > 0 ? roundCurrency(netTotal + vat) : 0;
   const budgetSubtotal =
     labourSubtotal + kitSubtotal + travelSubtotal + parkingSubtotal;
-  const profit = finalTotal - (budgetSubtotal + rentalSubtotal);
+  const profit = netTotal - (budgetSubtotal + rentalSubtotal);
   const affiliateCommission = affiliateContext
     ? computeAffiliateCommission(profit, affiliateContext.commissionRate)
     : null;
@@ -10598,7 +10626,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     parking: parkingSubtotal,
     rental: rentalSubtotal,
     totalCost: budgetSubtotal + rentalSubtotal,
-    netRevenue: finalTotal,
+    netRevenue: netTotal,
     grossRevenue: price,
     profit,
   };
@@ -10685,7 +10713,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     voucherDiscount,
     discountPct,
     discountAmount,
-    netTotal: finalTotal,
+    netTotal: netTotal,
     vat,
     price,
     profit,
@@ -10781,13 +10809,17 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     orderData.royaltyPercentage = null;
   }
 
-  if (!Array.isArray(orderData.paymentSchedule) || orderData.paymentSchedule.length === 0) {
+  if (
+    (!Array.isArray(orderData.paymentSchedule) || orderData.paymentSchedule.length === 0) &&
+    price > 0 &&
+    netTotal > 0
+  ) {
     try {
       const { splitTerms } = await getStripeOperationalSettings();
       if (splitTerms.length > 0) {
         const scheduleEntries = splitTerms.map((term, index) => {
           const grossAmount = Number((price * (term.percentage / 100)).toFixed(2));
-          const netAmount = Number((finalTotal * (term.percentage / 100)).toFixed(2));
+          const netAmount = Number((netTotal * (term.percentage / 100)).toFixed(2));
           let dueAt: admin.firestore.Timestamp | admin.firestore.FieldValue | null = null;
           if (term.dueDays !== null) {
             if (term.dueDays <= 0) {
@@ -10814,6 +10846,8 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     } catch (scheduleError) {
       console.warn('Failed to apply default Stripe payment schedule', scheduleError);
     }
+  } else if (!Array.isArray(orderData.paymentSchedule)) {
+    orderData.paymentSchedule = [];
   }
 
   const allocatedOrderNumber = await allocateOrderNumber();
@@ -10960,10 +10994,103 @@ export const createOrder = functions.https.onCall(async (data, context) => {
   return {
     orderId: orderRef.id,
     price,
-    netTotal: finalTotal,
+    netTotal: netTotal,
     voucherDiscount,
     discountAmount,
   };
+}
+
+export const createOrder = onRequest({ region: 'europe-west2' }, async (req, res) => {
+  try {
+    await runSharedCors(req, res);
+  } catch (error) {
+    console.error('createOrder CORS failure', error);
+    res.status(500).json({ error: 'Failed to configure CORS.', code: 'cors-error' });
+    return;
+  }
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed', code: 'method-not-allowed' });
+    return;
+  }
+
+  const authHeader = req.get('authorization') ?? req.get('Authorization');
+  let authContext: CallableAuthContext | null = null;
+
+  if (authHeader?.startsWith('Bearer ')) {
+    const token = authHeader.slice('Bearer '.length).trim();
+    if (token) {
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        authContext = { uid: decoded.uid, token: decoded };
+      } catch (error) {
+        console.error('createOrder verifyIdToken failed', error);
+        res.status(401).json({ error: 'Invalid authentication token', code: 'unauthenticated' });
+        return;
+      }
+    }
+  }
+
+  let body: unknown = req.body;
+  if (Buffer.isBuffer(body)) {
+    const text = body.toString('utf8');
+    if (text.trim()) {
+      try {
+        body = JSON.parse(text);
+      } catch (error) {
+        console.error('createOrder invalid buffer body', error);
+        res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
+        return;
+      }
+    } else {
+      body = null;
+    }
+  } else if (typeof body === 'string') {
+    if (body.trim()) {
+      try {
+        body = JSON.parse(body);
+      } catch (error) {
+        console.error('createOrder invalid string body', error);
+        res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
+        return;
+      }
+    } else {
+      body = null;
+    }
+  }
+
+  const payloadCandidate =
+    body && typeof body === 'object' && body !== null && 'data' in (body as Record<string, unknown>)
+      ? (body as { data?: unknown }).data
+      : body;
+
+  if (!payloadCandidate || typeof payloadCandidate !== 'object') {
+    res.status(400).json({ error: 'Order payload is required', code: 'invalid-argument' });
+    return;
+  }
+
+  try {
+    const result = await executeCreateOrder(payloadCandidate, { auth: authContext });
+    res.status(200).json({ data: result ?? null });
+  } catch (error) {
+    if (error instanceof functions.https.HttpsError) {
+      const status = CALLABLE_ERROR_STATUS[error.code] ?? 500;
+      res.status(status).json({
+        error: error.message || 'Failed to create order.',
+        code: error.code,
+        ...(error.details === undefined ? {} : { details: error.details }),
+      });
+      return;
+    }
+
+    console.error('createOrder handler failed', error);
+    res.status(500).json({ error: 'Failed to create order.', code: 'internal' });
+  }
 });
 
 export const clientResearch_onOrderCreated = functions.firestore
@@ -14174,7 +14301,7 @@ function parseRequestBody(req: functions.Request): Record<string, unknown> {
 /**
  * Record a user login event via HTTPS callable. Stores loginHistory for the current user.
  */
-export const recordLogin = functions.https.onCall(async (data, context) => {
+export const recordLogin = functions.region('europe-west2').https.onCall(async (data, context) => {
   if (!context.auth?.uid) {
     throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
   }
@@ -14182,8 +14309,15 @@ export const recordLogin = functions.https.onCall(async (data, context) => {
   return { ok: true };
 });
 
-export const recordLoginEvent = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
-  applyRecordLoginCors(req, res);
+export const recordLoginEvent = onRequest({ region: 'europe-west2' }, async (req, res) => {
+  try {
+    await runSharedCors(req, res);
+  } catch (error) {
+    console.error('recordLoginEvent CORS failure', error);
+    res.status(500).json({ error: 'Failed to configure CORS.' });
+    return;
+  }
+
   if (req.method === 'OPTIONS') {
     res.status(204).send('');
     return;

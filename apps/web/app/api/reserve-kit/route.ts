@@ -50,7 +50,7 @@ export async function POST(request: Request) {
   }
 
   const body = JSON.stringify({ data: payload });
-  const endpoints = buildCallableEndpointCandidates("reserveKit", request, {
+  const { endpoints } = buildCallableEndpointCandidates("reserveKit", request, {
     explicitEndpointEnvVar: "RESERVE_KIT_ENDPOINT",
   });
   const attemptLogger = createEndpointAttemptLogger();

@@ -39,9 +39,16 @@ const WEBHOOK_SECRET_CONFIG = createSecretConfig(
   'Stripe webhook secret'
 );
 
+function resolveEnvPublishableKey(): string | null {
+  return (
+    normaliseString(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY) ||
+    normaliseString(process.env.STRIPE_PUBLISHABLE_KEY)
+  );
+}
+
 function createEmptySettings(): StripeConnectSettings {
   return {
-    publishableKey: null,
+    publishableKey: resolveEnvPublishableKey(),
     secretKeyLast4: null,
     webhookSecretLast4: null,
     platformFeePercent: null,
@@ -186,7 +193,8 @@ export async function getStripeConnectSettings(options?: { forceRefresh?: boolea
 
   const raw = snapshot.exists ? (snapshot.data() as Record<string, unknown>) : {};
 
-  const publishableKey = normaliseString(raw.publishableKey ?? raw.publicKey);
+  const publishableKey =
+    normaliseString(raw.publishableKey ?? raw.publicKey) || resolveEnvPublishableKey();
   const secretKeyLast4 = normaliseString(raw.secretKeyLast4 ?? raw.secretLast4 ?? raw.secretSuffix);
   const webhookSecretLast4 = normaliseString(raw.webhookSecretLast4 ?? raw.webhookSuffix);
   const platformFeePercent = parsePercentage(raw.platformFeePercent ?? raw.applicationFeePercent ?? raw.platformFee);

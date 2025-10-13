@@ -1,11 +1,8 @@
-import { auth } from './firebase';
+import { auth, functionsBaseUrl } from './firebase';
 
-const rawProjectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
-const projectId =
-  rawProjectId && rawProjectId !== 'undefined'
-    ? rawProjectId
-    : 'ptfbportalbackend';
-const ANALYTICS_ENDPOINT = `https://us-central1-${projectId}.cloudfunctions.net/analytics_track`;
+const ANALYTICS_ENDPOINT = functionsBaseUrl
+  ? `${functionsBaseUrl.replace(/\/$/, '')}/analytics_track`
+  : 'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net/analytics_track';
 
 let analyticsDisabled = false;
 let hasLoggedFailure = false;

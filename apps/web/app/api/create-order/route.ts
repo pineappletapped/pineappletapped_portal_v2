@@ -1,12 +1,81 @@
-import { NextResponse } from "next/server";
-import {
-  JSON_CONTENT_TYPE,
-  buildCallableEndpointCandidates,
-  createEndpointAttemptLogger,
-  summariseDetails,
-  type CallableEnvelope,
-  type CallableErrorEnvelope,
-} from "@/lib/server/callable-proxy";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const JSON_CONTENT_TYPE = "application/json";
+
+const cleanEnv = (value?: string | null) => {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed && trimmed !== "undefined" ? trimmed : undefined;
+};
+
+const projectId =
+  cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID) ||
+  cleanEnv(process.env.FIREBASE_ADMIN_PROJECT_ID) ||
+  "pineapple-tapped---portal";
+const region = cleanEnv(process.env.NEXT_PUBLIC_FUNCTIONS_REGION) || "europe-west2";
+const createOrderEndpoint =
+  cleanEnv(process.env.CREATE_ORDER_ENDPOINT) ||
+  `https://${region}-${projectId}.cloudfunctions.net/createOrder`;
+
+const CALLABLE_ERROR_STATUS: Record<string, number> = {
+  cancelled: 499,
+  unknown: 500,
+  "invalid-argument": 400,
+  "deadline-exceeded": 504,
+  "not-found": 404,
+  "already-exists": 409,
+  "permission-denied": 403,
+  "resource-exhausted": 429,
+  "failed-precondition": 412,
+  aborted: 409,
+  "out-of-range": 400,
+  unimplemented: 501,
+  internal: 500,
+  unavailable: 503,
+  "data-loss": 500,
+  unauthenticated: 401,
+};
+
+const normaliseCallableError = (payload: Record<string, unknown>) => {
+  if (!("error" in payload)) {
+    return null;
+  }
+
+  const errorValue = (payload as { error?: unknown }).error;
+  const details = (payload as { details?: unknown }).details;
+  if (typeof errorValue === "string" && errorValue.trim().length > 0) {
+    const code =
+      typeof (payload as { code?: unknown }).code === "string"
+        ? ((payload as { code?: string }).code ?? "callable-error")
+        : "callable-error";
+    return { code, message: errorValue, details };
+  }
+
+  if (errorValue && typeof errorValue === "object") {
+    const error = errorValue as Record<string, unknown>;
+    const status = typeof error.status === "string" ? error.status : undefined;
+    const message = typeof error.message === "string" ? error.message : "Callable request failed";
+    const nestedDetails = "details" in error ? (error as { details?: unknown }).details : undefined;
+    const code = status ? status.toLowerCase().replace(/_/g, "-") : "callable-error";
+    return { code, message, details: nestedDetails ?? details };
+  }
+
+  return null;
+};
+
+const normaliseCallableSuccess = (payload: Record<string, unknown>) => {
+  if ("result" in payload) {
+    return payload.result;
+  }
+  if ("data" in payload) {
+    return payload.data;
+  }
+  return payload;
+};
 
 const createErrorResponse = (
   status: number,
@@ -14,17 +83,21 @@ const createErrorResponse = (
   message: string,
   details?: unknown,
 ) =>
-  NextResponse.json(
-    {
+  new Response(
+    JSON.stringify({
       error: message,
       code,
       ...(details === undefined ? null : { details }),
+    }),
+    {
+      status,
+      headers: { "content-type": JSON_CONTENT_TYPE },
     },
-    { status },
   );
 
 export async function POST(request: Request) {
   let payload: Record<string, unknown>;
+
   try {
     payload = (await request.json()) as Record<string, unknown>;
   } catch (error) {
@@ -40,120 +113,81 @@ export async function POST(request: Request) {
     return createErrorResponse(400, "invalid-argument", "Order payload is required");
   }
 
-  const body = JSON.stringify({ data: payload });
-  const endpoints = buildCallableEndpointCandidates("createOrder", request, {
-    explicitEndpointEnvVar: "CREATE_ORDER_ENDPOINT",
-  });
-  const attemptLogger = createEndpointAttemptLogger();
+  try {
+    const response = await fetch(createOrderEndpoint, {
+      method: "POST",
+      headers: {
+        "content-type": JSON_CONTENT_TYPE,
+        accept: JSON_CONTENT_TYPE,
+        ...(request.headers.get("authorization")
+          ? { authorization: request.headers.get("authorization") as string }
+          : {}),
+      },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    });
 
-  for (let index = 0; index < endpoints.length; index += 1) {
-    const endpoint = endpoints[index];
-
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": JSON_CONTENT_TYPE,
-          ...(request.headers.get("authorization")
-            ? { Authorization: request.headers.get("authorization") as string }
-            : {}),
-        },
-        body,
-        cache: "no-store",
-      });
-
-      const text = await response.text();
-      const contentType = response.headers.get("content-type") ?? "";
-      const isJson = contentType.toLowerCase().includes("application/json");
-      let json: CallableEnvelope | null = null;
-      if (text && isJson) {
-        try {
-          json = JSON.parse(text) as CallableEnvelope;
-        } catch (parseError) {
-          return createErrorResponse(
-            502,
-            "invalid-function-response",
-            "Callable response was not valid JSON",
-            (parseError as Error)?.message ?? "Callable response was not valid JSON",
-          );
-        }
-      }
-
-      if (response.ok && !isJson) {
+    const text = await response.text();
+    if (!text) {
+      if (!response.ok) {
         return createErrorResponse(
-          502,
-          "invalid-function-response",
-          "Callable response was not JSON",
-          summariseDetails(text),
+          response.status,
+          "empty-response",
+          `Order service returned status ${response.status}`,
         );
       }
 
-      if (!response.ok) {
-        const callableError = (json as CallableErrorEnvelope | null)?.error;
-        const errorDetails =
-          (callableError && typeof callableError === "object" && typeof callableError.message === "string"
-            ? callableError.message
-            : typeof callableError === "string"
-              ? callableError
-              : summariseDetails(text) || `callable request failed (${response.status})`);
-        const errorCode =
-          (callableError && typeof callableError === "object" && typeof callableError.status === "string"
-            ? callableError.status
-            : null) ||
-          (json && typeof json.code === "string" ? json.code : null) ||
-          "create-order-error";
-        const errorDetailsPayload =
-          callableError && typeof callableError === "object" && "details" in callableError
-            ? callableError.details
-            : callableError ?? summariseDetails(text) ?? null;
+      return new Response(JSON.stringify({ data: null }), {
+        status: response.status,
+        headers: { "content-type": JSON_CONTENT_TYPE },
+      });
+    }
 
-        if (response.status === 404) {
-          attemptLogger.push(`${endpoint} → 404`);
-          if (index < endpoints.length - 1) {
-            continue;
-          }
-        }
-
-        return createErrorResponse(502, errorCode, errorDetails, {
-          endpoint,
-          responseStatus: response.status,
-          details: errorDetailsPayload,
-        });
-      }
-
-      const data = (json?.result?.data ?? json?.data) as unknown;
-      return NextResponse.json({ data });
+    let json: unknown;
+    try {
+      json = JSON.parse(text);
     } catch (error) {
-      attemptLogger.push(`${endpoint} → ${(error as Error)?.message ?? "request failed"}`);
-      if (index < endpoints.length - 1) {
-        continue;
-      }
+      const status = response.status || 502;
+      const code = response.ok ? "invalid-response" : "order-service-error";
+      const message = response.ok
+        ? "Order service returned invalid JSON"
+        : `Order service responded with status ${status}`;
 
+      return createErrorResponse(status, code, message, (error as Error)?.message ?? text);
+    }
+
+    const jsonRecord = json && typeof json === "object" ? (json as Record<string, unknown>) : null;
+    if (!jsonRecord) {
+      return createErrorResponse(502, "invalid-response", "Callable returned invalid payload", json);
+    }
+
+    const callableError = normaliseCallableError(jsonRecord);
+    if (callableError) {
+      const status = response.status || CALLABLE_ERROR_STATUS[callableError.code] || 400;
+      return createErrorResponse(status, callableError.code, callableError.message, callableError.details);
+    }
+
+    if (!response.ok) {
       return createErrorResponse(
-        502,
-        "create-order-request-failed",
-        "Failed to contact createOrder function",
-        attemptLogger.attempts,
+        response.status,
+        "order-service-error",
+        "Order service request failed",
+        jsonRecord,
       );
     }
+
+    const result = normaliseCallableSuccess(jsonRecord);
+
+    return new Response(JSON.stringify({ data: result ?? null }), {
+      status: response.status,
+      headers: { "content-type": JSON_CONTENT_TYPE },
+    });
+  } catch (error) {
+    return createErrorResponse(
+      502,
+      "order-service-unreachable",
+      "Failed to contact the order service",
+      (error as Error)?.message ?? "Unknown error",
+    );
   }
-
-  return createErrorResponse(
-    502,
-    "create-order-endpoint-unavailable",
-    "No createOrder endpoints responded successfully",
-    attemptLogger.attempts,
-  );
-}
-
-export async function OPTIONS() {
-  return new NextResponse(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      "Access-Control-Max-Age": "3600",
-    },
-  });
 }

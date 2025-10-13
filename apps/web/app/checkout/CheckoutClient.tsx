@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useRouter } from "next/navigation";
 import { Elements } from "@stripe/react-stripe-js";
 import { loadStripe } from "@stripe/stripe-js";
-import { httpsCallable, httpsCallableFromURL, type Functions } from "firebase/functions";
+import { httpsCallable, type Functions } from "firebase/functions";
 import {
   collection,
   doc,
@@ -23,7 +23,7 @@ import {
 } from "firebase/auth";
 import type { FirebaseError } from "firebase/app";
 import { useCart } from "@/lib/cart";
-import { ensureFirebase, functionsBaseUrl, loadAuthModule } from "@/lib/firebase";
+import { ensureFirebase, loadAuthModule } from "@/lib/firebase";
 import { useLeadSourceTag } from "@/hooks/useLeadSourceTag";
 import {
   leadSourceDetailPlaceholder,
@@ -31,13 +31,6 @@ import {
   type LeadSourceKind,
 } from "@/lib/lead-source";
 import { VAT_RATE } from "@/lib/vat";
-import {
-  DEFAULT_FUNCTION_BASE,
-  buildCallableEndpointsFromBases,
-  normaliseBaseUrl,
-  normaliseCallableEndpoint,
-  resolveHostedAppBase,
-} from "@/lib/callableEndpoints";
 import CheckoutPaymentForm from "./CheckoutPaymentForm";
 
 const LEAD_SOURCE_OPTIONS: LeadSourceKind[] = [
@@ -51,11 +44,17 @@ const LEAD_SOURCE_OPTIONS: LeadSourceKind[] = [
 const ZERO_BALANCE_TOLERANCE = 0.005;
 const MIN_ACCOUNT_PASSWORD_LENGTH = 8;
 
-const EXPLICIT_CREATE_ORDER_ENDPOINT = process.env.NEXT_PUBLIC_CREATE_ORDER_ENDPOINT;
-const PUBLIC_FUNCTIONS_BASE_URL = process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL;
-const PUBLIC_FIREBASE_FUNCTIONS_URL = process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_URL;
-const LEGACY_BACKEND_FUNCTION_BASE =
-  "https://us-central1-ptfbportalbackend.cloudfunctions.net";
+type AccountRequirementReason =
+  | "login-required"
+  | "email-missing"
+  | "password-too-short"
+  | "password-mismatch"
+  | null;
+
+interface AccountRequirementState {
+  ready: boolean;
+  reason: AccountRequirementReason;
+}
 
 interface VoucherRecord {
   type?: string | null;
@@ -157,6 +156,52 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const lastIntentPayload = useRef<string | null>(null);
   const loginErrorRef = useRef<HTMLDivElement | null>(null);
   const authEmail = currentUser?.email || "";
+  const accountRequirement = useMemo<AccountRequirementState>(() => {
+    if (currentUser) {
+      return { ready: true, reason: null };
+    }
+    if (authMode === "login") {
+      return { ready: false, reason: "login-required" };
+    }
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      return { ready: false, reason: "email-missing" };
+    }
+    if (registerPassword.length < MIN_ACCOUNT_PASSWORD_LENGTH) {
+      return { ready: false, reason: "password-too-short" };
+    }
+    if (registerPassword !== confirmPassword) {
+      return { ready: false, reason: "password-mismatch" };
+    }
+    return { ready: true, reason: null };
+  }, [
+    authMode,
+    confirmPassword,
+    currentUser,
+    email,
+    registerPassword,
+  ]);
+  const describeAccountRequirement = useCallback(
+    (reason: AccountRequirementReason, context: "payment" | "checkout") => {
+      switch (reason) {
+        case "login-required":
+          return context === "payment"
+            ? "Sign in to continue to payment."
+            : "Sign in to continue to checkout.";
+        case "email-missing":
+          return "Enter your email to continue.";
+        case "password-too-short":
+          return `Create a password with at least ${MIN_ACCOUNT_PASSWORD_LENGTH} characters to continue.`;
+        case "password-mismatch":
+          return "Confirm your password to continue.";
+        default:
+          return context === "payment"
+            ? "Complete your account details to continue to payment."
+            : "Complete your account details to continue to checkout.";
+      }
+    },
+    [],
+  );
   const switchToLogin = useCallback(() => {
     setAuthMode("login");
     setAccountError(null);
@@ -812,8 +857,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     if (items.length === 0) {
       return "Add items to your cart to continue.";
     }
-    if (!currentUser) {
-      return "Sign in to continue to checkout.";
+    if (!accountRequirement.ready) {
+      return describeAccountRequirement(accountRequirement.reason, "checkout");
     }
     if (!name) {
       return "Enter your name to continue.";
@@ -822,7 +867,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       return "Enter a postcode for the shoot location.";
     }
     return null;
-  }, [currentUser, items.length, name, orderInput.postalCode]);
+  }, [
+    accountRequirement.ready,
+    accountRequirement.reason,
+    describeAccountRequirement,
+    items.length,
+    name,
+    orderInput.postalCode,
+  ]);
   const zeroBalanceMessage = zeroBalanceBlockingMessage
     ? zeroBalanceBlockingMessage
     : "Your voucher covers the full balance. Confirm your order to continue.";
@@ -972,8 +1024,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   };
 
   const describeCallableError = useCallback((error: unknown): string => {
+    const fallbackMessage = "We couldn't complete your order. Please try again.";
     if (!error) {
-      return "We couldn't complete your order. Please try again.";
+      return fallbackMessage;
     }
     if (typeof error === "string") {
       return error;
@@ -1009,8 +1062,33 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       if (detailObject) {
         return detailObject;
       }
-      if (firebaseError.message && firebaseError.message.trim().length > 0) {
-        return firebaseError.message;
+      if (Array.isArray(details) && details.length > 0) {
+        for (let idx = details.length - 1; idx >= 0; idx -= 1) {
+          const attempt = details[idx];
+          if (!attempt || typeof attempt !== "object") {
+            continue;
+          }
+          const attemptRecord = attempt as Record<string, unknown>;
+          const attemptError = attemptRecord.error;
+          if (attemptError && attemptError === error) {
+            continue;
+          }
+          const attemptMessage = describeCallableError(attemptError ?? null);
+          if (attemptMessage && attemptMessage !== fallbackMessage) {
+            const endpoint = attemptRecord.endpoint;
+            if (typeof endpoint === "string" && endpoint.trim().length > 0) {
+              return `Order service at ${endpoint} responded: ${attemptMessage}`;
+            }
+            return attemptMessage;
+          }
+        }
+      }
+      const rawMessage = firebaseError.message?.trim();
+      if (rawMessage) {
+        const normalised = rawMessage.replace(/^firebaseerror:\s*/i, "");
+        if (normalised && normalised.toLowerCase() !== "internal") {
+          return normalised;
+        }
       }
     }
     if (typeof error === "object" && error !== null && "message" in error) {
@@ -1019,7 +1097,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return messageValue;
       }
     }
-    return "We couldn't complete your order. Please try again.";
+    return fallbackMessage;
   }, []);
 
   const callCreateOrderViaApi = useCallback(
@@ -1082,131 +1160,11 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     [orderInput],
   );
 
-  const callCreateOrderViaCallable = useCallback(async (): Promise<CreateOrderResult> => {
-    const { functions } = await ensureFirebase();
-    const functionsInstance = functionsRef.current ?? functions ?? null;
-    if (!functionsInstance) {
-      throw Object.assign(new Error("Firebase functions are unavailable."), {
-        code: "create-order-functions-unavailable",
-      });
-    }
-
-    functionsRef.current = functionsInstance;
-
-    const extractCallableResult = (result: any): CreateOrderResult => {
-      const data =
-        (result && typeof result === "object"
-          ? result.data ?? result.result?.data ?? result.result ?? null
-          : null) ?? null;
-
-      if (!data || typeof data !== "object") {
-        return {};
-      }
-
-      return data as CreateOrderResult;
-    };
-
-    const attemptErrors: Array<{ endpoint: string | null; error: unknown }> = [];
-
-    const invokeCallable = async (
-      callable: ReturnType<typeof httpsCallable>,
-      endpoint: string | null,
-    ): Promise<CreateOrderResult | null> => {
-      try {
-        const result: any = await callable(orderInput);
-        return extractCallableResult(result);
-      } catch (error) {
-        console.warn(
-          endpoint
-            ? `createOrder callable attempt via ${endpoint} failed`
-            : "createOrder callable default attempt failed",
-          error,
-        );
-        attemptErrors.push({ endpoint, error });
-        return null;
-      }
-    };
-
-    const defaultResult = await invokeCallable(
-      httpsCallable(functionsInstance, "createOrder"),
-      null,
-    );
-    if (defaultResult !== null) {
-      return defaultResult;
-    }
-
-    const explicitEndpoint = normaliseCallableEndpoint(
-      EXPLICIT_CREATE_ORDER_ENDPOINT,
-      "createOrder",
-    );
-    const host = typeof window !== "undefined" ? window.location.host : null;
-    const hostBase = resolveHostedAppBase(host);
-    const defaultBase = normaliseBaseUrl(functionsBaseUrl);
-
-    let candidateEndpoints: string[];
-    if (explicitEndpoint) {
-      candidateEndpoints = [explicitEndpoint];
-    } else {
-      candidateEndpoints = buildCallableEndpointsFromBases("createOrder", [
-        functionsBaseUrl,
-        PUBLIC_FUNCTIONS_BASE_URL,
-        PUBLIC_FIREBASE_FUNCTIONS_URL,
-        hostBase,
-        DEFAULT_FUNCTION_BASE,
-        LEGACY_BACKEND_FUNCTION_BASE,
-      ]);
-
-      if (defaultBase) {
-        candidateEndpoints = candidateEndpoints.filter(
-          (endpoint) => !endpoint.startsWith(`${defaultBase}/`),
-        );
-      }
-    }
-
-    for (const endpoint of candidateEndpoints) {
-      const callable = httpsCallableFromURL(functionsInstance, endpoint);
-      const result = await invokeCallable(callable, endpoint);
-      if (result !== null) {
-        return result;
-      }
-    }
-
-    const lastError = attemptErrors.length ? attemptErrors[attemptErrors.length - 1].error : null;
-    if (lastError instanceof Error) {
-      if (!("details" in lastError)) {
-        (lastError as Error & { details?: unknown }).details = attemptErrors;
-      }
-      throw lastError;
-    }
-
-    const aggregatedError = Object.assign(
-      new Error("Failed to create order via callable endpoints."),
-      { code: "create-order-callable-failed", details: attemptErrors },
-    );
-    throw aggregatedError;
-  }, [orderInput]);
-
   const callCreateOrder = useCallback(
     async (token: string | null): Promise<CreateOrderResult> => {
-      try {
-        return await callCreateOrderViaApi(token);
-      } catch (apiError) {
-        console.warn("createOrder API proxy failed, retrying callable", apiError);
-        try {
-          return await callCreateOrderViaCallable();
-        } catch (callableError) {
-          console.error("createOrder callable fallback failed", callableError);
-          if (callableError instanceof Error) {
-            if (!("cause" in callableError)) {
-              (callableError as Error & { cause?: unknown }).cause = apiError;
-            }
-            throw callableError;
-          }
-          throw apiError instanceof Error ? apiError : new Error("Failed to create order.");
-        }
-      }
+      return await callCreateOrderViaApi(token);
     },
-    [callCreateOrderViaApi, callCreateOrderViaCallable],
+    [callCreateOrderViaApi],
   );
 
   const ensureCheckoutUser = useCallback(async (): Promise<User | null> => {
@@ -2013,12 +1971,12 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
               <p className="text-sm text-gray-500">
                 {items.length === 0
                   ? "Add items to your cart to continue."
-                  : !currentUser && authMode === "login"
-                    ? "Sign in to continue to payment."
-                    : !currentUser && authMode === "register"
-                      ? "Set your password to create an account before continuing."
-                      : !name
-                        ? "Enter your name to continue."
+                  : !accountRequirement.ready
+                    ? describeAccountRequirement(accountRequirement.reason, "payment")
+                    : !name
+                      ? "Enter your name to continue."
+                      : !orderInput.postalCode
+                        ? "Enter a postcode for the shoot location."
                         : stripeConfigError
                           ? stripeConfigError
                           : !stripePromise
@@ -2032,8 +1990,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 disabled={
                   initializingPayment ||
                   items.length === 0 ||
-                  (authMode === "login" && !currentUser) ||
+                  !accountRequirement.ready ||
                   !name ||
+                  !orderInput.postalCode ||
                   Boolean(stripeConfigError) ||
                   !stripePromise ||
                   isRegistering
