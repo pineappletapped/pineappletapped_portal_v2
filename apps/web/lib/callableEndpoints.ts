@@ -117,12 +117,23 @@ export const resolveHostedAppBases = (
       : "us-central1";
 
   const bases = new Set<string>();
+  const projectFragments = new Set<string>();
 
   const addBase = (candidate: string | null | undefined) => {
     const normalised = normaliseBaseUrl(candidate);
     if (normalised) {
       bases.add(normalised);
     }
+  };
+
+  const trackProjectFragment = (fragment: string | null | undefined) => {
+    const sanitised = sanitiseProjectFragment(fragment);
+    if (!sanitised) {
+      return null;
+    }
+
+    projectFragments.add(sanitised);
+    return sanitised;
   };
 
   let separatorIndex = -1;
@@ -142,25 +153,42 @@ export const resolveHostedAppBases = (
     searchIndex = candidate + 2;
   }
 
-  const addBaseForFragment = (fragment: string | null | undefined) => {
-    const sanitised = sanitiseProjectFragment(fragment);
-    if (!sanitised) {
-      return;
+  if (separatorIndex >= 0) {
+    const projectFragment = trackProjectFragment(
+      subdomain.slice(separatorIndex + 2),
+    );
+    if (projectFragment) {
+      addBase(`https://${regionCandidate}-${projectFragment}.cloudfunctions.net`);
     }
 
-    addBase(`https://${regionCandidate}-${sanitised}.cloudfunctions.net`);
-  };
-
-  if (separatorIndex >= 0) {
-    addBaseForFragment(subdomain.slice(separatorIndex + 2));
-    addBaseForFragment(subdomain.slice(0, separatorIndex));
+    const legacyFragment = trackProjectFragment(
+      subdomain.slice(0, separatorIndex),
+    );
+    if (legacyFragment) {
+      addBase(`https://${regionCandidate}-${legacyFragment}.cloudfunctions.net`);
+    }
   } else {
-    addBaseForFragment(subdomain);
+    const fragment = trackProjectFragment(subdomain);
+    if (fragment) {
+      addBase(`https://${regionCandidate}-${fragment}.cloudfunctions.net`);
+    }
   }
 
   const hostedAppBase = `https://${trimmed}/_firebase/functions/v1`;
   addBase(hostedAppBase);
   addBase(`${hostedAppBase}/${regionCandidate}`);
+
+  if (projectFragments.size > 0) {
+    const regionTargets = new Set([regionCandidate, ...REGION_FALLBACKS]);
+
+    for (const projectFragment of projectFragments) {
+      for (const region of regionTargets) {
+        addBase(
+          `https://${trimmed}/_firebase/functions/v1/projects/${projectFragment}/locations/${region}/functions`,
+        );
+      }
+    }
+  }
 
   return Array.from(bases);
 };
