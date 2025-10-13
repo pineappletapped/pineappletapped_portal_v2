@@ -99,6 +99,24 @@ const createErrorResponse = (
     },
   );
 
+const RETRYABLE_STATUS = new Set([404, 408, 425, 429, 500, 502, 503, 504, 522, 523, 524]);
+
+const isRetryableStatus = (status: number | null | undefined) => {
+  if (!status || status < 0) {
+    return false;
+  }
+
+  return RETRYABLE_STATUS.has(status);
+};
+
+const isJsonContentType = (value: string | null | undefined) => {
+  if (!value) {
+    return false;
+  }
+
+  return value.toLowerCase().includes("json");
+};
+
 export async function POST(request: Request) {
   let payload: Record<string, unknown>;
 
@@ -231,18 +249,16 @@ export async function POST(request: Request) {
       });
 
       const text = await response.text();
+      const status = response.status || 502;
+
       if (!text) {
         if (!response.ok) {
-          if (response.status === 404 && !isLastAttempt) {
-            attempts.push(`${endpoint} → 404 (empty response)`);
+          if (!isLastAttempt && isRetryableStatus(status)) {
+            attempts.push(`${endpoint} → ${status} (empty response)`);
             continue;
           }
 
-          return createErrorResponse(
-            response.status,
-            "empty-response",
-            `Order service returned status ${response.status}`,
-          );
+          return createErrorResponse(status, "empty-response", `Order service returned status ${status}`);
         }
 
         return new Response(JSON.stringify({ data: null }), {
@@ -251,28 +267,50 @@ export async function POST(request: Request) {
         });
       }
 
+      const contentType = response.headers.get("content-type");
+      const trimmedText = text.trim();
+      const looksJson =
+        isJsonContentType(contentType) || trimmedText.startsWith("{") || trimmedText.startsWith("[");
+
+      if (!looksJson) {
+        const descriptor = contentType ? `${status} (${contentType})` : `${status} (non-JSON response)`;
+        if (!isLastAttempt && (isRetryableStatus(status) || response.ok)) {
+          attempts.push(`${endpoint} → ${descriptor}`);
+          continue;
+        }
+
+        const failureStatus = response.ok ? 502 : status;
+        const code = response.ok ? "invalid-response" : "order-service-error";
+        const message = response.ok
+          ? "Order service returned non-JSON payload"
+          : `Order service responded with status ${status}`;
+        const detail = trimmedText ? trimmedText.slice(0, 200) : contentType ?? "non-JSON response";
+        return createErrorResponse(failureStatus, code, message, detail);
+      }
+
       let json: unknown;
       try {
         json = JSON.parse(text);
       } catch (error) {
-        const status = response.status || 502;
         const code = response.ok ? "invalid-response" : "order-service-error";
         const message = response.ok
           ? "Order service returned invalid JSON"
           : `Order service responded with status ${status}`;
 
-        if (!response.ok && response.status === 404 && !isLastAttempt) {
-          attempts.push(`${endpoint} → 404 (${(error as Error)?.message ?? "invalid JSON"})`);
+        if (!isLastAttempt && (isRetryableStatus(status) || response.ok)) {
+          const reason = (error as Error)?.message ?? "invalid JSON";
+          attempts.push(`${endpoint} → ${status} (${reason})`);
           continue;
         }
 
-        return createErrorResponse(status, code, message, (error as Error)?.message ?? text);
+        const failureStatus = response.ok ? 502 : status;
+        return createErrorResponse(failureStatus, code, message, (error as Error)?.message ?? text);
       }
 
       const jsonRecord = json && typeof json === "object" ? (json as Record<string, unknown>) : null;
       if (!jsonRecord) {
-        if (!response.ok && response.status === 404 && !isLastAttempt) {
-          attempts.push(`${endpoint} → 404 (non-object payload)`);
+        if (!isLastAttempt && (isRetryableStatus(status) || response.ok)) {
+          attempts.push(`${endpoint} → ${status} (non-object payload)`);
           continue;
         }
 
@@ -281,27 +319,27 @@ export async function POST(request: Request) {
 
       const callableError = normaliseCallableError(jsonRecord);
       if (callableError) {
-        const status = response.status || CALLABLE_ERROR_STATUS[callableError.code] || 400;
-        if (status === 404 && !isLastAttempt) {
-          attempts.push(`${endpoint} → 404 (${callableError.message})`);
-          continue;
-        }
-
-        return createErrorResponse(status, callableError.code, callableError.message, callableError.details);
-      }
-
-      if (!response.ok) {
-        if (response.status === 404 && !isLastAttempt) {
-          attempts.push(`${endpoint} → 404 (error response)`);
+        const callableStatus = response.status || CALLABLE_ERROR_STATUS[callableError.code] || 400;
+        if (!isLastAttempt && isRetryableStatus(callableStatus)) {
+          attempts.push(`${endpoint} → ${callableStatus} (${callableError.message})`);
           continue;
         }
 
         return createErrorResponse(
-          response.status,
-          "order-service-error",
-          "Order service request failed",
-          jsonRecord,
+          callableStatus,
+          callableError.code,
+          callableError.message,
+          callableError.details,
         );
+      }
+
+      if (!response.ok) {
+        if (!isLastAttempt && isRetryableStatus(status)) {
+          attempts.push(`${endpoint} → ${status} (error response)`);
+          continue;
+        }
+
+        return createErrorResponse(status, "order-service-error", "Order service request failed", jsonRecord);
       }
 
       const result = normaliseCallableSuccess(jsonRecord);
