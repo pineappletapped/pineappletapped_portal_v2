@@ -158,7 +158,9 @@ export const resolveHostedAppBases = (
     addBaseForFragment(subdomain);
   }
 
-  addBase(`https://${trimmed}/_firebase/functions/v1`);
+  const hostedAppBase = `https://${trimmed}/_firebase/functions/v1`;
+  addBase(hostedAppBase);
+  addBase(`${hostedAppBase}/${regionCandidate}`);
 
   return Array.from(bases);
 };
