@@ -19,7 +19,49 @@ const projectId =
 const region = cleanEnv(process.env.NEXT_PUBLIC_FUNCTIONS_REGION) || "europe-west2";
 const createOrderEndpoint =
   cleanEnv(process.env.CREATE_ORDER_ENDPOINT) ||
-  `https://${region}-${projectId}.cloudfunctions.net/createOrder`;
+  `https://${region}-${projectId}.cloudfunctions.net/createOrder:call`;
+
+const CALLABLE_ERROR_STATUS: Record<string, number> = {
+  cancelled: 499,
+  unknown: 500,
+  "invalid-argument": 400,
+  "deadline-exceeded": 504,
+  "not-found": 404,
+  "already-exists": 409,
+  "permission-denied": 403,
+  "resource-exhausted": 429,
+  "failed-precondition": 412,
+  aborted: 409,
+  "out-of-range": 400,
+  unimplemented: 501,
+  internal: 500,
+  unavailable: 503,
+  "data-loss": 500,
+  unauthenticated: 401,
+};
+
+const normaliseCallableError = (payload: Record<string, unknown>) => {
+  const error = payload.error as Record<string, unknown> | undefined;
+  if (!error) {
+    return null;
+  }
+
+  const status = typeof error.status === "string" ? error.status : undefined;
+  const message = typeof error.message === "string" ? error.message : "Callable request failed";
+  const details = "details" in error ? (error as { details?: unknown }).details : undefined;
+  const code = status ? status.toLowerCase().replace(/_/g, "-") : "callable-error";
+  return { code, message, details };
+};
+
+const normaliseCallableSuccess = (payload: Record<string, unknown>) => {
+  if ("result" in payload) {
+    return payload.result;
+  }
+  if ("data" in payload) {
+    return payload.data;
+  }
+  return payload;
+};
 
 const createErrorResponse = (
   status: number,
@@ -62,11 +104,12 @@ export async function POST(request: Request) {
       method: "POST",
       headers: {
         "content-type": JSON_CONTENT_TYPE,
+        accept: JSON_CONTENT_TYPE,
         ...(request.headers.get("authorization")
           ? { authorization: request.headers.get("authorization") as string }
           : {}),
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ data: payload }),
       cache: "no-store",
     });
 
@@ -79,7 +122,8 @@ export async function POST(request: Request) {
           `Order service returned status ${response.status}`,
         );
       }
-      return new Response(null, {
+
+      return new Response(JSON.stringify({ data: null }), {
         status: response.status,
         headers: { "content-type": JSON_CONTENT_TYPE },
       });
@@ -97,20 +141,29 @@ export async function POST(request: Request) {
       );
     }
 
+    const jsonRecord = json && typeof json === "object" ? (json as Record<string, unknown>) : null;
+    if (!jsonRecord) {
+      return createErrorResponse(502, "invalid-response", "Callable returned invalid payload", json);
+    }
+
+    const callableError = normaliseCallableError(jsonRecord);
+    if (callableError) {
+      const status = CALLABLE_ERROR_STATUS[callableError.code] ?? 400;
+      return createErrorResponse(status, callableError.code, callableError.message, callableError.details);
+    }
+
     if (!response.ok) {
-      const errorBody =
-        json && typeof json === "object" && "error" in (json as Record<string, unknown>)
-          ? (json as Record<string, unknown>).error
-          : json;
       return createErrorResponse(
         response.status,
         "order-service-error",
         "Order service request failed",
-        errorBody,
+        jsonRecord,
       );
     }
 
-    return new Response(JSON.stringify(json), {
+    const result = normaliseCallableSuccess(jsonRecord);
+
+    return new Response(JSON.stringify({ data: result ?? null }), {
       status: response.status,
       headers: { "content-type": JSON_CONTENT_TYPE },
     });

@@ -9403,25 +9403,6 @@ type CallableContextLike = {
   auth: CallableAuthContext | null;
 };
 
-const HTTPS_ERROR_STATUS_MAP: Record<string, number> = {
-  cancelled: 499,
-  unknown: 500,
-  invalid_argument: 400,
-  deadline_exceeded: 504,
-  not_found: 404,
-  already_exists: 409,
-  permission_denied: 403,
-  resource_exhausted: 429,
-  failed_precondition: 412,
-  aborted: 409,
-  out_of_range: 400,
-  unimplemented: 501,
-  internal: 500,
-  unavailable: 503,
-  data_loss: 500,
-  unauthenticated: 401,
-};
-
 async function executeCreateOrder(data: any, context: CallableContextLike) {
   const toNumber = (value: any, fallback = 0) => {
     const num = Number(value);
@@ -10999,86 +10980,25 @@ async function executeCreateOrder(data: any, context: CallableContextLike) {
   };
 }
 
-async function resolveAuthContextFromRequest(
-  req: functions.Request,
-): Promise<CallableAuthContext | null> {
-  const header = req.get('authorization') ?? req.get('Authorization');
-  if (!header) {
-    return null;
-  }
+export const createOrder = functions
+  .region('europe-west2')
+  .https.onCall(async (data: any, context: functions.https.CallableContext) => {
+    const authContext: CallableAuthContext | null = context.auth
+      ? { uid: context.auth.uid, token: context.auth.token as admin.auth.DecodedIdToken }
+      : null;
 
-  const [scheme, token] = header.split(' ');
-  if (!token || scheme.toLowerCase() !== 'bearer') {
-    throw new functions.https.HttpsError('unauthenticated', 'Invalid authorization header.');
-  }
+    try {
+      const result = await executeCreateOrder(data, { auth: authContext });
+      return result ?? null;
+    } catch (error) {
+      if (error instanceof functions.https.HttpsError) {
+        throw error;
+      }
 
-  try {
-    const decoded = await admin.auth().verifyIdToken(token.trim());
-    return { uid: decoded.uid, token: decoded };
-  } catch (error) {
-    console.error('createOrder verifyIdToken failed', error);
-    throw new functions.https.HttpsError('unauthenticated', 'Failed to verify authentication token.');
-  }
-}
-
-export const createOrder = onRequest({ region: 'europe-west2' }, async (req, res) => {
-  try {
-    await runSharedCors(req, res);
-  } catch (error) {
-    console.error('createOrder CORS failure', error);
-    res.status(500).json({ code: 'cors-error', error: 'Failed to configure CORS.' });
-    return;
-  }
-
-  if (req.method === 'OPTIONS') {
-    res.status(204).send('');
-    return;
-  }
-
-  if (req.method !== 'POST') {
-    res.status(405).json({ code: 'method-not-allowed', error: 'Method not allowed.' });
-    return;
-  }
-
-  const rawBody = req.body ?? null;
-  const payloadCandidate = (
-    rawBody && typeof rawBody === 'object' && rawBody !== null && 'data' in (rawBody as Record<string, unknown>)
-      ? (rawBody as Record<string, unknown>).data
-      : rawBody
-  ) as Record<string, unknown> | null;
-
-  if (!payloadCandidate || typeof payloadCandidate !== 'object') {
-    res.status(400).json({ code: 'invalid-argument', error: 'Order payload is required.' });
-    return;
-  }
-
-  let auth: CallableAuthContext | null = null;
-  try {
-    auth = await resolveAuthContextFromRequest(req);
-  } catch (authError) {
-    const message = authError instanceof Error ? authError.message : 'Authentication failed.';
-    res.status(401).json({ code: 'unauthenticated', error: message });
-    return;
-  }
-
-  try {
-    const result = await executeCreateOrder(payloadCandidate, { auth });
-    res.status(200).json({ data: result ?? null });
-  } catch (error) {
-    if (error instanceof functions.https.HttpsError) {
-      const status = HTTPS_ERROR_STATUS_MAP[error.code] ?? 500;
-      res.status(status).json({
-        code: error.code,
-        error: error.message,
-        ...(error.details === undefined ? null : { details: error.details }),
-      });
-      return;
+      console.error('createOrder handler failed', error);
+      throw new functions.https.HttpsError('internal', 'Failed to create order.');
     }
-
-    console.error('createOrder handler failed', error);
-    res.status(500).json({ code: 'internal', error: 'Failed to create order.' });
-  }
-});
+  });
 
 export const clientResearch_onOrderCreated = functions.firestore
   .document('orders/{orderId}')
