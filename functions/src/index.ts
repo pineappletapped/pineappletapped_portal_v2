@@ -18,7 +18,6 @@ import { google } from 'googleapis';
 import type { drive_v3 } from 'googleapis';
 import { Readable } from 'stream';
 import fetch from 'node-fetch';
-import * as cors from 'cors';
 import { bookingConflictsWithRange } from './utils/availability.js';
 import {
   DEFAULT_KIT_ROUTING_SETTINGS,
@@ -92,34 +91,99 @@ const isHostedAppOrigin = (origin: string): boolean => {
   }
 };
 
-const sharedCors = cors.default({
-  origin(origin, callback) {
-    if (!origin) {
-      callback(null, true);
-      return;
-    }
+const resolveAllowedOrigin = (originHeader: string | null | undefined): string | null => {
+  if (!originHeader) {
+    return null;
+  }
 
-    const normalisedOrigin = origin.toLowerCase();
-    if (explicitAllowedOrigins.has(normalisedOrigin) || isHostedAppOrigin(normalisedOrigin)) {
-      callback(null, true);
-      return;
-    }
+  const trimmed = originHeader.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'null') {
+    return null;
+  }
 
-    callback(null, false);
-  },
-  credentials: true,
-});
+  const lowerCased = trimmed.toLowerCase();
+  if (explicitAllowedOrigins.has(lowerCased)) {
+    return trimmed;
+  }
 
-function runSharedCors(req: ExpressRequest, res: ExpressResponse): Promise<void> {
-  return new Promise((resolve, reject) => {
-    sharedCors(req, res, (error) => {
-      if (error) {
-        reject(error);
-      } else {
-        resolve();
-      }
-    });
-  });
+  if (isHostedAppOrigin(trimmed)) {
+    return trimmed;
+  }
+
+  return null;
+};
+
+const appendVaryHeader = (res: ExpressResponse, value: string) => {
+  const existing = res.getHeader('Vary');
+  if (!existing) {
+    res.setHeader('Vary', value);
+    return;
+  }
+
+  const header = Array.isArray(existing) ? existing.join(', ') : String(existing);
+  const parts = header
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+
+  if (!parts.includes(value)) {
+    parts.push(value);
+    res.setHeader('Vary', parts.join(', '));
+  }
+};
+
+const DEFAULT_ALLOWED_HEADERS = 'authorization,content-type,x-requested-with';
+const DEFAULT_ALLOWED_METHODS = 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS';
+
+interface CorsResult {
+  allowed: boolean;
+  handled: boolean;
+  origin: string | null;
+}
+
+const configureSharedCors = (req: ExpressRequest, res: ExpressResponse): CorsResult => {
+  const originHeader = req.get('origin') ?? req.get('Origin') ?? null;
+  const allowedOrigin = resolveAllowedOrigin(originHeader);
+
+  if (originHeader && !allowedOrigin) {
+    const requestPath = req.originalUrl ?? req.url ?? '[unknown]';
+    console.warn('Blocked request from disallowed origin', originHeader, req.method, requestPath);
+    return { allowed: false, handled: false, origin: originHeader };
+  }
+
+  if (allowedOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    appendVaryHeader(res, 'Origin');
+  }
+
+  const requestedHeaders = req.get('Access-Control-Request-Headers');
+  if (requestedHeaders) {
+    res.setHeader('Access-Control-Allow-Headers', requestedHeaders);
+    appendVaryHeader(res, 'Access-Control-Request-Headers');
+  } else {
+    res.setHeader('Access-Control-Allow-Headers', DEFAULT_ALLOWED_HEADERS);
+  }
+
+  const requestedMethod = req.get('Access-Control-Request-Method');
+  if (requestedMethod) {
+    res.setHeader('Access-Control-Allow-Methods', requestedMethod);
+  } else {
+    res.setHeader('Access-Control-Allow-Methods', DEFAULT_ALLOWED_METHODS);
+  }
+
+  res.setHeader('Access-Control-Max-Age', '3600');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return { allowed: true, handled: true, origin: allowedOrigin };
+  }
+
+  return { allowed: true, handled: false, origin: allowedOrigin };
+};
+
+async function runSharedCors(req: ExpressRequest, res: ExpressResponse): Promise<CorsResult> {
+  return configureSharedCors(req, res);
 }
 
 const CALLABLE_ERROR_STATUS: Record<string, number> = {
@@ -5664,16 +5728,13 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
 
 // Track page view analytics from the public site
 export const analytics_track = onRequest({ region: 'europe-west2' }, async (req, res) => {
-  try {
-    await runSharedCors(req, res);
-  } catch (error) {
-    console.error('analytics_track CORS failure', error);
-    res.status(500).json({ error: 'Failed to configure CORS.' });
+  const corsResult = await runSharedCors(req, res);
+  if (!corsResult.allowed) {
+    res.status(403).json({ error: 'Origin not allowed', code: 'cors-not-allowed' });
     return;
   }
 
-  if (req.method === 'OPTIONS') {
-    res.status(204).send('');
+  if (corsResult.handled) {
     return;
   }
 
@@ -11062,16 +11123,13 @@ async function executeCreateOrder(data: any, context: CallableContextLike) {
 }
 
 export const createOrder = onRequest({ region: 'europe-west2' }, async (req, res) => {
-  try {
-    await runSharedCors(req, res);
-  } catch (error) {
-    console.error('createOrder CORS failure', error);
-    res.status(500).json({ error: 'Failed to configure CORS.', code: 'cors-error' });
+  const corsResult = await runSharedCors(req, res);
+  if (!corsResult.allowed) {
+    res.status(403).json({ error: 'Origin not allowed', code: 'cors-not-allowed' });
     return;
   }
 
-  if (req.method === 'OPTIONS') {
-    res.status(204).send('');
+  if (corsResult.handled) {
     return;
   }
 
@@ -14371,16 +14429,13 @@ export const recordLogin = functions.region('europe-west2').https.onCall(async (
 });
 
 export const recordLoginEvent = onRequest({ region: 'europe-west2' }, async (req, res) => {
-  try {
-    await runSharedCors(req, res);
-  } catch (error) {
-    console.error('recordLoginEvent CORS failure', error);
-    res.status(500).json({ error: 'Failed to configure CORS.' });
+  const corsResult = await runSharedCors(req, res);
+  if (!corsResult.allowed) {
+    res.status(403).json({ error: 'Origin not allowed', code: 'cors-not-allowed' });
     return;
   }
 
-  if (req.method === 'OPTIONS') {
-    res.status(204).send('');
+  if (corsResult.handled) {
     return;
   }
 
