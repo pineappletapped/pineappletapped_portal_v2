@@ -160,6 +160,24 @@ async function runSharedCors(req: ExpressRequest, res: ExpressResponse): Promise
   return configureSharedCors(req, res);
 }
 
+async function withSharedCors(
+  req: ExpressRequest,
+  res: ExpressResponse,
+  handler: () => Promise<void>,
+): Promise<void> {
+  const corsResult = await runSharedCors(req, res);
+  if (!corsResult.allowed) {
+    if (!corsResult.handled) {
+      res.status(403).json({ error: 'Origin not allowed' });
+    }
+    return;
+  }
+  if (corsResult.handled) {
+    return;
+  }
+  await handler();
+}
+
 const CALLABLE_ERROR_STATUS: Record<string, number> = {
   cancelled: 499,
   unknown: 500,
@@ -3461,6 +3479,32 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
     }
   }
 
+  const rawDigitalDeliveries =
+    orderData && orderData.digitalDeliveries && typeof orderData.digitalDeliveries === 'object'
+      ? (orderData.digitalDeliveries as Record<string, any>)
+      : {};
+  const normalisedDigitalMap: Record<string, NormalisedDigitalDelivery> = {};
+  let digitalDeliveries: Array<Record<string, any>> = [];
+  Object.entries(rawDigitalDeliveries).forEach(([productId, raw]) => {
+    const normalised = normaliseDigitalDelivery(raw, null);
+    if (normalised && normalised.enabled) {
+      normalisedDigitalMap[productId] = normalised;
+      const summary = serialiseDigitalDeliveryForClient(normalised);
+      if (summary) {
+        digitalDeliveries.push({ productId, ...summary });
+      }
+    }
+  });
+  const digitalStatusFromOrder =
+    typeof orderData?.digitalDeliveryStatus === 'string'
+      ? orderData.digitalDeliveryStatus
+      : null;
+  let digitalUpdatedAtTimestamp = orderData
+    ? parseTimestamp(orderData.digitalDeliveryUpdatedAt)
+    : null;
+  let digitalStatus =
+    digitalStatusFromOrder ?? computeAggregateDigitalStatus(normalisedDigitalMap) ?? null;
+
   const drive = await createDriveService();
   if (!drive) {
     throw new functions.https.HttpsError(
@@ -3780,7 +3824,10 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
   digitalDeliveries = Object.entries(normalisedDigitalMap)
     .map(([productId, config]) => {
       const summary = serialiseDigitalDeliveryForClient(config);
-      return summary ? { productId, ...summary } : null;
+      if (!summary) {
+        return null;
+      }
+      return { productId, ...summary } as Record<string, any>;
     })
     .filter((entry): entry is Record<string, any> => entry !== null);
   const aggregateStatusFinal = computeAggregateDigitalStatus(normalisedDigitalMap);
@@ -14462,19 +14509,21 @@ async function assertStaffRequest(
 /**
  * List all users. Returns a small subset of user fields for security reasons.
  */
-export const admin_listUsers = functions.https.onRequest((req, res) => {
-  corsHandler(req, res, async () => {
+export const admin_listUsers = functions.https.onRequest(async (req, res) => {
+  await withSharedCors(req as unknown as ExpressRequest, res as unknown as ExpressResponse, async () => {
     if (req.method !== 'GET') {
       res.status(405).end();
       return;
     }
     const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
-    if (!requester) return;
+    if (!requester) {
+      return;
+    }
     try {
       const snap = await db.collection('users').get();
       const users = snap.docs.map((doc) => {
         const data: any = doc.data();
-        if (data.createdAt && data.createdAt.toDate) {
+        if (data.createdAt && typeof data.createdAt.toDate === 'function') {
           data.createdAt = data.createdAt.toDate().toISOString();
         }
         return { id: doc.id, ...data };
@@ -14490,14 +14539,16 @@ export const admin_listUsers = functions.https.onRequest((req, res) => {
 /**
  * Update a user's profile. Accepts { userId, updates }. Only staff can call.
  */
-export const admin_updateUser = functions.https.onRequest((req, res) => {
-  corsHandler(req, res, async () => {
+export const admin_updateUser = functions.https.onRequest(async (req, res) => {
+  await withSharedCors(req as unknown as ExpressRequest, res as unknown as ExpressResponse, async () => {
     if (req.method !== 'POST') {
       res.status(405).end();
       return;
     }
     const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
-    if (!requester) return;
+    if (!requester) {
+      return;
+    }
     const { userId, updates } = req.body || {};
     if (!userId || !updates) {
       res.status(400).json({ error: 'userId and updates required' });
@@ -14516,7 +14567,7 @@ export const admin_updateUser = functions.https.onRequest((req, res) => {
     const beforeSnap = await userRef.get();
     const beforeData = beforeSnap.exists ? (beforeSnap.data() as admin.firestore.DocumentData) : undefined;
     await userRef.set(rest, { merge: true });
-    const authUpdates: any = {};
+    const authUpdates: admin.auth.UpdateRequest = {};
     const metadata: Record<string, any> = {};
     if (password) {
       authUpdates.password = password;
@@ -14532,7 +14583,7 @@ export const admin_updateUser = functions.https.onRequest((req, res) => {
         previousDisabled = null;
       }
     }
-    if (Object.keys(authUpdates).length) {
+    if (Object.keys(authUpdates).length > 0) {
       await admin.auth().updateUser(userId, authUpdates);
     }
     if (disabled !== undefined) {
@@ -15855,8 +15906,8 @@ export const admin_saveProposalTemplate = functions.https.onCall(
             bulletPoints: string[];
             notes: string | null;
             productId: string | null;
-            displayMode?: string;
-            autoContents?: boolean;
+            autoContents: boolean;
+            displayMode?: 'quote' | 'estimate';
           } => Boolean(page))
       : [];
 

@@ -117,6 +117,19 @@ const configureSharedCors = (req, res) => {
 async function runSharedCors(req, res) {
     return configureSharedCors(req, res);
 }
+async function withSharedCors(req, res, handler) {
+    const corsResult = await runSharedCors(req, res);
+    if (!corsResult.allowed) {
+        if (!corsResult.handled) {
+            res.status(403).json({ error: 'Origin not allowed' });
+        }
+        return;
+    }
+    if (corsResult.handled) {
+        return;
+    }
+    await handler();
+}
 const CALLABLE_ERROR_STATUS = {
     cancelled: 499,
     unknown: 500,
@@ -2776,6 +2789,28 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
             console.warn('drive_stageAssetFromFile order lookup failed', { projectId, orderId }, error);
         }
     }
+    const rawDigitalDeliveries = orderData && orderData.digitalDeliveries && typeof orderData.digitalDeliveries === 'object'
+        ? orderData.digitalDeliveries
+        : {};
+    const normalisedDigitalMap = {};
+    let digitalDeliveries = [];
+    Object.entries(rawDigitalDeliveries).forEach(([productId, raw]) => {
+        const normalised = normaliseDigitalDelivery(raw, null);
+        if (normalised && normalised.enabled) {
+            normalisedDigitalMap[productId] = normalised;
+            const summary = serialiseDigitalDeliveryForClient(normalised);
+            if (summary) {
+                digitalDeliveries.push({ productId, ...summary });
+            }
+        }
+    });
+    const digitalStatusFromOrder = typeof orderData?.digitalDeliveryStatus === 'string'
+        ? orderData.digitalDeliveryStatus
+        : null;
+    let digitalUpdatedAtTimestamp = orderData
+        ? parseTimestamp(orderData.digitalDeliveryUpdatedAt)
+        : null;
+    let digitalStatus = digitalStatusFromOrder ?? computeAggregateDigitalStatus(normalisedDigitalMap) ?? null;
     const drive = await createDriveService();
     if (!drive) {
         throw new functions.https.HttpsError('failed-precondition', 'Google Drive service account credentials are not configured.');
@@ -3061,7 +3096,10 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
     digitalDeliveries = Object.entries(normalisedDigitalMap)
         .map(([productId, config]) => {
         const summary = serialiseDigitalDeliveryForClient(config);
-        return summary ? { productId, ...summary } : null;
+        if (!summary) {
+            return null;
+        }
+        return { productId, ...summary };
     })
         .filter((entry) => entry !== null);
     const aggregateStatusFinal = computeAggregateDigitalStatus(normalisedDigitalMap);
@@ -12345,20 +12383,21 @@ async function assertStaffRequest(req, res, requiredRoles) {
 /**
  * List all users. Returns a small subset of user fields for security reasons.
  */
-export const admin_listUsers = functions.https.onRequest((req, res) => {
-    corsHandler(req, res, async () => {
+export const admin_listUsers = functions.https.onRequest(async (req, res) => {
+    await withSharedCors(req, res, async () => {
         if (req.method !== 'GET') {
             res.status(405).end();
             return;
         }
         const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
-        if (!requester)
+        if (!requester) {
             return;
+        }
         try {
             const snap = await db.collection('users').get();
             const users = snap.docs.map((doc) => {
                 const data = doc.data();
-                if (data.createdAt && data.createdAt.toDate) {
+                if (data.createdAt && typeof data.createdAt.toDate === 'function') {
                     data.createdAt = data.createdAt.toDate().toISOString();
                 }
                 return { id: doc.id, ...data };
@@ -12374,15 +12413,16 @@ export const admin_listUsers = functions.https.onRequest((req, res) => {
 /**
  * Update a user's profile. Accepts { userId, updates }. Only staff can call.
  */
-export const admin_updateUser = functions.https.onRequest((req, res) => {
-    corsHandler(req, res, async () => {
+export const admin_updateUser = functions.https.onRequest(async (req, res) => {
+    await withSharedCors(req, res, async () => {
         if (req.method !== 'POST') {
             res.status(405).end();
             return;
         }
         const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
-        if (!requester)
+        if (!requester) {
             return;
+        }
         const { userId, updates } = req.body || {};
         if (!userId || !updates) {
             res.status(400).json({ error: 'userId and updates required' });
@@ -12418,7 +12458,7 @@ export const admin_updateUser = functions.https.onRequest((req, res) => {
                 previousDisabled = null;
             }
         }
-        if (Object.keys(authUpdates).length) {
+        if (Object.keys(authUpdates).length > 0) {
             await admin.auth().updateUser(userId, authUpdates);
         }
         if (disabled !== undefined) {

@@ -1709,7 +1709,12 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             />
           )}
           {!currentUser && authMode === "register" && (
-            <div className="space-y-2">
+            <form
+              className="space-y-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+              }}
+            >
               <div className="grid gap-2 sm:grid-cols-2">
                 <input
                   className="input input-bordered w-full"
@@ -1749,7 +1754,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                   {accountError}
                 </div>
               ) : null}
-            </div>
+            </form>
           )}
           <input
             className="input input-bordered w-full"
