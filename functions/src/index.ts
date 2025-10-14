@@ -46,7 +46,7 @@ const parseAllowedOrigins = (value: string | undefined | null): string[] => {
   }
 
   return normalised
-    .split(/[,\s]+/)
+    .split(/[\s,]+/)
     .map((origin) => origin.trim())
     .filter((origin) => origin.length > 0);
 };
@@ -56,50 +56,10 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app',
   'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
   'http://localhost:3000',
+  'http://localhost:5173',
 ];
 
-const sanitiseHostToken = (value: string | null | undefined): string | null => {
-  if (!value) {
-    return null;
-  }
-
-  const trimmed = value.trim().toLowerCase();
-  if (!trimmed) {
-    return null;
-  }
-
-  return trimmed.replace(/[^a-z0-9-]+/g, '');
-};
-
-const collapseHyphenRuns = (value: string): string => value.replace(/-+/g, '-');
-
-const stripHyphens = (value: string): string => value.replace(/-/g, '');
-
-const collectTokenVariants = (value: string | null | undefined): string[] => {
-  const token = sanitiseHostToken(value);
-  if (!token) {
-    return [];
-  }
-
-  const variants = new Set<string>();
-  variants.add(token);
-  variants.add(collapseHyphenRuns(token));
-  variants.add(stripHyphens(token));
-
-  return Array.from(variants).filter((variant) => variant.length > 0);
-};
-
-const parseAllowedHostTokens = (value: string | undefined | null): string[] => {
-  const tokens: string[] = [];
-
-  for (const part of parseAllowedOrigins(value)) {
-    tokens.push(...collectTokenVariants(part));
-  }
-
-  return tokens;
-};
-
-const explicitAllowedOrigins = new Set(
+const allowedOrigins = new Set(
   [
     ...DEFAULT_ALLOWED_ORIGINS,
     ...parseAllowedOrigins(process.env.SHARED_ALLOWED_ORIGINS),
@@ -107,79 +67,6 @@ const explicitAllowedOrigins = new Set(
     ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
   ].map((origin) => origin.toLowerCase()),
 );
-
-const explicitHostedAppTokens = new Set<string>();
-
-for (const token of [
-  ...collectTokenVariants(process.env.FIREBASE_PROJECT_ID),
-  ...collectTokenVariants(process.env.GCLOUD_PROJECT),
-  ...collectTokenVariants('pineapple-tapped---portal'),
-  ...collectTokenVariants('pineapple-tapped-portal'),
-  ...collectTokenVariants('pineappletappedportal'),
-  ...collectTokenVariants('ptfbportalbackend'),
-  ...parseAllowedHostTokens(process.env.SHARED_ALLOWED_HOST_TOKENS),
-  ...parseAllowedHostTokens(process.env.NEXT_PUBLIC_SHARED_ALLOWED_HOST_TOKENS),
-  ...parseAllowedHostTokens(process.env.FUNCTIONS_SHARED_ALLOWED_HOST_TOKENS),
-]) {
-  explicitHostedAppTokens.add(token);
-}
-
-const projectId =
-  normaliseEnvValue(process.env.FIREBASE_PROJECT_ID) ||
-  normaliseEnvValue(process.env.GCLOUD_PROJECT) ||
-  'pineapple-tapped---portal';
-
-const collectHostedAppTokensFromHost = (host: string): string[] => {
-  const tokens = new Set<string>();
-  const [subdomain] = host.split('.', 1);
-  if (!subdomain) {
-    return [];
-  }
-
-  const pushTokens = (candidate: string | null | undefined) => {
-    for (const token of collectTokenVariants(candidate)) {
-      tokens.add(token);
-    }
-  };
-
-  pushTokens(subdomain);
-
-  const fragments = subdomain.split('--').filter((fragment) => fragment.length > 0);
-  for (const fragment of fragments) {
-    pushTokens(fragment);
-  }
-
-  return Array.from(tokens);
-};
-
-const HOSTED_APP_SUFFIXES = ['.hosted.app', '.web.app', '.firebaseapp.com'];
-
-const isHostedAppOrigin = (origin: string): boolean => {
-  try {
-    const url = new URL(origin);
-    if (url.protocol !== 'https:') {
-      return false;
-    }
-
-    const host = url.host.toLowerCase();
-    if (!HOSTED_APP_SUFFIXES.some((suffix) => host.endsWith(suffix))) {
-      return false;
-    }
-
-    const tokens = collectHostedAppTokensFromHost(host);
-    for (const token of tokens) {
-      if (explicitHostedAppTokens.has(token)) {
-        return true;
-      }
-    }
-
-    const projectToken = projectId?.toLowerCase();
-    return projectToken ? host.includes(projectToken) : false;
-  } catch (error) {
-    console.warn('Failed to parse origin for hosted app detection', origin, error);
-    return false;
-  }
-};
 
 const resolveAllowedOrigin = (originHeader: string | null | undefined): string | null => {
   if (!originHeader) {
@@ -192,15 +79,7 @@ const resolveAllowedOrigin = (originHeader: string | null | undefined): string |
   }
 
   const lowerCased = trimmed.toLowerCase();
-  if (explicitAllowedOrigins.has(lowerCased)) {
-    return trimmed;
-  }
-
-  if (isHostedAppOrigin(trimmed)) {
-    return trimmed;
-  }
-
-  return null;
+  return allowedOrigins.has(lowerCased) ? trimmed : null;
 };
 
 // Allow callable functions from any origin so regional App Hosting sites can
