@@ -152,6 +152,24 @@ const resolveAllowedOrigin = (originHeader) => {
     }
     return null;
 };
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const buildCallableCorsOrigins = () => {
+    const origins = Array.from(explicitAllowedOrigins);
+    const tokens = Array.from(explicitHostedAppTokens);
+    const suffixPattern = HOSTED_APP_SUFFIXES.map((suffix) => suffix.replace(/\./g, '\\.')).join('|');
+    if (tokens.length > 0 && suffixPattern) {
+        const escapedTokens = Array.from(new Set(tokens
+            .map((token) => token.trim())
+            .filter((token) => token.length > 0)
+            .map((token) => escapeRegex(token))));
+        if (escapedTokens.length > 0) {
+            const tokenPattern = escapedTokens.join('|');
+            origins.push(new RegExp(`^https://[a-z0-9-]*(?:${tokenPattern})[a-z0-9-]*(?:--[a-z0-9-]+)*\\.(?:${suffixPattern})$`, 'i'));
+        }
+    }
+    return origins.length > 0 ? origins : true;
+};
+const CALLABLE_CORS_ORIGINS = buildCallableCorsOrigins();
 const appendVaryHeader = (res, value) => {
     const existing = res.getHeader('Vary');
     if (!existing) {
@@ -4801,7 +4819,7 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
     return { ok: true, responseId };
 });
 // Track page view analytics from the public site
-export const analytics_track = onCall({ region: 'europe-west2' }, async (request) => {
+export const analytics_track = onCall({ region: 'europe-west2', cors: CALLABLE_CORS_ORIGINS }, async (request) => {
     const rawRequest = request.rawRequest;
     const payload = request.data && typeof request.data === 'object'
         ? request.data
@@ -12364,13 +12382,11 @@ async function recordLoginForUid(uid, timestampValue) {
         timestamp,
     });
 }
-const recordLoginCallable = functions
-    .region('europe-west2')
-    .https.onCall(async (data, context) => {
-    if (!context.auth?.uid) {
+const recordLoginCallable = onCall({ region: 'europe-west2', cors: CALLABLE_CORS_ORIGINS }, async (request) => {
+    if (!request.auth?.uid) {
         throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
     }
-    await recordLoginForUid(context.auth.uid, data?.timestamp);
+    await recordLoginForUid(request.auth.uid, request.data?.timestamp);
     return { ok: true };
 });
 export const recordLogin = recordLoginCallable;
