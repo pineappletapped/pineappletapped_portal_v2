@@ -2,9 +2,11 @@ import { ensureFirebase, httpsCallable } from './firebase';
 
 let analyticsDisabled = false;
 let hasLoggedFailure = false;
-let analyticsCallable: ((payload: Record<string, unknown>) => Promise<unknown>) | null = null;
+type CallableHandler = (payload: Record<string, unknown>) => Promise<unknown>;
 
-async function ensureAnalyticsCallable() {
+let analyticsCallable: CallableHandler | null = null;
+
+async function ensureAnalyticsCallable(): Promise<CallableHandler> {
   if (analyticsCallable) {
     return analyticsCallable;
   }
@@ -19,6 +21,11 @@ async function ensureAnalyticsCallable() {
   }
 
   analyticsCallable = httpsCallable(functions, 'analytics_track');
+
+  if (!analyticsCallable) {
+    throw new Error('Analytics callable not initialised');
+  }
+
   return analyticsCallable;
 }
 

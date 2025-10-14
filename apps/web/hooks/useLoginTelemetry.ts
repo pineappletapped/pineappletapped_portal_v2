@@ -71,6 +71,10 @@ export function useLoginTelemetry() {
               callable = httpsCallable(functions, 'recordLogin');
             }
 
+            if (!callable) {
+              throw new Error('Callable function not initialised');
+            }
+
             await callable({ timestamp: isoTimestamp });
             lastRecordedSessionRef.current = sessionKey;
           } catch (error) {
