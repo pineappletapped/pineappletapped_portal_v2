@@ -197,8 +197,9 @@ export async function POST(request: Request) {
   if (hostContext.region) {
     regionCandidates.add(hostContext.region);
   }
-  regionCandidates.add("us-central1");
   regionCandidates.add("europe-west2");
+  regionCandidates.add("europe-west4");
+  regionCandidates.add("us-central1");
 
   addBaseEndpoint(DEFAULT_FUNCTION_BASE);
   for (const legacyBase of LEGACY_FUNCTION_BASES) {

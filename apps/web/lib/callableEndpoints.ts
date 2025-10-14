@@ -1,14 +1,15 @@
 export const DEFAULT_FUNCTION_BASE =
-  "https://us-central1-pineapple-tapped---portal.cloudfunctions.net";
+  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net";
 
 export const LEGACY_FUNCTION_BASES = [
   "https://us-central1-ptfbportalbackend.cloudfunctions.net",
+  "https://europe-west2-ptfbportalbackend.cloudfunctions.net",
 ];
 
 const CLOUD_FUNCTION_REGION_HOST_PATTERN =
   /^https:\/\/((?:[a-z]+(?:-[a-z]+)*)[0-9])-([a-z0-9-]+)\.cloudfunctions\.net$/i;
 
-const REGION_FALLBACKS = ["us-central1", "europe-west2"];
+const REGION_FALLBACKS = ["europe-west2", "europe-west4", "us-central1"];
 const CODEBASE_ENV_VARS = [
   "FUNCTIONS_CODEBASE",
   "NEXT_PUBLIC_FUNCTIONS_CODEBASE",

@@ -53,6 +53,7 @@ const parseAllowedOrigins = (value: string | undefined | null): string[] => {
 
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
+  'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app',
   'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
   'http://localhost:3000',
 ];
