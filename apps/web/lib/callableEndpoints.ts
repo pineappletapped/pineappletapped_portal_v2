@@ -199,18 +199,24 @@ export const resolveHostedAppContext = (
     }
   }
 
-  const hostedAppBase = `https://${trimmed}/_firebase/functions/v1`;
-  addBase(hostedAppBase);
-  addBase(`${hostedAppBase}/${regionCandidate}`);
+  const hostedApiVersions = ["v2", "v1", "v1beta"] as const;
+
+  for (const apiVersion of hostedApiVersions) {
+    const versionedBase = `https://${trimmed}/_firebase/functions/${apiVersion}`;
+    addBase(versionedBase);
+    addBase(`${versionedBase}/${regionCandidate}`);
+  }
 
   if (projectFragments.size > 0) {
     const regionTargets = new Set([regionCandidate, ...REGION_FALLBACKS]);
 
     for (const projectFragment of projectFragments) {
       for (const region of regionTargets) {
-        addBase(
-          `https://${trimmed}/_firebase/functions/v1/projects/${projectFragment}/locations/${region}/functions`,
-        );
+        for (const apiVersion of hostedApiVersions) {
+          addBase(
+            `https://${trimmed}/_firebase/functions/${apiVersion}/projects/${projectFragment}/locations/${region}/functions`,
+          );
+        }
       }
     }
   }

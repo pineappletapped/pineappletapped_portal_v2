@@ -239,6 +239,8 @@ export async function POST(request: Request) {
   }
 
   const attempts: string[] = [];
+  const withAttempts = (details: unknown) =>
+    attempts.length ? { attempts: [...attempts], response: details } : details;
 
   for (let index = 0; index < endpointCandidates.length; index += 1) {
     const endpoint = endpointCandidates[index];
@@ -268,7 +270,13 @@ export async function POST(request: Request) {
             continue;
           }
 
-          return createErrorResponse(status, "empty-response", `Order service returned status ${status}`);
+          attempts.push(`${endpoint} → ${status} (empty response)`);
+          return createErrorResponse(
+            status,
+            "empty-response",
+            `Order service returned status ${status}`,
+            withAttempts(null),
+          );
         }
 
         return new Response(JSON.stringify({ data: null }), {
@@ -289,13 +297,14 @@ export async function POST(request: Request) {
           continue;
         }
 
+        attempts.push(`${endpoint} → ${descriptor}`);
         const failureStatus = response.ok ? 502 : status;
         const code = response.ok ? "invalid-response" : "order-service-error";
         const message = response.ok
           ? "Order service returned non-JSON payload"
           : `Order service responded with status ${status}`;
         const detail = trimmedText ? trimmedText.slice(0, 200) : contentType ?? "non-JSON response";
-        return createErrorResponse(failureStatus, code, message, detail);
+        return createErrorResponse(failureStatus, code, message, withAttempts(detail));
       }
 
       let json: unknown;
@@ -313,8 +322,16 @@ export async function POST(request: Request) {
           continue;
         }
 
+        attempts.push(
+          `${endpoint} → ${status} (${(error as Error)?.message ?? "invalid JSON"})`,
+        );
         const failureStatus = response.ok ? 502 : status;
-        return createErrorResponse(failureStatus, code, message, (error as Error)?.message ?? text);
+        return createErrorResponse(
+          failureStatus,
+          code,
+          message,
+          withAttempts((error as Error)?.message ?? text),
+        );
       }
 
       const jsonRecord = json && typeof json === "object" ? (json as Record<string, unknown>) : null;
@@ -324,7 +341,13 @@ export async function POST(request: Request) {
           continue;
         }
 
-        return createErrorResponse(502, "invalid-response", "Callable returned invalid payload", json);
+        attempts.push(`${endpoint} → ${status} (non-object payload)`);
+        return createErrorResponse(
+          502,
+          "invalid-response",
+          "Callable returned invalid payload",
+          withAttempts(json),
+        );
       }
 
       const callableError = normaliseCallableError(jsonRecord);
@@ -335,11 +358,12 @@ export async function POST(request: Request) {
           continue;
         }
 
+        attempts.push(`${endpoint} → ${callableStatus} (${callableError.message})`);
         return createErrorResponse(
           callableStatus,
           callableError.code,
           callableError.message,
-          callableError.details,
+          withAttempts(callableError.details ?? jsonRecord),
         );
       }
 
@@ -349,7 +373,13 @@ export async function POST(request: Request) {
           continue;
         }
 
-        return createErrorResponse(status, "order-service-error", "Order service request failed", jsonRecord);
+        attempts.push(`${endpoint} → ${status} (error response)`);
+        return createErrorResponse(
+          status,
+          "order-service-error",
+          "Order service request failed",
+          withAttempts(jsonRecord),
+        );
       }
 
       const result = normaliseCallableSuccess(jsonRecord);
