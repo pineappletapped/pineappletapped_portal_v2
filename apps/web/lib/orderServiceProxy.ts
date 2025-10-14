@@ -75,6 +75,10 @@ export async function forwardCreateOrderRequest(
     });
 
     const text = await response.text();
+    const rawContentType = response.headers.get("content-type") ?? "";
+    const contentType = rawContentType.split(";")[0]?.trim().toLowerCase();
+    const isJsonResponse = contentType?.includes("json");
+
     if (!text) {
       if (!response.ok) {
         throw new OrderProxyError(
@@ -87,16 +91,18 @@ export async function forwardCreateOrderRequest(
       return { status: response.status, body: null };
     }
 
-    let json: unknown;
-    try {
-      json = JSON.parse(text);
-    } catch (error) {
-      throw new OrderProxyError(
-        502,
-        "invalid-response",
-        "Order service returned invalid JSON",
-        error instanceof Error ? error.message : text,
-      );
+    let parsedBody: unknown = text;
+    if (isJsonResponse || text.trim().startsWith("{")) {
+      try {
+        parsedBody = JSON.parse(text);
+      } catch (error) {
+        throw new OrderProxyError(
+          502,
+          "invalid-response",
+          "Order service returned invalid JSON",
+          error instanceof Error ? error.message : text,
+        );
+      }
     }
 
     if (!response.ok) {
@@ -104,11 +110,11 @@ export async function forwardCreateOrderRequest(
         response.status,
         "order-service-error",
         "Order service request failed",
-        normaliseErrorBody(json),
+        isJsonResponse ? normaliseErrorBody(parsedBody) : text,
       );
     }
 
-    return { status: response.status, body: json };
+    return { status: response.status, body: parsedBody };
   } catch (error) {
     if (error instanceof OrderProxyError) {
       throw error;
