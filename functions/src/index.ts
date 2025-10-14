@@ -31,11 +31,66 @@ import {
   type RoutingStageKey,
 } from './utils/routing.js';
 
-const SHARED_ALLOWED_ORIGINS = new Set([
+const normaliseEnvValue = (value: string | undefined | null): string | null => {
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const parseAllowedOrigins = (value: string | undefined | null): string[] => {
+  const normalised = normaliseEnvValue(value);
+  if (!normalised) {
+    return [];
+  }
+
+  return normalised
+    .split(/[,\s]+/)
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+};
+
+const DEFAULT_ALLOWED_ORIGINS = [
   'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
   'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
   'http://localhost:3000',
-]);
+];
+
+const explicitAllowedOrigins = new Set(
+  [
+    ...DEFAULT_ALLOWED_ORIGINS,
+    ...parseAllowedOrigins(process.env.SHARED_ALLOWED_ORIGINS),
+    ...parseAllowedOrigins(process.env.NEXT_PUBLIC_SHARED_ALLOWED_ORIGINS),
+    ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
+  ].map((origin) => origin.toLowerCase()),
+);
+
+const projectId =
+  normaliseEnvValue(process.env.FIREBASE_PROJECT_ID) ||
+  normaliseEnvValue(process.env.GCLOUD_PROJECT) ||
+  'pineapple-tapped---portal';
+
+const isHostedAppOrigin = (origin: string): boolean => {
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'https:') {
+      return false;
+    }
+
+    const host = url.host.toLowerCase();
+    if (!host.endsWith('.hosted.app')) {
+      return false;
+    }
+
+    const projectToken = projectId?.toLowerCase();
+    return projectToken ? host.includes(projectToken) : false;
+  } catch (error) {
+    console.warn('Failed to parse origin for hosted app detection', origin, error);
+    return false;
+  }
+};
 
 const sharedCors = cors.default({
   origin(origin, callback) {
@@ -44,7 +99,13 @@ const sharedCors = cors.default({
       return;
     }
 
-    callback(null, SHARED_ALLOWED_ORIGINS.has(origin));
+    const normalisedOrigin = origin.toLowerCase();
+    if (explicitAllowedOrigins.has(normalisedOrigin) || isHostedAppOrigin(normalisedOrigin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(null, false);
   },
   credentials: true,
 });
