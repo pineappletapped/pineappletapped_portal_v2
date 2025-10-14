@@ -152,24 +152,10 @@ const resolveAllowedOrigin = (originHeader) => {
     }
     return null;
 };
-const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const buildCallableCorsOrigins = () => {
-    const origins = Array.from(explicitAllowedOrigins);
-    const tokens = Array.from(explicitHostedAppTokens);
-    const suffixPattern = HOSTED_APP_SUFFIXES.map((suffix) => suffix.replace(/\./g, '\\.')).join('|');
-    if (tokens.length > 0 && suffixPattern) {
-        const escapedTokens = Array.from(new Set(tokens
-            .map((token) => token.trim())
-            .filter((token) => token.length > 0)
-            .map((token) => escapeRegex(token))));
-        if (escapedTokens.length > 0) {
-            const tokenPattern = escapedTokens.join('|');
-            origins.push(new RegExp(`^https://[a-z0-9-]*(?:${tokenPattern})[a-z0-9-]*(?:--[a-z0-9-]+)*\\.(?:${suffixPattern})$`, 'i'));
-        }
-    }
-    return origins.length > 0 ? origins : true;
-};
-const CALLABLE_CORS_ORIGINS = buildCallableCorsOrigins();
+// Allow callable functions from any origin so regional App Hosting sites can
+// authenticate without additional CORS configuration. Auth checks still guard
+// access to the underlying handlers.
+const CALLABLE_CORS_ORIGINS = true;
 const appendVaryHeader = (res, value) => {
     const existing = res.getHeader('Vary');
     if (!existing) {
