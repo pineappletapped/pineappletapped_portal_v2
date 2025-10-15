@@ -104,6 +104,19 @@ interface CheckoutClientProps {
 }
 
 function CheckoutClient({ publishableKey }: CheckoutClientProps) {
+  const [isHydrated, setIsHydrated] = useState(false);
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
+
+  if (!isHydrated) {
+    return (
+      <div className="py-12 text-center text-sm text-gray-500" role="status">
+        Preparing checkout…
+      </div>
+    );
+  }
+
   const { items, clear } = useCart();
   const productTotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
   const rentalTotal = items.reduce(
@@ -116,7 +129,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     () => (publishableKey ? loadStripe(publishableKey) : null),
     [publishableKey]
   );
-  const stripeConfigError = publishableKey ? null : "Stripe publishable key is not configured.";
+  const stripeConfigError = publishableKey
+    ? null
+    : "Stripe publishable key is not configured.";
 
   const [email, setEmail] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
