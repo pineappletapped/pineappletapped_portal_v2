@@ -1286,6 +1286,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     setLoginError,
   ]);
 
+  const handlePaymentSuccess = useCallback(
+    (completedOrderId: string) => {
+      clear();
+      router.push(`/orders/${completedOrderId}`);
+    },
+    [clear, router]
+  );
+
   const initializePaymentIntent = useCallback(async () => {
     if (initializingPayment) {
       return false;
@@ -1440,14 +1448,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     stripePromise,
     hasZeroBalance,
   ]);
-
-  const handlePaymentSuccess = useCallback(
-    (completedOrderId: string) => {
-      clear();
-      router.push(`/orders/${completedOrderId}`);
-    },
-    [clear, router]
-  );
 
   const completeZeroBalanceOrder = useCallback(async () => {
     if (initializingPayment) {
