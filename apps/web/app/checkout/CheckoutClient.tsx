@@ -109,14 +109,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     setIsHydrated(true);
   }, []);
 
-  if (!isHydrated) {
-    return (
-      <div className="py-12 text-center text-sm text-gray-500" role="status">
-        Preparing checkout…
-      </div>
-    );
-  }
-
   const { items, clear } = useCart();
   const productTotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
   const rentalTotal = items.reduce(
@@ -1616,6 +1608,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       return { kind, detail: nextDetail ?? "" };
     });
   };
+
+  if (!isHydrated) {
+    return (
+      <div className="py-12 text-center text-sm text-gray-500" role="status">
+        Preparing checkout…
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-5xl mx-auto grid md:grid-cols-2 gap-8">
