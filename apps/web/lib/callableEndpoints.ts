@@ -20,7 +20,22 @@ const CODEBASE_ENV_VARS = [
   "FUNCTION_CODEBASES",
   "NEXT_PUBLIC_FUNCTION_CODEBASES",
 ];
+const CODEBASE_HINT_ENV_VARS = [
+  "FUNCTIONS_CODEBASE_HINTS",
+  "NEXT_PUBLIC_FUNCTIONS_CODEBASE_HINTS",
+  "FUNCTION_CODEBASE_HINTS",
+  "NEXT_PUBLIC_FUNCTION_CODEBASE_HINTS",
+  "CREATE_ORDER_FUNCTION_CODEBASE",
+  "NEXT_PUBLIC_CREATE_ORDER_FUNCTION_CODEBASE",
+];
+const PROJECT_ID_ENV_VARS = [
+  "NEXT_PUBLIC_FIREBASE_PROJECT_ID",
+  "FIREBASE_ADMIN_PROJECT_ID",
+  "GOOGLE_CLOUD_PROJECT",
+  "GCLOUD_PROJECT",
+];
 const CODEBASE_DELIMITER = /[\s,;]+/;
+const DEFAULT_CODEBASE_HINTS = ["ptfbportal", "ptfbportalbackend", "pineappletappedportal"];
 
 export const normaliseBaseUrl = (value: unknown): string | null => {
   if (typeof value !== "string") {
@@ -61,7 +76,75 @@ const sanitiseCodebase = (value: string | null | undefined) => {
   return trimmed;
 };
 
-export const resolveFunctionCodebases = (): string[] => {
+const expandCodebaseHint = (value: string | null | undefined): string[] => {
+  if (!value) {
+    return [];
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const variants = new Set<string>();
+  const record = (candidate: string | null) => {
+    const normalised = sanitiseCodebase(candidate);
+    if (normalised) {
+      variants.add(normalised);
+    }
+  };
+
+  record(trimmed);
+  record(trimmed.replace(/[-_]+/g, "-"));
+  record(trimmed.replace(/[^a-z0-9]+/gi, ""));
+
+  return Array.from(variants);
+};
+
+const collectCodebaseHints = (
+  additional: Array<string | null | undefined> = [],
+): string[] => {
+  const hints = new Set<string>();
+
+  const capture = (candidate: string | null | undefined) => {
+    if (!candidate) {
+      return;
+    }
+
+    for (const variant of expandCodebaseHint(candidate)) {
+      hints.add(variant);
+    }
+  };
+
+  for (const envName of CODEBASE_HINT_ENV_VARS) {
+    const raw = process.env[envName];
+    if (!raw) {
+      continue;
+    }
+
+    for (const part of raw.split(CODEBASE_DELIMITER)) {
+      capture(part);
+    }
+  }
+
+  for (const envName of PROJECT_ID_ENV_VARS) {
+    capture(process.env[envName]);
+  }
+
+  for (const fallback of DEFAULT_CODEBASE_HINTS) {
+    capture(fallback);
+  }
+
+  for (const candidate of additional) {
+    capture(candidate);
+  }
+
+  return Array.from(hints);
+};
+
+export const resolveFunctionCodebases = (
+  hints: Array<string | null | undefined> = [],
+): string[] => {
   const codebases: string[] = [""];
   const unique = new Set(codebases);
 
@@ -84,12 +167,23 @@ export const resolveFunctionCodebases = (): string[] => {
     }
   }
 
+  for (const hint of collectCodebaseHints(hints)) {
+    append(hint);
+  }
+
   append("default");
 
   return codebases;
 };
 
-export const resolveCallableFunctionIds = (functionName: string): string[] => {
+export interface CallableFunctionIdOptions {
+  codebaseHints?: Array<string | null | undefined>;
+}
+
+export const resolveCallableFunctionIds = (
+  functionName: string,
+  { codebaseHints }: CallableFunctionIdOptions = {},
+): string[] => {
   const trimmed = typeof functionName === "string" ? functionName.trim() : "";
   if (!trimmed) {
     return [];
@@ -97,7 +191,7 @@ export const resolveCallableFunctionIds = (functionName: string): string[] => {
 
   const identifiers = new Set<string>([trimmed]);
 
-  for (const codebase of resolveFunctionCodebases()) {
+  for (const codebase of resolveFunctionCodebases(codebaseHints)) {
     if (!codebase) {
       continue;
     }
