@@ -30,6 +30,7 @@ export async function POST(request: Request) {
     const result = await forwardCreateOrderRequest(
       payload,
       request.headers.get("authorization"),
+      request.headers.get("host"),
     );
 
     return new Response(JSON.stringify(result.body ?? null), {
