@@ -10237,13 +10237,16 @@ export const stripe_createPaymentIntent = functions.https.onCall(async (data, co
     const balanceAmount = Number(order.balanceAmount) || price - depositAmount;
     let amountCents;
     let description;
+    let zeroAmountPaymentType = null;
     if (type === 'deposit') {
         amountCents = Math.round(Math.max(depositAmount, 0) * 100);
         description = `Deposit for order ${orderId}`;
+        zeroAmountPaymentType = 'deposit';
     }
     else if (type === 'balance') {
         amountCents = Math.round(Math.max(balanceAmount, 0) * 100);
         description = `Balance for order ${orderId}`;
+        zeroAmountPaymentType = 'balance';
     }
     else if (type === 'custom') {
         const customAmountInput = data?.customAmount;
@@ -10264,7 +10267,29 @@ export const stripe_createPaymentIntent = functions.https.onCall(async (data, co
     else {
         throw new functions.https.HttpsError('invalid-argument', 'Invalid payment type');
     }
-    if (!Number.isFinite(amountCents) || amountCents <= 0) {
+    if (!Number.isFinite(amountCents) || amountCents < 0) {
+        throw new functions.https.HttpsError('failed-precondition', 'Payment amount must be zero or positive.');
+    }
+    if (amountCents === 0 && zeroAmountPaymentType) {
+        const currencyCode = normaliseCurrency(order?.currency) ?? normaliseCurrency(order?.currencyCode) ?? 'GBP';
+        const recorded = await recordOrderStripePayment({
+            orderId,
+            type: zeroAmountPaymentType,
+            amountReceivedCents: 0,
+            currency: currencyCode,
+            paymentIntentId: null,
+            checkoutSessionId: null,
+            paymentMethod: 'none',
+            source: 'zero_amount_payment',
+        });
+        return {
+            clientSecret: null,
+            zeroPayment: true,
+            paymentRecorded: Boolean(recorded?.recorded),
+            orderStatus: recorded?.orderData?.status ?? null,
+        };
+    }
+    if (amountCents === 0) {
         throw new functions.https.HttpsError('failed-precondition', 'Payment amount must be greater than zero.');
     }
     const stripe = await getStripeClient();

@@ -222,8 +222,23 @@ export function useCheckoutPayment({
         orderId: createdOrderId,
         type: "deposit",
       });
-      const secret: string | undefined = intentResponse.data?.clientSecret;
+      const intentData: Record<string, unknown> =
+        intentResponse && typeof intentResponse === "object"
+          ? (intentResponse.data as Record<string, unknown>) ?? {}
+          : {};
+      const secret =
+        typeof intentData.clientSecret === "string" && intentData.clientSecret.trim().length > 0
+          ? intentData.clientSecret
+          : null;
+      const zeroPayment = intentData.zeroPayment === true;
       if (!secret) {
+        if (zeroPayment) {
+          setOrderId(createdOrderId);
+          setClientSecret(null);
+          lastIntentPayloadRef.current = intentPayload;
+          onSuccess(createdOrderId);
+          return true;
+        }
         throw new Error("Payment session could not be created.");
       }
 
@@ -248,6 +263,7 @@ export function useCheckoutPayment({
     hasZeroBalance,
     initializing,
     intentPayload,
+    onSuccess,
     stripePromise,
     validate,
   ]);
@@ -307,8 +323,23 @@ export function useCheckoutPayment({
         orderId: createdOrderId,
         type: "deposit",
       });
-      const secret: string | undefined = intentResponse.data?.clientSecret;
+      const intentData: Record<string, unknown> =
+        intentResponse && typeof intentResponse === "object"
+          ? (intentResponse.data as Record<string, unknown>) ?? {}
+          : {};
+      const secret =
+        typeof intentData.clientSecret === "string" && intentData.clientSecret.trim().length > 0
+          ? intentData.clientSecret
+          : null;
+      const zeroPayment = intentData.zeroPayment === true;
       if (!secret) {
+        if (zeroPayment) {
+          setOrderId(createdOrderId);
+          setClientSecret(null);
+          lastIntentPayloadRef.current = intentPayload;
+          onSuccess(createdOrderId);
+          return true;
+        }
         throw new Error("Payment session could not be created.");
       }
 
