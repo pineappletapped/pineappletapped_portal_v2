@@ -149,8 +149,11 @@ export async function POST(request: Request) {
   ]);
   const attemptLogger = createEndpointAttemptLogger();
 
+  const RETRYABLE_STATUS_CODES = new Set([404, 408, 425, 429, 500, 502, 503, 504, 521, 522, 523]);
+
   for (let index = 0; index < endpoints.length; index += 1) {
     const endpoint = endpoints[index];
+    const isLastAttempt = index >= endpoints.length - 1;
 
     try {
       const response = await fetch(endpoint, {
@@ -173,16 +176,27 @@ export async function POST(request: Request) {
         try {
           json = JSON.parse(text) as CallableEnvelope;
         } catch (parseError) {
+          const summary = (parseError as Error)?.message ?? "callable response parse failed";
+          attemptLogger.push(`${endpoint} → ${summary}`);
+          if (!isLastAttempt) {
+            continue;
+          }
+
           return createErrorResponse(
             502,
             "invalid-function-response",
             "Callable response was not valid JSON",
-            (parseError as Error)?.message ?? "Callable response was not valid JSON",
+            summary,
           );
         }
       }
 
       if (response.ok && !isJson) {
+        attemptLogger.push(`${endpoint} → non-JSON response`);
+        if (!isLastAttempt) {
+          continue;
+        }
+
         return createErrorResponse(
           502,
           "invalid-function-response",
@@ -210,17 +224,18 @@ export async function POST(request: Request) {
             ? callableError.details
             : callableError ?? summariseDetails(text) ?? null;
 
-        if (response.status === 404) {
-          attemptLogger.push(`${endpoint} → 404`);
-          if (index < endpoints.length - 1) {
-            continue;
-          }
+        const attemptSummary = `${endpoint} → ${response.status} ${errorDetails}`;
+        attemptLogger.push(attemptSummary);
+
+        if (RETRYABLE_STATUS_CODES.has(response.status) && !isLastAttempt) {
+          continue;
         }
 
         return createErrorResponse(502, errorCode, errorDetails, {
           endpoint,
           responseStatus: response.status,
           details: errorDetailsPayload,
+          attempts: attemptLogger.attempts,
         });
       }
 
@@ -228,7 +243,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ data });
     } catch (error) {
       attemptLogger.push(`${endpoint} → ${(error as Error)?.message ?? "request failed"}`);
-      if (index < endpoints.length - 1) {
+      if (!isLastAttempt) {
         continue;
       }
 
