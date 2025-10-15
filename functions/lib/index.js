@@ -1,6 +1,6 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
-import { onRequest } from 'firebase-functions/v2/https';
+import { onCall, onRequest } from 'firebase-functions/v2/https';
 import Stripe from 'stripe';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
 import sharp from 'sharp';
@@ -14,23 +14,140 @@ import ColorThief from 'color-thief-node';
 import { google } from 'googleapis';
 import { Readable } from 'stream';
 import fetch from 'node-fetch';
-import * as cors from 'cors';
 import { bookingConflictsWithRange } from './utils/availability.js';
 import { DEFAULT_KIT_ROUTING_SETTINGS, ROUTING_STAGE_META, cloneRoutingSettings, parseKitRoutingSettings, resolveStageLabel as resolveRoutingStageLabel, } from './utils/routing.js';
-const corsHandler = cors.default({ origin: true });
-const ANALYTICS_ALLOWED_ORIGINS = [
+const normaliseEnvValue = (value) => {
+    if (!value) {
+        return null;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+};
+const parseAllowedOrigins = (value) => {
+    const normalised = normaliseEnvValue(value);
+    if (!normalised) {
+        return [];
+    }
+    return normalised
+        .split(/[\s,]+/)
+        .map((origin) => origin.trim())
+        .filter((origin) => origin.length > 0);
+};
+const DEFAULT_ALLOWED_ORIGINS = [
     'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
+    'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app',
     'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
     'http://localhost:3000',
+    'http://localhost:5173',
 ];
-function applyRecordLoginCors(req, res) {
-    const origin = req.get('origin');
-    const allowedOrigin = origin && ANALYTICS_ALLOWED_ORIGINS.includes(origin) ? origin : '*';
-    res.set('Access-Control-Allow-Origin', allowedOrigin);
-    res.set('Vary', 'Origin');
-    res.set('Access-Control-Allow-Methods', 'POST,OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+const allowedOrigins = new Set([
+    ...DEFAULT_ALLOWED_ORIGINS,
+    ...parseAllowedOrigins(process.env.SHARED_ALLOWED_ORIGINS),
+    ...parseAllowedOrigins(process.env.NEXT_PUBLIC_SHARED_ALLOWED_ORIGINS),
+    ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
+].map((origin) => origin.toLowerCase()));
+const resolveAllowedOrigin = (originHeader) => {
+    if (!originHeader) {
+        return null;
+    }
+    const trimmed = originHeader.trim();
+    if (!trimmed || trimmed.toLowerCase() === 'null') {
+        return null;
+    }
+    const lowerCased = trimmed.toLowerCase();
+    return allowedOrigins.has(lowerCased) ? trimmed : null;
+};
+// Allow callable functions from any origin so regional App Hosting sites can
+// authenticate without additional CORS configuration. Auth checks still guard
+// access to the underlying handlers.
+const CALLABLE_CORS_ORIGINS = true;
+const appendVaryHeader = (res, value) => {
+    const existing = res.getHeader('Vary');
+    if (!existing) {
+        res.setHeader('Vary', value);
+        return;
+    }
+    const header = Array.isArray(existing) ? existing.join(', ') : String(existing);
+    const parts = header
+        .split(',')
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0);
+    if (!parts.includes(value)) {
+        parts.push(value);
+        res.setHeader('Vary', parts.join(', '));
+    }
+};
+const DEFAULT_ALLOWED_HEADERS = 'authorization,content-type,x-requested-with';
+const DEFAULT_ALLOWED_METHODS = 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS';
+const configureSharedCors = (req, res) => {
+    const originHeader = req.get('origin') ?? req.get('Origin') ?? null;
+    const allowedOrigin = resolveAllowedOrigin(originHeader);
+    if (originHeader && !allowedOrigin) {
+        const requestPath = req.originalUrl ?? req.url ?? '[unknown]';
+        console.warn('Blocked request from disallowed origin', originHeader, req.method, requestPath);
+        return { allowed: false, handled: false, origin: originHeader };
+    }
+    if (allowedOrigin) {
+        res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+        appendVaryHeader(res, 'Origin');
+    }
+    const requestedHeaders = req.get('Access-Control-Request-Headers');
+    if (requestedHeaders) {
+        res.setHeader('Access-Control-Allow-Headers', requestedHeaders);
+        appendVaryHeader(res, 'Access-Control-Request-Headers');
+    }
+    else {
+        res.setHeader('Access-Control-Allow-Headers', DEFAULT_ALLOWED_HEADERS);
+    }
+    const requestedMethod = req.get('Access-Control-Request-Method');
+    if (requestedMethod) {
+        res.setHeader('Access-Control-Allow-Methods', requestedMethod);
+    }
+    else {
+        res.setHeader('Access-Control-Allow-Methods', DEFAULT_ALLOWED_METHODS);
+    }
+    res.setHeader('Access-Control-Max-Age', '3600');
+    if (req.method === 'OPTIONS') {
+        res.status(204).send('');
+        return { allowed: true, handled: true, origin: allowedOrigin };
+    }
+    return { allowed: true, handled: false, origin: allowedOrigin };
+};
+async function runSharedCors(req, res) {
+    return configureSharedCors(req, res);
 }
+async function withSharedCors(req, res, handler) {
+    const corsResult = await runSharedCors(req, res);
+    if (!corsResult.allowed) {
+        if (!corsResult.handled) {
+            res.status(403).json({ error: 'Origin not allowed' });
+        }
+        return;
+    }
+    if (corsResult.handled) {
+        return;
+    }
+    await handler();
+}
+const CALLABLE_ERROR_STATUS = {
+    cancelled: 499,
+    unknown: 500,
+    "invalid-argument": 400,
+    "deadline-exceeded": 504,
+    "not-found": 404,
+    "already-exists": 409,
+    "permission-denied": 403,
+    "resource-exhausted": 429,
+    "failed-precondition": 412,
+    aborted: 409,
+    "out-of-range": 400,
+    unimplemented: 501,
+    internal: 500,
+    unavailable: 503,
+    "data-loss": 500,
+    unauthenticated: 401,
+};
 // TODO: wrap all http functions with the cors handler, for example:
 // exports.myFunction = functions.https.onRequest((req, res) => {
 //   corsHandler(req, res, () => {
@@ -425,7 +542,8 @@ function roundCurrency(value) {
     if (typeof value !== 'number' || !Number.isFinite(value)) {
         return 0;
     }
-    return Number(value.toFixed(2));
+    const rounded = Math.round(value * 100) / 100;
+    return Math.abs(rounded) < 0.005 ? 0 : rounded;
 }
 function buildBookingInviteUrl(token) {
     const base = BOOKING_INVITE_BASE_URL || 'https://portal.pineappletapped.com';
@@ -2671,6 +2789,28 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
             console.warn('drive_stageAssetFromFile order lookup failed', { projectId, orderId }, error);
         }
     }
+    const rawDigitalDeliveries = orderData && orderData.digitalDeliveries && typeof orderData.digitalDeliveries === 'object'
+        ? orderData.digitalDeliveries
+        : {};
+    const normalisedDigitalMap = {};
+    let digitalDeliveries = [];
+    Object.entries(rawDigitalDeliveries).forEach(([productId, raw]) => {
+        const normalised = normaliseDigitalDelivery(raw, null);
+        if (normalised && normalised.enabled) {
+            normalisedDigitalMap[productId] = normalised;
+            const summary = serialiseDigitalDeliveryForClient(normalised);
+            if (summary) {
+                digitalDeliveries.push({ productId, ...summary });
+            }
+        }
+    });
+    const digitalStatusFromOrder = typeof orderData?.digitalDeliveryStatus === 'string'
+        ? orderData.digitalDeliveryStatus
+        : null;
+    let digitalUpdatedAtTimestamp = orderData
+        ? parseTimestamp(orderData.digitalDeliveryUpdatedAt)
+        : null;
+    let digitalStatus = digitalStatusFromOrder ?? computeAggregateDigitalStatus(normalisedDigitalMap) ?? null;
     const drive = await createDriveService();
     if (!drive) {
         throw new functions.https.HttpsError('failed-precondition', 'Google Drive service account credentials are not configured.');
@@ -2956,7 +3096,10 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
     digitalDeliveries = Object.entries(normalisedDigitalMap)
         .map(([productId, config]) => {
         const summary = serialiseDigitalDeliveryForClient(config);
-        return summary ? { productId, ...summary } : null;
+        if (!summary) {
+            return null;
+        }
+        return { productId, ...summary };
     })
         .filter((entry) => entry !== null);
     const aggregateStatusFinal = computeAggregateDigitalStatus(normalisedDigitalMap);
@@ -4605,74 +4748,93 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
     return { ok: true, responseId };
 });
 // Track page view analytics from the public site
-export const analytics_track = onRequest({ region: 'us-central1', cors: ANALYTICS_ALLOWED_ORIGINS }, async (req, res) => {
-    try {
-        let uid = null;
-        let userName = null;
-        const authHeader = req.get('authorization');
-        if (authHeader?.startsWith('Bearer ')) {
-            try {
-                const decoded = await admin
-                    .auth()
-                    .verifyIdToken(authHeader.split('Bearer ')[1]);
-                uid = decoded.uid;
-                const userSnap = await db.collection('users').doc(uid).get();
-                const udata = userSnap.data();
-                if (udata) {
-                    userName = udata.fullName || udata.email || null;
-                }
-            }
-            catch (err) {
-                console.error('verifyIdToken failed', err);
+export const analytics_track = onCall({ region: 'europe-west2', cors: CALLABLE_CORS_ORIGINS }, async (request) => {
+    const rawRequest = request.rawRequest;
+    const payload = request.data && typeof request.data === 'object'
+        ? request.data
+        : {};
+    let uid = request.auth?.uid ?? null;
+    let userName = null;
+    if (uid) {
+        try {
+            const userSnap = await db.collection('users').doc(uid).get();
+            const userData = userSnap.data();
+            if (userData) {
+                userName = userData.fullName || userData.email || null;
             }
         }
-        const rawBody = req.body;
-        let data = {};
-        if (typeof rawBody === 'string') {
-            if (rawBody.trim()) {
-                try {
-                    data = JSON.parse(rawBody);
-                }
-                catch (err) {
-                    console.error('analytics_track invalid JSON payload', err);
-                }
-            }
+        catch (error) {
+            console.error('analytics_track failed to load user profile', error);
         }
-        else if (rawBody && typeof rawBody === 'object') {
-            data = rawBody;
-        }
-        const visitorId = data.visitorId ?? null;
-        if (!uid && visitorId) {
-            const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
-            const mapData = mapSnap.data();
-            if (mapData) {
-                uid = mapData.uid || null;
-                userName = mapData.userName || null;
-            }
-        }
-        if (visitorId && uid && userName) {
-            await db
-                .collection('analyticsVisitors')
-                .doc(visitorId)
-                .set({ uid, userName }, { merge: true });
-        }
-        const event = {
-            uid,
-            userName,
-            path: data.path || null,
-            referrer: data.referrer || null,
-            userAgent: data.userAgent || req.get('user-agent') || null,
-            visitorId,
-            duration: data.duration || null,
-            ip: req.ip,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        };
-        await db.collection('analyticsEvents').add(event);
-        res.json({ ok: true });
     }
-    catch (err) {
-        console.error('analytics_track error', err);
-        res.status(500).json({ error: 'internal' });
+    const visitorIdRaw = payload.visitorId;
+    const visitorId = typeof visitorIdRaw === 'string' && visitorIdRaw.trim().length > 0
+        ? visitorIdRaw
+        : null;
+    if (!uid && visitorId) {
+        const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
+        const mapData = mapSnap.data();
+        if (mapData) {
+            uid = mapData.uid || null;
+            userName = mapData.userName || null;
+        }
+    }
+    if (visitorId && uid && userName) {
+        await db.collection('analyticsVisitors').doc(visitorId).set({ uid, userName }, { merge: true });
+    }
+    const resolveHeader = (name) => {
+        if (!rawRequest) {
+            return null;
+        }
+        if (typeof rawRequest.get === 'function') {
+            return rawRequest.get(name) ?? null;
+        }
+        const headerValue = rawRequest.headers?.[name];
+        if (typeof headerValue === 'string') {
+            return headerValue;
+        }
+        if (Array.isArray(headerValue) && headerValue.length > 0) {
+            return headerValue[0] ?? null;
+        }
+        return null;
+    };
+    let ip = null;
+    if (rawRequest) {
+        if (typeof rawRequest.ip === 'string' && rawRequest.ip) {
+            ip = rawRequest.ip;
+        }
+        else if (Array.isArray(rawRequest.ips) && rawRequest.ips.length > 0) {
+            ip = rawRequest.ips[0] ?? null;
+        }
+        if (!ip) {
+            const forwarded = resolveHeader('x-forwarded-for');
+            if (forwarded) {
+                ip = forwarded.split(',')[0]?.trim() || null;
+            }
+        }
+    }
+    const event = {
+        uid,
+        userName,
+        path: typeof payload.path === 'string' ? payload.path : null,
+        referrer: typeof payload.referrer === 'string' ? payload.referrer : null,
+        userAgent: typeof payload.userAgent === 'string' && payload.userAgent.trim().length > 0
+            ? payload.userAgent
+            : resolveHeader('user-agent'),
+        visitorId,
+        duration: typeof payload.duration === 'number' && Number.isFinite(payload.duration)
+            ? payload.duration
+            : null,
+        ip,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    try {
+        await db.collection('analyticsEvents').add(event);
+        return { ok: true };
+    }
+    catch (error) {
+        console.error('analytics_track error', error);
+        throw new functions.https.HttpsError('internal', 'Failed to record analytics event');
     }
 });
 export const bookings_confirm = functions.https.onCall(async (data, context) => {
@@ -6279,88 +6441,6 @@ export const expo_lead_submit = functions.https.onCall(async (data) => {
             .map((address) => sendEmail(address, `Expo lead captured: ${pageData.eventName || 'Expo'}`, summary).catch((err) => {
             console.error('Failed to send expo lead notification', address, err);
         })));
-    }
-    return { ok: true };
-});
-export const expo_lead_sendFollowUp = functions.https.onCall(async (data, context) => {
-    var _a, _b, _c, _d;
-    if (!context.auth) {
-        throw new functions.https.HttpsError('unauthenticated', 'Sign in required.');
-    }
-    const leadId = typeof data.leadId === 'string' ? data.leadId.trim() : '';
-    const subject = typeof data.subject === 'string' ? data.subject.trim() : '';
-    const body = typeof data.body === 'string' ? data.body.trim() : '';
-    if (!leadId) {
-        throw new functions.https.HttpsError('invalid-argument', 'leadId is required.');
-    }
-    if (!subject) {
-        throw new functions.https.HttpsError('invalid-argument', 'subject is required.');
-    }
-    if (!body) {
-        throw new functions.https.HttpsError('invalid-argument', 'body is required.');
-    }
-    const leadSnap = await db.collection('expoLeads').doc(leadId).get();
-    if (!leadSnap.exists) {
-        throw new functions.https.HttpsError('not-found', 'Expo lead not found.');
-    }
-    const leadData = leadSnap.data() ?? {};
-    const email = typeof leadData.email === 'string' ? leadData.email.trim() : '';
-    if (!email) {
-        throw new functions.https.HttpsError('failed-precondition', 'Lead has no email address.');
-    }
-    await sendEmail(email, subject, body);
-    const timestamp = admin.firestore.FieldValue.serverTimestamp();
-    const followUpLog = {
-        leadId,
-        subject,
-        body,
-        sentTo: email,
-        sentByUid: (_a = context.auth.uid) !== null && _a !== void 0 ? _a : null,
-        sentByEmail: typeof ((_b = context.auth.token) === null || _b === void 0 ? void 0 : _b.email) === 'string'
-            ? context.auth.token.email
-            : null,
-        eventName: typeof leadData.eventName === 'string' ? leadData.eventName : null,
-        eventSlug: typeof leadData.eventSlug === 'string'
-            ? leadData.eventSlug
-            : typeof leadData.slug === 'string'
-                ? leadData.slug
-                : null,
-        createdAt: timestamp,
-    };
-    await Promise.all([
-        db.collection('expoLeads').doc(leadId).set({
-            lastFollowUpAt: timestamp,
-            lastFollowUpByUid: (_c = context.auth.uid) !== null && _c !== void 0 ? _c : null,
-            lastFollowUpByEmail: typeof ((_d = context.auth.token) === null || _d === void 0 ? void 0 : _d.email) === 'string'
-                ? context.auth.token.email
-                : null,
-            lastFollowUpSubject: subject,
-            updatedAt: timestamp,
-        }, { merge: true }),
-        db.collection('expoLeadFollowUps').add(followUpLog),
-    ]);
-    try {
-        const crmSnap = await db.collection('leads').where('email', '==', email).limit(1).get();
-        if (!crmSnap.empty) {
-            const crmUpdate = {
-                status: 'outreach',
-                lastFollowUpAt: timestamp,
-                lastFollowUpByUid: context.auth.uid ?? null,
-                lastFollowUpByEmail: typeof (context.auth.token?.email) === 'string'
-                    ? context.auth.token.email
-                    : null,
-                lastFollowUpSource: 'expo',
-                updatedAt: timestamp,
-            };
-            if (followUpLog.eventName)
-                crmUpdate.eventName = followUpLog.eventName;
-            if (followUpLog.eventSlug)
-                crmUpdate.eventSlug = followUpLog.eventSlug;
-            await crmSnap.docs[0].ref.set(crmUpdate, { merge: true });
-        }
-    }
-    catch (err) {
-        console.error('Failed to update CRM lead after expo follow-up', err);
     }
     return { ok: true };
 });
@@ -8018,12 +8098,7 @@ export const esign_request = functions.https.onCall(async (data, context) => {
     });
     return { id: sigRef.id };
 });
-/**
- * Create an order from cart item IDs and quantities. Fetches product data to calculate
- * pricing server-side and writes the order document with status 'pending'. Returns
- * the created order ID.
- */
-export const createOrder = functions.https.onCall(async (data, context) => {
+async function executeCreateOrder(data, context) {
     const toNumber = (value, fallback = 0) => {
         const num = Number(value);
         return Number.isFinite(num) ? num : fallback;
@@ -8934,50 +9009,78 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     let voucherDiscount = 0;
     let voucherCode = null;
     if (voucher) {
-        const vSnap = await db
-            .collection('vouchers')
-            .where('code', '==', voucher)
-            .limit(1)
-            .get();
-        if (!vSnap.empty) {
-            const v = vSnap.docs[0].data();
-            const locs = v.locations || [];
-            const locAllowed = locs.length === 0 ||
-                (location && locs.map((l) => l.toLowerCase()).includes(String(location).toLowerCase()));
-            if (locAllowed) {
-                const prodIds = v.productIds || [];
-                const catIds = v.categoryIds || [];
-                let eligibleSubtotal = 0;
-                orderItems.forEach((item) => {
-                    const prodOk = prodIds.length === 0 || prodIds.includes(item.id);
-                    const catOk = catIds.length === 0 || catIds.includes(item.category);
-                    if (prodOk && catOk)
-                        eligibleSubtotal += item.price * item.quantity;
-                });
-                if (eligibleSubtotal > 0) {
-                    if (v.type === 'percentage') {
-                        voucherDiscount = eligibleSubtotal * (v.amount / 100);
+        try {
+            const vSnap = await db
+                .collection('vouchers')
+                .where('code', '==', voucher)
+                .limit(1)
+                .get();
+            if (!vSnap.empty) {
+                const v = vSnap.docs[0].data();
+                const locs = Array.isArray(v.locations) ? v.locations : [];
+                const locAllowed = locs.length === 0 ||
+                    (location &&
+                        locs
+                            .map((l) => (typeof l === 'string' ? l.toLowerCase() : ''))
+                            .includes(String(location).toLowerCase()));
+                if (locAllowed) {
+                    const prodIds = Array.isArray(v.productIds) ? v.productIds : [];
+                    const catIds = Array.isArray(v.categoryIds) ? v.categoryIds : [];
+                    let eligibleSubtotal = 0;
+                    orderItems.forEach((item) => {
+                        const prodOk = prodIds.length === 0 || prodIds.includes(item.id);
+                        const catOk = catIds.length === 0 || catIds.includes(item.category);
+                        if (prodOk && catOk) {
+                            const lineTotal = Number(item.price) * Number(item.quantity ?? 0);
+                            if (Number.isFinite(lineTotal)) {
+                                eligibleSubtotal += lineTotal;
+                            }
+                        }
+                    });
+                    const voucherAmount = parseNumber(v.amount);
+                    const voucherType = typeof v.type === 'string' ? v.type.toLowerCase() : '';
+                    if (eligibleSubtotal > 0 && voucherAmount !== null && Number.isFinite(voucherAmount)) {
+                        if (voucherType === 'percentage') {
+                            const safePercent = Math.max(0, voucherAmount);
+                            voucherDiscount = eligibleSubtotal * (safePercent / 100);
+                        }
+                        else if (voucherType === 'fixed') {
+                            const safeFixed = Math.max(0, voucherAmount);
+                            voucherDiscount = Math.min(safeFixed, eligibleSubtotal);
+                        }
+                        voucherCode = voucher;
                     }
-                    else if (v.type === 'fixed') {
-                        voucherDiscount = Math.min(v.amount, eligibleSubtotal);
-                    }
-                    voucherCode = voucher;
                 }
             }
         }
+        catch (voucherError) {
+            console.error('Failed to resolve voucher', voucher, voucherError);
+        }
     }
-    const subtotalAfterVoucher = productSubtotal - voucherDiscount;
+    voucherDiscount =
+        Number.isFinite(voucherDiscount) && voucherDiscount > 0
+            ? roundCurrency(Math.min(voucherDiscount, productSubtotal))
+            : 0;
+    const subtotalAfterVoucherRaw = productSubtotal - voucherDiscount;
+    const subtotalAfterVoucher = subtotalAfterVoucherRaw > 0 ? roundCurrency(subtotalAfterVoucherRaw) : 0;
     let discountPct = 0;
     if (context.auth?.uid) {
         const userSnap = await db.collection('users').doc(context.auth.uid).get();
-        discountPct = userSnap.data()?.discount || 0;
+        const rawDiscount = parseNumber(userSnap.data()?.discount);
+        discountPct = rawDiscount !== null && Number.isFinite(rawDiscount) ? rawDiscount : 0;
     }
-    const discountAmount = subtotalAfterVoucher * (discountPct / 100);
-    const finalTotal = subtotalAfterVoucher - discountAmount + rentalSubtotal;
-    const vat = finalTotal * VAT_RATE;
-    const price = finalTotal + vat;
+    const rawDiscountAmount = subtotalAfterVoucher * (discountPct / 100);
+    const discountAmount = rawDiscountAmount > 0 && Number.isFinite(rawDiscountAmount)
+        ? roundCurrency(Math.min(subtotalAfterVoucher, rawDiscountAmount))
+        : 0;
+    const subtotalAfterAllDiscountsRaw = subtotalAfterVoucher - discountAmount;
+    const subtotalAfterAllDiscounts = subtotalAfterAllDiscountsRaw > 0 ? roundCurrency(subtotalAfterAllDiscountsRaw) : 0;
+    const netTotalRaw = subtotalAfterAllDiscounts + rentalSubtotal;
+    const netTotal = netTotalRaw > 0 && Number.isFinite(netTotalRaw) ? roundCurrency(netTotalRaw) : 0;
+    const vat = netTotal > 0 ? roundCurrency(netTotal * VAT_RATE) : 0;
+    const price = netTotal > 0 ? roundCurrency(netTotal + vat) : 0;
     const budgetSubtotal = labourSubtotal + kitSubtotal + travelSubtotal + parkingSubtotal;
-    const profit = finalTotal - (budgetSubtotal + rentalSubtotal);
+    const profit = netTotal - (budgetSubtotal + rentalSubtotal);
     const affiliateCommission = affiliateContext
         ? computeAffiliateCommission(profit, affiliateContext.commissionRate)
         : null;
@@ -9003,7 +9106,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         parking: parkingSubtotal,
         rental: rentalSubtotal,
         totalCost: budgetSubtotal + rentalSubtotal,
-        netRevenue: finalTotal,
+        netRevenue: netTotal,
         grossRevenue: price,
         profit,
     };
@@ -9088,7 +9191,7 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         voucherDiscount,
         discountPct,
         discountAmount,
-        netTotal: finalTotal,
+        netTotal: netTotal,
         vat,
         price,
         profit,
@@ -9181,13 +9284,15 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         orderData.royalty = null;
         orderData.royaltyPercentage = null;
     }
-    if (!Array.isArray(orderData.paymentSchedule) || orderData.paymentSchedule.length === 0) {
+    if ((!Array.isArray(orderData.paymentSchedule) || orderData.paymentSchedule.length === 0) &&
+        price > 0 &&
+        netTotal > 0) {
         try {
             const { splitTerms } = await getStripeOperationalSettings();
             if (splitTerms.length > 0) {
                 const scheduleEntries = splitTerms.map((term, index) => {
                     const grossAmount = Number((price * (term.percentage / 100)).toFixed(2));
-                    const netAmount = Number((finalTotal * (term.percentage / 100)).toFixed(2));
+                    const netAmount = Number((netTotal * (term.percentage / 100)).toFixed(2));
                     let dueAt = null;
                     if (term.dueDays !== null) {
                         if (term.dueDays <= 0) {
@@ -9216,6 +9321,9 @@ export const createOrder = functions.https.onCall(async (data, context) => {
         catch (scheduleError) {
             console.warn('Failed to apply default Stripe payment schedule', scheduleError);
         }
+    }
+    else if (!Array.isArray(orderData.paymentSchedule)) {
+        orderData.paymentSchedule = [];
     }
     const allocatedOrderNumber = await allocateOrderNumber();
     if (allocatedOrderNumber.number !== null) {
@@ -9344,10 +9452,96 @@ export const createOrder = functions.https.onCall(async (data, context) => {
     return {
         orderId: orderRef.id,
         price,
-        netTotal: finalTotal,
+        netTotal: netTotal,
         voucherDiscount,
         discountAmount,
     };
+}
+export const createOrder = onRequest({ region: 'europe-west2' }, async (req, res) => {
+    const corsResult = await runSharedCors(req, res);
+    if (!corsResult.allowed) {
+        res.status(403).json({ error: 'Origin not allowed', code: 'cors-not-allowed' });
+        return;
+    }
+    if (corsResult.handled) {
+        return;
+    }
+    if (req.method !== 'POST') {
+        res.status(405).json({ error: 'Method not allowed', code: 'method-not-allowed' });
+        return;
+    }
+    const authHeader = req.get('authorization') ?? req.get('Authorization');
+    let authContext = null;
+    if (authHeader?.startsWith('Bearer ')) {
+        const token = authHeader.slice('Bearer '.length).trim();
+        if (token) {
+            try {
+                const decoded = await admin.auth().verifyIdToken(token);
+                authContext = { uid: decoded.uid, token: decoded };
+            }
+            catch (error) {
+                console.error('createOrder verifyIdToken failed', error);
+                res.status(401).json({ error: 'Invalid authentication token', code: 'unauthenticated' });
+                return;
+            }
+        }
+    }
+    let body = req.body;
+    if (Buffer.isBuffer(body)) {
+        const text = body.toString('utf8');
+        if (text.trim()) {
+            try {
+                body = JSON.parse(text);
+            }
+            catch (error) {
+                console.error('createOrder invalid buffer body', error);
+                res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
+                return;
+            }
+        }
+        else {
+            body = null;
+        }
+    }
+    else if (typeof body === 'string') {
+        if (body.trim()) {
+            try {
+                body = JSON.parse(body);
+            }
+            catch (error) {
+                console.error('createOrder invalid string body', error);
+                res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
+                return;
+            }
+        }
+        else {
+            body = null;
+        }
+    }
+    const payloadCandidate = body && typeof body === 'object' && body !== null && 'data' in body
+        ? body.data
+        : body;
+    if (!payloadCandidate || typeof payloadCandidate !== 'object') {
+        res.status(400).json({ error: 'Order payload is required', code: 'invalid-argument' });
+        return;
+    }
+    try {
+        const result = await executeCreateOrder(payloadCandidate, { auth: authContext });
+        res.status(200).json({ data: result ?? null });
+    }
+    catch (error) {
+        if (error instanceof functions.https.HttpsError) {
+            const status = CALLABLE_ERROR_STATUS[error.code] ?? 500;
+            res.status(status).json({
+                error: error.message || 'Failed to create order.',
+                code: error.code,
+                ...(error.details === undefined ? {} : { details: error.details }),
+            });
+            return;
+        }
+        console.error('createOrder handler failed', error);
+        res.status(500).json({ error: 'Failed to create order.', code: 'internal' });
+    }
 });
 export const clientResearch_onOrderCreated = functions.firestore
     .document('orders/{orderId}')
@@ -12117,94 +12311,15 @@ async function recordLoginForUid(uid, timestampValue) {
         timestamp,
     });
 }
-function parseRequestBody(req) {
-    const rawBody = req.body;
-    if (typeof rawBody === 'string') {
-        const trimmed = rawBody.trim();
-        if (!trimmed) {
-            return {};
-        }
-        try {
-            return JSON.parse(trimmed);
-        }
-        catch (error) {
-            console.warn('recordLoginEvent invalid JSON body', error);
-            return {};
-        }
-    }
-    if (Buffer.isBuffer(rawBody)) {
-        const text = rawBody.toString('utf8').trim();
-        if (!text) {
-            return {};
-        }
-        try {
-            return JSON.parse(text);
-        }
-        catch (error) {
-            console.warn('recordLoginEvent invalid buffer body', error);
-            return {};
-        }
-    }
-    if (rawBody && typeof rawBody === 'object') {
-        return rawBody;
-    }
-    return {};
-}
-/**
- * Record a user login event via HTTPS callable. Stores loginHistory for the current user.
- */
-export const recordLogin = functions.https.onCall(async (data, context) => {
-    if (!context.auth?.uid) {
+const recordLoginCallable = onCall({ region: 'europe-west2', cors: CALLABLE_CORS_ORIGINS }, async (request) => {
+    if (!request.auth?.uid) {
         throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
     }
-    await recordLoginForUid(context.auth.uid, data?.timestamp);
+    await recordLoginForUid(request.auth.uid, request.data?.timestamp);
     return { ok: true };
 });
-export const recordLoginEvent = onRequest({ region: 'us-central1', cors: true }, async (req, res) => {
-    applyRecordLoginCors(req, res);
-    if (req.method === 'OPTIONS') {
-        res.status(204).send('');
-        return;
-    }
-    if (req.method !== 'POST') {
-        res.status(405).json({ error: 'Method not allowed' });
-        return;
-    }
-    const authHeader = req.get('authorization') || '';
-    if (!authHeader.startsWith('Bearer ')) {
-        res.status(401).json({ error: 'Sign in required' });
-        return;
-    }
-    const token = authHeader.split('Bearer ')[1]?.trim();
-    if (!token) {
-        res.status(401).json({ error: 'Sign in required' });
-        return;
-    }
-    let uid = null;
-    try {
-        const decoded = await admin.auth().verifyIdToken(token);
-        uid = decoded.uid;
-    }
-    catch (error) {
-        console.error('recordLoginEvent verifyIdToken failed', error);
-        res.status(401).json({ error: 'Invalid token' });
-        return;
-    }
-    if (!uid) {
-        res.status(401).json({ error: 'Invalid token' });
-        return;
-    }
-    const body = parseRequestBody(req);
-    try {
-        await recordLoginForUid(uid, body.timestamp);
-        res.set('Cache-Control', 'no-store');
-        res.json({ ok: true });
-    }
-    catch (error) {
-        console.error('recordLoginEvent failed', error);
-        res.status(500).json({ error: 'Failed to record login' });
-    }
-});
+export const recordLogin = recordLoginCallable;
+export const recordLoginEvent = recordLoginCallable;
 /**
  * ADMIN FUNCTIONS
  * The following callables support management operations for super administrators. These
@@ -12268,20 +12383,21 @@ async function assertStaffRequest(req, res, requiredRoles) {
 /**
  * List all users. Returns a small subset of user fields for security reasons.
  */
-export const admin_listUsers = functions.https.onRequest((req, res) => {
-    corsHandler(req, res, async () => {
+export const admin_listUsers = functions.https.onRequest(async (req, res) => {
+    await withSharedCors(req, res, async () => {
         if (req.method !== 'GET') {
             res.status(405).end();
             return;
         }
         const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
-        if (!requester)
+        if (!requester) {
             return;
+        }
         try {
             const snap = await db.collection('users').get();
             const users = snap.docs.map((doc) => {
                 const data = doc.data();
-                if (data.createdAt && data.createdAt.toDate) {
+                if (data.createdAt && typeof data.createdAt.toDate === 'function') {
                     data.createdAt = data.createdAt.toDate().toISOString();
                 }
                 return { id: doc.id, ...data };
@@ -12297,15 +12413,16 @@ export const admin_listUsers = functions.https.onRequest((req, res) => {
 /**
  * Update a user's profile. Accepts { userId, updates }. Only staff can call.
  */
-export const admin_updateUser = functions.https.onRequest((req, res) => {
-    corsHandler(req, res, async () => {
+export const admin_updateUser = functions.https.onRequest(async (req, res) => {
+    await withSharedCors(req, res, async () => {
         if (req.method !== 'POST') {
             res.status(405).end();
             return;
         }
         const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
-        if (!requester)
+        if (!requester) {
             return;
+        }
         const { userId, updates } = req.body || {};
         if (!userId || !updates) {
             res.status(400).json({ error: 'userId and updates required' });
@@ -12341,7 +12458,7 @@ export const admin_updateUser = functions.https.onRequest((req, res) => {
                 previousDisabled = null;
             }
         }
-        if (Object.keys(authUpdates).length) {
+        if (Object.keys(authUpdates).length > 0) {
             await admin.auth().updateUser(userId, authUpdates);
         }
         if (disabled !== undefined) {

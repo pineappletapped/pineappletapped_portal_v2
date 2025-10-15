@@ -33,12 +33,24 @@ const config = {
   measurementId,
 };
 
-const defaultFunctionsBaseUrl =
+const explicitFunctionsBaseUrl =
   cleanEnv(process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL) ||
-  (projectId ? `https://europe-west2-${projectId}.cloudfunctions.net` : undefined) ||
-  'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net';
+  cleanEnv(process.env.FUNCTIONS_BASE_URL) ||
+  cleanEnv(process.env.FIREBASE_FUNCTIONS_URL);
+
+const defaultFunctionsRegion =
+  cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_REGION) ||
+  cleanEnv(process.env.FIREBASE_FUNCTIONS_REGION) ||
+  'europe-west2';
+
+const defaultFunctionsBaseUrl =
+  explicitFunctionsBaseUrl ||
+  (projectId ? `https://${defaultFunctionsRegion}-${projectId}.cloudfunctions.net` : undefined) ||
+  `https://${defaultFunctionsRegion}-pineapple-tapped---portal.cloudfunctions.net`;
+
 const firebaseProjectId = projectId;
 const functionsBaseUrl = defaultFunctionsBaseUrl;
+const functionsLocation = explicitFunctionsBaseUrl || defaultFunctionsRegion;
 
 const missingServiceError = (service: string) =>
   new Error(
@@ -127,7 +139,7 @@ async function initBrowserFirebase() {
 
   auth = authMod.getAuth(app);
   storage = storageMod.getStorage(app);
-  functions = functionsMod.getFunctions(app, functionsBaseUrl);
+  functions = functionsMod.getFunctions(app, functionsLocation);
   ({ httpsCallable } = functionsMod);
 
   ({
@@ -228,4 +240,5 @@ export {
   loadAuthModule,
   firebaseProjectId,
   functionsBaseUrl,
+  functionsLocation,
 };

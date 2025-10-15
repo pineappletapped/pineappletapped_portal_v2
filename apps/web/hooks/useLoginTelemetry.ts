@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import type { User } from 'firebase/auth';
-import { ensureFirebase, httpsCallable, loadAuthModule, functionsBaseUrl } from '@/lib/firebase';
+import { ensureFirebase, httpsCallable, loadAuthModule } from '@/lib/firebase';
 
 const makeSessionKey = (user: User) => {
   const lastSignIn =
@@ -13,54 +13,13 @@ const makeSessionKey = (user: User) => {
 const isCallableAvailable = (callable: unknown): callable is typeof httpsCallable =>
   typeof callable === 'function';
 
-const normaliseBaseUrl = (baseUrl?: string | null) => {
-  if (!baseUrl) {
-    return null;
-  }
-  return baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
-};
-
-const normalisedFunctionsBaseUrl = normaliseBaseUrl(functionsBaseUrl);
-const recordLoginUrl = normalisedFunctionsBaseUrl
-  ? `${normalisedFunctionsBaseUrl}/recordLoginEvent`
-  : null;
-
-async function recordLoginViaHttp(user: User, isoTimestamp: string): Promise<boolean> {
-  if (!recordLoginUrl) {
-    return false;
-  }
-
-  try {
-    const token = await user.getIdToken();
-    const response = await fetch(recordLoginUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: token ? `Bearer ${token}` : '',
-      },
-      body: JSON.stringify({ timestamp: isoTimestamp }),
-      mode: 'cors',
-      cache: 'no-store',
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(text || `HTTP ${response.status}`);
-    }
-
-    return true;
-  } catch (error) {
-    console.warn('recordLogin telemetry HTTP call failed', error);
-    return false;
-  }
-}
-
 export function useLoginTelemetry() {
   const lastRecordedSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
     let unsubscribe: (() => void) | null = null;
     let cancelled = false;
+    let callable: ((payload: Record<string, unknown>) => Promise<unknown>) | null = null;
 
     (async () => {
       try {
@@ -87,6 +46,8 @@ export function useLoginTelemetry() {
           return;
         }
 
+        callable = httpsCallable(functions, 'recordLogin');
+
         unsubscribe = onAuthStateChanged(auth, async (user) => {
           if (!user) {
             lastRecordedSessionRef.current = null;
@@ -99,24 +60,25 @@ export function useLoginTelemetry() {
           }
 
           const isoTimestamp = new Date().toISOString();
-          let recorded = await recordLoginViaHttp(user, isoTimestamp);
-
-          if (!recorded) {
-            try {
-              if (!isCallableAvailable(httpsCallable) || !functions || (functions as any).__isPlaceholder) {
+          try {
+            if (!callable) {
+              if (!functions || (functions as any).__isPlaceholder) {
+                throw new Error('Firebase functions unavailable');
+              }
+              if (!isCallableAvailable(httpsCallable)) {
                 throw new Error('httpsCallable unavailable');
               }
-              const callable = httpsCallable(functions, 'recordLogin');
-              await callable({ timestamp: isoTimestamp });
-              recorded = true;
-            } catch (error) {
-              console.warn('Failed to record login telemetry via callable', error);
+              callable = httpsCallable(functions, 'recordLogin');
             }
-          }
 
-          if (recorded) {
+            if (!callable) {
+              throw new Error('Callable function not initialised');
+            }
+
+            await callable({ timestamp: isoTimestamp });
             lastRecordedSessionRef.current = sessionKey;
-          } else {
+          } catch (error) {
+            console.warn('Failed to record login telemetry via callable', error);
             lastRecordedSessionRef.current = null;
           }
         });

@@ -104,6 +104,11 @@ interface CheckoutClientProps {
 }
 
 function CheckoutClient({ publishableKey }: CheckoutClientProps) {
+  const [isHydrated, setIsHydrated] = useState(false);
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
+
   const { items, clear } = useCart();
   const productTotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
   const rentalTotal = items.reduce(
@@ -116,7 +121,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     () => (publishableKey ? loadStripe(publishableKey) : null),
     [publishableKey]
   );
-  const stripeConfigError = publishableKey ? null : "Stripe publishable key is not configured.";
+  const stripeConfigError = publishableKey
+    ? null
+    : "Stripe publishable key is not configured.";
 
   const [email, setEmail] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
@@ -1602,6 +1609,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     });
   };
 
+  if (!isHydrated) {
+    return (
+      <div className="py-12 text-center text-sm text-gray-500" role="status">
+        Preparing checkout…
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-5xl mx-auto grid md:grid-cols-2 gap-8">
       <div className="space-y-6">
@@ -1709,7 +1724,12 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             />
           )}
           {!currentUser && authMode === "register" && (
-            <div className="space-y-2">
+            <form
+              className="space-y-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+              }}
+            >
               <div className="grid gap-2 sm:grid-cols-2">
                 <input
                   className="input input-bordered w-full"
@@ -1749,7 +1769,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                   {accountError}
                 </div>
               ) : null}
-            </div>
+            </form>
           )}
           <input
             className="input input-bordered w-full"

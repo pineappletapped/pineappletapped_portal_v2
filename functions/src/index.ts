@@ -1,7 +1,7 @@
 
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
-import { onRequest } from 'firebase-functions/v2/https';
+import { onCall, onRequest } from 'firebase-functions/v2/https';
 import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import Stripe from 'stripe';
 import type { DocumentData, DocumentReference, DocumentSnapshot } from 'firebase-admin/firestore';
@@ -18,7 +18,6 @@ import { google } from 'googleapis';
 import type { drive_v3 } from 'googleapis';
 import { Readable } from 'stream';
 import fetch from 'node-fetch';
-import * as cors from 'cors';
 import { bookingConflictsWithRange } from './utils/availability.js';
 import {
   DEFAULT_KIT_ROUTING_SETTINGS,
@@ -31,34 +30,152 @@ import {
   type RoutingStageKey,
 } from './utils/routing.js';
 
-const SHARED_ALLOWED_ORIGINS = new Set([
+const normaliseEnvValue = (value: string | undefined | null): string | null => {
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const parseAllowedOrigins = (value: string | undefined | null): string[] => {
+  const normalised = normaliseEnvValue(value);
+  if (!normalised) {
+    return [];
+  }
+
+  return normalised
+    .split(/[\s,]+/)
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+};
+
+const DEFAULT_ALLOWED_ORIGINS = [
   'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
+  'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app',
   'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
   'http://localhost:3000',
-]);
+  'http://localhost:5173',
+];
 
-const sharedCors = cors.default({
-  origin(origin, callback) {
-    if (!origin) {
-      callback(null, true);
-      return;
+const allowedOrigins = new Set(
+  [
+    ...DEFAULT_ALLOWED_ORIGINS,
+    ...parseAllowedOrigins(process.env.SHARED_ALLOWED_ORIGINS),
+    ...parseAllowedOrigins(process.env.NEXT_PUBLIC_SHARED_ALLOWED_ORIGINS),
+    ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
+  ].map((origin) => origin.toLowerCase()),
+);
+
+const resolveAllowedOrigin = (originHeader: string | null | undefined): string | null => {
+  if (!originHeader) {
+    return null;
+  }
+
+  const trimmed = originHeader.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'null') {
+    return null;
+  }
+
+  const lowerCased = trimmed.toLowerCase();
+  return allowedOrigins.has(lowerCased) ? trimmed : null;
+};
+
+// Allow callable functions from any origin so regional App Hosting sites can
+// authenticate without additional CORS configuration. Auth checks still guard
+// access to the underlying handlers.
+const CALLABLE_CORS_ORIGINS: true | (string | RegExp)[] = true;
+
+const appendVaryHeader = (res: ExpressResponse, value: string) => {
+  const existing = res.getHeader('Vary');
+  if (!existing) {
+    res.setHeader('Vary', value);
+    return;
+  }
+
+  const header = Array.isArray(existing) ? existing.join(', ') : String(existing);
+  const parts = header
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+
+  if (!parts.includes(value)) {
+    parts.push(value);
+    res.setHeader('Vary', parts.join(', '));
+  }
+};
+
+const DEFAULT_ALLOWED_HEADERS = 'authorization,content-type,x-requested-with';
+const DEFAULT_ALLOWED_METHODS = 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS';
+
+interface CorsResult {
+  allowed: boolean;
+  handled: boolean;
+  origin: string | null;
+}
+
+const configureSharedCors = (req: ExpressRequest, res: ExpressResponse): CorsResult => {
+  const originHeader = req.get('origin') ?? req.get('Origin') ?? null;
+  const allowedOrigin = resolveAllowedOrigin(originHeader);
+
+  if (originHeader && !allowedOrigin) {
+    const requestPath = req.originalUrl ?? req.url ?? '[unknown]';
+    console.warn('Blocked request from disallowed origin', originHeader, req.method, requestPath);
+    return { allowed: false, handled: false, origin: originHeader };
+  }
+
+  if (allowedOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    appendVaryHeader(res, 'Origin');
+  }
+
+  const requestedHeaders = req.get('Access-Control-Request-Headers');
+  if (requestedHeaders) {
+    res.setHeader('Access-Control-Allow-Headers', requestedHeaders);
+    appendVaryHeader(res, 'Access-Control-Request-Headers');
+  } else {
+    res.setHeader('Access-Control-Allow-Headers', DEFAULT_ALLOWED_HEADERS);
+  }
+
+  const requestedMethod = req.get('Access-Control-Request-Method');
+  if (requestedMethod) {
+    res.setHeader('Access-Control-Allow-Methods', requestedMethod);
+  } else {
+    res.setHeader('Access-Control-Allow-Methods', DEFAULT_ALLOWED_METHODS);
+  }
+
+  res.setHeader('Access-Control-Max-Age', '3600');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return { allowed: true, handled: true, origin: allowedOrigin };
+  }
+
+  return { allowed: true, handled: false, origin: allowedOrigin };
+};
+
+async function runSharedCors(req: ExpressRequest, res: ExpressResponse): Promise<CorsResult> {
+  return configureSharedCors(req, res);
+}
+
+async function withSharedCors(
+  req: ExpressRequest,
+  res: ExpressResponse,
+  handler: () => Promise<void>,
+): Promise<void> {
+  const corsResult = await runSharedCors(req, res);
+  if (!corsResult.allowed) {
+    if (!corsResult.handled) {
+      res.status(403).json({ error: 'Origin not allowed' });
     }
-
-    callback(null, SHARED_ALLOWED_ORIGINS.has(origin));
-  },
-  credentials: true,
-});
-
-function runSharedCors(req: ExpressRequest, res: ExpressResponse): Promise<void> {
-  return new Promise((resolve, reject) => {
-    sharedCors(req, res, (error) => {
-      if (error) {
-        reject(error);
-      } else {
-        resolve();
-      }
-    });
-  });
+    return;
+  }
+  if (corsResult.handled) {
+    return;
+  }
+  await handler();
 }
 
 const CALLABLE_ERROR_STATUS: Record<string, number> = {
@@ -3362,6 +3479,32 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
     }
   }
 
+  const rawDigitalDeliveries =
+    orderData && orderData.digitalDeliveries && typeof orderData.digitalDeliveries === 'object'
+      ? (orderData.digitalDeliveries as Record<string, any>)
+      : {};
+  const normalisedDigitalMap: Record<string, NormalisedDigitalDelivery> = {};
+  let digitalDeliveries: Array<Record<string, any>> = [];
+  Object.entries(rawDigitalDeliveries).forEach(([productId, raw]) => {
+    const normalised = normaliseDigitalDelivery(raw, null);
+    if (normalised && normalised.enabled) {
+      normalisedDigitalMap[productId] = normalised;
+      const summary = serialiseDigitalDeliveryForClient(normalised);
+      if (summary) {
+        digitalDeliveries.push({ productId, ...summary });
+      }
+    }
+  });
+  const digitalStatusFromOrder =
+    typeof orderData?.digitalDeliveryStatus === 'string'
+      ? orderData.digitalDeliveryStatus
+      : null;
+  let digitalUpdatedAtTimestamp = orderData
+    ? parseTimestamp(orderData.digitalDeliveryUpdatedAt)
+    : null;
+  let digitalStatus =
+    digitalStatusFromOrder ?? computeAggregateDigitalStatus(normalisedDigitalMap) ?? null;
+
   const drive = await createDriveService();
   if (!drive) {
     throw new functions.https.HttpsError(
@@ -3681,7 +3824,10 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
   digitalDeliveries = Object.entries(normalisedDigitalMap)
     .map(([productId, config]) => {
       const summary = serialiseDigitalDeliveryForClient(config);
-      return summary ? { productId, ...summary } : null;
+      if (!summary) {
+        return null;
+      }
+      return { productId, ...summary } as Record<string, any>;
     })
     .filter((entry): entry is Record<string, any> => entry !== null);
   const aggregateStatusFinal = computeAggregateDigitalStatus(normalisedDigitalMap);
@@ -5602,90 +5748,107 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
 });
 
 // Track page view analytics from the public site
-export const analytics_track = onRequest({ region: 'europe-west2' }, async (req, res) => {
+export const analytics_track = onCall({ region: 'europe-west2', cors: CALLABLE_CORS_ORIGINS }, async (request) => {
+  const rawRequest = request.rawRequest as ExpressRequest | undefined;
+  const payload =
+    request.data && typeof request.data === 'object'
+      ? (request.data as Record<string, any>)
+      : {};
+
+  let uid: string | null = request.auth?.uid ?? null;
+  let userName: string | null = null;
+
+  if (uid) {
+    try {
+      const userSnap = await db.collection('users').doc(uid).get();
+      const userData = userSnap.data() as any;
+      if (userData) {
+        userName = userData.fullName || userData.email || null;
+      }
+    } catch (error) {
+      console.error('analytics_track failed to load user profile', error);
+    }
+  }
+
+  const visitorIdRaw = payload.visitorId;
+  const visitorId =
+    typeof visitorIdRaw === 'string' && visitorIdRaw.trim().length > 0
+      ? visitorIdRaw
+      : null;
+
+  if (!uid && visitorId) {
+    const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
+    const mapData = mapSnap.data() as any;
+    if (mapData) {
+      uid = mapData.uid || null;
+      userName = mapData.userName || null;
+    }
+  }
+
+  if (visitorId && uid && userName) {
+    await db.collection('analyticsVisitors').doc(visitorId).set({ uid, userName }, { merge: true });
+  }
+
+  const resolveHeader = (name: string): string | null => {
+    if (!rawRequest) {
+      return null;
+    }
+
+    if (typeof rawRequest.get === 'function') {
+      return rawRequest.get(name) ?? null;
+    }
+
+    const headerValue = rawRequest.headers?.[name];
+    if (typeof headerValue === 'string') {
+      return headerValue;
+    }
+    if (Array.isArray(headerValue) && headerValue.length > 0) {
+      return headerValue[0] ?? null;
+    }
+
+    return null;
+  };
+
+  let ip: string | null = null;
+  if (rawRequest) {
+    if (typeof rawRequest.ip === 'string' && rawRequest.ip) {
+      ip = rawRequest.ip;
+    } else if (Array.isArray((rawRequest as any).ips) && (rawRequest as any).ips.length > 0) {
+      ip = (rawRequest as any).ips[0] ?? null;
+    }
+
+    if (!ip) {
+      const forwarded = resolveHeader('x-forwarded-for');
+      if (forwarded) {
+        ip = forwarded.split(',')[0]?.trim() || null;
+      }
+    }
+  }
+
+  const event = {
+    uid,
+    userName,
+    path: typeof payload.path === 'string' ? payload.path : null,
+    referrer: typeof payload.referrer === 'string' ? payload.referrer : null,
+    userAgent:
+      typeof payload.userAgent === 'string' && payload.userAgent.trim().length > 0
+        ? payload.userAgent
+        : resolveHeader('user-agent'),
+    visitorId,
+    duration:
+      typeof payload.duration === 'number' && Number.isFinite(payload.duration)
+        ? payload.duration
+        : null,
+    ip,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+
   try {
-    await runSharedCors(req, res);
-  } catch (error) {
-    console.error('analytics_track CORS failure', error);
-    res.status(500).json({ error: 'Failed to configure CORS.' });
-    return;
-  }
-
-  if (req.method === 'OPTIONS') {
-    res.status(204).send('');
-    return;
-  }
-
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
-    return;
-  }
-
-  try {
-    let uid: string | null = null;
-    let userName: string | null = null;
-    const authHeader = req.get('authorization');
-    if (authHeader?.startsWith('Bearer ')) {
-      try {
-        const decoded = await admin
-          .auth()
-          .verifyIdToken(authHeader.split('Bearer ')[1]);
-        uid = decoded.uid;
-        const userSnap = await db.collection('users').doc(uid).get();
-        const udata = userSnap.data() as any;
-        if (udata) {
-          userName = udata.fullName || udata.email || null;
-        }
-      } catch (err) {
-        console.error('verifyIdToken failed', err);
-      }
-    }
-
-    const rawBody = req.body;
-    let data: Record<string, any> = {};
-    if (typeof rawBody === 'string') {
-      if (rawBody.trim()) {
-        try {
-          data = JSON.parse(rawBody);
-        } catch (err) {
-          console.error('analytics_track invalid JSON payload', err);
-        }
-      }
-    } else if (rawBody && typeof rawBody === 'object') {
-      data = rawBody as Record<string, any>;
-    }
-
-    const visitorId = data.visitorId ?? null;
-    if (!uid && visitorId) {
-      const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
-      const mapData = mapSnap.data() as any;
-      if (mapData) {
-        uid = mapData.uid || null;
-        userName = mapData.userName || null;
-      }
-    }
-    if (visitorId && uid && userName) {
-      await db
-        .collection('analyticsVisitors')
-        .doc(visitorId)
-        .set({ uid, userName }, { merge: true });
-    }
-    const event = {
-      uid,
-      userName,
-      path: data.path || null,
-      referrer: data.referrer || null,
-      userAgent: data.userAgent || req.get('user-agent') || null,
-      visitorId,
-      duration: data.duration || null,
-      ip: req.ip,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
     await db.collection('analyticsEvents').add(event);
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('analytics_track error', err);
-    res.status(500).json({ error: 'internal' });
+    return { ok: true };
+  } catch (error) {
+    console.error('analytics_track error', error);
+    throw new functions.https.HttpsError('internal', 'Failed to record analytics event');
   }
 });
 
@@ -11001,16 +11164,13 @@ async function executeCreateOrder(data: any, context: CallableContextLike) {
 }
 
 export const createOrder = onRequest({ region: 'europe-west2' }, async (req, res) => {
-  try {
-    await runSharedCors(req, res);
-  } catch (error) {
-    console.error('createOrder CORS failure', error);
-    res.status(500).json({ error: 'Failed to configure CORS.', code: 'cors-error' });
+  const corsResult = await runSharedCors(req, res);
+  if (!corsResult.allowed) {
+    res.status(403).json({ error: 'Origin not allowed', code: 'cors-not-allowed' });
     return;
   }
 
-  if (req.method === 'OPTIONS') {
-    res.status(204).send('');
+  if (corsResult.handled) {
     return;
   }
 
@@ -14262,110 +14422,20 @@ async function recordLoginForUid(uid: string, timestampValue: unknown): Promise<
   });
 }
 
-function parseRequestBody(req: functions.Request): Record<string, unknown> {
-  const rawBody = req.body;
-
-  if (typeof rawBody === 'string') {
-    const trimmed = rawBody.trim();
-    if (!trimmed) {
-      return {};
+const recordLoginCallable = onCall(
+  { region: 'europe-west2', cors: CALLABLE_CORS_ORIGINS },
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
     }
-    try {
-      return JSON.parse(trimmed) as Record<string, unknown>;
-    } catch (error) {
-      console.warn('recordLoginEvent invalid JSON body', error);
-      return {};
-    }
+
+    await recordLoginForUid(request.auth.uid, request.data?.timestamp);
+    return { ok: true };
   }
+);
 
-  if (Buffer.isBuffer(rawBody)) {
-    const text = rawBody.toString('utf8').trim();
-    if (!text) {
-      return {};
-    }
-    try {
-      return JSON.parse(text) as Record<string, unknown>;
-    } catch (error) {
-      console.warn('recordLoginEvent invalid buffer body', error);
-      return {};
-    }
-  }
-
-  if (rawBody && typeof rawBody === 'object') {
-    return rawBody as Record<string, unknown>;
-  }
-
-  return {};
-}
-
-/**
- * Record a user login event via HTTPS callable. Stores loginHistory for the current user.
- */
-export const recordLogin = functions.region('europe-west2').https.onCall(async (data, context) => {
-  if (!context.auth?.uid) {
-    throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
-  }
-  await recordLoginForUid(context.auth.uid, data?.timestamp);
-  return { ok: true };
-});
-
-export const recordLoginEvent = onRequest({ region: 'europe-west2' }, async (req, res) => {
-  try {
-    await runSharedCors(req, res);
-  } catch (error) {
-    console.error('recordLoginEvent CORS failure', error);
-    res.status(500).json({ error: 'Failed to configure CORS.' });
-    return;
-  }
-
-  if (req.method === 'OPTIONS') {
-    res.status(204).send('');
-    return;
-  }
-
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' });
-    return;
-  }
-
-  const authHeader = req.get('authorization') || '';
-  if (!authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Sign in required' });
-    return;
-  }
-
-  const token = authHeader.split('Bearer ')[1]?.trim();
-  if (!token) {
-    res.status(401).json({ error: 'Sign in required' });
-    return;
-  }
-
-  let uid: string | null = null;
-  try {
-    const decoded = await admin.auth().verifyIdToken(token);
-    uid = decoded.uid;
-  } catch (error) {
-    console.error('recordLoginEvent verifyIdToken failed', error);
-    res.status(401).json({ error: 'Invalid token' });
-    return;
-  }
-
-  if (!uid) {
-    res.status(401).json({ error: 'Invalid token' });
-    return;
-  }
-
-  const body = parseRequestBody(req);
-
-  try {
-    await recordLoginForUid(uid, body.timestamp);
-    res.set('Cache-Control', 'no-store');
-    res.json({ ok: true });
-  } catch (error) {
-    console.error('recordLoginEvent failed', error);
-    res.status(500).json({ error: 'Failed to record login' });
-  }
-});
+export const recordLogin = recordLoginCallable;
+export const recordLoginEvent = recordLoginCallable;
 
 /**
  * ADMIN FUNCTIONS
@@ -14439,19 +14509,21 @@ async function assertStaffRequest(
 /**
  * List all users. Returns a small subset of user fields for security reasons.
  */
-export const admin_listUsers = functions.https.onRequest((req, res) => {
-  corsHandler(req, res, async () => {
+export const admin_listUsers = functions.https.onRequest(async (req, res) => {
+  await withSharedCors(req as unknown as ExpressRequest, res as unknown as ExpressResponse, async () => {
     if (req.method !== 'GET') {
       res.status(405).end();
       return;
     }
     const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
-    if (!requester) return;
+    if (!requester) {
+      return;
+    }
     try {
       const snap = await db.collection('users').get();
       const users = snap.docs.map((doc) => {
         const data: any = doc.data();
-        if (data.createdAt && data.createdAt.toDate) {
+        if (data.createdAt && typeof data.createdAt.toDate === 'function') {
           data.createdAt = data.createdAt.toDate().toISOString();
         }
         return { id: doc.id, ...data };
@@ -14467,14 +14539,16 @@ export const admin_listUsers = functions.https.onRequest((req, res) => {
 /**
  * Update a user's profile. Accepts { userId, updates }. Only staff can call.
  */
-export const admin_updateUser = functions.https.onRequest((req, res) => {
-  corsHandler(req, res, async () => {
+export const admin_updateUser = functions.https.onRequest(async (req, res) => {
+  await withSharedCors(req as unknown as ExpressRequest, res as unknown as ExpressResponse, async () => {
     if (req.method !== 'POST') {
       res.status(405).end();
       return;
     }
     const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
-    if (!requester) return;
+    if (!requester) {
+      return;
+    }
     const { userId, updates } = req.body || {};
     if (!userId || !updates) {
       res.status(400).json({ error: 'userId and updates required' });
@@ -14493,7 +14567,7 @@ export const admin_updateUser = functions.https.onRequest((req, res) => {
     const beforeSnap = await userRef.get();
     const beforeData = beforeSnap.exists ? (beforeSnap.data() as admin.firestore.DocumentData) : undefined;
     await userRef.set(rest, { merge: true });
-    const authUpdates: any = {};
+    const authUpdates: admin.auth.UpdateRequest = {};
     const metadata: Record<string, any> = {};
     if (password) {
       authUpdates.password = password;
@@ -14509,7 +14583,7 @@ export const admin_updateUser = functions.https.onRequest((req, res) => {
         previousDisabled = null;
       }
     }
-    if (Object.keys(authUpdates).length) {
+    if (Object.keys(authUpdates).length > 0) {
       await admin.auth().updateUser(userId, authUpdates);
     }
     if (disabled !== undefined) {
@@ -15832,8 +15906,8 @@ export const admin_saveProposalTemplate = functions.https.onCall(
             bulletPoints: string[];
             notes: string | null;
             productId: string | null;
-            displayMode?: string;
-            autoContents?: boolean;
+            autoContents: boolean;
+            displayMode?: 'quote' | 'estimate';
           } => Boolean(page))
       : [];
 

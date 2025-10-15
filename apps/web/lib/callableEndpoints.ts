@@ -1,14 +1,15 @@
 export const DEFAULT_FUNCTION_BASE =
-  "https://us-central1-pineapple-tapped---portal.cloudfunctions.net";
+  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net";
 
 export const LEGACY_FUNCTION_BASES = [
   "https://us-central1-ptfbportalbackend.cloudfunctions.net",
+  "https://europe-west2-ptfbportalbackend.cloudfunctions.net",
 ];
 
 const CLOUD_FUNCTION_REGION_HOST_PATTERN =
   /^https:\/\/((?:[a-z]+(?:-[a-z]+)*)[0-9])-([a-z0-9-]+)\.cloudfunctions\.net$/i;
 
-const REGION_FALLBACKS = ["us-central1", "europe-west2"];
+const REGION_FALLBACKS = ["europe-west2", "europe-west4", "us-central1"];
 const CODEBASE_ENV_VARS = [
   "FUNCTIONS_CODEBASE",
   "NEXT_PUBLIC_FUNCTIONS_CODEBASE",
@@ -199,18 +200,24 @@ export const resolveHostedAppContext = (
     }
   }
 
-  const hostedAppBase = `https://${trimmed}/_firebase/functions/v1`;
-  addBase(hostedAppBase);
-  addBase(`${hostedAppBase}/${regionCandidate}`);
+  const hostedApiVersions = ["v2", "v1", "v1beta"] as const;
+
+  for (const apiVersion of hostedApiVersions) {
+    const versionedBase = `https://${trimmed}/_firebase/functions/${apiVersion}`;
+    addBase(versionedBase);
+    addBase(`${versionedBase}/${regionCandidate}`);
+  }
 
   if (projectFragments.size > 0) {
     const regionTargets = new Set([regionCandidate, ...REGION_FALLBACKS]);
 
     for (const projectFragment of projectFragments) {
       for (const region of regionTargets) {
-        addBase(
-          `https://${trimmed}/_firebase/functions/v1/projects/${projectFragment}/locations/${region}/functions`,
-        );
+        for (const apiVersion of hostedApiVersions) {
+          addBase(
+            `https://${trimmed}/_firebase/functions/${apiVersion}/projects/${projectFragment}/locations/${region}/functions`,
+          );
+        }
       }
     }
   }
