@@ -55,6 +55,8 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
   'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app',
   'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
+  'https://pineapple-tapped---portal.web.app',
+  'https://pineapple-tapped---portal.firebaseapp.com',
   'http://localhost:3000',
   'http://localhost:5173',
 ];
