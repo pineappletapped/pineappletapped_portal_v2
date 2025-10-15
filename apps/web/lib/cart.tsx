@@ -179,7 +179,17 @@ function loadStoredItems(): CartItem[] {
 }
 
 export function CartProvider({ children }: { children: ReactNode }) {
-  const [items, setItems] = useState<CartItem[]>(() => loadStoredItems());
+  const [items, setItems] = useState<CartItem[]>([]);
+  const hasLoadedInitialItems = useRef(false);
+
+  useEffect(() => {
+    if (!isBrowser || hasLoadedInitialItems.current) {
+      return;
+    }
+
+    hasLoadedInitialItems.current = true;
+    setItems(loadStoredItems());
+  }, []);
   const persistTimeout = useRef<number | null>(null);
 
   const persistCart = useCallback((nextItems: CartItem[]) => {
