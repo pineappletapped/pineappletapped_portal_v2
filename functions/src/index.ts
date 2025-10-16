@@ -55,20 +55,46 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
   'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app',
   'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
+  'https://pineapple-tapped---portal.web.app',
+  'https://pineapple-tapped---portal.firebaseapp.com',
   'http://localhost:3000',
   'http://localhost:5173',
 ];
 
-const allowedOrigins = new Set(
-  [
-    ...DEFAULT_ALLOWED_ORIGINS,
-    ...parseAllowedOrigins(process.env.SHARED_ALLOWED_ORIGINS),
-    ...parseAllowedOrigins(process.env.NEXT_PUBLIC_SHARED_ALLOWED_ORIGINS),
-    ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
-  ].map((origin) => origin.toLowerCase()),
-);
+const allowedOriginMap = new Map<string, string>();
+
+const registerAllowedOrigin = (candidate: string | null | undefined) => {
+  if (!candidate) {
+    return;
+  }
+
+  const trimmed = candidate.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  const lower = trimmed.toLowerCase();
+  if (!allowedOriginMap.has(lower)) {
+    allowedOriginMap.set(lower, trimmed);
+  }
+};
+
+for (const origin of [
+  ...DEFAULT_ALLOWED_ORIGINS,
+  ...parseAllowedOrigins(process.env.SHARED_ALLOWED_ORIGINS),
+  ...parseAllowedOrigins(process.env.NEXT_PUBLIC_SHARED_ALLOWED_ORIGINS),
+  ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
+]) {
+  registerAllowedOrigin(origin);
+}
+
+const allowsAllOrigins = allowedOriginMap.has('*');
 
 const resolveAllowedOrigin = (originHeader: string | null | undefined): string | null => {
+  if (allowsAllOrigins) {
+    return '*';
+  }
+
   if (!originHeader) {
     return null;
   }
@@ -78,14 +104,13 @@ const resolveAllowedOrigin = (originHeader: string | null | undefined): string |
     return null;
   }
 
-  const lowerCased = trimmed.toLowerCase();
-  return allowedOrigins.has(lowerCased) ? trimmed : null;
+  const match = allowedOriginMap.get(trimmed.toLowerCase());
+  return match ?? null;
 };
 
-// Allow callable functions from any origin so regional App Hosting sites can
-// authenticate without additional CORS configuration. Auth checks still guard
-// access to the underlying handlers.
-const CALLABLE_CORS_ORIGINS: true | (string | RegExp)[] = true;
+const allowedOriginValues = Array.from(new Set(allowedOriginMap.values()));
+
+const CALLABLE_CORS_ORIGINS: true | string[] = allowsAllOrigins ? true : allowedOriginValues;
 
 const appendVaryHeader = (res: ExpressResponse, value: string) => {
   const existing = res.getHeader('Vary');
@@ -127,8 +152,11 @@ const configureSharedCors = (req: ExpressRequest, res: ExpressResponse): CorsRes
 
   if (allowedOrigin) {
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    appendVaryHeader(res, 'Origin');
+
+    if (allowedOrigin !== '*') {
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      appendVaryHeader(res, 'Origin');
+    }
   }
 
   const requestedHeaders = req.get('Access-Control-Request-Headers');
@@ -12047,12 +12075,15 @@ export const stripe_createPaymentIntent = functions.https.onCall(async (data, co
 
   let amountCents: number;
   let description: string;
+  let zeroAmountPaymentType: 'deposit' | 'balance' | null = null;
   if (type === 'deposit') {
     amountCents = Math.round(Math.max(depositAmount, 0) * 100);
     description = `Deposit for order ${orderId}`;
+    zeroAmountPaymentType = 'deposit';
   } else if (type === 'balance') {
     amountCents = Math.round(Math.max(balanceAmount, 0) * 100);
     description = `Balance for order ${orderId}`;
+    zeroAmountPaymentType = 'balance';
   } else if (type === 'custom') {
     const customAmountInput = data?.customAmount;
     const parsedAmount =
@@ -12074,7 +12105,33 @@ export const stripe_createPaymentIntent = functions.https.onCall(async (data, co
     throw new functions.https.HttpsError('invalid-argument', 'Invalid payment type');
   }
 
-  if (!Number.isFinite(amountCents) || amountCents <= 0) {
+  if (!Number.isFinite(amountCents) || amountCents < 0) {
+    throw new functions.https.HttpsError('failed-precondition', 'Payment amount must be zero or positive.');
+  }
+
+  if (amountCents === 0 && zeroAmountPaymentType) {
+    const currencyCode =
+      normaliseCurrency(order?.currency) ?? normaliseCurrency(order?.currencyCode) ?? 'GBP';
+    const recorded = await recordOrderStripePayment({
+      orderId,
+      type: zeroAmountPaymentType,
+      amountReceivedCents: 0,
+      currency: currencyCode,
+      paymentIntentId: null,
+      checkoutSessionId: null,
+      paymentMethod: 'none',
+      source: 'zero_amount_payment',
+    });
+
+    return {
+      clientSecret: null,
+      zeroPayment: true,
+      paymentRecorded: Boolean(recorded?.recorded),
+      orderStatus: recorded?.orderData?.status ?? null,
+    };
+  }
+
+  if (amountCents === 0) {
     throw new functions.https.HttpsError('failed-precondition', 'Payment amount must be greater than zero.');
   }
 

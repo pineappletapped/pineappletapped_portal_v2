@@ -143,7 +143,13 @@ export async function POST(request: Request) {
       explicitEndpointEnvVar: "CREATE_ORDER_ENDPOINT",
     },
   );
-  const functionIds = resolveCallableFunctionIds("createOrder");
+  const functionIds = resolveCallableFunctionIds("createOrder", {
+    codebaseHints: [
+      ...(hostContext?.projectFragments ?? []),
+      process.env.CREATE_ORDER_FUNCTION_CODEBASE,
+      process.env.NEXT_PUBLIC_CREATE_ORDER_FUNCTION_CODEBASE,
+    ],
+  });
   const apiTargets = collectCallableApiTargets(bases, hostContext, [
     process.env.CREATE_ORDER_FUNCTION_PROJECT,
   ]);

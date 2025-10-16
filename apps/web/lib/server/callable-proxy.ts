@@ -4,7 +4,7 @@ import {
   LEGACY_FUNCTION_BASES,
   collectCallableTargets,
   buildCallableEndpointsFromBases,
-  normaliseCallableEndpoint,
+  normaliseCallableEndpointVariants,
   resolveHostedAppContext,
   type CallableTarget,
   type HostedAppContext,
@@ -65,21 +65,21 @@ export const buildCallableEndpointCandidates = (
   const baseCandidates: Array<string | null | undefined> = [
     functionsBaseUrl,
     ...baseEnvVars.map((name) => process.env[name]),
-    ...hostContext.bases,
     defaultBaseUrl ?? DEFAULT_FUNCTION_BASE,
     ...LEGACY_FUNCTION_BASES,
+    ...hostContext.bases,
   ];
 
   for (const envName of explicitEnvNames) {
     if (!envName) {
       continue;
     }
-    const explicit = normaliseCallableEndpoint(
+    const explicit = normaliseCallableEndpointVariants(
       process.env[envName],
       functionName,
     );
-    if (explicit) {
-      return { endpoints: [explicit], bases: baseCandidates, hostContext };
+    if (explicit.length > 0) {
+      return { endpoints: explicit, bases: baseCandidates, hostContext };
     }
   }
 

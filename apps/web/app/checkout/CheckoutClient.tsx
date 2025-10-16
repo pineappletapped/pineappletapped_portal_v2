@@ -1286,6 +1286,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     setLoginError,
   ]);
 
+  const handlePaymentSuccess = useCallback(
+    (completedOrderId: string) => {
+      clear();
+      router.push(`/orders/${completedOrderId}`);
+    },
+    [clear, router]
+  );
+
   const initializePaymentIntent = useCallback(async () => {
     if (initializingPayment) {
       return false;
@@ -1363,8 +1371,23 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         orderId: createdOrderId,
         type: "deposit",
       });
-      const secret: string | undefined = intentRes.data?.clientSecret;
+      const intentData: Record<string, unknown> =
+        intentRes && typeof intentRes === "object"
+          ? (intentRes.data as Record<string, unknown>) ?? {}
+          : {};
+      const secret =
+        typeof intentData.clientSecret === "string" && intentData.clientSecret.trim().length > 0
+          ? intentData.clientSecret
+          : null;
+      const zeroPayment = intentData.zeroPayment === true;
       if (!secret) {
+        if (zeroPayment) {
+          setOrderId(createdOrderId);
+          setClientSecret(null);
+          lastIntentPayload.current = currentIntentPayload;
+          handlePaymentSuccess(createdOrderId);
+          return true;
+        }
         throw new Error("Payment session could not be created.");
       }
 
@@ -1390,6 +1413,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     currentUser,
     describeCallableError,
     ensureCheckoutUser,
+    handlePaymentSuccess,
     hasZeroBalance,
     initializingPayment,
     isRegistering,
@@ -1424,14 +1448,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     stripePromise,
     hasZeroBalance,
   ]);
-
-  const handlePaymentSuccess = useCallback(
-    (completedOrderId: string) => {
-      clear();
-      router.push(`/orders/${completedOrderId}`);
-    },
-    [clear, router]
-  );
 
   const completeZeroBalanceOrder = useCallback(async () => {
     if (initializingPayment) {
@@ -1560,8 +1576,23 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         orderId: createdOrderId,
         type: "deposit",
       });
-      const secret: string | undefined = intentRes.data?.clientSecret;
+      const intentData: Record<string, unknown> =
+        intentRes && typeof intentRes === "object"
+          ? (intentRes.data as Record<string, unknown>) ?? {}
+          : {};
+      const secret =
+        typeof intentData.clientSecret === "string" && intentData.clientSecret.trim().length > 0
+          ? intentData.clientSecret
+          : null;
+      const zeroPayment = intentData.zeroPayment === true;
       if (!secret) {
+        if (zeroPayment) {
+          setOrderId(createdOrderId);
+          setClientSecret(null);
+          lastIntentPayload.current = currentIntentPayload;
+          handlePaymentSuccess(createdOrderId);
+          return true;
+        }
         throw new Error("Payment session could not be created.");
       }
       setOrderId(createdOrderId);
