@@ -48,7 +48,11 @@ const allowedOrigins = new Set([
     ...parseAllowedOrigins(process.env.NEXT_PUBLIC_SHARED_ALLOWED_ORIGINS),
     ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
 ].map((origin) => origin.toLowerCase()));
+const allowsAllOrigins = allowedOrigins.has('*');
 const resolveAllowedOrigin = (originHeader) => {
+    if (allowsAllOrigins) {
+        return '*';
+    }
     if (!originHeader) {
         return null;
     }
@@ -91,8 +95,10 @@ const configureSharedCors = (req, res) => {
     }
     if (allowedOrigin) {
         res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-        res.setHeader('Access-Control-Allow-Credentials', 'true');
-        appendVaryHeader(res, 'Origin');
+        if (allowedOrigin !== '*') {
+            res.setHeader('Access-Control-Allow-Credentials', 'true');
+            appendVaryHeader(res, 'Origin');
+        }
     }
     const requestedHeaders = req.get('Access-Control-Request-Headers');
     if (requestedHeaders) {

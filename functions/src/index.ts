@@ -70,7 +70,13 @@ const allowedOrigins = new Set(
   ].map((origin) => origin.toLowerCase()),
 );
 
+const allowsAllOrigins = allowedOrigins.has('*');
+
 const resolveAllowedOrigin = (originHeader: string | null | undefined): string | null => {
+  if (allowsAllOrigins) {
+    return '*';
+  }
+
   if (!originHeader) {
     return null;
   }
@@ -129,8 +135,11 @@ const configureSharedCors = (req: ExpressRequest, res: ExpressResponse): CorsRes
 
   if (allowedOrigin) {
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    appendVaryHeader(res, 'Origin');
+
+    if (allowedOrigin !== '*') {
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      appendVaryHeader(res, 'Origin');
+    }
   }
 
   const requestedHeaders = req.get('Access-Control-Request-Headers');

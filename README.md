@@ -58,7 +58,9 @@ project settings.
 > origin against that list and does **not** rely on a service account or any
 > additional IAM permissions. As long as your functions are deployed in the
 > project, no extra roles need to be granted for the CORS headers to be
-> applied.
+> applied. For ad-hoc testing you can set `SHARED_ALLOWED_ORIGINS=*` (or the
+> equivalent function-specific env var) before deploying to temporarily allow
+> any origin; just remember to clear it before production deployments.
 
 This executes `next lint` inside `apps/web` to catch basic code-quality issues.
 
