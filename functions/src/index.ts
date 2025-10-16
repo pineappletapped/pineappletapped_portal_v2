@@ -110,7 +110,7 @@ const resolveAllowedOrigin = (originHeader: string | null | undefined): string |
 
 const allowedOriginValues = Array.from(new Set(allowedOriginMap.values()));
 
-const CALLABLE_CORS_ORIGINS: true | string | string[] = allowsAllOrigins ? '*' : allowedOriginValues;
+const CALLABLE_CORS_ORIGINS: true | string[] = allowsAllOrigins ? true : allowedOriginValues;
 
 const appendVaryHeader = (res: ExpressResponse, value: string) => {
   const existing = res.getHeader('Vary');

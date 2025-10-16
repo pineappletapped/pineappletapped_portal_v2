@@ -80,7 +80,7 @@ const resolveAllowedOrigin = (originHeader) => {
     return match ?? null;
 };
 const allowedOriginValues = Array.from(new Set(allowedOriginMap.values()));
-const CALLABLE_CORS_ORIGINS = allowsAllOrigins ? '*' : allowedOriginValues;
+const CALLABLE_CORS_ORIGINS = allowsAllOrigins ? true : allowedOriginValues;
 const appendVaryHeader = (res, value) => {
     const existing = res.getHeader('Vary');
     if (!existing) {

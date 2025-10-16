@@ -65,9 +65,9 @@ export const buildCallableEndpointCandidates = (
   const baseCandidates: Array<string | null | undefined> = [
     functionsBaseUrl,
     ...baseEnvVars.map((name) => process.env[name]),
-    ...hostContext.bases,
     defaultBaseUrl ?? DEFAULT_FUNCTION_BASE,
     ...LEGACY_FUNCTION_BASES,
+    ...hostContext.bases,
   ];
 
   for (const envName of explicitEnvNames) {
