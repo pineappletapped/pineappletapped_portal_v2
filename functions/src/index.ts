@@ -61,16 +61,34 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:5173',
 ];
 
-const allowedOrigins = new Set(
-  [
-    ...DEFAULT_ALLOWED_ORIGINS,
-    ...parseAllowedOrigins(process.env.SHARED_ALLOWED_ORIGINS),
-    ...parseAllowedOrigins(process.env.NEXT_PUBLIC_SHARED_ALLOWED_ORIGINS),
-    ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
-  ].map((origin) => origin.toLowerCase()),
-);
+const allowedOriginMap = new Map<string, string>();
 
-const allowsAllOrigins = allowedOrigins.has('*');
+const registerAllowedOrigin = (candidate: string | null | undefined) => {
+  if (!candidate) {
+    return;
+  }
+
+  const trimmed = candidate.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  const lower = trimmed.toLowerCase();
+  if (!allowedOriginMap.has(lower)) {
+    allowedOriginMap.set(lower, trimmed);
+  }
+};
+
+for (const origin of [
+  ...DEFAULT_ALLOWED_ORIGINS,
+  ...parseAllowedOrigins(process.env.SHARED_ALLOWED_ORIGINS),
+  ...parseAllowedOrigins(process.env.NEXT_PUBLIC_SHARED_ALLOWED_ORIGINS),
+  ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
+]) {
+  registerAllowedOrigin(origin);
+}
+
+const allowsAllOrigins = allowedOriginMap.has('*');
 
 const resolveAllowedOrigin = (originHeader: string | null | undefined): string | null => {
   if (allowsAllOrigins) {
@@ -86,14 +104,13 @@ const resolveAllowedOrigin = (originHeader: string | null | undefined): string |
     return null;
   }
 
-  const lowerCased = trimmed.toLowerCase();
-  return allowedOrigins.has(lowerCased) ? trimmed : null;
+  const match = allowedOriginMap.get(trimmed.toLowerCase());
+  return match ?? null;
 };
 
-// Allow callable functions from any origin so regional App Hosting sites can
-// authenticate without additional CORS configuration. Auth checks still guard
-// access to the underlying handlers.
-const CALLABLE_CORS_ORIGINS: true | (string | RegExp)[] = true;
+const allowedOriginValues = Array.from(new Set(allowedOriginMap.values()));
+
+const CALLABLE_CORS_ORIGINS: true | string | string[] = allowsAllOrigins ? '*' : allowedOriginValues;
 
 const appendVaryHeader = (res: ExpressResponse, value: string) => {
   const existing = res.getHeader('Vary');

@@ -42,13 +42,29 @@ const DEFAULT_ALLOWED_ORIGINS = [
     'http://localhost:3000',
     'http://localhost:5173',
 ];
-const allowedOrigins = new Set([
+const allowedOriginMap = new Map();
+const registerAllowedOrigin = (candidate) => {
+    if (!candidate) {
+        return;
+    }
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+        return;
+    }
+    const lower = trimmed.toLowerCase();
+    if (!allowedOriginMap.has(lower)) {
+        allowedOriginMap.set(lower, trimmed);
+    }
+};
+for (const origin of [
     ...DEFAULT_ALLOWED_ORIGINS,
     ...parseAllowedOrigins(process.env.SHARED_ALLOWED_ORIGINS),
     ...parseAllowedOrigins(process.env.NEXT_PUBLIC_SHARED_ALLOWED_ORIGINS),
     ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
-].map((origin) => origin.toLowerCase()));
-const allowsAllOrigins = allowedOrigins.has('*');
+]) {
+    registerAllowedOrigin(origin);
+}
+const allowsAllOrigins = allowedOriginMap.has('*');
 const resolveAllowedOrigin = (originHeader) => {
     if (allowsAllOrigins) {
         return '*';
@@ -60,13 +76,11 @@ const resolveAllowedOrigin = (originHeader) => {
     if (!trimmed || trimmed.toLowerCase() === 'null') {
         return null;
     }
-    const lowerCased = trimmed.toLowerCase();
-    return allowedOrigins.has(lowerCased) ? trimmed : null;
+    const match = allowedOriginMap.get(trimmed.toLowerCase());
+    return match ?? null;
 };
-// Allow callable functions from any origin so regional App Hosting sites can
-// authenticate without additional CORS configuration. Auth checks still guard
-// access to the underlying handlers.
-const CALLABLE_CORS_ORIGINS = true;
+const allowedOriginValues = Array.from(new Set(allowedOriginMap.values()));
+const CALLABLE_CORS_ORIGINS = allowsAllOrigins ? '*' : allowedOriginValues;
 const appendVaryHeader = (res, value) => {
     const existing = res.getHeader('Vary');
     if (!existing) {

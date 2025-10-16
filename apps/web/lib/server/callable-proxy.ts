@@ -4,7 +4,7 @@ import {
   LEGACY_FUNCTION_BASES,
   collectCallableTargets,
   buildCallableEndpointsFromBases,
-  normaliseCallableEndpoint,
+  normaliseCallableEndpointVariants,
   resolveHostedAppContext,
   type CallableTarget,
   type HostedAppContext,
@@ -74,12 +74,12 @@ export const buildCallableEndpointCandidates = (
     if (!envName) {
       continue;
     }
-    const explicit = normaliseCallableEndpoint(
+    const explicit = normaliseCallableEndpointVariants(
       process.env[envName],
       functionName,
     );
-    if (explicit) {
-      return { endpoints: [explicit], bases: baseCandidates, hostContext };
+    if (explicit.length > 0) {
+      return { endpoints: explicit, bases: baseCandidates, hostContext };
     }
   }
 

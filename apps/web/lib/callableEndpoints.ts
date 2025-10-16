@@ -353,35 +353,40 @@ const looksLikeExplicitEndpoint = (
   return lowerValue.endsWith(callableSuffix);
 };
 
-const requiresCallableSuffix = (value: string) => {
-  const lowerValue = value.toLowerCase();
-  if (lowerValue.includes("/_firebase/functions/")) {
-    return true;
+export const normaliseCallableEndpointVariants = (
+  value: string | null | undefined,
+  functionName: string,
+): string[] => {
+  const normalised = normaliseBaseUrl(value);
+  if (!normalised) {
+    return [];
   }
 
-  if (lowerValue.includes("/functions/")) {
-    return true;
+  if (looksLikeExplicitEndpoint(normalised, functionName)) {
+    const variants = new Set<string>([normalised]);
+    if (!normalised.includes('?')) {
+      if (normalised.endsWith(':call')) {
+        variants.add(normalised.slice(0, -5));
+      } else {
+        variants.add(`${normalised}:call`);
+      }
+    }
+    return Array.from(variants);
   }
 
-  return false;
+  const variants = new Set<string>();
+  const baseEndpoint = `${normalised}/${functionName}`;
+  variants.add(baseEndpoint);
+
+  variants.add(`${baseEndpoint}:call`);
+
+  return Array.from(variants);
 };
 
 export const normaliseCallableEndpoint = (
   value: string | null | undefined,
   functionName: string,
-): string | null => {
-  const normalised = normaliseBaseUrl(value);
-  if (!normalised) {
-    return null;
-  }
-
-  if (looksLikeExplicitEndpoint(normalised, functionName)) {
-    return normalised;
-  }
-
-  const callableSuffix = requiresCallableSuffix(normalised) ? ":call" : "";
-  return `${normalised}/${functionName}${callableSuffix}`;
-};
+): string | null => normaliseCallableEndpointVariants(value, functionName)[0] ?? null;
 
 const normaliseProjectId = (value: string | null | undefined) =>
   sanitiseProjectFragment(value);
@@ -499,9 +504,8 @@ export const buildCallableEndpointsFromBases = (
   const functionIds = resolveCallableFunctionIds(functionName);
 
   for (const base of expandRegionalBases(baseUrls)) {
-    const primaryEndpoint = normaliseCallableEndpoint(base, functionName);
-    if (primaryEndpoint) {
-      uniqueEndpoints.add(primaryEndpoint);
+    for (const endpoint of normaliseCallableEndpointVariants(base, functionName)) {
+      uniqueEndpoints.add(endpoint);
     }
 
     for (const codebase of codebases) {
@@ -510,15 +514,13 @@ export const buildCallableEndpointsFromBases = (
       }
 
       const candidateBase = `${base}/${codebase}`;
-      const endpoint = normaliseCallableEndpoint(candidateBase, functionName);
-      if (endpoint) {
+      for (const endpoint of normaliseCallableEndpointVariants(candidateBase, functionName)) {
         uniqueEndpoints.add(endpoint);
       }
     }
 
     for (const functionId of functionIds) {
-      const endpoint = normaliseCallableEndpoint(base, functionId);
-      if (endpoint) {
+      for (const endpoint of normaliseCallableEndpointVariants(base, functionId)) {
         uniqueEndpoints.add(endpoint);
       }
     }
