@@ -52,6 +52,14 @@ gsutil cors set storage.cors.json gs://<your-storage-bucket>
 Replace `<your-storage-bucket>` with the bucket name shown in your Firebase
 project settings.
 
+> **Note:** The HTTP Cloud Functions (such as `createOrder`) implement their
+> own allow-list using the origins defined in
+> `functions/src/index.ts`. The CORS middleware simply checks the request
+> origin against that list and does **not** rely on a service account or any
+> additional IAM permissions. As long as your functions are deployed in the
+> project, no extra roles need to be granted for the CORS headers to be
+> applied.
+
 This executes `next lint` inside `apps/web` to catch basic code-quality issues.
 
 ## Storage Adapters
