@@ -2,6 +2,7 @@ import { ensureFirebase, httpsCallable } from './firebase';
 
 let analyticsDisabled = false;
 let hasLoggedFailure = false;
+let hasLoggedTransientFailure = false;
 type CallableHandler = (payload: Record<string, unknown>) => Promise<unknown>;
 
 let analyticsCallable: CallableHandler | null = null;
@@ -41,6 +42,32 @@ function getVisitorId() {
   return visitorId;
 }
 
+const transientFirebaseCodes = new Set([
+  'deadline-exceeded',
+  'internal',
+  'resource-exhausted',
+  'unavailable',
+]);
+
+function isTransientFirebaseError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const code = (error as { code?: unknown }).code;
+  if (typeof code !== 'string') {
+    return false;
+  }
+
+  const normalisedCode = code.toLowerCase();
+  if (transientFirebaseCodes.has(normalisedCode)) {
+    return true;
+  }
+
+  const lastSegment = normalisedCode.split('/').pop();
+  return !!lastSegment && transientFirebaseCodes.has(lastSegment);
+}
+
 export async function trackPageView(path: string, duration?: number) {
   if (analyticsDisabled || typeof window === 'undefined') return;
 
@@ -54,6 +81,15 @@ export async function trackPageView(path: string, duration?: number) {
       duration: duration || 0,
     });
   } catch (err) {
+    if (isTransientFirebaseError(err)) {
+      if (!hasLoggedTransientFailure) {
+        hasLoggedTransientFailure = true;
+        // eslint-disable-next-line no-console
+        console.warn('trackPageView transient error, will retry', err);
+      }
+      return;
+    }
+
     analyticsDisabled = true;
     if (!hasLoggedFailure) {
       hasLoggedFailure = true;
