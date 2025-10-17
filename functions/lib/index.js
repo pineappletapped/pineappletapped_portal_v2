@@ -16,120 +16,7 @@ import { Readable } from 'stream';
 import fetch from 'node-fetch';
 import { bookingConflictsWithRange } from './utils/availability.js';
 import { DEFAULT_KIT_ROUTING_SETTINGS, ROUTING_STAGE_META, cloneRoutingSettings, parseKitRoutingSettings, resolveStageLabel as resolveRoutingStageLabel, } from './utils/routing.js';
-const normaliseEnvValue = (value) => {
-    if (!value) {
-        return null;
-    }
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : null;
-};
-const parseAllowedOrigins = (value) => {
-    const normalised = normaliseEnvValue(value);
-    if (!normalised) {
-        return [];
-    }
-    return normalised
-        .split(/[\s,]+/)
-        .map((origin) => origin.trim())
-        .filter((origin) => origin.length > 0);
-};
-const DEFAULT_ALLOWED_ORIGINS = [
-    'https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app',
-    'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app',
-    'https://ptfbportalbackend--pineapple-tapped---portal.us-central1.hosted.app',
-    'http://localhost:3000',
-    'http://localhost:5173',
-];
-const allowedOrigins = new Set([
-    ...DEFAULT_ALLOWED_ORIGINS,
-    ...parseAllowedOrigins(process.env.SHARED_ALLOWED_ORIGINS),
-    ...parseAllowedOrigins(process.env.NEXT_PUBLIC_SHARED_ALLOWED_ORIGINS),
-    ...parseAllowedOrigins(process.env.FUNCTIONS_SHARED_ALLOWED_ORIGINS),
-].map((origin) => origin.toLowerCase()));
-const resolveAllowedOrigin = (originHeader) => {
-    if (!originHeader) {
-        return null;
-    }
-    const trimmed = originHeader.trim();
-    if (!trimmed || trimmed.toLowerCase() === 'null') {
-        return null;
-    }
-    const lowerCased = trimmed.toLowerCase();
-    return allowedOrigins.has(lowerCased) ? trimmed : null;
-};
-// Allow callable functions from any origin so regional App Hosting sites can
-// authenticate without additional CORS configuration. Auth checks still guard
-// access to the underlying handlers.
-const CALLABLE_CORS_ORIGINS = true;
-const appendVaryHeader = (res, value) => {
-    const existing = res.getHeader('Vary');
-    if (!existing) {
-        res.setHeader('Vary', value);
-        return;
-    }
-    const header = Array.isArray(existing) ? existing.join(', ') : String(existing);
-    const parts = header
-        .split(',')
-        .map((part) => part.trim())
-        .filter((part) => part.length > 0);
-    if (!parts.includes(value)) {
-        parts.push(value);
-        res.setHeader('Vary', parts.join(', '));
-    }
-};
-const DEFAULT_ALLOWED_HEADERS = 'authorization,content-type,x-requested-with';
-const DEFAULT_ALLOWED_METHODS = 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS';
-const configureSharedCors = (req, res) => {
-    const originHeader = req.get('origin') ?? req.get('Origin') ?? null;
-    const allowedOrigin = resolveAllowedOrigin(originHeader);
-    if (originHeader && !allowedOrigin) {
-        const requestPath = req.originalUrl ?? req.url ?? '[unknown]';
-        console.warn('Blocked request from disallowed origin', originHeader, req.method, requestPath);
-        return { allowed: false, handled: false, origin: originHeader };
-    }
-    if (allowedOrigin) {
-        res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-        res.setHeader('Access-Control-Allow-Credentials', 'true');
-        appendVaryHeader(res, 'Origin');
-    }
-    const requestedHeaders = req.get('Access-Control-Request-Headers');
-    if (requestedHeaders) {
-        res.setHeader('Access-Control-Allow-Headers', requestedHeaders);
-        appendVaryHeader(res, 'Access-Control-Request-Headers');
-    }
-    else {
-        res.setHeader('Access-Control-Allow-Headers', DEFAULT_ALLOWED_HEADERS);
-    }
-    const requestedMethod = req.get('Access-Control-Request-Method');
-    if (requestedMethod) {
-        res.setHeader('Access-Control-Allow-Methods', requestedMethod);
-    }
-    else {
-        res.setHeader('Access-Control-Allow-Methods', DEFAULT_ALLOWED_METHODS);
-    }
-    res.setHeader('Access-Control-Max-Age', '3600');
-    if (req.method === 'OPTIONS') {
-        res.status(204).send('');
-        return { allowed: true, handled: true, origin: allowedOrigin };
-    }
-    return { allowed: true, handled: false, origin: allowedOrigin };
-};
-async function runSharedCors(req, res) {
-    return configureSharedCors(req, res);
-}
-async function withSharedCors(req, res, handler) {
-    const corsResult = await runSharedCors(req, res);
-    if (!corsResult.allowed) {
-        if (!corsResult.handled) {
-            res.status(403).json({ error: 'Origin not allowed' });
-        }
-        return;
-    }
-    if (corsResult.handled) {
-        return;
-    }
-    await handler();
-}
+import { CALLABLE_CORS_ORIGINS, withCors } from './utils/cors.js';
 const CALLABLE_ERROR_STATUS = {
     cancelled: 499,
     unknown: 500,
@@ -9458,90 +9345,84 @@ async function executeCreateOrder(data, context) {
     };
 }
 export const createOrder = onRequest({ region: 'europe-west2' }, async (req, res) => {
-    const corsResult = await runSharedCors(req, res);
-    if (!corsResult.allowed) {
-        res.status(403).json({ error: 'Origin not allowed', code: 'cors-not-allowed' });
-        return;
-    }
-    if (corsResult.handled) {
-        return;
-    }
-    if (req.method !== 'POST') {
-        res.status(405).json({ error: 'Method not allowed', code: 'method-not-allowed' });
-        return;
-    }
-    const authHeader = req.get('authorization') ?? req.get('Authorization');
-    let authContext = null;
-    if (authHeader?.startsWith('Bearer ')) {
-        const token = authHeader.slice('Bearer '.length).trim();
-        if (token) {
-            try {
-                const decoded = await admin.auth().verifyIdToken(token);
-                authContext = { uid: decoded.uid, token: decoded };
-            }
-            catch (error) {
-                console.error('createOrder verifyIdToken failed', error);
-                res.status(401).json({ error: 'Invalid authentication token', code: 'unauthenticated' });
-                return;
-            }
-        }
-    }
-    let body = req.body;
-    if (Buffer.isBuffer(body)) {
-        const text = body.toString('utf8');
-        if (text.trim()) {
-            try {
-                body = JSON.parse(text);
-            }
-            catch (error) {
-                console.error('createOrder invalid buffer body', error);
-                res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
-                return;
-            }
-        }
-        else {
-            body = null;
-        }
-    }
-    else if (typeof body === 'string') {
-        if (body.trim()) {
-            try {
-                body = JSON.parse(body);
-            }
-            catch (error) {
-                console.error('createOrder invalid string body', error);
-                res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
-                return;
-            }
-        }
-        else {
-            body = null;
-        }
-    }
-    const payloadCandidate = body && typeof body === 'object' && body !== null && 'data' in body
-        ? body.data
-        : body;
-    if (!payloadCandidate || typeof payloadCandidate !== 'object') {
-        res.status(400).json({ error: 'Order payload is required', code: 'invalid-argument' });
-        return;
-    }
-    try {
-        const result = await executeCreateOrder(payloadCandidate, { auth: authContext });
-        res.status(200).json({ data: result ?? null });
-    }
-    catch (error) {
-        if (error instanceof functions.https.HttpsError) {
-            const status = CALLABLE_ERROR_STATUS[error.code] ?? 500;
-            res.status(status).json({
-                error: error.message || 'Failed to create order.',
-                code: error.code,
-                ...(error.details === undefined ? {} : { details: error.details }),
-            });
+    await withCors(req, res, async () => {
+        if (req.method !== 'POST') {
+            res.status(405).json({ error: 'Method not allowed', code: 'method-not-allowed' });
             return;
         }
-        console.error('createOrder handler failed', error);
-        res.status(500).json({ error: 'Failed to create order.', code: 'internal' });
-    }
+        const authHeader = req.get('authorization') ?? req.get('Authorization');
+        let authContext = null;
+        if (authHeader?.startsWith('Bearer ')) {
+            const token = authHeader.slice('Bearer '.length).trim();
+            if (token) {
+                try {
+                    const decoded = await admin.auth().verifyIdToken(token);
+                    authContext = { uid: decoded.uid, token: decoded };
+                }
+                catch (error) {
+                    console.error('createOrder verifyIdToken failed', error);
+                    res.status(401).json({ error: 'Invalid authentication token', code: 'unauthenticated' });
+                    return;
+                }
+            }
+        }
+        let body = req.body;
+        if (Buffer.isBuffer(body)) {
+            const text = body.toString('utf8');
+            if (text.trim()) {
+                try {
+                    body = JSON.parse(text);
+                }
+                catch (error) {
+                    console.error('createOrder invalid buffer body', error);
+                    res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
+                    return;
+                }
+            }
+            else {
+                body = null;
+            }
+        }
+        else if (typeof body === 'string') {
+            if (body.trim()) {
+                try {
+                    body = JSON.parse(body);
+                }
+                catch (error) {
+                    console.error('createOrder invalid string body', error);
+                    res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
+                    return;
+                }
+            }
+            else {
+                body = null;
+            }
+        }
+        const payloadCandidate = body && typeof body === 'object' && body !== null && 'data' in body
+            ? body.data
+            : body;
+        if (!payloadCandidate || typeof payloadCandidate !== 'object') {
+            res.status(400).json({ error: 'Order payload is required', code: 'invalid-argument' });
+            return;
+        }
+        try {
+            const result = await executeCreateOrder(payloadCandidate, { auth: authContext });
+            res.status(200).json({ data: result ?? null });
+        }
+        catch (error) {
+            if (error instanceof functions.https.HttpsError) {
+                const status = CALLABLE_ERROR_STATUS[error.code] ?? 500;
+                res.status(status).json({
+                    error: error.message || 'Failed to create order.',
+                    code: error.code,
+                    ...(error.details === undefined ? {} : { details: error.details }),
+                });
+                return;
+            }
+            console.error('createOrder handler failed', error);
+            res.status(500).json({ error: 'Failed to create order.', code: 'internal' });
+        }
+    });
 });
 export const clientResearch_onOrderCreated = functions.firestore
     .document('orders/{orderId}')
@@ -12384,7 +12265,7 @@ async function assertStaffRequest(req, res, requiredRoles) {
  * List all users. Returns a small subset of user fields for security reasons.
  */
 export const admin_listUsers = functions.https.onRequest(async (req, res) => {
-    await withSharedCors(req, res, async () => {
+    await withCors(req, res, async () => {
         if (req.method !== 'GET') {
             res.status(405).end();
             return;
@@ -12414,7 +12295,7 @@ export const admin_listUsers = functions.https.onRequest(async (req, res) => {
  * Update a user's profile. Accepts { userId, updates }. Only staff can call.
  */
 export const admin_updateUser = functions.https.onRequest(async (req, res) => {
-    await withSharedCors(req, res, async () => {
+    await withCors(req, res, async () => {
         if (req.method !== 'POST') {
             res.status(405).end();
             return;
