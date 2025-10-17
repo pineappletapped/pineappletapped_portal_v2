@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import type { User } from 'firebase/auth';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
@@ -227,7 +228,7 @@ export default function PortalContainer({ children }: { children: React.ReactNod
       try {
         await ensureFirebase();
         if (auth && typeof auth.onAuthStateChanged === 'function') {
-          unsubscribe = auth.onAuthStateChanged((user) => {
+          unsubscribe = auth.onAuthStateChanged((user: User | null) => {
             if (user) {
               setUserName(user.displayName || 'Workspace member');
               setUserEmail(user.email || null);
