@@ -1,4 +1,3 @@
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -16,15 +15,15 @@
   }
 
   h1 {
-    @apply text-4xl font-bold text-orange;
+    @apply text-3xl font-semibold text-charcoal;
   }
 
   h2 {
-    @apply text-3xl font-semibold text-orange;
+    @apply text-2xl font-semibold text-blue;
   }
 
   h3 {
-    @apply text-xl font-medium text-orange;
+    @apply text-xl font-medium text-charcoal;
   }
 
   a {
@@ -62,11 +61,11 @@
   }
 
   .card {
-    @apply rounded-3xl border border-gray-200 bg-white p-6 shadow-sm;
+    @apply rounded-3xl border border-slate-200 bg-white p-6 shadow-sm;
   }
 
   .input {
-    @apply w-full min-w-0 max-w-full rounded-2xl border border-gray-200 bg-white px-4 py-2 text-sm shadow-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange disabled:cursor-not-allowed disabled:opacity-60;
+    @apply w-full min-w-0 max-w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm shadow-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange disabled:cursor-not-allowed disabled:opacity-60;
   }
 
   .badge {
@@ -81,7 +80,7 @@
   .prose h2,
   .prose h3,
   .prose h4 {
-    @apply text-orange font-semibold;
+    @apply text-charcoal font-semibold;
   }
 
   .prose h1 {
