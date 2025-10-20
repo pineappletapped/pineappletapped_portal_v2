@@ -1,7 +1,11 @@
 'use client';
 
-import Link from 'next/link';
+import NextLink from 'next/link';
 import { usePathname } from 'next/navigation';
+import NavigateNextIcon from '@mui/icons-material/NavigateNext';
+import MuiBreadcrumbs from '@mui/material/Breadcrumbs';
+import Link from '@mui/material/Link';
+import Typography from '@mui/material/Typography';
 
 const LABELS: Record<string, string> = {
   admin: 'Admin',
@@ -63,27 +67,29 @@ export default function Breadcrumbs({
   if (trail.length === 0 || shouldAutoHide) return null;
 
   return (
-    <nav aria-label="Breadcrumb" className="mb-4">
-      <ol className="flex flex-wrap items-center gap-2 text-xs font-medium text-gray-500 sm:text-sm">
-        {trail.map((item, idx) => {
-          const isLast = idx === trail.length - 1;
+    <MuiBreadcrumbs separator={<NavigateNextIcon fontSize="small" color="disabled" />} aria-label="Breadcrumb">
+      {trail.map((item, idx) => {
+        const isLast = idx === trail.length - 1;
+        if (isLast) {
           return (
-            <li key={item.href} className="flex items-center gap-2">
-              {isLast ? (
-                <span className="text-gray-900" aria-current="page">
-                  {item.label}
-                </span>
-              ) : (
-                <Link href={item.href} className="hover:text-gray-900">
-                  {item.label}
-                </Link>
-              )}
-              {!isLast ? <span className="text-gray-300">/</span> : null}
-            </li>
+            <Typography key={item.href} color="text.primary" fontWeight={600}>
+              {item.label}
+            </Typography>
           );
-        })}
-      </ol>
-    </nav>
+        }
+        return (
+          <Link
+            key={item.href}
+            component={NextLink}
+            href={item.href}
+            underline="hover"
+            color="text.secondary"
+            sx={{ fontWeight: 500 }}
+          >
+            {item.label}
+          </Link>
+        );
+      })}
+    </MuiBreadcrumbs>
   );
 }
-

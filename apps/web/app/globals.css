@@ -11,7 +11,8 @@
   }
 
   body {
-    @apply text-base font-normal text-charcoal bg-light-gray;
+    @apply text-base font-normal text-charcoal;
+    background: transparent;
   }
 
   h1 {

@@ -2,31 +2,48 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { User } from 'firebase/auth';
-import Link from 'next/link';
+import NextLink from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
-  FiBarChart2,
-  FiBriefcase,
-  FiCalendar,
-  FiClipboard,
-  FiFolder,
-  FiGrid,
-  FiHome,
-  FiLayers,
-  FiMail,
-  FiMenu,
-  FiSettings,
-  FiShoppingBag,
-  FiShield,
-  FiUploadCloud,
-  FiUsers,
-  FiX,
-} from 'react-icons/fi';
-import clsx from 'clsx';
+  Avatar,
+  Box,
+  Chip,
+  Container,
+  Drawer,
+  Grid,
+  IconButton,
+  List,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
+  Paper,
+  Stack,
+  Typography,
+  useMediaQuery,
+} from '@mui/material';
+import { useTheme } from '@mui/material/styles';
+import AssessmentOutlinedIcon from '@mui/icons-material/AssessmentOutlined';
+import AssignmentOutlinedIcon from '@mui/icons-material/AssignmentOutlined';
+import CalendarMonthOutlinedIcon from '@mui/icons-material/CalendarMonthOutlined';
+import CloudUploadOutlinedIcon from '@mui/icons-material/CloudUploadOutlined';
+import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
+import Diversity3OutlinedIcon from '@mui/icons-material/Diversity3Outlined';
+import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
+import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
+import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined';
+import LayersOutlinedIcon from '@mui/icons-material/LayersOutlined';
+import LocalMallOutlinedIcon from '@mui/icons-material/LocalMallOutlined';
+import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
+import MailOutlineOutlinedIcon from '@mui/icons-material/MailOutlineOutlined';
+import MenuIcon from '@mui/icons-material/Menu';
+import QueryStatsOutlinedIcon from '@mui/icons-material/QueryStatsOutlined';
+import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
+import WorkOutlineOutlinedIcon from '@mui/icons-material/WorkOutlineOutlined';
+import CloseIcon from '@mui/icons-material/Close';
 import Breadcrumbs from './Breadcrumbs';
 import { auth, ensureFirebase } from '@/lib/firebase';
 
-type IconComponent = (props: { className?: string }) => JSX.Element;
+type IconComponent = React.ElementType;
 
 interface NavigationItem {
   label: string;
@@ -97,37 +114,37 @@ const PORTAL_CONFIGS: PortalConfig[] = [
       {
         heading: 'Command',
         items: [
-          { label: 'Overview', href: '/admin', icon: FiHome, exact: true },
-          { label: 'Projects', href: '/admin/projects', icon: FiFolder },
-          { label: 'Orders', href: '/admin/orders', icon: FiShoppingBag },
-          { label: 'Bookings', href: '/admin/bookings', icon: FiCalendar },
-          { label: 'Deliveries', href: '/admin/deliveries', icon: FiUploadCloud },
-          { label: 'Analytics', href: '/admin/analytics', icon: FiBarChart2 },
+          { label: 'Overview', href: '/admin', icon: HomeOutlinedIcon, exact: true },
+          { label: 'Projects', href: '/admin/projects', icon: FolderOutlinedIcon },
+          { label: 'Orders', href: '/admin/orders', icon: LocalMallOutlinedIcon },
+          { label: 'Bookings', href: '/admin/bookings', icon: CalendarMonthOutlinedIcon },
+          { label: 'Deliveries', href: '/admin/deliveries', icon: CloudUploadOutlinedIcon },
+          { label: 'Analytics', href: '/admin/analytics', icon: QueryStatsOutlinedIcon },
         ],
       },
       {
         heading: 'Enablement',
         items: [
-          { label: 'Tools hub', href: '/admin/tools', icon: FiGrid },
-          { label: 'AI management', href: '/admin/ai-management', icon: FiSettings },
-          { label: 'Training', href: '/admin/training', icon: FiLayers },
-          { label: 'Marketing', href: '/admin/marketing', icon: FiClipboard },
-          { label: 'Email templates', href: '/admin/email-templates', icon: FiMail },
+          { label: 'Tools hub', href: '/admin/tools', icon: GridViewOutlinedIcon },
+          { label: 'AI management', href: '/admin/ai-management', icon: SettingsOutlinedIcon },
+          { label: 'Training', href: '/admin/training', icon: LayersOutlinedIcon },
+          { label: 'Marketing', href: '/admin/marketing', icon: AssignmentOutlinedIcon },
+          { label: 'Email templates', href: '/admin/email-templates', icon: MailOutlineOutlinedIcon },
         ],
       },
       {
         heading: 'People & coverage',
         items: [
-          { label: 'Team', href: '/admin/team', icon: FiUsers },
-          { label: 'Franchises', href: '/admin/franchises', icon: FiBriefcase },
-          { label: 'Insurance', href: '/admin/insurance', icon: FiShield },
+          { label: 'Team', href: '/admin/team', icon: Diversity3OutlinedIcon },
+          { label: 'Franchises', href: '/admin/franchises', icon: WorkOutlineOutlinedIcon },
+          { label: 'Insurance', href: '/admin/insurance', icon: LockOutlinedIcon },
         ],
       },
     ],
     quickActions: [
-      { label: 'Create proposal', href: '/admin/proposals', icon: FiClipboard },
-      { label: 'Schedule production', href: '/admin/bookings', icon: FiCalendar },
-      { label: 'Launch tools hub', href: '/admin/tools', icon: FiGrid },
+      { label: 'Create proposal', href: '/admin/proposals', icon: AssignmentOutlinedIcon },
+      { label: 'Schedule production', href: '/admin/bookings', icon: CalendarMonthOutlinedIcon },
+      { label: 'Launch tools hub', href: '/admin/tools', icon: GridViewOutlinedIcon },
     ],
     surface: 'plain',
   },
@@ -147,25 +164,25 @@ const PORTAL_CONFIGS: PortalConfig[] = [
       {
         heading: 'Work',
         items: [
-          { label: 'Dashboard', href: '/dashboard', icon: FiHome, exact: true },
-          { label: 'Projects', href: '/projects', icon: FiFolder },
-          { label: 'Bookings', href: '/bookings', icon: FiCalendar },
+          { label: 'Dashboard', href: '/dashboard', icon: DashboardOutlinedIcon, exact: true },
+          { label: 'Projects', href: '/projects', icon: FolderOutlinedIcon },
+          { label: 'Bookings', href: '/bookings', icon: CalendarMonthOutlinedIcon },
         ],
       },
       {
         heading: 'Collaboration',
         items: [
-          { label: 'Shared inbox', href: '/emails', icon: FiMail },
-          { label: 'Analytics', href: '/analytics', icon: FiBarChart2 },
-          { label: 'Content planner', href: '/dashboard/content-planner', icon: FiGrid },
-          { label: 'Organisations', href: '/orgs', icon: FiUsers },
+          { label: 'Shared inbox', href: '/emails', icon: MailOutlineOutlinedIcon },
+          { label: 'Analytics', href: '/analytics', icon: AssessmentOutlinedIcon },
+          { label: 'Content planner', href: '/dashboard/content-planner', icon: GridViewOutlinedIcon },
+          { label: 'Organisations', href: '/orgs', icon: Diversity3OutlinedIcon },
         ],
       },
     ],
     quickActions: [
-      { label: 'Request new project', href: '/projects/new', icon: FiLayers },
-      { label: 'Book a shoot', href: '/bookings', icon: FiCalendar },
-      { label: 'Open shared inbox', href: '/emails', icon: FiMail },
+      { label: 'Request new project', href: '/projects/new', icon: LayersOutlinedIcon },
+      { label: 'Book a shoot', href: '/bookings', icon: CalendarMonthOutlinedIcon },
+      { label: 'Open shared inbox', href: '/emails', icon: MailOutlineOutlinedIcon },
     ],
     surface: 'card',
   },
@@ -210,8 +227,12 @@ function getUserInitials(name: string): string {
   return initials || 'PT';
 }
 
+const drawerWidth = 304;
+
 export default function PortalContainer({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const theme = useTheme();
+  const isLgUp = useMediaQuery(theme.breakpoints.up('lg'));
   const portalConfig = useMemo(() => resolvePortalConfig(pathname), [pathname]);
   const navSections = useMemo(
     () => (portalConfig.navigation ?? []).filter((section) => section.items.length > 0),
@@ -250,163 +271,234 @@ export default function PortalContainer({ children }: { children: React.ReactNod
   }, []);
 
   const navContent = hasNavigation ? (
-    <div className="flex h-full flex-col bg-white">
-      <div className="space-y-4 border-b border-slate-200 px-6 py-6">
-        <div className="flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-orange text-white text-lg font-semibold">
+    <Box
+      role="navigation"
+      sx={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        bgcolor: 'background.paper',
+      }}
+    >
+      <Box sx={{ px: 3, py: 4, borderBottom: '1px solid', borderColor: 'divider' }}>
+        <Stack direction="row" spacing={2} alignItems="center">
+          <Avatar
+            variant="rounded"
+            sx={{
+              bgcolor: 'primary.main',
+              color: 'primary.contrastText',
+              fontWeight: 600,
+              width: 52,
+              height: 52,
+              fontSize: 20,
+            }}
+          >
             {portalConfig.brandMark}
-          </div>
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-blue/70">
+          </Avatar>
+          <Box>
+            <Typography variant="overline" color="secondary.main" sx={{ letterSpacing: '0.28em' }}>
               {portalConfig.sidebarTitle}
-            </p>
-            <p className="text-lg font-semibold text-charcoal">{portalConfig.sidebarSubtitle}</p>
-          </div>
-        </div>
+            </Typography>
+            <Typography variant="h6" color="text.primary">
+              {portalConfig.sidebarSubtitle}
+            </Typography>
+          </Box>
+        </Stack>
         {portalConfig.sidebarCopy ? (
-          <p className="text-sm text-slate-500">{portalConfig.sidebarCopy}</p>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+            {portalConfig.sidebarCopy}
+          </Typography>
         ) : null}
-      </div>
-      <nav className="flex-1 space-y-8 overflow-y-auto px-6 py-6">
-        {navSections.map((section) => (
-          <div key={section.heading} className="space-y-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-              {section.heading}
-            </p>
-            <ul className="space-y-1">
-              {section.items.map((item) => {
-                const ItemIcon = item.icon;
-                const active = isItemActive(pathname, item);
-                return (
-                  <li key={item.href}>
-                    <Link
+      </Box>
+      <Box sx={{ flex: 1, overflowY: 'auto', px: 3, py: 4 }}>
+        <Stack spacing={4}>
+          {navSections.map((section) => (
+            <Box key={section.heading}>
+              <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1.5, letterSpacing: '0.08em' }}>
+                {section.heading}
+              </Typography>
+              <List disablePadding>
+                {section.items.map((item) => {
+                  const ItemIcon = item.icon;
+                  const active = isItemActive(pathname, item);
+                  return (
+                    <ListItemButton
+                      key={item.href}
+                      component={NextLink}
                       href={item.href}
-                      className={clsx(
-                        'flex items-center gap-3 rounded-2xl px-3 py-2 text-sm font-medium transition-colors',
-                        active
-                          ? 'bg-orange/10 text-orange'
-                          : 'text-slate-600 hover:bg-slate-100 hover:text-charcoal'
-                      )}
+                      selected={active}
                       onClick={() => setMobileNavOpen(false)}
+                      sx={{
+                        borderRadius: 2,
+                        mb: 0.5,
+                        '&.Mui-selected': {
+                          bgcolor: 'primary.main',
+                          color: 'primary.contrastText',
+                          '& .MuiListItemIcon-root': {
+                            color: 'inherit',
+                          },
+                        },
+                      }}
                     >
-                      <ItemIcon className="h-4 w-4" />
-                      <span>{item.label}</span>
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        ))}
-      </nav>
-    </div>
+                      <ListItemIcon sx={{ minWidth: 36, color: 'text.secondary' }}>
+                        <ItemIcon fontSize="small" />
+                      </ListItemIcon>
+                      <ListItemText primary={item.label} primaryTypographyProps={{ fontWeight: active ? 600 : 500 }} />
+                    </ListItemButton>
+                  );
+                })}
+              </List>
+            </Box>
+          ))}
+        </Stack>
+      </Box>
+    </Box>
   ) : null;
 
   const quickActions = portalConfig.quickActions ?? [];
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 via-white to-slate-100">
-      <div className="mx-auto flex w-full max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:px-8">
-        {hasNavigation ? (
-          <aside className="hidden w-72 flex-shrink-0 lg:block">{navContent}</aside>
+    <Box sx={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', py: { xs: 4, md: 6 } }}>
+      <Container maxWidth="xl" sx={{ display: 'flex', gap: 4 }}>
+        {hasNavigation && isLgUp ? (
+          <Box component="aside" sx={{ width: drawerWidth, flexShrink: 0 }}>
+            <Paper sx={{ height: '100%', overflow: 'hidden' }}>{navContent}</Paper>
+          </Box>
         ) : null}
-        <main className="flex-1 space-y-6">
-          <div className="flex items-center justify-between lg:hidden">
+        <Box component="main" sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ display: { lg: 'none' } }}>
             {hasNavigation ? (
-              <button
-                type="button"
+              <IconButton
                 onClick={() => setMobileNavOpen(true)}
-                className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-charcoal shadow-sm"
+                aria-label="Open navigation"
+                sx={{ border: '1px solid', borderColor: 'divider' }}
               >
-                <FiMenu className="h-4 w-4" />
-                Menu
-              </button>
+                <MenuIcon />
+              </IconButton>
             ) : (
-              <span />
+              <Box />
             )}
-          </div>
+          </Stack>
 
-          <header className="rounded-3xl border border-slate-200 bg-white/80 p-6 shadow-sm ring-1 ring-white/60">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div className="space-y-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.35em] text-blue/60">
-                  {portalConfig.badge}
-                </p>
-                <h1 className="text-2xl font-semibold text-charcoal lg:text-3xl">{portalConfig.title}</h1>
+          <Paper sx={{ p: { xs: 3, md: 4 }, position: 'relative', overflow: 'hidden' }}>
+            <Stack direction={{ xs: 'column', lg: 'row' }} spacing={4} justifyContent="space-between" alignItems="flex-start">
+              <Box>
+                <Chip label={portalConfig.badge} color="secondary" size="small" sx={{ mb: 2 }} />
+                <Typography variant="h4" color="text.primary" gutterBottom>
+                  {portalConfig.title}
+                </Typography>
                 {portalConfig.summary ? (
-                  <p className="max-w-2xl text-sm text-slate-600">{portalConfig.summary}</p>
+                  <Typography variant="body1" color="text.secondary" sx={{ maxWidth: 640 }}>
+                    {portalConfig.summary}
+                  </Typography>
                 ) : null}
-              </div>
-              <div className="flex items-center gap-3 rounded-2xl bg-white/70 px-4 py-3 shadow-inner ring-1 ring-slate-200">
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-orange/15 text-sm font-semibold uppercase text-orange">
+              </Box>
+              <Paper
+                variant="outlined"
+                sx={{
+                  borderRadius: 3,
+                  px: 3,
+                  py: 2.5,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 2,
+                  boxShadow: 'inset 0 1px 0 rgba(15,23,42,0.06)',
+                  minWidth: 220,
+                }}
+              >
+                <Avatar sx={{ bgcolor: 'primary.main', color: 'primary.contrastText', fontWeight: 600 }}>
                   {getUserInitials(userName)}
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-charcoal">{userName}</p>
-                  {userEmail ? (
-                    <p className="text-xs text-slate-500">{userEmail}</p>
-                  ) : (
-                    <p className="text-xs text-slate-400">Signed in</p>
-                  )}
-                </div>
-              </div>
-            </div>
+                </Avatar>
+                <Box>
+                  <Typography variant="subtitle1" fontWeight={600}>
+                    {userName}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {userEmail ?? 'Signed in'}
+                  </Typography>
+                </Box>
+              </Paper>
+            </Stack>
             {quickActions.length > 0 ? (
-              <div className="mt-6 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              <Grid container spacing={2} sx={{ mt: 3 }}>
                 {quickActions.map((action) => {
                   const ActionIcon = action.icon;
                   return (
-                    <Link
-                      key={action.href}
-                      href={action.href}
-                      className="group flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white/70 px-4 py-3 text-sm font-medium text-charcoal shadow-sm transition hover:border-orange hover:bg-orange/5 hover:text-orange"
-                    >
-                      <span>{action.label}</span>
-                      <ActionIcon className="h-4 w-4 text-slate-400 transition group-hover:text-orange" />
-                    </Link>
+                    <Grid item xs={12} sm={6} lg={4} key={action.href}>
+                      <Paper
+                        component={NextLink}
+                        href={action.href}
+                        sx={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          px: 3,
+                          py: 2.5,
+                          textDecoration: 'none',
+                          color: 'text.primary',
+                          borderRadius: 3,
+                          transition: 'all 0.2s ease',
+                          '&:hover': {
+                            borderColor: 'primary.main',
+                            color: 'primary.main',
+                            transform: 'translateY(-2px)',
+                          },
+                        }}
+                      >
+                        <Typography variant="body1" fontWeight={600}>
+                          {action.label}
+                        </Typography>
+                        <ActionIcon fontSize="small" />
+                      </Paper>
+                    </Grid>
                   );
                 })}
-              </div>
+              </Grid>
             ) : null}
-          </header>
+          </Paper>
 
-          <div
-            className={clsx(
-              'space-y-6',
-              portalConfig.surface === 'card' &&
-                'rounded-3xl border border-slate-200 bg-white/90 p-6 shadow-sm ring-1 ring-slate-200'
-            )}
+          <Box
+            sx={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 3,
+            }}
           >
             <Breadcrumbs />
-            {children}
-          </div>
-        </main>
-      </div>
+            {portalConfig.surface === 'card' ? (
+              <Paper sx={{ p: { xs: 3, md: 4 }, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                {children}
+              </Paper>
+            ) : (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>{children}</Box>
+            )}
+          </Box>
+        </Box>
+      </Container>
 
-      {hasNavigation && mobileNavOpen ? (
-        <div className="fixed inset-0 z-50 flex lg:hidden">
-          <div className="h-full w-72 max-w-xs bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
-              <p className="text-sm font-semibold text-slate-500">Navigation</p>
-              <button
-                type="button"
-                onClick={() => setMobileNavOpen(false)}
-                className="rounded-full border border-slate-200 bg-white p-2 text-slate-500 transition hover:text-orange"
-                aria-label="Close navigation"
-              >
-                <FiX className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto">{navContent}</div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setMobileNavOpen(false)}
-            className="h-full flex-1 bg-slate-900/50"
-            aria-label="Close navigation backdrop"
-          />
-        </div>
+      {hasNavigation ? (
+        <Drawer
+          anchor="left"
+          variant="temporary"
+          open={mobileNavOpen}
+          onClose={() => setMobileNavOpen(false)}
+          ModalProps={{ keepMounted: true }}
+          sx={{
+            display: { xs: 'block', lg: 'none' },
+            '& .MuiDrawer-paper': {
+              width: drawerWidth,
+              borderRadius: 0,
+            },
+          }}
+        >
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 2, py: 1 }}>
+            <IconButton onClick={() => setMobileNavOpen(false)} aria-label="Close navigation">
+              <CloseIcon />
+            </IconButton>
+          </Box>
+          {navContent}
+        </Drawer>
       ) : null}
-    </div>
+    </Box>
   );
 }
