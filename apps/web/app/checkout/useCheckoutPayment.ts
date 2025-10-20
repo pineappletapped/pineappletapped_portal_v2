@@ -1,5 +1,14 @@
 "use client";
 
+// This file is a modified version of the original
+// `apps/web/app/checkout/useCheckoutPayment.ts` from the
+// `pineappletapped_portal_v2` repository.  It implements a
+// zero‑balance order bypass by calling `completeZeroBalanceOrder()`
+// whenever the cart total is zero (e.g. when a voucher code reduces
+// the entire balance to zero).  The dependency array for
+// `initialisePayment` has also been updated to include
+// `completeZeroBalanceOrder`.
+
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { FirebaseError } from "firebase/app";
 import { type User } from "firebase/auth";
@@ -186,10 +195,9 @@ export function useCheckoutPayment({
       return false;
     }
     if (hasZeroBalance) {
-      setPaymentError(
-        "This order no longer requires payment. Confirm your order to continue.",
-      );
-      return false;
+      // If the order has zero balance (voucher covers the full amount),
+      // bypass payment entirely by completing the order directly.
+      return await completeZeroBalanceOrder();
     }
 
     const validationError = validate();
@@ -250,6 +258,7 @@ export function useCheckoutPayment({
     intentPayload,
     stripePromise,
     validate,
+    completeZeroBalanceOrder,
   ]);
 
   const completeZeroBalanceOrder = useCallback(async () => {
