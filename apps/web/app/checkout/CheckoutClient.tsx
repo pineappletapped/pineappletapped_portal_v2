@@ -1,5 +1,13 @@
 "use client";
 
+// This file is a modified version of the original
+// `apps/web/app/checkout/CheckoutClient.tsx` from the
+// `pineappletapped_portal_v2` repository.  It implements a
+// zero‑balance order bypass by invoking `completeZeroBalanceOrder()`
+// whenever the computed total is zero (i.e. when a voucher or discount
+// reduces the entire balance to zero).  The dependency array for
+// `initializePaymentIntent` has been updated accordingly.
+
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Elements } from "@stripe/react-stripe-js";
@@ -113,17 +121,15 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const productTotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
   const rentalTotal = items.reduce(
     (sum, i) => sum + (i.rentalTotal || 0) * i.quantity,
-    0
+    0,
   );
   const [discount, setDiscount] = useState(0);
   const router = useRouter();
   const stripePromise = useMemo(
     () => (publishableKey ? loadStripe(publishableKey) : null),
-    [publishableKey]
+    [publishableKey],
   );
-  const stripeConfigError = publishableKey
-    ? null
-    : "Stripe publishable key is not configured.";
+  const stripeConfigError = publishableKey ? null : "Stripe publishable key is not configured.";
 
   const [email, setEmail] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
@@ -181,13 +187,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       return { ready: false, reason: "password-mismatch" };
     }
     return { ready: true, reason: null };
-  }, [
-    authMode,
-    confirmPassword,
-    currentUser,
-    email,
-    registerPassword,
-  ]);
+  }, [authMode, confirmPassword, currentUser, email, registerPassword]);
   const describeAccountRequirement = useCallback(
     (reason: AccountRequirementReason, context: "payment" | "checkout") => {
       switch (reason) {
@@ -221,13 +221,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     setAccountError(null);
     setRegisterPassword("");
     setConfirmPassword("");
-  }, [
-    setAccountError,
-    setAuthMode,
-    setConfirmPassword,
-    setLoginError,
-    setRegisterPassword,
-  ]);
+  }, [setAccountError, setAuthMode, setConfirmPassword, setLoginError, setRegisterPassword]);
   const venueLocked = useMemo(
     () =>
       items.length > 0 &&
@@ -235,19 +229,19 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         (item) =>
           item.coverage?.matchType === "venue" &&
           typeof item.location === "string" &&
-          item.location.trim().length > 0
+          item.location.trim().length > 0,
       ),
-    [items]
+    [items],
   );
   const primaryCartLocation = useMemo(() => {
     const entry = items.find(
-      (item) => typeof item.location === "string" && item.location.trim().length > 0
+      (item) => typeof item.location === "string" && item.location.trim().length > 0,
     );
     return entry ? entry.location!.trim() : "";
   }, [items]);
   const lockedVenueLocation = useMemo(() => {
     const preset = items.find(
-      (item) => typeof item.location === "string" && item.location.trim().length > 0
+      (item) => typeof item.location === "string" && item.location.trim().length > 0,
     );
     return preset ? preset.location!.trim() : "";
   }, [items]);
@@ -296,7 +290,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         year: "numeric",
       });
     },
-    [parseDateTime]
+    [parseDateTime],
   );
 
   const formatTimeSlotLabel = useCallback(
@@ -308,7 +302,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             start?: string | null;
             end?: string | null;
             label?: string | null;
-          }
+          },
     ) => {
       if (!slot) {
         return null;
@@ -319,14 +313,17 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       const start = parseDateTime(slot.start ?? null);
       const end = parseDateTime(slot.end ?? null);
       if (start && end) {
-        return `${start.toLocaleTimeString("en-GB", { timeStyle: "short" })} – ${end.toLocaleTimeString("en-GB", { timeStyle: "short" })}`;
+        return `${start.toLocaleTimeString("en-GB", { timeStyle: "short" })} – ${end.toLocaleTimeString(
+          "en-GB",
+          { timeStyle: "short" },
+        )}`;
       }
       if (start) {
         return start.toLocaleTimeString("en-GB", { timeStyle: "short" });
       }
       return null;
     },
-    [parseDateTime]
+    [parseDateTime],
   );
 
   useEffect(() => {
@@ -357,7 +354,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         const voucherQuery = query(
           collection(db, "vouchers"),
           where("code", "==", requestCode),
-          limit(1)
+          limit(1),
         );
         const snapshot = await getDocs(voucherQuery);
         if (cancelled) {
@@ -374,9 +371,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           return;
         }
         const message =
-          error instanceof Error
-            ? error.message
-            : "We couldn't validate that voucher. Try again.";
+          error instanceof Error ? error.message : "We couldn't validate that voucher. Try again.";
         setVoucherFetch({ code: requestCode, checking: false, data: null, error: message });
       }
     }, 350);
@@ -419,9 +414,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     const record = data as Record<string, unknown>;
     const rawLocations = Array.isArray(record.locations)
       ? (record.locations as unknown[])
-          .map((value) =>
-            typeof value === "string" ? value.trim().toLowerCase() : ""
-          )
+          .map((value) => (typeof value === "string" ? value.trim().toLowerCase() : ""))
           .filter((value) => value.length > 0)
       : [];
     const trimmedLocation = location.trim();
@@ -454,12 +447,10 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       : [];
     let eligibleSubtotal = 0;
     items.forEach((item) => {
-      const matchesProduct =
-        rawProductIds.length === 0 || rawProductIds.includes(item.id);
+      const matchesProduct = rawProductIds.length === 0 || rawProductIds.includes(item.id);
       const matchesCategory =
         rawCategoryIds.length === 0 ||
-        (typeof item.category === "string" &&
-          rawCategoryIds.includes(item.category));
+        (typeof item.category === "string" && rawCategoryIds.includes(item.category));
       if (matchesProduct && matchesCategory) {
         eligibleSubtotal += item.price * item.quantity;
       }
@@ -472,8 +463,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       };
     }
     const amountValue = (record.amount ?? 0) as unknown;
-    const amount =
-      typeof amountValue === "number" ? amountValue : Number(amountValue);
+    const amount = typeof amountValue === "number" ? amountValue : Number(amountValue);
     if (!Number.isFinite(amount) || amount <= 0) {
       return {
         status: "ineligible",
@@ -482,8 +472,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       };
     }
     const typeValue = record.type;
-    const voucherType =
-      typeof typeValue === "string" ? typeValue : "percentage";
+    const voucherType = typeof typeValue === "string" ? typeValue : "percentage";
     let computedDiscount = 0;
     if (voucherType === "percentage") {
       computedDiscount = eligibleSubtotal * (amount / 100);
@@ -502,19 +491,10 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     const normalisedDiscount = Math.min(productTotal, computedDiscount);
     return { status: "applied", discount: normalisedDiscount, message: null };
   }, [items, location, productTotal, voucher, voucherFetch]);
-  const voucherDiscount = Math.min(
-    productTotal,
-    Math.max(0, voucherEvaluation.discount)
-  );
+  const voucherDiscount = Math.min(productTotal, Math.max(0, voucherEvaluation.discount));
   const subtotalAfterVoucher = Math.max(0, productTotal - voucherDiscount);
-  const discountAmount = Math.min(
-    subtotalAfterVoucher,
-    subtotalAfterVoucher * (discount / 100)
-  );
-  const finalTotal = Math.max(
-    0,
-    subtotalAfterVoucher - discountAmount + rentalTotal
-  );
+  const discountAmount = Math.min(subtotalAfterVoucher, subtotalAfterVoucher * (discount / 100));
+  const finalTotal = Math.max(0, subtotalAfterVoucher - discountAmount + rentalTotal);
   const vat = finalTotal * VAT_RATE;
   const rawGrandTotal = finalTotal + vat;
   const hasZeroBalance = rawGrandTotal <= ZERO_BALANCE_TOLERANCE;
@@ -526,9 +506,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return { text: "Checking voucher…", tone: "muted" };
       case "error":
         return {
-          text:
-            voucherEvaluation.message ||
-            "We couldn't validate that voucher. Try again.",
+          text: voucherEvaluation.message || "We couldn't validate that voucher. Try again.",
           tone: "error",
         };
       case "invalid":
@@ -545,9 +523,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         };
       case "applied":
         return {
-          text: `Voucher applied${
-            appliedCode ? ` (${appliedCode})` : ""
-          } – £${voucherDiscount.toFixed(2)} off.`,
+          text: `Voucher applied${appliedCode ? ` (${appliedCode})` : ""} – £${voucherDiscount.toFixed(2)} off.`,
           tone: "success",
         };
       default:
@@ -633,8 +609,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 : item.id,
             source: item.organiser.source ?? null,
             lineRole:
-              item.organiser.exhibitorProductId &&
-              item.organiser.exhibitorProductId === item.id
+              item.organiser.exhibitorProductId && item.organiser.exhibitorProductId === item.id
                 ? ("exhibitor" as OrganiserLineRole)
                 : ("organiser" as OrganiserLineRole),
           }
@@ -788,9 +763,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             ? item.kitWarnings
                 .map((warning) => (typeof warning === "string" ? warning.trim() : ""))
                 .filter((warning) => warning.length > 0)
-            : []
-        )
-      )
+            : [],
+        ),
+      ),
     );
     return {
       items: itemPayload,
@@ -858,7 +833,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         kitReservationWarnings: orderInput.kitReservationWarnings,
         organisers: orderInput.organisers,
       }),
-    [orderInput]
+    [orderInput],
   );
   const zeroBalanceBlockingMessage = useMemo(() => {
     if (items.length === 0) {
@@ -889,8 +864,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     ? "text-sm text-gray-500"
     : "text-sm text-emerald-700";
   const paymentDetailsStale =
-    lastIntentPayload.current !== null &&
-    lastIntentPayload.current !== currentIntentPayload;
+    lastIntentPayload.current !== null && lastIntentPayload.current !== currentIntentPayload;
 
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
@@ -1056,7 +1030,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       const detailFromCustomData = extractDetailMessage(
         customData && typeof customData === "object"
           ? (customData as Record<string, unknown>).details ?? null
-          : null
+          : null,
       );
       if (detailFromCustomData) {
         return detailFromCustomData;
@@ -1297,10 +1271,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       return false;
     }
     if (hasZeroBalance) {
-      setPaymentError(
-        "This order no longer requires payment. Proceed with the order instead.",
-      );
-      return false;
+      // If the cart total is zero, bypass the payment intent and complete the order directly.
+      return await completeZeroBalanceOrder();
     }
     if (items.length === 0) {
       setPaymentError("Your cart is empty.");
@@ -1355,10 +1327,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         throw new Error("Failed to create order.");
       }
 
-      const createIntent = httpsCallable(
-        functionsInstance,
-        "stripe_createPaymentIntent"
-      );
+      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
       const intentRes: any = await createIntent({
         orderId: createdOrderId,
         type: "deposit",
@@ -1397,8 +1366,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     orderInput,
     stripePromise,
     stripeConfigError,
+    completeZeroBalanceOrder,
   ]);
-
 
   useEffect(() => {
     if (
@@ -1430,7 +1399,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       clear();
       router.push(`/orders/${completedOrderId}`);
     },
-    [clear, router]
+    [clear, router],
   );
 
   const completeZeroBalanceOrder = useCallback(async () => {
@@ -1516,24 +1485,22 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         throw new Error("We couldn't verify the order total. Please try again.");
       }
       const orderSnap = await getDoc(doc(db, "orders", createdOrderId));
-      if (!orderSnap.exists) {
+      if (!orderSnap.exists()) {
         throw new Error("Order could not be verified. Please try again.");
       }
       const snapData = orderSnap.data() ?? {};
       const priceValue = Number(
-        snapData.price ?? (serverPrice !== null ? serverPrice : 0)
+        snapData.price ?? (serverPrice !== null ? serverPrice : 0),
       );
       const netTotalValue = Number(
-        snapData.netTotal ?? (serverNetTotal !== null ? serverNetTotal : 0)
+        snapData.netTotal ?? (serverNetTotal !== null ? serverNetTotal : 0),
       );
       const voucherDiscountValue =
         serverVoucherDiscountValue ?? snapData.voucherDiscount ?? null;
       const discountAmountValue =
         serverDiscountAmountValue ?? snapData.discountAmount ?? null;
       const normalisedPrice = Number.isFinite(priceValue) ? priceValue : 0;
-      const normalisedNetTotal = Number.isFinite(netTotalValue)
-        ? netTotalValue
-        : 0;
+      const normalisedNetTotal = Number.isFinite(netTotalValue) ? netTotalValue : 0;
       if (
         Math.abs(normalisedPrice) <= ZERO_BALANCE_TOLERANCE ||
         Math.abs(normalisedNetTotal) <= ZERO_BALANCE_TOLERANCE
@@ -1552,10 +1519,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return true;
       }
 
-      const createIntent = httpsCallable(
-        functionsInstance,
-        "stripe_createPaymentIntent"
-      );
+      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
       const intentRes: any = await createIntent({
         orderId: createdOrderId,
         type: "deposit",
@@ -1568,7 +1532,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       setClientSecret(secret);
       lastIntentPayload.current = currentIntentPayload;
       setPaymentError(
-        "Voucher no longer covers the full balance. Complete the payment below to finish your order."
+        "Voucher no longer covers the full balance. Complete the payment below to finish your order.",
       );
       return false;
     } catch (error) {
@@ -1595,7 +1559,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     items.length,
     orderInput,
   ]);
-
 
   const handleLeadSourceKindChange = (kind: LeadSourceKind) => {
     setLeadSourceState((prev) => {
@@ -1861,9 +1824,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         <div className="space-y-2">
           {items.map((item, idx) => {
             const bookingDateLabel =
-              formatDateLabel(item.date ?? null) ||
-              formatDateLabel(item.timeSlot?.start ?? null) ||
-              null;
+              formatDateLabel(item.date ?? null) || formatDateLabel(item.timeSlot?.start ?? null) || null;
             const timeSlotLabel = formatTimeSlotLabel(item.timeSlot ?? null);
             return (
               <div key={idx} className="text-sm">
@@ -1879,12 +1840,12 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                     {timeSlotLabel ? <div>Time: {timeSlotLabel}</div> : null}
                   </div>
                 ) : null}
-              {item.rentalTotal ? (
-                <div className="flex justify-between text-xs text-gray-600">
-                  <span>Rental</span>
-                  <span>£{(item.rentalTotal * item.quantity).toFixed(2)}</span>
-                </div>
-              ) : null}
+                {item.rentalTotal ? (
+                  <div className="flex justify-between text-xs text-gray-600">
+                    <span>Rental</span>
+                    <span>£{(item.rentalTotal * item.quantity).toFixed(2)}</span>
+                  </div>
+                ) : null}
               </div>
             );
           })}
@@ -1947,14 +1908,10 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 className="btn w-full"
                 onClick={completeZeroBalanceOrder}
                 disabled={
-                  Boolean(zeroBalanceBlockingMessage) ||
-                  initializingPayment ||
-                  isRegistering
+                  Boolean(zeroBalanceBlockingMessage) || initializingPayment || isRegistering
                 }
               >
-                {initializingPayment
-                  ? "Submitting order..."
-                  : "Proceed with order"}
+                {initializingPayment ? "Submitting order..." : "Proceed with order"}
               </button>
             </>
           ) : clientSecret && orderId && stripePromise ? (
@@ -1980,9 +1937,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                   onClick={initializePaymentIntent}
                   disabled={initializingPayment}
                 >
-                  {initializingPayment
-                    ? "Refreshing..."
-                    : "Refresh payment details"}
+                  {initializingPayment ? "Refreshing..." : "Refresh payment details"}
                 </button>
               ) : null}
             </>
@@ -2018,9 +1973,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                   isRegistering
                 }
               >
-                {initializingPayment
-                  ? "Preparing payment..."
-                  : "Prepare payment"}
+                {initializingPayment ? "Preparing payment..." : "Prepare payment"}
               </button>
             </>
           )}
