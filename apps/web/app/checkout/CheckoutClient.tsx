@@ -1369,31 +1369,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     completeZeroBalanceOrder,
   ]);
 
-  useEffect(() => {
-    if (
-      authReady &&
-      currentUser &&
-      !clientSecret &&
-      !initializingPayment &&
-      items.length > 0 &&
-      name &&
-      stripePromise &&
-      !hasZeroBalance
-    ) {
-      void initializePaymentIntent();
-    }
-  }, [
-    authReady,
-    clientSecret,
-    currentUser,
-    initializePaymentIntent,
-    initializingPayment,
-    items.length,
-    name,
-    stripePromise,
-    hasZeroBalance,
-  ]);
-
   const handlePaymentSuccess = useCallback(
     (completedOrderId: string) => {
       clear();
@@ -1558,6 +1533,31 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     isRegistering,
     items.length,
     orderInput,
+  ]);
+
+  useEffect(() => {
+    if (
+      authReady &&
+      currentUser &&
+      !clientSecret &&
+      !initializingPayment &&
+      items.length > 0 &&
+      name &&
+      stripePromise &&
+      !hasZeroBalance
+    ) {
+      void initializePaymentIntent();
+    }
+  }, [
+    authReady,
+    clientSecret,
+    currentUser,
+    initializePaymentIntent,
+    initializingPayment,
+    items.length,
+    name,
+    stripePromise,
+    hasZeroBalance,
   ]);
 
   const handleLeadSourceKindChange = (kind: LeadSourceKind) => {
