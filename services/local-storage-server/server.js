@@ -1,13 +1,11 @@
 
 import express from 'express';
 import multer from 'multer';
-import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
 
 const app = express();
-app.use(cors());
 app.use(express.json());
 
 const STORAGE_ROOT = process.env.STORAGE_ROOT || path.join(process.cwd(), 'data');

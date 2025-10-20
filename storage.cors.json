@@ -1,7 +1,0 @@
-[
-  {
-    "origin": ["https://pineapple--pineapple-tapped---portal.europe-west4.hosted.app"],
-    "method": ["GET", "POST", "DELETE"],
-    "maxAgeSeconds": 3600
-  }
-]

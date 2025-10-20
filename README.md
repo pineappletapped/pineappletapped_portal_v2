@@ -40,18 +40,6 @@ Run the linter across the web app:
 npm test
 ```
 
-### Configure Storage CORS
-
-To allow the web app to upload and delete files from Firebase Storage without
-browser CORS errors, apply the provided `storage.cors.json` to your bucket:
-
-```bash
-gsutil cors set storage.cors.json gs://<your-storage-bucket>
-```
-
-Replace `<your-storage-bucket>` with the bucket name shown in your Firebase
-project settings.
-
 This executes `next lint` inside `apps/web` to catch basic code-quality issues.
 
 ## Storage Adapters

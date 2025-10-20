@@ -2,7 +2,7 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { onCall, onRequest } from 'firebase-functions/v2/https';
-import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
+import type { Request as ExpressRequest } from 'express';
 import Stripe from 'stripe';
 import type { DocumentData, DocumentReference, DocumentSnapshot } from 'firebase-admin/firestore';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
@@ -29,7 +29,6 @@ import {
   type RoutingStageConfig,
   type RoutingStageKey,
 } from './utils/routing.js';
-import { CALLABLE_CORS_ORIGINS, withCors } from './utils/cors.js';
 
 const CALLABLE_ERROR_STATUS: Record<string, number> = {
   cancelled: 499,
@@ -49,13 +48,6 @@ const CALLABLE_ERROR_STATUS: Record<string, number> = {
   "data-loss": 500,
   unauthenticated: 401,
 };
-
-// TODO: wrap all http functions with the cors handler, for example:
-// exports.myFunction = functions.https.onRequest((req, res) => {
-//   corsHandler(req, res, () => {
-//     // your function logic
-//   });
-// });
 
 admin.initializeApp({
   storageBucket:
@@ -5601,7 +5593,7 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
 });
 
 // Track page view analytics from the public site
-export const analytics_track = onCall({ region: 'europe-west2', cors: CALLABLE_CORS_ORIGINS }, async (request) => {
+export const analytics_track = onCall({ region: 'europe-west2' }, async (request) => {
   const rawRequest = request.rawRequest as ExpressRequest | undefined;
   const payload =
     request.data && typeof request.data === 'object'
@@ -11017,85 +11009,83 @@ async function executeCreateOrder(data: any, context: CallableContextLike) {
 }
 
 export const createOrder = onRequest({ region: 'europe-west2' }, async (req, res) => {
-  await withCors(req as unknown as ExpressRequest, res as unknown as ExpressResponse, async () => {
-    if (req.method !== 'POST') {
-      res.status(405).json({ error: 'Method not allowed', code: 'method-not-allowed' });
-      return;
-    }
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed', code: 'method-not-allowed' });
+    return;
+  }
 
-    const authHeader = req.get('authorization') ?? req.get('Authorization');
-    let authContext: CallableAuthContext | null = null;
+  const authHeader = req.get('authorization') ?? req.get('Authorization');
+  let authContext: CallableAuthContext | null = null;
 
-    if (authHeader?.startsWith('Bearer ')) {
-      const token = authHeader.slice('Bearer '.length).trim();
-      if (token) {
-        try {
-          const decoded = await admin.auth().verifyIdToken(token);
-          authContext = { uid: decoded.uid, token: decoded };
-        } catch (error) {
-          console.error('createOrder verifyIdToken failed', error);
-          res.status(401).json({ error: 'Invalid authentication token', code: 'unauthenticated' });
-          return;
-        }
-      }
-    }
-
-    let body: unknown = req.body;
-    if (Buffer.isBuffer(body)) {
-      const text = body.toString('utf8');
-      if (text.trim()) {
-        try {
-          body = JSON.parse(text);
-        } catch (error) {
-          console.error('createOrder invalid buffer body', error);
-          res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
-          return;
-        }
-      } else {
-        body = null;
-      }
-    } else if (typeof body === 'string') {
-      if (body.trim()) {
-        try {
-          body = JSON.parse(body);
-        } catch (error) {
-          console.error('createOrder invalid string body', error);
-          res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
-          return;
-        }
-      } else {
-        body = null;
-      }
-    }
-
-    const payloadCandidate =
-      body && typeof body === 'object' && body !== null && 'data' in (body as Record<string, unknown>)
-        ? (body as { data?: unknown }).data
-        : body;
-
-    if (!payloadCandidate || typeof payloadCandidate !== 'object') {
-      res.status(400).json({ error: 'Order payload is required', code: 'invalid-argument' });
-      return;
-    }
-
-    try {
-      const result = await executeCreateOrder(payloadCandidate, { auth: authContext });
-      res.status(200).json({ data: result ?? null });
-    } catch (error) {
-      if (error instanceof functions.https.HttpsError) {
-        const status = CALLABLE_ERROR_STATUS[error.code] ?? 500;
-        res.status(status).json({
-          error: error.message || 'Failed to create order.',
-          code: error.code,
-          ...(error.details === undefined ? {} : { details: error.details }),
-        });
+  if (authHeader?.startsWith('Bearer ')) {
+    const token = authHeader.slice('Bearer '.length).trim();
+    if (token) {
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        authContext = { uid: decoded.uid, token: decoded };
+      } catch (error) {
+        console.error('createOrder verifyIdToken failed', error);
+        res.status(401).json({ error: 'Invalid authentication token', code: 'unauthenticated' });
         return;
       }
-
-      console.error('createOrder handler failed', error);
-      res.status(500).json({ error: 'Failed to create order.', code: 'internal' });
     }
-  });
+  }
+
+  let body: unknown = req.body;
+  if (Buffer.isBuffer(body)) {
+    const text = body.toString('utf8');
+    if (text.trim()) {
+      try {
+        body = JSON.parse(text);
+      } catch (error) {
+        console.error('createOrder invalid buffer body', error);
+        res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
+        return;
+      }
+    } else {
+      body = null;
+    }
+  } else if (typeof body === 'string') {
+    if (body.trim()) {
+      try {
+        body = JSON.parse(body);
+      } catch (error) {
+        console.error('createOrder invalid string body', error);
+        res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
+        return;
+      }
+    } else {
+      body = null;
+    }
+  }
+
+  const payloadCandidate =
+    body && typeof body === 'object' && body !== null && 'data' in (body as Record<string, unknown>)
+      ? (body as { data?: unknown }).data
+      : body;
+
+  if (!payloadCandidate || typeof payloadCandidate !== 'object') {
+    res.status(400).json({ error: 'Order payload is required', code: 'invalid-argument' });
+    return;
+  }
+
+  try {
+    const result = await executeCreateOrder(payloadCandidate, { auth: authContext });
+    res.status(200).json({ data: result ?? null });
+  } catch (error) {
+    if (error instanceof functions.https.HttpsError) {
+      const status = CALLABLE_ERROR_STATUS[error.code] ?? 500;
+      res.status(status).json({
+        error: error.message || 'Failed to create order.',
+        code: error.code,
+        ...(error.details === undefined ? {} : { details: error.details }),
+      });
+      return;
+    }
+
+    console.error('createOrder handler failed', error);
+    res.status(500).json({ error: 'Failed to create order.', code: 'internal' });
+  }
 });
 
 export const clientResearch_onOrderCreated = functions.firestore
@@ -14268,7 +14258,7 @@ async function recordLoginForUid(uid: string, timestampValue: unknown): Promise<
 }
 
 const recordLoginCallable = onCall(
-  { region: 'europe-west2', cors: CALLABLE_CORS_ORIGINS },
+  { region: 'europe-west2' },
   async (request) => {
     if (!request.auth?.uid) {
       throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
@@ -14355,96 +14345,92 @@ async function assertStaffRequest(
  * List all users. Returns a small subset of user fields for security reasons.
  */
 export const admin_listUsers = functions.https.onRequest(async (req, res) => {
-  await withCors(req as unknown as ExpressRequest, res as unknown as ExpressResponse, async () => {
-    if (req.method !== 'GET') {
-      res.status(405).end();
-      return;
-    }
-    const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
-    if (!requester) {
-      return;
-    }
-    try {
-      const snap = await db.collection('users').get();
-      const users = snap.docs.map((doc) => {
-        const data: any = doc.data();
-        if (data.createdAt && typeof data.createdAt.toDate === 'function') {
-          data.createdAt = data.createdAt.toDate().toISOString();
-        }
-        return { id: doc.id, ...data };
-      });
-      res.json({ users });
-    } catch (err: any) {
-      console.error('admin_listUsers failed', err);
-      res.status(500).json({ error: err.message || 'Failed to list users' });
-    }
-  });
+  if (req.method !== 'GET') {
+    res.status(405).end();
+    return;
+  }
+  const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
+  if (!requester) {
+    return;
+  }
+  try {
+    const snap = await db.collection('users').get();
+    const users = snap.docs.map((doc) => {
+      const data: any = doc.data();
+      if (data.createdAt && typeof data.createdAt.toDate === 'function') {
+        data.createdAt = data.createdAt.toDate().toISOString();
+      }
+      return { id: doc.id, ...data };
+    });
+    res.json({ users });
+  } catch (err: any) {
+    console.error('admin_listUsers failed', err);
+    res.status(500).json({ error: err.message || 'Failed to list users' });
+  }
 });
 
 /**
  * Update a user's profile. Accepts { userId, updates }. Only staff can call.
  */
 export const admin_updateUser = functions.https.onRequest(async (req, res) => {
-  await withCors(req as unknown as ExpressRequest, res as unknown as ExpressResponse, async () => {
-    if (req.method !== 'POST') {
-      res.status(405).end();
-      return;
+  if (req.method !== 'POST') {
+    res.status(405).end();
+    return;
+  }
+  const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
+  if (!requester) {
+    return;
+  }
+  const { userId, updates } = req.body || {};
+  if (!userId || !updates) {
+    res.status(400).json({ error: 'userId and updates required' });
+    return;
+  }
+  if (updates.roles && !requester.roles.has('admin')) {
+    res.status(403).json({ error: 'Only administrators can modify roles' });
+    return;
+  }
+  if (updates.isStaff !== undefined && !requester.roles.has('admin')) {
+    res.status(403).json({ error: 'Only administrators can promote staff' });
+    return;
+  }
+  const { password, disabled, ...rest } = updates;
+  const userRef = db.collection('users').doc(userId);
+  const beforeSnap = await userRef.get();
+  const beforeData = beforeSnap.exists ? (beforeSnap.data() as admin.firestore.DocumentData) : undefined;
+  await userRef.set(rest, { merge: true });
+  const authUpdates: admin.auth.UpdateRequest = {};
+  const metadata: Record<string, any> = {};
+  if (password) {
+    authUpdates.password = password;
+    metadata.passwordReset = true;
+  }
+  let previousDisabled: boolean | null = null;
+  if (disabled !== undefined) {
+    authUpdates.disabled = disabled;
+    try {
+      const record = await admin.auth().getUser(userId);
+      previousDisabled = record.disabled ?? null;
+    } catch (err) {
+      previousDisabled = null;
     }
-    const requester = await assertStaffRequest(req, res, ['admin', 'sales']);
-    if (!requester) {
-      return;
-    }
-    const { userId, updates } = req.body || {};
-    if (!userId || !updates) {
-      res.status(400).json({ error: 'userId and updates required' });
-      return;
-    }
-    if (updates.roles && !requester.roles.has('admin')) {
-      res.status(403).json({ error: 'Only administrators can modify roles' });
-      return;
-    }
-    if (updates.isStaff !== undefined && !requester.roles.has('admin')) {
-      res.status(403).json({ error: 'Only administrators can promote staff' });
-      return;
-    }
-    const { password, disabled, ...rest } = updates;
-    const userRef = db.collection('users').doc(userId);
-    const beforeSnap = await userRef.get();
-    const beforeData = beforeSnap.exists ? (beforeSnap.data() as admin.firestore.DocumentData) : undefined;
-    await userRef.set(rest, { merge: true });
-    const authUpdates: admin.auth.UpdateRequest = {};
-    const metadata: Record<string, any> = {};
-    if (password) {
-      authUpdates.password = password;
-      metadata.passwordReset = true;
-    }
-    let previousDisabled: boolean | null = null;
-    if (disabled !== undefined) {
-      authUpdates.disabled = disabled;
-      try {
-        const record = await admin.auth().getUser(userId);
-        previousDisabled = record.disabled ?? null;
-      } catch (err) {
-        previousDisabled = null;
-      }
-    }
-    if (Object.keys(authUpdates).length > 0) {
-      await admin.auth().updateUser(userId, authUpdates);
-    }
-    if (disabled !== undefined) {
-      metadata.disabled = { before: previousDisabled, after: disabled };
-    }
-    const changes = buildChangesFromUpdates(beforeData, rest);
-    await writeAuditLog({
-      actorUid: requester.uid,
-      action: 'admin_update_user',
-      entityType: 'user',
-      entityId: userId,
-      changes: Object.keys(changes).length ? changes : null,
-      metadata: Object.keys(metadata).length ? metadata : null,
-    });
-    res.json({ ok: true });
+  }
+  if (Object.keys(authUpdates).length > 0) {
+    await admin.auth().updateUser(userId, authUpdates);
+  }
+  if (disabled !== undefined) {
+    metadata.disabled = { before: previousDisabled, after: disabled };
+  }
+  const changes = buildChangesFromUpdates(beforeData, rest);
+  await writeAuditLog({
+    actorUid: requester.uid,
+    action: 'admin_update_user',
+    entityType: 'user',
+    entityId: userId,
+    changes: Object.keys(changes).length ? changes : null,
+    metadata: Object.keys(metadata).length ? metadata : null,
   });
+  res.json({ ok: true });
 });
 
 /**
