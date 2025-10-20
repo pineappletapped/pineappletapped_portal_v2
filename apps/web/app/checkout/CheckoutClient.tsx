@@ -1260,115 +1260,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     setLoginError,
   ]);
 
-  const initializePaymentIntent = useCallback(async () => {
-    if (initializingPayment) {
-      return false;
-    }
-    if (isRegistering) {
-      setPaymentError(
-        "We're creating your account. Please wait a moment and try again.",
-      );
-      return false;
-    }
-    if (hasZeroBalance) {
-      // If the cart total is zero, bypass the payment intent and complete the order directly.
-      return await completeZeroBalanceOrder();
-    }
-    if (items.length === 0) {
-      setPaymentError("Your cart is empty.");
-      return false;
-    }
-    if (!orderInput.customerName) {
-      setPaymentError("Please enter your name before continuing.");
-      return false;
-    }
-    if (!orderInput.postalCode) {
-      setPaymentError("Please provide a postcode for the shoot location.");
-      return false;
-    }
-    if (!stripePromise) {
-      setPaymentError(stripeConfigError || "Payment configuration is unavailable.");
-      return false;
-    }
-
-    setInitializingPayment(true);
-    setPaymentError(null);
-
-    try {
-      let authUser = currentUser;
-      if (!authUser) {
-        authUser = await ensureCheckoutUser();
-      }
-      if (!authUser) {
-        setPaymentError(
-          authMode === "register"
-            ? accountError ||
-                "Create your portal account by setting a password before continuing."
-            : "Sign in to continue to payment.",
-        );
-        return false;
-      }
-
-      let functionsInstance = functionsRef.current;
-      if (!functionsInstance) {
-        const { functions } = await ensureFirebase();
-        functionsInstance = functions ?? null;
-        functionsRef.current = functionsInstance;
-      }
-      if (!functionsInstance) {
-        throw new Error("Firebase functions are unavailable.");
-      }
-
-      const token = await authUser.getIdToken();
-      const orderData = await callCreateOrder(token);
-      const createdOrderId: string | undefined =
-        typeof orderData.orderId === "string" ? orderData.orderId : undefined;
-      if (!createdOrderId) {
-        throw new Error("Failed to create order.");
-      }
-
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const intentRes: any = await createIntent({
-        orderId: createdOrderId,
-        type: "deposit",
-      });
-      const secret: string | undefined = intentRes.data?.clientSecret;
-      if (!secret) {
-        throw new Error("Payment session could not be created.");
-      }
-
-      setOrderId(createdOrderId);
-      setClientSecret(secret);
-      lastIntentPayload.current = currentIntentPayload;
-      return true;
-    } catch (error) {
-      console.error("Failed to initialise payment intent", error);
-      const message = describeCallableError(error);
-      setPaymentError(message);
-      setOrderId(null);
-      setClientSecret(null);
-      return false;
-    } finally {
-      setInitializingPayment(false);
-    }
-  }, [
-    accountError,
-    authMode,
-    callCreateOrder,
-    currentIntentPayload,
-    currentUser,
-    describeCallableError,
-    ensureCheckoutUser,
-    hasZeroBalance,
-    initializingPayment,
-    isRegistering,
-    items.length,
-    orderInput,
-    stripePromise,
-    stripeConfigError,
-    completeZeroBalanceOrder,
-  ]);
-
   const handlePaymentSuccess = useCallback(
     (completedOrderId: string) => {
       clear();
@@ -1533,6 +1424,115 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     isRegistering,
     items.length,
     orderInput,
+  ]);
+
+  const initializePaymentIntent = useCallback(async () => {
+    if (initializingPayment) {
+      return false;
+    }
+    if (isRegistering) {
+      setPaymentError(
+        "We're creating your account. Please wait a moment and try again.",
+      );
+      return false;
+    }
+    if (hasZeroBalance) {
+      // If the cart total is zero, bypass the payment intent and complete the order directly.
+      return await completeZeroBalanceOrder();
+    }
+    if (items.length === 0) {
+      setPaymentError("Your cart is empty.");
+      return false;
+    }
+    if (!orderInput.customerName) {
+      setPaymentError("Please enter your name before continuing.");
+      return false;
+    }
+    if (!orderInput.postalCode) {
+      setPaymentError("Please provide a postcode for the shoot location.");
+      return false;
+    }
+    if (!stripePromise) {
+      setPaymentError(stripeConfigError || "Payment configuration is unavailable.");
+      return false;
+    }
+
+    setInitializingPayment(true);
+    setPaymentError(null);
+
+    try {
+      let authUser = currentUser;
+      if (!authUser) {
+        authUser = await ensureCheckoutUser();
+      }
+      if (!authUser) {
+        setPaymentError(
+          authMode === "register"
+            ? accountError ||
+                "Create your portal account by setting a password before continuing."
+            : "Sign in to continue to payment.",
+        );
+        return false;
+      }
+
+      let functionsInstance = functionsRef.current;
+      if (!functionsInstance) {
+        const { functions } = await ensureFirebase();
+        functionsInstance = functions ?? null;
+        functionsRef.current = functionsInstance;
+      }
+      if (!functionsInstance) {
+        throw new Error("Firebase functions are unavailable.");
+      }
+
+      const token = await authUser.getIdToken();
+      const orderData = await callCreateOrder(token);
+      const createdOrderId: string | undefined =
+        typeof orderData.orderId === "string" ? orderData.orderId : undefined;
+      if (!createdOrderId) {
+        throw new Error("Failed to create order.");
+      }
+
+      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
+      const intentRes: any = await createIntent({
+        orderId: createdOrderId,
+        type: "deposit",
+      });
+      const secret: string | undefined = intentRes.data?.clientSecret;
+      if (!secret) {
+        throw new Error("Payment session could not be created.");
+      }
+
+      setOrderId(createdOrderId);
+      setClientSecret(secret);
+      lastIntentPayload.current = currentIntentPayload;
+      return true;
+    } catch (error) {
+      console.error("Failed to initialise payment intent", error);
+      const message = describeCallableError(error);
+      setPaymentError(message);
+      setOrderId(null);
+      setClientSecret(null);
+      return false;
+    } finally {
+      setInitializingPayment(false);
+    }
+  }, [
+    accountError,
+    authMode,
+    callCreateOrder,
+    currentIntentPayload,
+    currentUser,
+    describeCallableError,
+    ensureCheckoutUser,
+    hasZeroBalance,
+    initializingPayment,
+    isRegistering,
+    items.length,
+    orderInput,
+    stripePromise,
+    stripeConfigError,
+    completeZeroBalanceOrder,
   ]);
 
   useEffect(() => {
