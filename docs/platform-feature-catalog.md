@@ -31,8 +31,7 @@ This catalogue captures the notable features implemented in the Pineapple Tapped
 
 ## Platform Services & Integrations
 
-- **CORS foundation.** A bespoke CORS utility compiles wildcard-aware origin patterns, honours environment overrides, manages preflight responses, and exposes `withCors` so HTTPS functions can share a single enforcement path.【F:functions/src/utils/cors.ts†L1-L314】
-- **Order intake API.** The `createOrder` HTTPS endpoint validates authentication headers, accepts raw or JSON-wrapped payloads, and delegates to the order execution pipeline under the shared CORS layer.【F:functions/src/index.ts†L11019-L11099】
+- **Order intake API.** The `createOrder` HTTPS endpoint validates authentication headers, accepts raw or JSON-wrapped payloads, and delegates to the order execution pipeline.【F:functions/src/index.ts†L11019-L11099】
 - **Automatic client research.** Whenever an order is created, the platform inspects client preferences, attempts wallet debits, writes audit logs, and optionally enqueues a research job to keep onboarding insights flowing without manual work.【F:functions/src/index.ts†L11101-L11199】
 - **Stripe billing toolkit.** Callable Stripe helpers generate PaymentIntents for deposits, balances, or custom amounts, calculate franchise and organiser fee splits, and respect authenticated access controls.【F:functions/src/index.ts†L11870-L11958】
 - **Lifecycle email scheduling.** Staff can create, update, and delete email schedules while a five-minute Pub/Sub task fans out batched outreach to lead groups and advances the next-run cursor.【F:functions/src/index.ts†L14088-L14166】

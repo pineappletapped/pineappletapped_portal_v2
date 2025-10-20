@@ -190,77 +190,6 @@ export function useCheckoutPayment({
     [orderInput],
   );
 
-  const initialisePayment = useCallback(async () => {
-    if (initializing) {
-      return false;
-    }
-    if (hasZeroBalance) {
-      // If the order has zero balance (voucher covers the full amount),
-      // bypass payment entirely by completing the order directly.
-      return await completeZeroBalanceOrder();
-    }
-
-    const validationError = validate();
-    if (validationError) {
-      setPaymentError(validationError);
-      return false;
-    }
-
-    if (!stripePromise) {
-      setPaymentError("Payment configuration is unavailable. Please try again later.");
-      return false;
-    }
-
-    setInitializing(true);
-    setPaymentError(null);
-
-    try {
-      const user = await ensureUser();
-      const token = await user.getIdToken();
-      const orderData = await callCreateOrder(token);
-      const createdOrderId: string | undefined =
-        typeof orderData.orderId === "string" ? orderData.orderId : undefined;
-      if (!createdOrderId) {
-        throw new Error("Failed to create order.");
-      }
-
-      const functionsInstance = await ensureFunctions();
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const intentResponse: any = await createIntent({
-        orderId: createdOrderId,
-        type: "deposit",
-      });
-      const secret: string | undefined = intentResponse.data?.clientSecret;
-      if (!secret) {
-        throw new Error("Payment session could not be created.");
-      }
-
-      setOrderId(createdOrderId);
-      setClientSecret(secret);
-      lastIntentPayloadRef.current = intentPayload;
-      return true;
-    } catch (error) {
-      console.error("Failed to initialise payment intent", error);
-      const message = describeCallableError(error);
-      setPaymentError(message);
-      setOrderId(null);
-      setClientSecret(null);
-      return false;
-    } finally {
-      setInitializing(false);
-    }
-  }, [
-    callCreateOrder,
-    ensureFunctions,
-    ensureUser,
-    hasZeroBalance,
-    initializing,
-    intentPayload,
-    stripePromise,
-    validate,
-    completeZeroBalanceOrder,
-  ]);
-
   const completeZeroBalanceOrder = useCallback(async () => {
     if (initializing) {
       return false;
@@ -346,6 +275,77 @@ export function useCheckoutPayment({
     onSuccess,
     validate,
     initializing,
+  ]);
+
+  const initialisePayment = useCallback(async () => {
+    if (initializing) {
+      return false;
+    }
+    if (hasZeroBalance) {
+      // If the order has zero balance (voucher covers the full amount),
+      // bypass payment entirely by completing the order directly.
+      return await completeZeroBalanceOrder();
+    }
+
+    const validationError = validate();
+    if (validationError) {
+      setPaymentError(validationError);
+      return false;
+    }
+
+    if (!stripePromise) {
+      setPaymentError("Payment configuration is unavailable. Please try again later.");
+      return false;
+    }
+
+    setInitializing(true);
+    setPaymentError(null);
+
+    try {
+      const user = await ensureUser();
+      const token = await user.getIdToken();
+      const orderData = await callCreateOrder(token);
+      const createdOrderId: string | undefined =
+        typeof orderData.orderId === "string" ? orderData.orderId : undefined;
+      if (!createdOrderId) {
+        throw new Error("Failed to create order.");
+      }
+
+      const functionsInstance = await ensureFunctions();
+      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
+      const intentResponse: any = await createIntent({
+        orderId: createdOrderId,
+        type: "deposit",
+      });
+      const secret: string | undefined = intentResponse.data?.clientSecret;
+      if (!secret) {
+        throw new Error("Payment session could not be created.");
+      }
+
+      setOrderId(createdOrderId);
+      setClientSecret(secret);
+      lastIntentPayloadRef.current = intentPayload;
+      return true;
+    } catch (error) {
+      console.error("Failed to initialise payment intent", error);
+      const message = describeCallableError(error);
+      setPaymentError(message);
+      setOrderId(null);
+      setClientSecret(null);
+      return false;
+    } finally {
+      setInitializing(false);
+    }
+  }, [
+    callCreateOrder,
+    ensureFunctions,
+    ensureUser,
+    hasZeroBalance,
+    initializing,
+    intentPayload,
+    stripePromise,
+    validate,
+    completeZeroBalanceOrder,
   ]);
 
   const resetPaymentError = useCallback(() => setPaymentError(null), []);
