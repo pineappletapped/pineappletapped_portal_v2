@@ -8,7 +8,7 @@ const cleanEnv = (value?: string | null) => {
   return trimmed && trimmed !== "undefined" ? trimmed : undefined;
 };
 
-const trimTrailingSlash = (value: string) => value.replace(/\/+$, "");
+const trimTrailingSlash = (value: string) => value.replace(/\/+$/, "");
 
 const FUNCTION_ENDPOINT_OVERRIDES: Record<string, string | undefined> = {
   createOrder: cleanEnv(process.env.NEXT_PUBLIC_CREATE_ORDER_ENDPOINT),
