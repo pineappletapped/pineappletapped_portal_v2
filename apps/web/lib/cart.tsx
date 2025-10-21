@@ -56,6 +56,7 @@ export interface CartOrganiserInfo {
 }
 
 export interface CartItem extends SharedCartItem {
+  quantity: number;
   price: number;
   date: string;
   modifiers?: ProductModifierSelection[];
