@@ -335,7 +335,6 @@ export default function StripeConnectSettingsPage() {
                   setSecretKeyInput(event.target.value);
                 }}
                 placeholder={secretStatus.configured ? `Stored (${secretStatus.last4 ? `ending ${secretStatus.last4}` : "configured"})` : "sk_live_..."}
-                autoComplete="off"
               />
               <label className="flex items-center gap-2 text-xs text-gray-600">
                 <input
@@ -365,7 +364,6 @@ export default function StripeConnectSettingsPage() {
                   setWebhookSecretInput(event.target.value);
                 }}
                 placeholder={webhookStatus.configured ? `Stored (${webhookStatus.last4 ? `ending ${webhookStatus.last4}` : "configured"})` : "whsec_..."}
-                autoComplete="off"
               />
               <label className="flex items-center gap-2 text-xs text-gray-600">
                 <input
