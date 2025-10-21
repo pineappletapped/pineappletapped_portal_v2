@@ -180,7 +180,7 @@ function loadStoredItems(): CartItem[] {
 }
 
 export function CartProvider({ children }: { children: ReactNode }) {
-  const [items, setItems] = useState<CartItem[]>(() => loadStoredItems());
+  const [items, setItems] = useState<CartItem[]>([]);
   const persistTimeout = useRef<number | null>(null);
 
   const persistCart = useCallback((nextItems: CartItem[]) => {
@@ -200,6 +200,26 @@ export function CartProvider({ children }: { children: ReactNode }) {
       }
     }, 150);
   }, []);
+
+  useEffect(() => {
+    if (!isBrowser) {
+      return;
+    }
+
+    const stored = loadStoredItems();
+    setItems((prev) => {
+      if (prev.length > 0) {
+        return prev;
+      }
+      return stored;
+    });
+
+    if (stored.length > 0) {
+      persistCart(stored);
+    } else if (window.localStorage.getItem(STORAGE_KEY)) {
+      window.localStorage.removeItem(STORAGE_KEY);
+    }
+  }, [persistCart]);
 
   useEffect(() => {
     return () => {

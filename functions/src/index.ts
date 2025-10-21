@@ -33,14 +33,27 @@ import {
 
 const PORTAL_HOSTED_APP_ORIGIN =
   'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app';
+const additionalCorsOrigins = (process.env.ALLOWED_CORS_ORIGINS || '')
+  .split(',')
+  .map((value) => value.trim())
+  .filter((value) => value.length > 0);
+
+const corsOriginSeeds = [
+  PORTAL_HOSTED_APP_ORIGIN,
+  'http://localhost:3000',
+  'http://localhost:5173',
+  ...additionalCorsOrigins,
+];
+
 const ALLOWED_CORS_ORIGINS = new Map<string, string>(
-  [PORTAL_HOSTED_APP_ORIGIN, 'http://localhost:3000', 'http://localhost:5173']
+  corsOriginSeeds
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     .map((value) => {
       const trimmed = value.trim();
       return [trimmed.toLowerCase(), trimmed] as const;
     }),
 );
+const ALLOWED_CORS_VALUES = Array.from(ALLOWED_CORS_ORIGINS.values());
 const CORS_ALLOW_METHODS = 'POST, OPTIONS';
 const DEFAULT_CORS_ALLOW_HEADERS = [
   'Content-Type',
@@ -55,12 +68,16 @@ const CORS_MAX_AGE_SECONDS = '3600';
 
 const applyCorsHeaders = (req: ExpressRequest, res: ExpressResponse) => {
   const originHeader = req.get?.('origin') ?? req.headers.origin;
+  let allowedOrigin: string | null = null;
   if (typeof originHeader === 'string') {
     const normalisedOrigin = originHeader.trim().toLowerCase();
-    const allowedOrigin = ALLOWED_CORS_ORIGINS.get(normalisedOrigin);
-    if (allowedOrigin) {
-      res.set('Access-Control-Allow-Origin', allowedOrigin);
-    }
+    allowedOrigin = ALLOWED_CORS_ORIGINS.get(normalisedOrigin) ?? null;
+  }
+  if (!allowedOrigin && !originHeader && ALLOWED_CORS_VALUES.length > 0) {
+    allowedOrigin = ALLOWED_CORS_VALUES[0] ?? null;
+  }
+  if (allowedOrigin) {
+    res.set('Access-Control-Allow-Origin', allowedOrigin);
   }
   res.set('Access-Control-Allow-Credentials', 'true');
   res.set('Access-Control-Allow-Methods', CORS_ALLOW_METHODS);
@@ -5673,7 +5690,7 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
 
 // Track page view analytics from the public site
 export const analytics_track = onRequest(
-  { region: 'europe-west2', cors: [PORTAL_HOSTED_APP_ORIGIN] },
+  { region: 'europe-west2', cors: ALLOWED_CORS_VALUES },
   async (req, res) => {
     applyCorsHeaders(req, res);
     if (req.method === 'OPTIONS') {
@@ -11258,7 +11275,7 @@ const respondWithHttpsError = (
 };
 
 export const createOrder = onRequest(
-  { region: 'europe-west2', cors: [PORTAL_HOSTED_APP_ORIGIN] },
+  { region: 'europe-west2', cors: ALLOWED_CORS_VALUES },
   async (req, res) => {
     applyCorsHeaders(req, res);
     if (req.method === 'OPTIONS') {
@@ -14467,7 +14484,7 @@ async function recordLoginForUid(uid: string, timestampValue: unknown): Promise<
 }
 
 export const recordLogin = onRequest(
-  { region: 'europe-west2', cors: [PORTAL_HOSTED_APP_ORIGIN] },
+  { region: 'europe-west2', cors: ALLOWED_CORS_VALUES },
   async (req, res) => {
     applyCorsHeaders(req, res);
     if (req.method === 'OPTIONS') {

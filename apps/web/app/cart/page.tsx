@@ -165,9 +165,11 @@ export default function CartPage() {
               return null;
             })();
 
+            const itemKey = `${item.id}-${idx}`;
+
             return (
               <div
-                key={idx}
+                key={itemKey}
                 className="flex flex-wrap items-center justify-between gap-4 rounded border p-4"
               >
                 <div className="min-w-[12rem] flex-1">
