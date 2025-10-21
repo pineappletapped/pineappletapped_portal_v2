@@ -328,6 +328,7 @@ export default function StripeConnectSettingsPage() {
               <input
                 className="input"
                 type="password"
+                autoComplete="current-password"
                 value={secretKeyInput}
                 onChange={(event) => {
                   resetNotifications();
@@ -357,6 +358,7 @@ export default function StripeConnectSettingsPage() {
               <input
                 className="input"
                 type="password"
+                autoComplete="current-password"
                 value={webhookSecretInput}
                 onChange={(event) => {
                   resetNotifications();

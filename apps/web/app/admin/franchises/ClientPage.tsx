@@ -1832,6 +1832,7 @@ export default function AdminFranchisesPage() {
                 <input
                   className="input"
                   type="password"
+                  autoComplete="current-password"
                   value={newFranchise.quickbooks.clientSecret}
                   onChange={(event) => updateNewQuickBooks({ clientSecret: event.target.value })}
                   placeholder="••••••"
@@ -1842,6 +1843,7 @@ export default function AdminFranchisesPage() {
                 <input
                   className="input"
                   type="password"
+                  autoComplete="current-password"
                   value={newFranchise.quickbooks.refreshToken}
                   onChange={(event) => updateNewQuickBooks({ refreshToken: event.target.value })}
                   placeholder="Paste the long-lived refresh token"
@@ -2397,6 +2399,7 @@ export default function AdminFranchisesPage() {
                                 <input
                                   className="input"
                                   type="password"
+                                  autoComplete="current-password"
                                   value={editingFranchise.quickbooks.clientSecret}
                                   onChange={(event) => updateEditingQuickBooks({ clientSecret: event.target.value })}
                                 />
@@ -2406,6 +2409,7 @@ export default function AdminFranchisesPage() {
                                 <input
                                   className="input"
                                   type="password"
+                                  autoComplete="current-password"
                                   value={editingFranchise.quickbooks.refreshToken}
                                   onChange={(event) => updateEditingQuickBooks({ refreshToken: event.target.value })}
                                 />

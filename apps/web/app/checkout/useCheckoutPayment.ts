@@ -131,64 +131,16 @@ export function useCheckoutPayment({
     return functions;
   }, []);
 
-  const callCreateOrder = useCallback(
-    async (token: string | null): Promise<CreateOrderResult> => {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (token) {
-        headers.Authorization = `Bearer ${token}`;
-      }
-
-      const response = await fetch("/api/create-order", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(orderInput),
-        credentials: "include",
-      });
-
-      let payload: unknown;
-      try {
-        payload = await response.json();
-      } catch (parseError) {
-        if (!response.ok) {
-          const error = Object.assign(new Error(`Failed to create order (${response.status})`), {
-            code: "create-order-error",
-          });
-          throw error;
-        }
-        throw parseError;
-      }
-
-      const payloadRecord =
-        payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
-
-      if (!response.ok || !payloadRecord) {
-        const message =
-          payloadRecord && typeof payloadRecord.error === "string" && payloadRecord.error.trim().length > 0
-            ? payloadRecord.error
-            : payloadRecord && typeof payloadRecord.message === "string" && payloadRecord.message.trim().length > 0
-              ? payloadRecord.message
-              : `Failed to create order (${response.status})`;
-        const error = Object.assign(new Error(message), {
-          code:
-            payloadRecord && typeof payloadRecord.code === "string" && payloadRecord.code.trim().length > 0
-              ? payloadRecord.code
-              : "create-order-error",
-          details: payloadRecord?.details,
-        });
-        throw error;
-      }
-
-      const data = payloadRecord.data;
-      if (!data || typeof data !== "object") {
-        return {};
-      }
-
-      return data as CreateOrderResult;
-    },
-    [orderInput],
-  );
+  const callCreateOrder = useCallback(async (): Promise<CreateOrderResult> => {
+    const functionsInstance = await ensureFunctions();
+    const callable = httpsCallable(functionsInstance, "createOrder");
+    const response = await callable(orderInput);
+    const payload = response?.data;
+    if (!payload || typeof payload !== "object") {
+      return {};
+    }
+    return payload as CreateOrderResult;
+  }, [ensureFunctions, orderInput]);
 
   const completeZeroBalanceOrder = useCallback(async () => {
     if (initializing) {
@@ -206,8 +158,8 @@ export function useCheckoutPayment({
 
     try {
       const user = await ensureUser();
-      const token = await user.getIdToken();
-      const orderData = await callCreateOrder(token);
+      await user.getIdToken();
+      const orderData = await callCreateOrder();
       const createdOrderId: string | undefined =
         typeof orderData.orderId === "string" ? orderData.orderId : undefined;
       if (!createdOrderId) {
@@ -239,13 +191,10 @@ export function useCheckoutPayment({
         return true;
       }
 
-      const functionsInstance = await ensureFunctions();
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const intentResponse: any = await createIntent({
-        orderId: createdOrderId,
-        type: "deposit",
-      });
-      const secret: string | undefined = intentResponse.data?.clientSecret;
+      const secret =
+        typeof orderData.clientSecret === "string" && orderData.clientSecret.trim().length > 0
+          ? orderData.clientSecret
+          : null;
       if (!secret) {
         throw new Error("Payment session could not be created.");
       }
@@ -267,15 +216,7 @@ export function useCheckoutPayment({
     } finally {
       setInitializing(false);
     }
-  }, [
-    callCreateOrder,
-    ensureFunctions,
-    ensureUser,
-    intentPayload,
-    onSuccess,
-    validate,
-    initializing,
-  ]);
+  }, [callCreateOrder, ensureUser, intentPayload, onSuccess, validate, initializing]);
 
   const initialisePayment = useCallback(async () => {
     if (initializing) {
@@ -303,21 +244,18 @@ export function useCheckoutPayment({
 
     try {
       const user = await ensureUser();
-      const token = await user.getIdToken();
-      const orderData = await callCreateOrder(token);
+      await user.getIdToken();
+      const orderData = await callCreateOrder();
       const createdOrderId: string | undefined =
         typeof orderData.orderId === "string" ? orderData.orderId : undefined;
       if (!createdOrderId) {
         throw new Error("Failed to create order.");
       }
 
-      const functionsInstance = await ensureFunctions();
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const intentResponse: any = await createIntent({
-        orderId: createdOrderId,
-        type: "deposit",
-      });
-      const secret: string | undefined = intentResponse.data?.clientSecret;
+      const secret =
+        typeof orderData.clientSecret === "string" && orderData.clientSecret.trim().length > 0
+          ? orderData.clientSecret
+          : null;
       if (!secret) {
         throw new Error("Payment session could not be created.");
       }
@@ -338,7 +276,6 @@ export function useCheckoutPayment({
     }
   }, [
     callCreateOrder,
-    ensureFunctions,
     ensureUser,
     hasZeroBalance,
     initializing,
@@ -364,3 +301,5 @@ export function useCheckoutPayment({
     reportPaymentError,
   };
 }
+
+export { describeCallableError };

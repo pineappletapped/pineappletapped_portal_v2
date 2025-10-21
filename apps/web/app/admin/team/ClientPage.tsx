@@ -348,7 +348,14 @@ export default function AdminTeamPage() {
       {showCreate && (
         <div className="border p-4 rounded grid gap-2">
           <input className="input" placeholder="Email" value={newUser.email} onChange={e => setNewUser({ ...newUser, email: e.target.value })} />
-          <input className="input" placeholder="Password" type="password" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} />
+          <input
+            className="input"
+            placeholder="Password"
+            type="password"
+            autoComplete="current-password"
+            value={newUser.password}
+            onChange={e => setNewUser({ ...newUser, password: e.target.value })}
+          />
           <input className="input" placeholder="Full name" value={newUser.fullName} onChange={e => setNewUser({ ...newUser, fullName: e.target.value })} />
           <label className="flex items-center gap-2"><input type="checkbox" checked={newUser.isStaff} onChange={e => setNewUser({ ...newUser, isStaff: e.target.checked })} />Staff</label>
           <label className="flex items-center gap-2"><input type="checkbox" checked={newUser.contractor} onChange={e => setNewUser({ ...newUser, contractor: e.target.checked })} />Contractor</label>

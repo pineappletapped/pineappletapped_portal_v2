@@ -1081,72 +1081,30 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     return fallbackMessage;
   }, []);
 
-  const callCreateOrderViaApi = useCallback(
-    async (token: string | null): Promise<CreateOrderResult> => {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (token) {
-        headers.Authorization = `Bearer ${token}`;
+  const callCreateOrderViaApi = useCallback(async (): Promise<CreateOrderResult> => {
+    let functionsInstance = functionsRef.current;
+    if (!functionsInstance) {
+      const { functions } = await ensureFirebase();
+      if (!functions) {
+        throw new Error("Firebase functions are unavailable.");
       }
+      functionsInstance = functions;
+      functionsRef.current = functionsInstance;
+    }
 
-      const response = await fetch("/api/create-order", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(orderInput),
-        credentials: "include",
-      });
+    const callable = httpsCallable(functionsInstance, "createOrder");
+    const response = await callable(orderInput);
+    const payload = response?.data;
+    if (!payload || typeof payload !== "object") {
+      return {};
+    }
 
-      let payload: unknown;
-      try {
-        payload = await response.json();
-      } catch (parseError) {
-        if (!response.ok) {
-          const error = Object.assign(
-            new Error(`Failed to create order (${response.status})`),
-            { code: "create-order-error" },
-          );
-          throw error;
-        }
-        throw parseError;
-      }
+    return payload as CreateOrderResult;
+  }, [orderInput]);
 
-      const payloadRecord =
-        payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
-
-      if (!response.ok || !payloadRecord) {
-        const message =
-          payloadRecord && typeof payloadRecord.error === "string" && payloadRecord.error.trim().length > 0
-            ? payloadRecord.error
-            : payloadRecord && typeof payloadRecord.message === "string" && payloadRecord.message.trim().length > 0
-              ? payloadRecord.message
-              : `Failed to create order (${response.status})`;
-        const error = Object.assign(new Error(message), {
-          code:
-            payloadRecord && typeof payloadRecord.code === "string" && payloadRecord.code.trim().length > 0
-              ? payloadRecord.code
-              : "create-order-error",
-          details: payloadRecord?.details,
-        });
-        throw error;
-      }
-
-      const data = payloadRecord.data;
-      if (!data || typeof data !== "object") {
-        return {};
-      }
-
-      return data as CreateOrderResult;
-    },
-    [orderInput],
-  );
-
-  const callCreateOrder = useCallback(
-    async (token: string | null): Promise<CreateOrderResult> => {
-      return await callCreateOrderViaApi(token);
-    },
-    [callCreateOrderViaApi],
-  );
+  const callCreateOrder = useCallback(async (): Promise<CreateOrderResult> => {
+    return await callCreateOrderViaApi();
+  }, [callCreateOrderViaApi]);
 
   const ensureCheckoutUser = useCallback(async (): Promise<User | null> => {
     if (currentUser) {
@@ -1309,15 +1267,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return false;
       }
 
-      const { db, functions } = await ensureFirebase();
-      const functionsInstance = functionsRef.current ?? functions ?? null;
-      if (!functionsInstance) {
-        throw new Error("Firebase functions are unavailable.");
-      }
-      functionsRef.current = functionsInstance;
-
-      const token = await authUser.getIdToken();
-      const orderData = await callCreateOrder(token);
+      const { db } = await ensureFirebase();
+      await authUser.getIdToken();
+      const orderData = await callCreateOrder();
       const createdOrderId: string | undefined =
         typeof orderData.orderId === "string" ? orderData.orderId : undefined;
       const serverPriceValue = orderData.price;
@@ -1385,12 +1337,10 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return true;
       }
 
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const intentRes: any = await createIntent({
-        orderId: createdOrderId,
-        type: "deposit",
-      });
-      const secret: string | undefined = intentRes.data?.clientSecret;
+      const secret =
+        typeof orderData.clientSecret === "string" && orderData.clientSecret.trim().length > 0
+          ? orderData.clientSecret
+          : null;
       if (!secret) {
         throw new Error("Payment session could not be created.");
       }
@@ -1475,30 +1425,18 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return false;
       }
 
-      let functionsInstance = functionsRef.current;
-      if (!functionsInstance) {
-        const { functions } = await ensureFirebase();
-        functionsInstance = functions ?? null;
-        functionsRef.current = functionsInstance;
-      }
-      if (!functionsInstance) {
-        throw new Error("Firebase functions are unavailable.");
-      }
-
-      const token = await authUser.getIdToken();
-      const orderData = await callCreateOrder(token);
+      await authUser.getIdToken();
+      const orderData = await callCreateOrder();
       const createdOrderId: string | undefined =
         typeof orderData.orderId === "string" ? orderData.orderId : undefined;
       if (!createdOrderId) {
         throw new Error("Failed to create order.");
       }
 
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const intentRes: any = await createIntent({
-        orderId: createdOrderId,
-        type: "deposit",
-      });
-      const secret: string | undefined = intentRes.data?.clientSecret;
+      const secret =
+        typeof orderData.clientSecret === "string" && orderData.clientSecret.trim().length > 0
+          ? orderData.clientSecret
+          : null;
       if (!secret) {
         throw new Error("Payment session could not be created.");
       }

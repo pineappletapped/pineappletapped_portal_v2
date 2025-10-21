@@ -2,7 +2,7 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { onCall, onRequest } from 'firebase-functions/v2/https';
-import type { Request as ExpressRequest } from 'express';
+import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import Stripe from 'stripe';
 import type { DocumentData, DocumentReference, DocumentSnapshot } from 'firebase-admin/firestore';
 import { SecretManagerServiceClient } from '@google-cloud/secret-manager';
@@ -19,6 +19,7 @@ import type { drive_v3 } from 'googleapis';
 import { Readable } from 'stream';
 import fetch from 'node-fetch';
 import { bookingConflictsWithRange } from './utils/availability.js';
+import type { Voucher } from '../../shared/types/commerce.js';
 import {
   DEFAULT_KIT_ROUTING_SETTINGS,
   ROUTING_STAGE_META,
@@ -30,23 +31,80 @@ import {
   type RoutingStageKey,
 } from './utils/routing.js';
 
-const CALLABLE_ERROR_STATUS: Record<string, number> = {
-  cancelled: 499,
-  unknown: 500,
-  "invalid-argument": 400,
-  "deadline-exceeded": 504,
-  "not-found": 404,
-  "already-exists": 409,
-  "permission-denied": 403,
-  "resource-exhausted": 429,
-  "failed-precondition": 412,
-  aborted: 409,
-  "out-of-range": 400,
-  unimplemented: 501,
-  internal: 500,
-  unavailable: 503,
-  "data-loss": 500,
-  unauthenticated: 401,
+const PORTAL_HOSTED_APP_ORIGIN =
+  'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app';
+const ALLOWED_CORS_ORIGINS = new Set<string>([PORTAL_HOSTED_APP_ORIGIN]);
+const CORS_ALLOW_METHODS = 'POST, OPTIONS';
+const CORS_ALLOW_HEADERS = 'Content-Type, Authorization';
+
+const applyCorsHeaders = (req: ExpressRequest, res: ExpressResponse) => {
+  const originHeader = req.get?.('origin') ?? req.headers.origin;
+  if (typeof originHeader === 'string' && ALLOWED_CORS_ORIGINS.has(originHeader)) {
+    res.set('Access-Control-Allow-Origin', originHeader);
+  }
+  res.set('Access-Control-Allow-Credentials', 'true');
+  res.set('Access-Control-Allow-Methods', CORS_ALLOW_METHODS);
+  res.set('Access-Control-Allow-Headers', CORS_ALLOW_HEADERS);
+  res.append('Vary', 'Origin');
+};
+
+const parseJsonBody = (req: ExpressRequest): Record<string, any> => {
+  const { body } = req;
+  if (!body) {
+    return {};
+  }
+  if (typeof body === 'object') {
+    return body as Record<string, any>;
+  }
+  if (typeof body === 'string') {
+    const trimmed = body.trim();
+    if (!trimmed) {
+      return {};
+    }
+    try {
+      return JSON.parse(trimmed) as Record<string, any>;
+    } catch (error) {
+      console.warn('Failed to parse JSON body', error);
+      return {};
+    }
+  }
+  if (Buffer.isBuffer(body)) {
+    const text = body.toString('utf8');
+    if (!text.trim()) {
+      return {};
+    }
+    try {
+      return JSON.parse(text) as Record<string, any>;
+    } catch (error) {
+      console.warn('Failed to parse buffer JSON body', error);
+      return {};
+    }
+  }
+  return {};
+};
+
+const verifyAuthTokenFromRequest = async (
+  req: ExpressRequest,
+): Promise<admin.auth.DecodedIdToken | null> => {
+  const authHeader = req.get?.('authorization') ?? req.get?.('Authorization') ?? null;
+  if (!authHeader || typeof authHeader !== 'string') {
+    return null;
+  }
+  const trimmed = authHeader.trim();
+  const prefix = 'Bearer ';
+  if (!trimmed.startsWith(prefix)) {
+    return null;
+  }
+  const token = trimmed.slice(prefix.length).trim();
+  if (!token) {
+    return null;
+  }
+  try {
+    return await admin.auth().verifyIdToken(token);
+  } catch (error) {
+    console.error('Failed to verify auth token', error);
+    return null;
+  }
 };
 
 admin.initializeApp({
@@ -5584,109 +5642,111 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
 });
 
 // Track page view analytics from the public site
-export const analytics_track = onCall({ region: 'europe-west2' }, async (request) => {
-  const rawRequest = request.rawRequest as ExpressRequest | undefined;
-  const payload =
-    request.data && typeof request.data === 'object'
-      ? (request.data as Record<string, any>)
-      : {};
+export const analytics_track = onRequest(
+  { region: 'europe-west2', cors: [PORTAL_HOSTED_APP_ORIGIN] },
+  async (req, res) => {
+    applyCorsHeaders(req, res);
+    if (req.method === 'OPTIONS') {
+      res.status(204).send('');
+      return;
+    }
 
-  let uid: string | null = request.auth?.uid ?? null;
-  let userName: string | null = null;
+    if (req.method !== 'POST') {
+      res.status(405).json({ error: 'Method not allowed' });
+      return;
+    }
 
-  if (uid) {
     try {
-      const userSnap = await db.collection('users').doc(uid).get();
-      const userData = userSnap.data() as any;
-      if (userData) {
-        userName = userData.fullName || userData.email || null;
+      const payload = parseJsonBody(req);
+      const auth = await verifyAuthTokenFromRequest(req);
+      let uid: string | null = auth?.uid ?? null;
+      let userName: string | null = null;
+
+      if (uid) {
+        try {
+          const userSnap = await db.collection('users').doc(uid).get();
+          const userData = userSnap.data() as any;
+          if (userData) {
+            userName = userData.fullName || userData.email || null;
+          }
+        } catch (error) {
+          console.error('analytics_track failed to load user profile', error);
+        }
       }
+
+      const visitorIdRaw = payload.visitorId;
+      const visitorId =
+        typeof visitorIdRaw === 'string' && visitorIdRaw.trim().length > 0
+          ? visitorIdRaw.trim()
+          : null;
+
+      if (!uid && visitorId) {
+        const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
+        const mapData = mapSnap.data() as any;
+        if (mapData) {
+          uid = mapData.uid || null;
+          userName = mapData.userName || null;
+        }
+      }
+
+      if (visitorId && uid && userName) {
+        await db.collection('analyticsVisitors').doc(visitorId).set({ uid, userName }, { merge: true });
+      }
+
+      const resolveHeader = (name: string): string | null => {
+        const value = req.get(name);
+        if (typeof value === 'string') {
+          return value;
+        }
+        const header = req.headers?.[name];
+        if (typeof header === 'string') {
+          return header;
+        }
+        if (Array.isArray(header) && header.length > 0) {
+          return header[0] ?? null;
+        }
+        return null;
+      };
+
+      let ip: string | null = null;
+      if (typeof req.ip === 'string' && req.ip) {
+        ip = req.ip;
+      } else if (Array.isArray((req as any).ips) && (req as any).ips.length > 0) {
+        ip = (req as any).ips[0] ?? null;
+      }
+      if (!ip) {
+        const forwarded = resolveHeader('x-forwarded-for');
+        if (forwarded) {
+          ip = forwarded.split(',')[0]?.trim() || null;
+        }
+      }
+
+      const event = {
+        uid,
+        userName,
+        path: typeof payload.path === 'string' ? payload.path : null,
+        referrer: typeof payload.referrer === 'string' ? payload.referrer : null,
+        userAgent:
+          typeof payload.userAgent === 'string' && payload.userAgent.trim().length > 0
+            ? payload.userAgent
+            : resolveHeader('user-agent'),
+        visitorId,
+        duration:
+          typeof payload.duration === 'number' && Number.isFinite(payload.duration)
+            ? payload.duration
+            : null,
+        ip,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      await db.collection('analyticsEvents').add(event);
+      res.status(200).json({ ok: true, visitorId, uid });
     } catch (error) {
-      console.error('analytics_track failed to load user profile', error);
+      console.error('analytics_track error', error);
+      res.status(500).json({ error: 'Failed to record analytics event' });
     }
   }
-
-  const visitorIdRaw = payload.visitorId;
-  const visitorId =
-    typeof visitorIdRaw === 'string' && visitorIdRaw.trim().length > 0
-      ? visitorIdRaw
-      : null;
-
-  if (!uid && visitorId) {
-    const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
-    const mapData = mapSnap.data() as any;
-    if (mapData) {
-      uid = mapData.uid || null;
-      userName = mapData.userName || null;
-    }
-  }
-
-  if (visitorId && uid && userName) {
-    await db.collection('analyticsVisitors').doc(visitorId).set({ uid, userName }, { merge: true });
-  }
-
-  const resolveHeader = (name: string): string | null => {
-    if (!rawRequest) {
-      return null;
-    }
-
-    if (typeof rawRequest.get === 'function') {
-      return rawRequest.get(name) ?? null;
-    }
-
-    const headerValue = rawRequest.headers?.[name];
-    if (typeof headerValue === 'string') {
-      return headerValue;
-    }
-    if (Array.isArray(headerValue) && headerValue.length > 0) {
-      return headerValue[0] ?? null;
-    }
-
-    return null;
-  };
-
-  let ip: string | null = null;
-  if (rawRequest) {
-    if (typeof rawRequest.ip === 'string' && rawRequest.ip) {
-      ip = rawRequest.ip;
-    } else if (Array.isArray((rawRequest as any).ips) && (rawRequest as any).ips.length > 0) {
-      ip = (rawRequest as any).ips[0] ?? null;
-    }
-
-    if (!ip) {
-      const forwarded = resolveHeader('x-forwarded-for');
-      if (forwarded) {
-        ip = forwarded.split(',')[0]?.trim() || null;
-      }
-    }
-  }
-
-  const event = {
-    uid,
-    userName,
-    path: typeof payload.path === 'string' ? payload.path : null,
-    referrer: typeof payload.referrer === 'string' ? payload.referrer : null,
-    userAgent:
-      typeof payload.userAgent === 'string' && payload.userAgent.trim().length > 0
-        ? payload.userAgent
-        : resolveHeader('user-agent'),
-    visitorId,
-    duration:
-      typeof payload.duration === 'number' && Number.isFinite(payload.duration)
-        ? payload.duration
-        : null,
-    ip,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  };
-
-  try {
-    await db.collection('analyticsEvents').add(event);
-    return { ok: true };
-  } catch (error) {
-    console.error('analytics_track error', error);
-    throw new functions.https.HttpsError('internal', 'Failed to record analytics event');
-  }
-});
+);
 
 export const bookings_confirm = functions.https.onCall(async (data, context) => {
   if (!context.auth) throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
@@ -10531,7 +10591,7 @@ async function executeCreateOrder(data: any, context: CallableContextLike) {
         .limit(1)
         .get();
       if (!vSnap.empty) {
-        const v = vSnap.docs[0].data() as any;
+        const v = vSnap.docs[0].data() as Voucher;
         const locs: string[] = Array.isArray(v.locations) ? v.locations : [];
         const locAllowed =
           locs.length === 0 ||
@@ -10990,92 +11050,165 @@ async function executeCreateOrder(data: any, context: CallableContextLike) {
     );
   }
 
+  const clientSecret = await createDepositPaymentIntentForOrder(orderRef.id, orderData);
+
   return {
     orderId: orderRef.id,
     price,
     netTotal: netTotal,
     voucherDiscount,
     discountAmount,
+    ...(clientSecret ? { clientSecret } : {}),
   };
 }
 
-export const createOrder = onRequest({ region: 'europe-west2' }, async (req, res) => {
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed', code: 'method-not-allowed' });
-    return;
+async function createDepositPaymentIntentForOrder(
+  orderId: string,
+  order: Record<string, any>,
+): Promise<string | null> {
+  const price = Number(order.price) || 0;
+  const depositPercentage = Number(order.depositPercentage) || 0;
+  const depositAmount = Number(order.depositAmount) || price * (depositPercentage / 100);
+  const amountCents = Math.round(Math.max(depositAmount, 0) * 100);
+
+  if (!Number.isFinite(amountCents) || amountCents <= 0) {
+    return null;
   }
 
-  const authHeader = req.get('authorization') ?? req.get('Authorization');
-  let authContext: CallableAuthContext | null = null;
+  const stripe = await getStripeClient();
+  const { platformFeePercent } = await getStripeOperationalSettings();
 
-  if (authHeader?.startsWith('Bearer ')) {
-    const token = authHeader.slice('Bearer '.length).trim();
-    if (token) {
-      try {
-        const decoded = await admin.auth().verifyIdToken(token);
-        authContext = { uid: decoded.uid, token: decoded };
-      } catch (error) {
-        console.error('createOrder verifyIdToken failed', error);
-        res.status(401).json({ error: 'Invalid authentication token', code: 'unauthenticated' });
-        return;
+  let applicationFeeAmount: number | null = null;
+  let destinationAccountId: string | null = null;
+  const rawFranchiseId = typeof order.franchiseId === 'string' ? order.franchiseId.trim() : '';
+
+  if (rawFranchiseId) {
+    try {
+      const franchiseSnap = await db.collection('franchises').doc(rawFranchiseId).get();
+      if (franchiseSnap.exists) {
+        const franchiseData = (franchiseSnap.data() as Record<string, unknown>) || {};
+        const accountId = normaliseString(franchiseData.stripeAccountId ?? franchiseData.connectAccountId);
+        if (accountId) {
+          destinationAccountId = accountId;
+          const franchiseFee = parseNumber(franchiseData.platformFee);
+          const feePercentage = franchiseFee ?? platformFeePercent;
+          if (feePercentage !== null && Number.isFinite(feePercentage) && feePercentage > 0) {
+            applicationFeeAmount = Math.round((amountCents * feePercentage) / 100);
+            if (applicationFeeAmount < 0) {
+              applicationFeeAmount = 0;
+            }
+            if (applicationFeeAmount > amountCents) {
+              applicationFeeAmount = amountCents;
+            }
+          }
+        }
       }
+    } catch (franchiseError) {
+      console.warn('Unable to resolve franchise Stripe account for deposit intent', rawFranchiseId, franchiseError);
     }
   }
 
-  let body: unknown = req.body;
-  if (Buffer.isBuffer(body)) {
-    const text = body.toString('utf8');
-    if (text.trim()) {
-      try {
-        body = JSON.parse(text);
-      } catch (error) {
-        console.error('createOrder invalid buffer body', error);
-        res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
-        return;
+  let organiserShortfallCents = 0;
+  let organiserCommissionCents = 0;
+  let organiserHoldCents = 0;
+  let organiserStripeAccountId: string | null = null;
+  const organiserInfo = order.organiser && typeof order.organiser === 'object' ? order.organiser : null;
+  if (organiserInfo) {
+    const commitmentsRaw = Array.isArray(organiserInfo.commitments)
+      ? (organiserInfo.commitments as Record<string, any>[])
+      : [];
+    commitmentsRaw.forEach((commitment) => {
+      const minimumValue = parseNumber(commitment?.minimumGuarantee) ?? 0;
+      const exhibitorSubtotalValue = parseNumber(commitment?.exhibitorSubtotal) ?? 0;
+      const shortfallValue =
+        parseNumber(commitment?.guaranteeShortfall) ?? Math.max(minimumValue - exhibitorSubtotalValue, 0);
+      const commissionValue = parseNumber(commitment?.commissionDue) ?? 0;
+      organiserShortfallCents += Math.max(0, Math.round(shortfallValue * 100));
+      organiserCommissionCents += Math.max(0, Math.round(commissionValue * 100));
+      if (!organiserStripeAccountId) {
+        const candidate = normaliseString(
+          commitment?.stripeAccountId ??
+            commitment?.organiserStripeAccountId ??
+            commitment?.accountId ??
+            organiserInfo.stripeAccountId ??
+            organiserInfo?.settlement?.stripeAccountId ??
+            null,
+        );
+        if (candidate) {
+          organiserStripeAccountId = candidate;
+        }
       }
-    } else {
-      body = null;
-    }
-  } else if (typeof body === 'string') {
-    if (body.trim()) {
-      try {
-        body = JSON.parse(body);
-      } catch (error) {
-        console.error('createOrder invalid string body', error);
-        res.status(400).json({ error: 'Invalid JSON body', code: 'invalid-json' });
-        return;
-      }
-    } else {
-      body = null;
+    });
+    const calculatedHold = organiserShortfallCents + organiserCommissionCents;
+    if (calculatedHold > 0) {
+      organiserHoldCents = Math.min(Math.max(calculatedHold, 0), amountCents);
     }
   }
 
-  const payloadCandidate =
-    body && typeof body === 'object' && body !== null && 'data' in (body as Record<string, unknown>)
-      ? (body as { data?: unknown }).data
-      : body;
+  if (organiserHoldCents > 0 && destinationAccountId) {
+    const baseFee = applicationFeeAmount ?? 0;
+    let nextFee = baseFee + organiserHoldCents;
+    if (nextFee > amountCents) {
+      nextFee = amountCents;
+    }
+    applicationFeeAmount = nextFee;
+  }
 
-  if (!payloadCandidate || typeof payloadCandidate !== 'object') {
-    res.status(400).json({ error: 'Order payload is required', code: 'invalid-argument' });
-    return;
+  const metadata: Record<string, string> = {
+    orderId: String(orderId),
+    type: 'deposit',
+  };
+  if (rawFranchiseId) {
+    metadata.franchiseId = rawFranchiseId;
+  }
+  if (applicationFeeAmount !== null) {
+    metadata.applicationFeeAmount = String(applicationFeeAmount);
+  }
+  if (destinationAccountId) {
+    metadata.destinationAccountId = destinationAccountId;
+  }
+  if (organiserHoldCents > 0) {
+    metadata.organiserHoldCents = String(organiserHoldCents);
+  }
+  if (organiserShortfallCents > 0) {
+    metadata.organiserGuaranteeShortfallCents = String(organiserShortfallCents);
+  }
+  if (organiserCommissionCents > 0) {
+    metadata.organiserCommissionCents = String(organiserCommissionCents);
+  }
+  if (organiserStripeAccountId) {
+    metadata.organiserStripeAccountId = organiserStripeAccountId;
+  }
+
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount: amountCents,
+    currency: 'gbp',
+    description: `Deposit for order ${orderId}`,
+    metadata,
+    automatic_payment_methods: { enabled: true },
+    transfer_data: destinationAccountId ? { destination: destinationAccountId } : undefined,
+    application_fee_amount:
+      applicationFeeAmount !== null && applicationFeeAmount > 0 ? applicationFeeAmount : undefined,
+  });
+
+  return paymentIntent.client_secret ?? null;
+}
+
+export const createOrder = onCall({ region: 'europe-west2' }, async (request) => {
+  const payload = request.data;
+  if (!payload || typeof payload !== 'object') {
+    throw new functions.https.HttpsError('invalid-argument', 'Order payload is required');
   }
 
   try {
-    const result = await executeCreateOrder(payloadCandidate, { auth: authContext });
-    res.status(200).json({ data: result ?? null });
+    const result = await executeCreateOrder(payload, { auth: request.auth ?? null });
+    return result ?? null;
   } catch (error) {
     if (error instanceof functions.https.HttpsError) {
-      const status = CALLABLE_ERROR_STATUS[error.code] ?? 500;
-      res.status(status).json({
-        error: error.message || 'Failed to create order.',
-        code: error.code,
-        ...(error.details === undefined ? {} : { details: error.details }),
-      });
-      return;
+      throw error;
     }
-
     console.error('createOrder handler failed', error);
-    res.status(500).json({ error: 'Failed to create order.', code: 'internal' });
+    throw new functions.https.HttpsError('internal', 'Failed to create order.');
   }
 });
 
@@ -14248,20 +14381,39 @@ async function recordLoginForUid(uid: string, timestampValue: unknown): Promise<
   });
 }
 
-const recordLoginCallable = onCall(
-  { region: 'europe-west2' },
-  async (request) => {
-    if (!request.auth?.uid) {
-      throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+export const recordLogin = onRequest(
+  { region: 'europe-west2', cors: [PORTAL_HOSTED_APP_ORIGIN] },
+  async (req, res) => {
+    applyCorsHeaders(req, res);
+    if (req.method === 'OPTIONS') {
+      res.status(204).send('');
+      return;
     }
 
-    await recordLoginForUid(request.auth.uid, request.data?.timestamp);
-    return { ok: true };
+    if (req.method !== 'POST') {
+      res.status(405).json({ error: 'Method not allowed' });
+      return;
+    }
+
+    const auth = await verifyAuthTokenFromRequest(req);
+    if (!auth?.uid) {
+      res.status(401).json({ error: 'Sign in required' });
+      return;
+    }
+
+    const payload = parseJsonBody(req);
+
+    try {
+      await recordLoginForUid(auth.uid, payload?.timestamp);
+      res.status(200).json({ ok: true });
+    } catch (error) {
+      console.error('recordLogin handler failed', error);
+      res.status(500).json({ error: 'Failed to record login' });
+    }
   }
 );
 
-export const recordLogin = recordLoginCallable;
-export const recordLoginEvent = recordLoginCallable;
+export const recordLoginEvent = recordLogin;
 
 /**
  * ADMIN FUNCTIONS

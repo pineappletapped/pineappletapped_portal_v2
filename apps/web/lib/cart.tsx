@@ -10,6 +10,7 @@ import {
   ReactNode,
 } from "react";
 import { ProductModifierSelection, type ProductOrderFieldType } from "@/lib/products";
+import type { CartItem as SharedCartItem } from "../../shared/types/commerce";
 
 export interface CartCampaignBooking {
   projectId: string;
@@ -54,17 +55,9 @@ export interface CartOrganiserInfo {
   source?: string | null;
 }
 
-export interface CartItem {
-  id: string;
-  name: string;
-  price: number;
-  category?: string | null;
-  variation?: string;
+export interface CartItem extends SharedCartItem {
   date: string;
-  quantity: number;
   modifiers?: ProductModifierSelection[];
-  location?: string | null;
-  postalCode?: string | null;
   exhibition?: {
     showDate?: string | null;
     setupDate?: string | null;
@@ -90,7 +83,6 @@ export interface CartItem {
     start: string;
     end: string;
   }[];
-  rentalTotal?: number;
   kitStatus?: "confirmed" | "pending";
   kitWarnings?: string[];
   campaignBooking?: CartCampaignBooking | null;
