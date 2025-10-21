@@ -56,6 +56,7 @@ export interface CartOrganiserInfo {
 }
 
 export interface CartItem extends SharedCartItem {
+  price: number;
   date: string;
   modifiers?: ProductModifierSelection[];
   exhibition?: {
@@ -159,7 +160,14 @@ function loadStoredItems(): CartItem[] {
     const parsed = JSON.parse(stored);
     if (Array.isArray(parsed)) {
       return parsed.filter((item): item is CartItem =>
-        item && typeof item === "object" && "id" in item && "quantity" in item
+        Boolean(
+          item &&
+            typeof item === "object" &&
+            "id" in item &&
+            "quantity" in item &&
+            "price" in item &&
+            typeof (item as { price?: unknown }).price === "number"
+        )
       );
     }
   } catch (error) {
