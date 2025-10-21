@@ -33,18 +33,48 @@ import {
 
 const PORTAL_HOSTED_APP_ORIGIN =
   'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app';
-const ALLOWED_CORS_ORIGINS = new Set<string>([PORTAL_HOSTED_APP_ORIGIN]);
+const ALLOWED_CORS_ORIGINS = new Map<string, string>(
+  [PORTAL_HOSTED_APP_ORIGIN, 'http://localhost:3000', 'http://localhost:5173']
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => {
+      const trimmed = value.trim();
+      return [trimmed.toLowerCase(), trimmed] as const;
+    }),
+);
 const CORS_ALLOW_METHODS = 'POST, OPTIONS';
-const CORS_ALLOW_HEADERS = 'Content-Type, Authorization';
+const DEFAULT_CORS_ALLOW_HEADERS = [
+  'Content-Type',
+  'Authorization',
+  'X-Requested-With',
+  'X-Firebase-GMPID',
+  'X-Firebase-Client',
+  'X-Client-Version',
+  'X-Firebase-AppCheck',
+].join(', ');
+const CORS_MAX_AGE_SECONDS = '3600';
 
 const applyCorsHeaders = (req: ExpressRequest, res: ExpressResponse) => {
   const originHeader = req.get?.('origin') ?? req.headers.origin;
-  if (typeof originHeader === 'string' && ALLOWED_CORS_ORIGINS.has(originHeader)) {
-    res.set('Access-Control-Allow-Origin', originHeader);
+  if (typeof originHeader === 'string') {
+    const normalisedOrigin = originHeader.trim().toLowerCase();
+    const allowedOrigin = ALLOWED_CORS_ORIGINS.get(normalisedOrigin);
+    if (allowedOrigin) {
+      res.set('Access-Control-Allow-Origin', allowedOrigin);
+    }
   }
   res.set('Access-Control-Allow-Credentials', 'true');
   res.set('Access-Control-Allow-Methods', CORS_ALLOW_METHODS);
-  res.set('Access-Control-Allow-Headers', CORS_ALLOW_HEADERS);
+  const requestedHeadersRaw =
+    (req.get?.('access-control-request-headers') ?? req.headers['access-control-request-headers']) || '';
+  const requestedHeaders = Array.isArray(requestedHeadersRaw)
+    ? requestedHeadersRaw.join(', ')
+    : requestedHeadersRaw;
+  if (typeof requestedHeaders === 'string' && requestedHeaders.trim().length > 0) {
+    res.set('Access-Control-Allow-Headers', requestedHeaders);
+  } else {
+    res.set('Access-Control-Allow-Headers', DEFAULT_CORS_ALLOW_HEADERS);
+  }
+  res.set('Access-Control-Max-Age', CORS_MAX_AGE_SECONDS);
   res.append('Vary', 'Origin');
 };
 
