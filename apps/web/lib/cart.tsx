@@ -10,7 +10,7 @@ import {
   ReactNode,
 } from "react";
 import { ProductModifierSelection, type ProductOrderFieldType } from "@/lib/products";
-import type { CartItem as SharedCartItem } from "../../shared/types/commerce";
+import type { CartItem as SharedCartItem } from "../../../shared/types/commerce";
 
 export interface CartCampaignBooking {
   projectId: string;

@@ -1092,6 +1092,10 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       functionsRef.current = functionsInstance;
     }
 
+    if (!functionsInstance) {
+      throw new Error("Firebase functions are unavailable.");
+    }
+
     const callable = httpsCallable(functionsInstance, "createOrder");
     const response = await callable(orderInput);
     const payload = response?.data;
