@@ -13,7 +13,6 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import type { FirebaseError } from "firebase/app";
 import { type User } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
-import { httpsCallable, type Functions } from "firebase/functions";
 
 import { ensureFirebase } from "@/lib/firebase";
 
@@ -69,6 +68,20 @@ const describeCallableError = (error: unknown): string => {
       }
     }
 
+    const genericCode = (error as { code?: unknown }).code;
+    if (typeof genericCode === "string") {
+      switch (genericCode) {
+        case "unauthenticated":
+          return "Sign in to continue with your order.";
+        case "permission-denied":
+          return "You do not have permission to complete this order.";
+        case "invalid-argument":
+          return "Checkout details were incomplete. Review your information and try again.";
+        default:
+          break;
+      }
+    }
+
     const message = firebaseError.message?.replace(/^FirebaseError:\s*/i, "") || firebaseError.message;
     if (message && message.toLowerCase() !== "internal") {
       return message;
@@ -110,37 +123,67 @@ export function useCheckoutPayment({
   const [orderId, setOrderId] = useState<string | null>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(false);
-  const functionsRef = useRef<Functions | null>(null);
   const lastIntentPayloadRef = useRef<string | null>(null);
 
   const intentPayload = useMemo(() => createIntentPayload(orderInput), [orderInput]);
+  const orderRequestBody = useMemo(() => JSON.stringify(orderInput), [orderInput]);
   const paymentDetailsStale = useMemo(
     () => lastIntentPayloadRef.current !== null && lastIntentPayloadRef.current !== intentPayload,
     [intentPayload],
   );
+  const callCreateOrder = useCallback(
+    async (idToken: string): Promise<CreateOrderResult> => {
+      const response = await fetch("/api/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: orderRequestBody,
+        cache: "no-store",
+      });
 
-  const ensureFunctions = useCallback(async () => {
-    if (functionsRef.current) {
-      return functionsRef.current;
-    }
-    const { functions } = await ensureFirebase();
-    if (!functions) {
-      throw new Error("Firebase functions are unavailable.");
-    }
-    functionsRef.current = functions;
-    return functions;
-  }, []);
+      const text = await response.text();
+      let payload: unknown = null;
+      if (text) {
+        try {
+          payload = JSON.parse(text) as unknown;
+        } catch (error) {
+          const parseError = new Error("Order service returned invalid JSON.");
+          (parseError as Error & { details?: unknown }).details = {
+            responseSnippet: text.slice(0, 200),
+          };
+          throw parseError;
+        }
+      }
 
-  const callCreateOrder = useCallback(async (): Promise<CreateOrderResult> => {
-    const functionsInstance = await ensureFunctions();
-    const callable = httpsCallable(functionsInstance, "createOrder");
-    const response = await callable(orderInput);
-    const payload = response?.data;
-    if (!payload || typeof payload !== "object") {
-      return {};
-    }
-    return payload as CreateOrderResult;
-  }, [ensureFunctions, orderInput]);
+      if (!response.ok) {
+        const message =
+          (payload && typeof payload === "object" && payload !== null && "error" in payload &&
+            typeof (payload as { error: unknown }).error === "string"
+            ? ((payload as { error: string }).error as string)
+            : `Order service responded with ${response.status}`);
+        const error = new Error(message);
+        if (payload && typeof payload === "object" && payload !== null) {
+          const record = payload as Record<string, unknown>;
+          if (typeof record.code === "string") {
+            (error as Error & { code?: string }).code = record.code;
+          }
+          if ("details" in record) {
+            (error as Error & { details?: unknown }).details = record.details;
+          }
+        }
+        throw error;
+      }
+
+      if (!payload || typeof payload !== "object") {
+        return {};
+      }
+
+      return payload as CreateOrderResult;
+    },
+    [orderRequestBody],
+  );
 
   const completeZeroBalanceOrder = useCallback(async () => {
     if (initializing) {
@@ -158,8 +201,8 @@ export function useCheckoutPayment({
 
     try {
       const user = await ensureUser();
-      await user.getIdToken();
-      const orderData = await callCreateOrder();
+      const token = await user.getIdToken();
+      const orderData = await callCreateOrder(token);
       const createdOrderId: string | undefined =
         typeof orderData.orderId === "string" ? orderData.orderId : undefined;
       if (!createdOrderId) {
@@ -244,8 +287,8 @@ export function useCheckoutPayment({
 
     try {
       const user = await ensureUser();
-      await user.getIdToken();
-      const orderData = await callCreateOrder();
+      const token = await user.getIdToken();
+      const orderData = await callCreateOrder(token);
       const createdOrderId: string | undefined =
         typeof orderData.orderId === "string" ? orderData.orderId : undefined;
       if (!createdOrderId) {

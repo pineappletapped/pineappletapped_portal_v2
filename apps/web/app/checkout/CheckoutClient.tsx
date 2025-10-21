@@ -12,7 +12,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useRouter } from "next/navigation";
 import { Elements } from "@stripe/react-stripe-js";
 import { loadStripe } from "@stripe/stripe-js";
-import { httpsCallable, type Functions } from "firebase/functions";
 import {
   collection,
   doc,
@@ -165,7 +164,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const [accountError, setAccountError] = useState<string | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
   const authRef = useRef<Auth | null>(null);
-  const functionsRef = useRef<Functions | null>(null);
   const lastIntentPayload = useRef<string | null>(null);
   const loginErrorRef = useRef<HTMLDivElement | null>(null);
   const authEmail = currentUser?.email || "";
@@ -872,7 +870,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
 
     (async () => {
       try {
-        const { auth, db, functions } = await ensureFirebase();
+        const { auth, db } = await ensureFirebase();
         if (cancelled) {
           return;
         }
@@ -882,7 +880,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         }
 
         authRef.current = auth;
-        functionsRef.current = functions ?? null;
 
         const { onAuthStateChanged } = await loadAuthModule();
         if (cancelled) {
@@ -1014,6 +1011,39 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     }
     if (error instanceof Error) {
       const firebaseError = error as FirebaseError;
+      if (firebaseError.code) {
+        const code = firebaseError.code.replace(/^functions\//, "");
+        switch (code) {
+          case "permission-denied":
+            return "You do not have permission to complete this order.";
+          case "invalid-argument":
+            return "Checkout details were incomplete. Review your information and try again.";
+          case "not-found":
+            return "We couldn't find the checkout service. Try again in a moment.";
+          case "deadline-exceeded":
+          case "resource-exhausted":
+          case "aborted":
+          case "unavailable":
+            return "The checkout service is busy. Try again in a few seconds.";
+          default:
+            break;
+        }
+      }
+
+      const genericCode = (error as { code?: unknown }).code;
+      if (typeof genericCode === "string") {
+        switch (genericCode) {
+          case "unauthenticated":
+            return "Sign in to continue with your order.";
+          case "permission-denied":
+            return "You do not have permission to complete this order.";
+          case "invalid-argument":
+            return "Checkout details were incomplete. Review your information and try again.";
+          default:
+            break;
+        }
+      }
+
       const extractDetailMessage = (payload: unknown): string | null => {
         if (!payload || typeof payload !== "object") {
           return null;
@@ -1081,34 +1111,59 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     return fallbackMessage;
   }, []);
 
-  const callCreateOrderViaApi = useCallback(async (): Promise<CreateOrderResult> => {
-    let functionsInstance = functionsRef.current;
-    if (!functionsInstance) {
-      const { functions } = await ensureFirebase();
-      if (!functions) {
-        throw new Error("Firebase functions are unavailable.");
+  const callCreateOrder = useCallback(
+    async (idToken: string): Promise<CreateOrderResult> => {
+      const response = await fetch("/api/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: currentIntentPayload,
+        cache: "no-store",
+      });
+
+      const text = await response.text();
+      let payload: unknown = null;
+      if (text) {
+        try {
+          payload = JSON.parse(text) as unknown;
+        } catch (error) {
+          const parseError = new Error("Order service returned invalid JSON.");
+          (parseError as Error & { details?: unknown }).details = {
+            responseSnippet: text.slice(0, 200),
+          };
+          throw parseError;
+        }
       }
-      functionsInstance = functions;
-      functionsRef.current = functionsInstance;
-    }
 
-    if (!functionsInstance) {
-      throw new Error("Firebase functions are unavailable.");
-    }
+      if (!response.ok) {
+        const message =
+          (payload && typeof payload === "object" && payload !== null && "error" in payload &&
+            typeof (payload as { error: unknown }).error === "string"
+            ? ((payload as { error: string }).error as string)
+            : `Order service responded with ${response.status}`);
+        const error = new Error(message);
+        if (payload && typeof payload === "object" && payload !== null) {
+          const record = payload as Record<string, unknown>;
+          if (typeof record.code === "string") {
+            (error as Error & { code?: string }).code = record.code;
+          }
+          if ("details" in record) {
+            (error as Error & { details?: unknown }).details = record.details;
+          }
+        }
+        throw error;
+      }
 
-    const callable = httpsCallable(functionsInstance, "createOrder");
-    const response = await callable(orderInput);
-    const payload = response?.data;
-    if (!payload || typeof payload !== "object") {
-      return {};
-    }
+      if (!payload || typeof payload !== "object") {
+        return {};
+      }
 
-    return payload as CreateOrderResult;
-  }, [orderInput]);
-
-  const callCreateOrder = useCallback(async (): Promise<CreateOrderResult> => {
-    return await callCreateOrderViaApi();
-  }, [callCreateOrderViaApi]);
+      return payload as CreateOrderResult;
+    },
+    [currentIntentPayload],
+  );
 
   const ensureCheckoutUser = useCallback(async (): Promise<User | null> => {
     if (currentUser) {
@@ -1272,8 +1327,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       }
 
       const { db } = await ensureFirebase();
-      await authUser.getIdToken();
-      const orderData = await callCreateOrder();
+      const token = await authUser.getIdToken();
+      const orderData = await callCreateOrder(token);
       const createdOrderId: string | undefined =
         typeof orderData.orderId === "string" ? orderData.orderId : undefined;
       const serverPriceValue = orderData.price;
@@ -1429,8 +1484,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return false;
       }
 
-      await authUser.getIdToken();
-      const orderData = await callCreateOrder();
+      const token = await authUser.getIdToken();
+      const orderData = await callCreateOrder(token);
       const createdOrderId: string | undefined =
         typeof orderData.orderId === "string" ? orderData.orderId : undefined;
       if (!createdOrderId) {

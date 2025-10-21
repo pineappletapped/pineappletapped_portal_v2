@@ -1,7 +1,7 @@
 
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
-import { onCall, onRequest } from 'firebase-functions/v2/https';
+import { onRequest } from 'firebase-functions/v2/https';
 import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import Stripe from 'stripe';
 import type { DocumentData, DocumentReference, DocumentSnapshot } from 'firebase-admin/firestore';
@@ -11224,23 +11224,78 @@ async function createDepositPaymentIntentForOrder(
   return paymentIntent.client_secret ?? null;
 }
 
-export const createOrder = onCall({ region: 'europe-west2' }, async (request) => {
-  const payload = request.data;
-  if (!payload || typeof payload !== 'object') {
-    throw new functions.https.HttpsError('invalid-argument', 'Order payload is required');
-  }
+const HTTPS_ERROR_STATUS: Record<string, number> = {
+  'invalid-argument': 400,
+  'failed-precondition': 400,
+  'out-of-range': 400,
+  'unauthenticated': 401,
+  'permission-denied': 403,
+  'not-found': 404,
+  'aborted': 409,
+  'already-exists': 409,
+  'resource-exhausted': 429,
+  'cancelled': 499,
+  'data-loss': 500,
+  'unknown': 500,
+  'internal': 500,
+  'unavailable': 503,
+  'deadline-exceeded': 504,
+};
 
-  try {
-    const result = await executeCreateOrder(payload, { auth: request.auth ?? null });
-    return result ?? null;
-  } catch (error) {
-    if (error instanceof functions.https.HttpsError) {
-      throw error;
-    }
-    console.error('createOrder handler failed', error);
-    throw new functions.https.HttpsError('internal', 'Failed to create order.');
+const respondWithHttpsError = (
+  res: ExpressResponse,
+  error: functions.https.HttpsError,
+) => {
+  const status = HTTPS_ERROR_STATUS[error.code] ?? 500;
+  const payload: Record<string, unknown> = {
+    error: error.message || 'Checkout service failed.',
+    code: error.code,
+  };
+  if (error.details !== undefined) {
+    payload.details = error.details;
   }
-});
+  res.status(status).json(payload);
+};
+
+export const createOrder = onRequest(
+  { region: 'europe-west2', cors: [PORTAL_HOSTED_APP_ORIGIN] },
+  async (req, res) => {
+    applyCorsHeaders(req, res);
+    if (req.method === 'OPTIONS') {
+      res.status(204).send('');
+      return;
+    }
+
+    if (req.method !== 'POST') {
+      res.status(405).json({ error: 'Method not allowed', code: 'method-not-allowed' });
+      return;
+    }
+
+    const auth = await verifyAuthTokenFromRequest(req);
+    if (!auth?.uid) {
+      res.status(401).json({ error: 'Sign in required', code: 'unauthenticated' });
+      return;
+    }
+
+    const payload = parseJsonBody(req);
+    if (!payload || typeof payload !== 'object') {
+      res.status(400).json({ error: 'Order payload is required', code: 'invalid-argument' });
+      return;
+    }
+
+    try {
+      const result = await executeCreateOrder(payload, { auth: { uid: auth.uid, token: auth } });
+      res.status(200).json(result ?? null);
+    } catch (error) {
+      if (error instanceof functions.https.HttpsError) {
+        respondWithHttpsError(res, error);
+        return;
+      }
+      console.error('createOrder handler failed', error);
+      res.status(500).json({ error: 'Failed to create order.', code: 'internal' });
+    }
+  },
+);
 
 export const clientResearch_onOrderCreated = functions.firestore
   .document('orders/{orderId}')
