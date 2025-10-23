@@ -91,6 +91,10 @@ export async function POST(request: Request) {
       }
 
       if (!response.ok) {
+        if (response.status === 404 && !isLastAttempt) {
+          attemptLogger.push(`${endpoint} → 404 not found`);
+          continue;
+        }
         const message =
           (json && typeof json === "object" && typeof json.error === "string"
             ? json.error
