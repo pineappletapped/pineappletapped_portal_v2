@@ -238,7 +238,8 @@ export default function PortalContainer({ children }: { children: React.ReactNod
     () => (portalConfig.navigation ?? []).filter((section) => section.items.length > 0),
     [portalConfig.navigation]
   );
-  const hasNavigation = navSections.length > 0;
+  const disableNavigation = portalConfig.id === 'admin';
+  const hasNavigation = !disableNavigation && navSections.length > 0;
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [userName, setUserName] = useState<string>('Workspace member');
   const [userEmail, setUserEmail] = useState<string | null>(null);
