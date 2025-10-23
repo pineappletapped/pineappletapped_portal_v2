@@ -1,5 +1,5 @@
 import { functionsBaseUrl } from "./firebase";
-import { DEFAULT_FUNCTION_BASE, LEGACY_FUNCTION_BASES, resolveHostedAppContext } from "./callableEndpoints";
+import { DEFAULT_FUNCTION_BASE, LEGACY_FUNCTION_BASES } from "./callableEndpoints";
 
 const cleanEnv = (value?: string | null) => {
   if (typeof value !== "string") {
@@ -43,10 +43,13 @@ const RELATIVE_FALLBACK_ENDPOINTS: Record<string, string[]> = {
   analytics_track: ["/api/analytics-track"],
 };
 
-const ADDITIONAL_BASE_ENVS = [
+const PRIMARY_BASE_ENVS = [
   "NEXT_PUBLIC_FUNCTIONS_BASE_URL",
   "FUNCTIONS_BASE_URL",
   "FIREBASE_FUNCTIONS_URL",
+];
+
+const ADDITIONAL_BASE_ENVS = [
   "NEXT_PUBLIC_FUNCTIONS_FALLBACK_BASES",
   "FUNCTIONS_FALLBACK_BASES",
   "NEXT_PUBLIC_FUNCTIONS_ADDITIONAL_BASES",
@@ -68,6 +71,16 @@ const buildBaseCandidates = (): string[] => {
     }
   };
 
+  PRIMARY_BASE_ENVS.forEach((envName) => {
+    const value = cleanEnv(process.env[envName]);
+    if (!value) {
+      return;
+    }
+    addBase(value);
+  });
+
+  addBase(DEFAULT_FUNCTION_BASE);
+
   if (functionsBaseUrl) {
     addBase(functionsBaseUrl);
   }
@@ -84,17 +97,7 @@ const buildBaseCandidates = (): string[] => {
     addBase(value);
   });
 
-  addBase(DEFAULT_FUNCTION_BASE);
   LEGACY_FUNCTION_BASES.forEach((legacy) => addBase(legacy));
-
-  if (typeof window !== "undefined") {
-    try {
-      const context = resolveHostedAppContext(window.location.host);
-      context.bases.forEach((candidate) => addBase(candidate));
-    } catch {
-      // ignore resolution failures in non-browser contexts
-    }
-  }
 
   return Array.from(bases);
 };
@@ -273,16 +276,17 @@ export async function postHttpFunctionOrThrow<T = unknown>(
   const result = await invokeHttpFunction<T>(name, options);
   if (!result.ok) {
     const payload = result.payload as Record<string, unknown> | null;
+    const isObjectPayload = payload !== null && typeof payload === "object";
     const message =
-      (payload && typeof payload.error === "string"
+      (isObjectPayload && typeof payload.error === "string"
         ? payload.error
         : `HTTP function ${name} responded with ${result.status}`) ??
       `HTTP function ${name} failed`;
     const error = new Error(message);
-    if (payload && typeof payload.code === "string") {
+    if (isObjectPayload && typeof payload.code === "string") {
       (error as Error & { code?: string }).code = payload.code;
     }
-    if (payload && "details" in payload) {
+    if (isObjectPayload && "details" in payload) {
       (error as Error & { details?: unknown }).details = payload.details;
     }
     (error as Error & { endpoint?: string }).endpoint = result.endpoint;
