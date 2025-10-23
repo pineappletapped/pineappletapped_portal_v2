@@ -42,12 +42,34 @@ const resolveOriginHeader = (req) => {
     }
     return null;
 };
+const TRUSTED_HOST_FRAGMENTS = [
+    'pineapple-tapped---portal',
+    'pineappletappedportal--pineapple-tapped---portal',
+];
+const isTrustedHostedOrigin = (origin) => {
+    try {
+        const { hostname } = new URL(origin);
+        const lowerHost = hostname.toLowerCase();
+        return TRUSTED_HOST_FRAGMENTS.some((fragment) => lowerHost.includes(fragment));
+    }
+    catch (_a) {
+        return false;
+    }
+};
 const resolveAllowedOrigin = (originHeader) => {
     if (originHeader) {
-        const match = originLookup.get(originHeader.trim().toLowerCase());
-        if (match) {
-            return match;
+        const trimmed = originHeader.trim();
+        if (!trimmed) {
+            return null;
         }
+        const lookup = originLookup.get(trimmed.toLowerCase());
+        if (lookup) {
+            return lookup;
+        }
+        if (isTrustedHostedOrigin(trimmed)) {
+            return trimmed;
+        }
+        return null;
     }
     return allowedOriginsList[0] ?? null;
 };
