@@ -91,7 +91,7 @@ function getVisitorId(): string | null {
 function resolveAnalyticsEndpoints(): string[] {
   const endpoints: string[] = [];
   try {
-    const primary = resolveHttpFunctionUrl('analytics_track');
+    const primary = resolveHttpFunctionUrl('analytics_track', { allowRelativeFallback: false });
     if (primary) {
       endpoints.push(primary);
     }

@@ -78,6 +78,9 @@ describe('analytics tracker', () => {
     const fetchMock = global.fetch as unknown as Mock;
     await flushAnalyticsQueue();
 
+    expect(resolveHttpFunctionUrlMock).toHaveBeenCalledWith('analytics_track', {
+      allowRelativeFallback: false,
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toBe('https://example.com/analytics_track');
     expect(__analyticsTestExports.getQueue()).toHaveLength(0);
@@ -100,6 +103,9 @@ describe('analytics tracker', () => {
     trackPageView('/pricing');
     await flushAnalyticsQueue();
 
+    expect(resolveHttpFunctionUrlMock).toHaveBeenCalledWith('analytics_track', {
+      allowRelativeFallback: false,
+    });
     expect(fetchMock).toHaveBeenCalled();
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net/analytics_track',

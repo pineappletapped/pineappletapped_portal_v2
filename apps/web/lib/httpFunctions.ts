@@ -114,7 +114,7 @@ const normaliseEndpoint = (endpoint: string) => {
 
 const buildEndpointCandidates = (
   name: string,
-  { allowRelativeFallback = true }: { allowRelativeFallback?: boolean } = {},
+  { allowRelativeFallback = false }: { allowRelativeFallback?: boolean } = {},
 ): string[] => {
   const candidates: string[] = [];
   const seen = new Set<string>();
@@ -142,8 +142,11 @@ const buildEndpointCandidates = (
   return candidates;
 };
 
-export function resolveHttpFunctionUrl(name: string): string {
-  const endpoints = buildEndpointCandidates(name);
+export function resolveHttpFunctionUrl(
+  name: string,
+  options: { allowRelativeFallback?: boolean } = {},
+): string {
+  const endpoints = buildEndpointCandidates(name, options);
   if (endpoints.length === 0) {
     throw new Error(`No endpoints are configured for HTTP function ${name}.`);
   }
