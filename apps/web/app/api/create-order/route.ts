@@ -64,8 +64,10 @@ export async function POST(request: Request) {
       });
 
       const text = await response.text();
+      const contentType = response.headers.get("content-type") || "";
+      const expectsJson = /json/i.test(contentType);
       let json: any = null;
-      if (text) {
+      if (text && expectsJson) {
         try {
           json = JSON.parse(text);
         } catch (parseError) {
@@ -75,10 +77,16 @@ export async function POST(request: Request) {
             continue;
           }
 
-          return createErrorResponse(502, "invalid-function-response", "Order service response was not valid JSON", {
-            endpoint,
-            attempts: attemptLogger.attempts,
-          });
+          return createErrorResponse(
+            502,
+            "invalid-function-response",
+            "Order service response was not valid JSON",
+            {
+              endpoint,
+              attempts: attemptLogger.attempts,
+              responseSnippet: summariseDetails(text),
+            },
+          );
         }
       }
 
