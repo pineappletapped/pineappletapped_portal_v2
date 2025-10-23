@@ -5626,6 +5626,122 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
 });
 
 // Track page view analytics from the public site
+const ANALYTICS_MAX_EVENTS = 25;
+
+const sanitiseString = (value: unknown, maxLength = 512): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.slice(0, maxLength);
+};
+
+const sanitisePath = (value: unknown): string | null => {
+  const str = sanitiseString(value, 512);
+  if (!str) {
+    return null;
+  }
+  return str.startsWith('/') ? str : `/${str}`;
+};
+
+const sanitiseNumber = (value: unknown): number | null => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  return value;
+};
+
+const sanitiseDuration = (value: unknown): number | null => {
+  const num = sanitiseNumber(value);
+  if (num === null) {
+    return null;
+  }
+  return Math.max(0, Math.round(num));
+};
+
+const sanitiseTimestamp = (value: unknown): number | null => {
+  const num = sanitiseNumber(value);
+  if (num === null) {
+    return null;
+  }
+  return Math.max(0, Math.trunc(num));
+};
+
+const toFirestoreTimestamp = (value: number | null) => {
+  if (value === null) {
+    return null;
+  }
+  try {
+    return admin.firestore.Timestamp.fromMillis(value);
+  } catch (error) {
+    console.warn('analytics_track invalid timestamp', error);
+    return null;
+  }
+};
+
+type IncomingAnalyticsEvent = {
+  id: string | null;
+  path: string;
+  referrer: string | null;
+  visitorId: string | null;
+  durationMs: number | null;
+  startedAtMs: number | null;
+  userAgent: string | null;
+  language: string | null;
+  screen: string | null;
+  createdAtMs: number | null;
+};
+
+const sanitiseAnalyticsEvent = (raw: any): IncomingAnalyticsEvent | null => {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const path = sanitisePath((raw as any).path);
+  if (!path) {
+    return null;
+  }
+  const eventId = sanitiseString((raw as any).id ?? (raw as any).eventId, 120);
+  const referrer = sanitiseString((raw as any).referrer, 512);
+  const visitorId = sanitiseString((raw as any).visitorId, 128);
+  const durationMs = sanitiseDuration((raw as any).durationMs ?? (raw as any).duration);
+  const startedAtMs = sanitiseTimestamp((raw as any).startedAtMs ?? (raw as any).startedAt);
+  const createdAtMs = sanitiseTimestamp((raw as any).createdAtMs ?? (raw as any).createdAt);
+  const userAgent = sanitiseString((raw as any).userAgent, 1024);
+  const language = sanitiseString((raw as any).language, 64);
+  const screen = sanitiseString((raw as any).screen, 64);
+
+  return {
+    id: eventId,
+    path,
+    referrer,
+    visitorId,
+    durationMs,
+    startedAtMs,
+    userAgent,
+    language,
+    screen,
+    createdAtMs,
+  };
+};
+
+const resolveHeaderValue = (req: ExpressRequest, name: string): string | null => {
+  const value = req.get(name);
+  if (typeof value === 'string') {
+    return value;
+  }
+  const header = req.headers?.[name];
+  if (typeof header === 'string') {
+    return header;
+  }
+  if (Array.isArray(header) && header.length > 0) {
+    return header[0] ?? null;
+  }
+  return null;
+};
+
 export const analytics_track = onRequest(
   { region: 'europe-west2', cors: allowedCorsOrigins },
   async (req, res) => {
@@ -5641,94 +5757,123 @@ export const analytics_track = onRequest(
 
     try {
       const payload = parseJsonBody(req);
-      const auth = await verifyAuthTokenFromRequest(req);
-      let uid: string | null = auth?.uid ?? null;
-      let userName: string | null = null;
+      const rawEvents = Array.isArray(payload?.events) ? payload.events : [payload];
+      const sanitizedEvents = rawEvents
+        .map((raw) => sanitiseAnalyticsEvent(raw))
+        .filter((event): event is IncomingAnalyticsEvent => event !== null)
+        .slice(0, ANALYTICS_MAX_EVENTS);
 
-      if (uid) {
+      if (sanitizedEvents.length === 0) {
+        res.status(400).json({ error: 'No analytics events were provided' });
+        return;
+      }
+
+      const auth = await verifyAuthTokenFromRequest(req);
+      const authUid = auth?.uid ?? null;
+      let authUserName: string | null = null;
+
+      if (authUid) {
         try {
-          const userSnap = await db.collection('users').doc(uid).get();
-          const userData = userSnap.data() as any;
+          const userSnap = await db.collection('users').doc(authUid).get();
+          const userData = userSnap.data() as Record<string, any> | undefined;
           if (userData) {
-            userName = userData.fullName || userData.email || null;
+            authUserName =
+              sanitiseString(userData.fullName, 256) ||
+              sanitiseString(userData.displayName, 256) ||
+              sanitiseString(userData.email, 256);
           }
         } catch (error) {
-          console.error('analytics_track failed to load user profile', error);
+          console.error('analytics_track failed to resolve user profile', error);
         }
       }
 
-      const visitorIdRaw = payload.visitorId;
-      const visitorId =
-        typeof visitorIdRaw === 'string' && visitorIdRaw.trim().length > 0
-          ? visitorIdRaw.trim()
-          : null;
+      const fallbackUserAgent = resolveHeaderValue(req, 'user-agent');
 
-      if (!uid && visitorId) {
-        const mapSnap = await db.collection('analyticsVisitors').doc(visitorId).get();
-        const mapData = mapSnap.data() as any;
-        if (mapData) {
-          uid = mapData.uid || null;
-          userName = mapData.userName || null;
-        }
+      const visitorIdsToLookup = new Set<string>();
+      if (!authUid) {
+        sanitizedEvents.forEach((event) => {
+          if (event.visitorId) {
+            visitorIdsToLookup.add(event.visitorId);
+          }
+        });
       }
 
-      if (visitorId && uid && userName) {
-        await db.collection('analyticsVisitors').doc(visitorId).set({ uid, userName }, { merge: true });
+      const visitorLookup = new Map<string, { uid: string | null; userName: string | null }>();
+      if (visitorIdsToLookup.size > 0) {
+        await Promise.all(
+          Array.from(visitorIdsToLookup).map(async (visitorId) => {
+            try {
+              const snap = await db.collection('analyticsVisitors').doc(visitorId).get();
+              const data = snap.data() as Record<string, any> | undefined;
+              if (data) {
+                visitorLookup.set(visitorId, {
+                  uid: typeof data.uid === 'string' ? data.uid : null,
+                  userName: sanitiseString(data.userName, 256),
+                });
+              }
+            } catch (error) {
+              console.error('analytics_track failed to load visitor mapping', error);
+            }
+          }),
+        );
       }
 
-      const resolveHeader = (name: string): string | null => {
-        const value = req.get(name);
-        if (typeof value === 'string') {
-          return value;
-        }
-        const header = req.headers?.[name];
-        if (typeof header === 'string') {
-          return header;
-        }
-        if (Array.isArray(header) && header.length > 0) {
-          return header[0] ?? null;
-        }
-        return null;
-      };
+      const visitorUpdates = new Map<string, { uid: string; userName: string }>();
+      const nowTimestamp = admin.firestore.FieldValue.serverTimestamp();
 
-      let ip: string | null = null;
-      if (typeof req.ip === 'string' && req.ip) {
-        ip = req.ip;
-      } else if (Array.isArray((req as any).ips) && (req as any).ips.length > 0) {
-        ip = (req as any).ips[0] ?? null;
+      await Promise.all(
+        sanitizedEvents.map(async (event) => {
+          let eventUid: string | null = authUid;
+          let eventUserName: string | null = authUserName;
+
+          if (!eventUid && event.visitorId) {
+            const mapping = visitorLookup.get(event.visitorId);
+            if (mapping) {
+              eventUid = mapping.uid ?? null;
+              eventUserName = mapping.userName ?? null;
+            }
+          }
+
+          if (event.visitorId && eventUid && eventUserName) {
+            visitorUpdates.set(event.visitorId, { uid: eventUid, userName: eventUserName });
+          }
+
+          const documentData: Record<string, any> = {
+            type: 'pageview',
+            eventId: event.id ?? null,
+            path: event.path,
+            referrer: event.referrer ?? null,
+            visitorId: event.visitorId ?? null,
+            uid: eventUid,
+            userName: eventUserName,
+            userAgent: event.userAgent ?? fallbackUserAgent ?? null,
+            language: event.language ?? null,
+            screen: event.screen ?? null,
+            durationMs: event.durationMs,
+            createdAt: nowTimestamp,
+            updatedAt: nowTimestamp,
+            clientStartedAt: toFirestoreTimestamp(event.startedAtMs),
+            clientRecordedAt: toFirestoreTimestamp(event.createdAtMs),
+          };
+
+          await db.collection('analyticsEvents').add(documentData);
+        }),
+      );
+
+      if (visitorUpdates.size > 0) {
+        await Promise.all(
+          Array.from(visitorUpdates.entries()).map(([visitorId, data]) =>
+            db.collection('analyticsVisitors').doc(visitorId).set(data, { merge: true }),
+          ),
+        );
       }
-      if (!ip) {
-        const forwarded = resolveHeader('x-forwarded-for');
-        if (forwarded) {
-          ip = forwarded.split(',')[0]?.trim() || null;
-        }
-      }
 
-      const event = {
-        uid,
-        userName,
-        path: typeof payload.path === 'string' ? payload.path : null,
-        referrer: typeof payload.referrer === 'string' ? payload.referrer : null,
-        userAgent:
-          typeof payload.userAgent === 'string' && payload.userAgent.trim().length > 0
-            ? payload.userAgent
-            : resolveHeader('user-agent'),
-        visitorId,
-        duration:
-          typeof payload.duration === 'number' && Number.isFinite(payload.duration)
-            ? payload.duration
-            : null,
-        ip,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      };
-
-      await db.collection('analyticsEvents').add(event);
-      res.status(200).json({ ok: true, visitorId, uid });
+      res.status(200).json({ ok: true, stored: sanitizedEvents.length });
     } catch (error) {
       console.error('analytics_track error', error);
-      res.status(500).json({ error: 'Failed to record analytics event' });
+      res.status(500).json({ error: 'Failed to record analytics events' });
     }
-  }
+  },
 );
 
 export const bookings_confirm = functions.https.onCall(async (data, context) => {

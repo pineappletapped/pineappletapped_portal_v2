@@ -49,13 +49,19 @@ const resolveRequestedHeaders = (req: ExpressRequest): string | null => {
 };
 
 const resolveOriginHeader = (req: ExpressRequest): string | null => {
-  const direct = req.get?.('origin') ?? req.headers.origin;
-  if (typeof direct === 'string') {
-    return direct;
+  const headerValue = req.get?.('origin');
+  if (typeof headerValue === 'string' && headerValue.trim()) {
+    return headerValue;
   }
-  if (Array.isArray(direct) && direct.length > 0) {
-    return direct[0] ?? null;
+
+  const header = req.headers.origin;
+  if (typeof header === 'string' && header.trim()) {
+    return header;
   }
+  if (Array.isArray(header) && header.length > 0) {
+    return header[0] ?? null;
+  }
+
   return null;
 };
 
