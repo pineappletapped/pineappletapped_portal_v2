@@ -16,63 +16,7 @@ import { Readable } from 'stream';
 import fetch from 'node-fetch';
 import { bookingConflictsWithRange } from './utils/availability.js';
 import { DEFAULT_KIT_ROUTING_SETTINGS, ROUTING_STAGE_META, cloneRoutingSettings, parseKitRoutingSettings, resolveStageLabel as resolveRoutingStageLabel, } from './utils/routing.js';
-const PORTAL_HOSTED_APP_ORIGIN = 'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app';
-const additionalCorsOrigins = (process.env.ALLOWED_CORS_ORIGINS || '')
-    .split(',')
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-const corsOriginSeeds = [
-    PORTAL_HOSTED_APP_ORIGIN,
-    'http://localhost:3000',
-    'http://localhost:5173',
-    ...additionalCorsOrigins,
-];
-const ALLOWED_CORS_ORIGINS = new Map(corsOriginSeeds
-    .filter((value) => typeof value === 'string' && value.trim().length > 0)
-    .map((value) => {
-    const trimmed = value.trim();
-    return [trimmed.toLowerCase(), trimmed];
-}));
-const ALLOWED_CORS_VALUES = Array.from(ALLOWED_CORS_ORIGINS.values());
-const CORS_ALLOW_METHODS = 'POST, OPTIONS';
-const DEFAULT_CORS_ALLOW_HEADERS = [
-    'Content-Type',
-    'Authorization',
-    'X-Requested-With',
-    'X-Firebase-GMPID',
-    'X-Firebase-Client',
-    'X-Client-Version',
-    'X-Firebase-AppCheck',
-].join(', ');
-const CORS_MAX_AGE_SECONDS = '3600';
-const applyCorsHeaders = (req, res) => {
-    const originHeader = req.get?.('origin') ?? req.headers.origin;
-    let allowedOrigin = null;
-    if (typeof originHeader === 'string') {
-        const normalisedOrigin = originHeader.trim().toLowerCase();
-        allowedOrigin = ALLOWED_CORS_ORIGINS.get(normalisedOrigin) ?? null;
-    }
-    if (!allowedOrigin && !originHeader && ALLOWED_CORS_VALUES.length > 0) {
-        allowedOrigin = ALLOWED_CORS_VALUES[0] ?? null;
-    }
-    if (allowedOrigin) {
-        res.set('Access-Control-Allow-Origin', allowedOrigin);
-    }
-    res.set('Access-Control-Allow-Credentials', 'true');
-    res.set('Access-Control-Allow-Methods', CORS_ALLOW_METHODS);
-    const requestedHeadersRaw = (req.get?.('access-control-request-headers') ?? req.headers['access-control-request-headers']) || '';
-    const requestedHeaders = Array.isArray(requestedHeadersRaw)
-        ? requestedHeadersRaw.join(', ')
-        : requestedHeadersRaw;
-    if (typeof requestedHeaders === 'string' && requestedHeaders.trim().length > 0) {
-        res.set('Access-Control-Allow-Headers', requestedHeaders);
-    }
-    else {
-        res.set('Access-Control-Allow-Headers', DEFAULT_CORS_ALLOW_HEADERS);
-    }
-    res.set('Access-Control-Max-Age', CORS_MAX_AGE_SECONDS);
-    res.append('Vary', 'Origin');
-};
+import { allowedCorsOrigins, prepareCorsResponse } from './utils/httpCors.js';
 const parseJsonBody = (req) => {
     const { body } = req;
     if (!body) {
@@ -4718,10 +4662,9 @@ export const projectBookings_acceptInvite = functions.https.onCall(async (data) 
     return { ok: true, responseId };
 });
 // Track page view analytics from the public site
-export const analytics_track = onRequest({ region: 'europe-west2', cors: ALLOWED_CORS_VALUES }, async (req, res) => {
-    applyCorsHeaders(req, res);
-    if (req.method === 'OPTIONS') {
-        res.status(204).send('');
+export const analytics_track = onRequest({ region: 'europe-west2', cors: allowedCorsOrigins }, async (req, res) => {
+    const cors = prepareCorsResponse(req, res);
+    if (cors.handled) {
         return;
     }
     if (req.method !== 'POST') {
@@ -9576,10 +9519,9 @@ const respondWithHttpsError = (res, error) => {
     }
     res.status(status).json(payload);
 };
-export const createOrder = onRequest({ region: 'europe-west2', cors: ALLOWED_CORS_VALUES }, async (req, res) => {
-    applyCorsHeaders(req, res);
-    if (req.method === 'OPTIONS') {
-        res.status(204).send('');
+export const createOrder = onRequest({ region: 'europe-west2', cors: allowedCorsOrigins }, async (req, res) => {
+    const cors = prepareCorsResponse(req, res);
+    if (cors.handled) {
         return;
     }
     if (req.method !== 'POST') {
@@ -12377,10 +12319,9 @@ async function recordLoginForUid(uid, timestampValue) {
         timestamp,
     });
 }
-export const recordLogin = onRequest({ region: 'europe-west2', cors: ALLOWED_CORS_VALUES }, async (req, res) => {
-    applyCorsHeaders(req, res);
-    if (req.method === 'OPTIONS') {
-        res.status(204).send('');
+export const recordLogin = onRequest({ region: 'europe-west2', cors: allowedCorsOrigins }, async (req, res) => {
+    const cors = prepareCorsResponse(req, res);
+    if (cors.handled) {
         return;
     }
     if (req.method !== 'POST') {
