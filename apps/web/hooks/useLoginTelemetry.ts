@@ -55,7 +55,7 @@ export function useLoginTelemetry() {
             await postHttpFunctionOrThrow('recordLogin', {
               body: { timestamp: isoTimestamp },
               idToken: token,
-              allowRelativeFallback: false,
+              allowRelativeFallback: true,
             });
             lastRecordedSessionRef.current = sessionKey;
           } catch (error) {

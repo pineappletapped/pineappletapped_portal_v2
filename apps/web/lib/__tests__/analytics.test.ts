@@ -79,7 +79,7 @@ describe('analytics tracker', () => {
     await flushAnalyticsQueue();
 
     expect(resolveHttpFunctionUrlMock).toHaveBeenCalledWith('analytics_track', {
-      allowRelativeFallback: false,
+      allowRelativeFallback: true,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toBe('https://example.com/analytics_track');
@@ -104,7 +104,7 @@ describe('analytics tracker', () => {
     await flushAnalyticsQueue();
 
     expect(resolveHttpFunctionUrlMock).toHaveBeenCalledWith('analytics_track', {
-      allowRelativeFallback: false,
+      allowRelativeFallback: true,
     });
     expect(fetchMock).toHaveBeenCalled();
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
