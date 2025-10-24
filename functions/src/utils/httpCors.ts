@@ -6,121 +6,77 @@ const HOSTED_APP_ORIGIN =
 const PRIMARY_FUNCTION_ORIGIN =
   'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net';
 
-const LEGACY_FUNCTION_ORIGIN =
+const SECONDARY_FUNCTION_ORIGIN =
   'https://europe-west2-ptfbportalbackend.cloudfunctions.net';
 
-const parseEnvOrigins = (raw: string | undefined | null): string[] => {
-  if (!raw) {
-    return [];
-  }
+const LOCAL_DEVELOPMENT_ORIGINS = ['http://localhost:3000', 'http://localhost:5173'];
 
-  return raw
-    .split(',')
+const parseEnvOrigins = (raw: string | undefined | null): string[] =>
+  raw
+    ?.split(',')
     .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-};
+    .filter((value) => value.length > 0) ?? [];
 
-const baseOrigins = [
+const ALLOW_ORIGINS = new Set<string>([
   HOSTED_APP_ORIGIN,
   PRIMARY_FUNCTION_ORIGIN,
-  LEGACY_FUNCTION_ORIGIN,
-  'http://localhost:3000',
-  'http://localhost:5173',
-];
-
-const allowedOriginsList = Array.from(
-  new Set<string>([...baseOrigins, ...parseEnvOrigins(process.env.ALLOWED_CORS_ORIGINS)]),
-);
-
-const originLookup = new Map(allowedOriginsList.map((origin) => [origin.toLowerCase(), origin]));
+  SECONDARY_FUNCTION_ORIGIN,
+  ...LOCAL_DEVELOPMENT_ORIGINS,
+  ...parseEnvOrigins(process.env.ALLOWED_CORS_ORIGINS),
+]);
 
 const DEFAULT_ALLOW_HEADERS = 'Content-Type, Authorization';
 const ALLOW_METHODS = 'POST, OPTIONS';
 const MAX_AGE_SECONDS = '3600';
+
+const normaliseHeaderValue = (value: unknown): string | null => {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (Array.isArray(value)) {
+    const joined = value.map((part) => part?.toString().trim()).filter(Boolean).join(', ');
+    return joined.length > 0 ? joined : null;
+  }
+  return null;
+};
+
+const resolveRequestedHeaders = (req: ExpressRequest): string | null =>
+  normaliseHeaderValue(
+    req.get?.('access-control-request-headers') ?? req.headers['access-control-request-headers'],
+  );
+
+const resolveOriginHeader = (req: ExpressRequest): string | null =>
+  normaliseHeaderValue(req.get?.('origin') ?? req.headers.origin);
+
+const resolveAllowedOrigin = (originHeader: string | null): string | null => {
+  if (!originHeader) {
+    return null;
+  }
+
+  const trimmed = originHeader.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return ALLOW_ORIGINS.has(trimmed) ? trimmed : null;
+};
 
 export interface CorsPreparation {
   allowedOrigin: string | null;
   handled: boolean;
 }
 
-const resolveRequestedHeaders = (req: ExpressRequest): string | null => {
-  const direct = req.get?.('access-control-request-headers');
-  if (typeof direct === 'string' && direct.trim()) {
-    return direct;
-  }
-
-  const header = req.headers['access-control-request-headers'];
-  if (typeof header === 'string' && header.trim()) {
-    return header;
-  }
-  if (Array.isArray(header) && header.length > 0) {
-    return header.join(', ');
-  }
-
-  return null;
-};
-
-const resolveOriginHeader = (req: ExpressRequest): string | null => {
-  const headerValue = req.get?.('origin');
-  if (typeof headerValue === 'string' && headerValue.trim()) {
-    return headerValue;
-  }
-
-  const header = req.headers.origin;
-  if (typeof header === 'string' && header.trim()) {
-    return header;
-  }
-  if (Array.isArray(header) && header.length > 0) {
-    return header[0] ?? null;
-  }
-
-  return null;
-};
-
-const TRUSTED_HOST_FRAGMENTS = [
-  'pineapple-tapped---portal',
-  'pineappletappedportal--pineapple-tapped---portal',
-];
-
-const isTrustedHostedOrigin = (origin: string) => {
-  try {
-    const { hostname } = new URL(origin);
-    const lowerHost = hostname.toLowerCase();
-    return TRUSTED_HOST_FRAGMENTS.some((fragment) => lowerHost.includes(fragment));
-  } catch {
-    return false;
-  }
-};
-
-const resolveAllowedOrigin = (originHeader: string | null): string | null => {
-  if (originHeader) {
-    const trimmed = originHeader.trim();
-    if (!trimmed) {
-      return null;
-    }
-    const lookup = originLookup.get(trimmed.toLowerCase());
-    if (lookup) {
-      return lookup;
-    }
-    if (isTrustedHostedOrigin(trimmed)) {
-      return trimmed;
-    }
-    return null;
-  }
-
-  return allowedOriginsList[0] ?? null;
-};
-
 export const prepareCorsResponse = (
   req: ExpressRequest,
   res: ExpressResponse,
   { allowCredentials = true }: { allowCredentials?: boolean } = {},
 ): CorsPreparation => {
-  const originHeader = resolveOriginHeader(req);
-  const allowedOrigin = resolveAllowedOrigin(originHeader);
+  const allowedOrigin = resolveAllowedOrigin(resolveOriginHeader(req));
 
   if (allowedOrigin) {
     res.set('Access-Control-Allow-Origin', allowedOrigin);
+    res.append('Vary', 'Origin');
   }
 
   if (allowCredentials) {
@@ -129,10 +85,7 @@ export const prepareCorsResponse = (
 
   res.set('Access-Control-Allow-Methods', ALLOW_METHODS);
   res.set('Access-Control-Max-Age', MAX_AGE_SECONDS);
-
-  const requestedHeaders = resolveRequestedHeaders(req);
-  res.set('Access-Control-Allow-Headers', requestedHeaders ?? DEFAULT_ALLOW_HEADERS);
-  res.append('Vary', 'Origin');
+  res.set('Access-Control-Allow-Headers', resolveRequestedHeaders(req) ?? DEFAULT_ALLOW_HEADERS);
 
   if (req.method === 'OPTIONS') {
     res.status(204).send('');
@@ -142,4 +95,4 @@ export const prepareCorsResponse = (
   return { allowedOrigin, handled: false };
 };
 
-export const allowedCorsOrigins = allowedOriginsList;
+export const allowedCorsOrigins = Array.from(ALLOW_ORIGINS);

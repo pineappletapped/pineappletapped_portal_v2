@@ -102,3 +102,12 @@ export async function POST(request: Request) {
 }
 
 export const dynamic = "force-dynamic";
+
+export function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+    },
+  });
+}
