@@ -1,8 +1,8 @@
 # Cloud Function CORS headers
 
 The shared CORS helper at `functions/src/utils/httpCors.ts` sets the response headers for
-`recordLogin`, `analytics_track`, and `createOrder` before handling either the preflight
-or the actual POST request. When the caller origin matches one of the allowed domains,
+the `analytics_track` and `createOrder` HTTP functions before handling either the
+preflight or the actual POST request. When the caller origin matches one of the allowed domains,
 the Cloud Function replies with:
 
 | Header | Value |

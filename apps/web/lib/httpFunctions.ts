@@ -34,12 +34,10 @@ const summariseDetails = (value: string | null | undefined) => {
 
 const FUNCTION_ENDPOINT_OVERRIDES: Record<string, string | undefined> = {
   createOrder: cleanEnv(process.env.NEXT_PUBLIC_CREATE_ORDER_ENDPOINT),
-  recordLogin: cleanEnv(process.env.NEXT_PUBLIC_RECORD_LOGIN_ENDPOINT),
   analytics_track: cleanEnv(process.env.NEXT_PUBLIC_ANALYTICS_TRACK_ENDPOINT),
 };
 
 const RELATIVE_FALLBACK_ENDPOINTS: Record<string, string[]> = {
-  recordLogin: ["/api/record-login"],
   analytics_track: ["/api/analytics-track"],
 };
 
