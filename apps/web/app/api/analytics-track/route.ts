@@ -5,22 +5,27 @@ import {
   invokeHttpFunction,
   type HttpFunctionResponse,
 } from "@/lib/httpFunctions";
+import { applyCorsHeaders, buildCorsHeaders } from "../_lib/cors";
 
 const JSON_CONTENT_TYPE = "application/json";
 
 const createErrorResponse = (
+  request: Request,
   status: number,
   code: string,
   message: string,
   details?: unknown,
 ) =>
-  NextResponse.json(
-    {
-      error: message,
-      code,
-      ...(details === undefined ? null : { details }),
-    },
-    { status },
+  applyCorsHeaders(
+    NextResponse.json(
+      {
+        error: message,
+        code,
+        ...(details === undefined ? null : { details }),
+      },
+      { status },
+    ),
+    request,
   );
 
 const sanitisePayload = (value: unknown): Record<string, unknown> =>
@@ -47,12 +52,17 @@ const normaliseResultPayload = (result: HttpFunctionResponse<Record<string, unkn
     ? (result.payload as Record<string, unknown>)
     : null);
 
+export async function OPTIONS(request: Request) {
+  return new Response(null, { status: 204, headers: buildCorsHeaders(request) });
+}
+
 export async function POST(request: Request) {
   let payload: Record<string, unknown>;
   try {
     payload = sanitisePayload(await request.json());
   } catch (error) {
     return createErrorResponse(
+      request,
       400,
       "invalid-json",
       "Failed to parse JSON body",
@@ -72,31 +82,40 @@ export async function POST(request: Request) {
 
     if (!result.ok) {
       const data = normaliseResultPayload(result);
-      return NextResponse.json(
-        {
-          error:
-            typeof data?.error === "string" ? data.error : "Failed to record analytics events",
-          code: typeof data?.code === "string" ? data.code : "analytics-track-error",
-          details: data?.details ?? null,
-          attempts: result.attempts,
-        },
-        { status: result.status },
+      return applyCorsHeaders(
+        NextResponse.json(
+          {
+            error:
+              typeof data?.error === "string" ? data.error : "Failed to record analytics events",
+            code: typeof data?.code === "string" ? data.code : "analytics-track-error",
+            details: data?.details ?? null,
+            attempts: result.attempts,
+          },
+          { status: result.status },
+        ),
+        request,
       );
     }
 
     const data = normaliseResultPayload(result);
-    return NextResponse.json(data ?? { ok: true }, {
-      status: 200,
-      headers: { "Content-Type": JSON_CONTENT_TYPE },
-    });
+    return applyCorsHeaders(
+      NextResponse.json(data ?? { ok: true }, {
+        status: 200,
+        headers: { "Content-Type": JSON_CONTENT_TYPE },
+      }),
+      request,
+    );
   } catch (error) {
     if (error instanceof HttpFunctionInvocationError) {
-      return NextResponse.json(
-        { error: error.message, code: "analytics-track-endpoint-failure", attempts: error.attempts },
-        { status: 502 },
+      return applyCorsHeaders(
+        NextResponse.json(
+          { error: error.message, code: "analytics-track-endpoint-failure", attempts: error.attempts },
+          { status: 502 },
+        ),
+        request,
       );
     }
-    return createErrorResponse(502, "analytics-track-error", "Failed to contact analytics_track", {
+    return createErrorResponse(request, 502, "analytics-track-error", "Failed to contact analytics_track", {
       message: (error as Error)?.message ?? "unknown error",
     });
   }

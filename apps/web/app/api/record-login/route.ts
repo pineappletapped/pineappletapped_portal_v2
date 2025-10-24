@@ -3,6 +3,7 @@ import {
   HttpFunctionInvocationError,
   invokeHttpFunction,
 } from '@/lib/httpFunctions';
+import { applyCorsHeaders, buildCorsHeaders } from '../_lib/cors';
 
 const extractBearerToken = (header: string | null): string | null => {
   if (!header) {
@@ -35,8 +36,8 @@ const parseRequestBody = async (request: Request): Promise<Record<string, unknow
   return {};
 };
 
-export async function OPTIONS() {
-  return new Response(null, { status: 204 });
+export async function OPTIONS(request: Request) {
+  return new Response(null, { status: 204, headers: buildCorsHeaders(request) });
 }
 
 export async function POST(request: Request) {
@@ -56,21 +57,30 @@ export async function POST(request: Request) {
         ? result.payload
         : { ok: result.ok };
 
-    return NextResponse.json(payload, { status: result.status });
+    return applyCorsHeaders(
+      NextResponse.json(payload, { status: result.status }),
+      request,
+    );
   } catch (error) {
     if (error instanceof HttpFunctionInvocationError) {
-      return NextResponse.json(
-        {
-          error: 'recordLogin unavailable',
-          code: 'http-function-error',
-          attempts: error.attempts,
-        },
-        { status: 502 },
+      return applyCorsHeaders(
+        NextResponse.json(
+          {
+            error: 'recordLogin unavailable',
+            code: 'http-function-error',
+            attempts: error.attempts,
+          },
+          { status: 502 },
+        ),
+        request,
       );
     }
 
     console.error('record-login proxy request failed', error);
-    return NextResponse.json({ error: 'recordLogin failed', code: 'proxy-error' }, { status: 500 });
+    return applyCorsHeaders(
+      NextResponse.json({ error: 'recordLogin failed', code: 'proxy-error' }, { status: 500 }),
+      request,
+    );
   }
 }
 
