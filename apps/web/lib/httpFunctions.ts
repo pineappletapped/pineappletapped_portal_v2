@@ -35,6 +35,7 @@ const summariseDetails = (value: string | null | undefined) => {
 const FUNCTION_ENDPOINT_OVERRIDES: Record<string, string | undefined> = {
   createOrder: cleanEnv(process.env.NEXT_PUBLIC_CREATE_ORDER_ENDPOINT),
   analytics_track: cleanEnv(process.env.NEXT_PUBLIC_ANALYTICS_TRACK_ENDPOINT),
+  recordLogin: "/api/record-login",
 };
 
 const RELATIVE_FALLBACK_ENDPOINTS: Record<string, string[]> = {
@@ -112,7 +113,10 @@ const normaliseEndpoint = (endpoint: string) => {
 
 const buildEndpointCandidates = (
   name: string,
-  { allowRelativeFallback = false }: { allowRelativeFallback?: boolean } = {},
+  {
+    allowRelativeFallback = false,
+    includeOverrides = true,
+  }: { allowRelativeFallback?: boolean; includeOverrides?: boolean } = {},
 ): string[] => {
   const candidates: string[] = [];
   const seen = new Set<string>();
@@ -126,7 +130,7 @@ const buildEndpointCandidates = (
     candidates.push(normalised);
   };
 
-  const override = FUNCTION_ENDPOINT_OVERRIDES[name];
+  const override = includeOverrides ? FUNCTION_ENDPOINT_OVERRIDES[name] : undefined;
   if (override) {
     push(override);
   }
@@ -142,7 +146,7 @@ const buildEndpointCandidates = (
 
 export function resolveHttpFunctionUrl(
   name: string,
-  options: { allowRelativeFallback?: boolean } = {},
+  options: { allowRelativeFallback?: boolean; includeOverrides?: boolean } = {},
 ): string {
   const endpoints = buildEndpointCandidates(name, options);
   if (endpoints.length === 0) {
@@ -156,6 +160,7 @@ export interface InvokeHttpFunctionOptions {
   idToken?: string | null;
   signal?: AbortSignal;
   allowRelativeFallback?: boolean;
+  includeOverrides?: boolean;
 }
 
 export interface HttpFunctionResponse<T = unknown> {
@@ -178,9 +183,15 @@ export class HttpFunctionInvocationError extends Error {
 
 export async function invokeHttpFunction<T = unknown>(
   name: string,
-  { body = null, idToken, signal, allowRelativeFallback }: InvokeHttpFunctionOptions = {},
+  {
+    body = null,
+    idToken,
+    signal,
+    allowRelativeFallback,
+    includeOverrides = true,
+  }: InvokeHttpFunctionOptions = {},
 ): Promise<HttpFunctionResponse<T>> {
-  const endpoints = buildEndpointCandidates(name, { allowRelativeFallback });
+  const endpoints = buildEndpointCandidates(name, { allowRelativeFallback, includeOverrides });
   if (endpoints.length === 0) {
     throw new HttpFunctionInvocationError(`No endpoints configured for ${name}`, []);
   }
