@@ -9,7 +9,10 @@ interface AdminNavigationProps {
   sections: AdminNavSection[];
 }
 
-const matchPath = (pathname: string, href: string, exact?: boolean) => {
+const matchPath = (pathname: string | null, href: string, exact?: boolean) => {
+  if (!pathname) {
+    return false;
+  }
   if (exact) {
     return pathname === href;
   }
