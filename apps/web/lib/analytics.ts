@@ -11,7 +11,7 @@ const ERROR_LOG_INTERVAL_MS = 60_000;
 
 const ANALYTICS_FALLBACK_ENDPOINTS = [
   'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net/analytics_track',
-  'https://us-central1-pineapple-tapped---portal.cloudfunctions.net/analytics_track',
+  'https://europe-west2-ptfbportalbackend.cloudfunctions.net/analytics_track',
 ];
 
 type AnalyticsQueueEvent = {

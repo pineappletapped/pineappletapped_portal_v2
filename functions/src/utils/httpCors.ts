@@ -3,6 +3,12 @@ import type { Request as ExpressRequest, Response as ExpressResponse } from 'exp
 const HOSTED_APP_ORIGIN =
   'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app';
 
+const PRIMARY_FUNCTION_ORIGIN =
+  'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net';
+
+const LEGACY_FUNCTION_ORIGIN =
+  'https://europe-west2-ptfbportalbackend.cloudfunctions.net';
+
 const parseEnvOrigins = (raw: string | undefined | null): string[] => {
   if (!raw) {
     return [];
@@ -14,7 +20,13 @@ const parseEnvOrigins = (raw: string | undefined | null): string[] => {
     .filter((value) => value.length > 0);
 };
 
-const baseOrigins = [HOSTED_APP_ORIGIN, 'http://localhost:3000', 'http://localhost:5173'];
+const baseOrigins = [
+  HOSTED_APP_ORIGIN,
+  PRIMARY_FUNCTION_ORIGIN,
+  LEGACY_FUNCTION_ORIGIN,
+  'http://localhost:3000',
+  'http://localhost:5173',
+];
 
 const allowedOriginsList = Array.from(
   new Set<string>([...baseOrigins, ...parseEnvOrigins(process.env.ALLOWED_CORS_ORIGINS)]),

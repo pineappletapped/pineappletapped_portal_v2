@@ -1,4 +1,6 @@
 const HOSTED_APP_ORIGIN = 'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app';
+const PRIMARY_FUNCTION_ORIGIN = 'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net';
+const LEGACY_FUNCTION_ORIGIN = 'https://europe-west2-ptfbportalbackend.cloudfunctions.net';
 const parseEnvOrigins = (raw) => {
     if (!raw) {
         return [];
@@ -8,7 +10,13 @@ const parseEnvOrigins = (raw) => {
         .map((value) => value.trim())
         .filter((value) => value.length > 0);
 };
-const baseOrigins = [HOSTED_APP_ORIGIN, 'http://localhost:3000', 'http://localhost:5173'];
+const baseOrigins = [
+    HOSTED_APP_ORIGIN,
+    PRIMARY_FUNCTION_ORIGIN,
+    LEGACY_FUNCTION_ORIGIN,
+    'http://localhost:3000',
+    'http://localhost:5173',
+];
 const allowedOriginsList = Array.from(new Set([...baseOrigins, ...parseEnvOrigins(process.env.ALLOWED_CORS_ORIGINS)]));
 const originLookup = new Map(allowedOriginsList.map((origin) => [origin.toLowerCase(), origin]));
 const DEFAULT_ALLOW_HEADERS = 'Content-Type, Authorization';
