@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react';
 import type { User } from 'firebase/auth';
 import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
-import { httpsCallable } from 'firebase/functions';
+import { postHttpFunctionOrThrow } from '@/lib/httpFunctions';
 
 const makeSessionKey = (user: User) => {
   const lastSignIn =
@@ -21,16 +21,12 @@ export function useLoginTelemetry() {
     (async () => {
       try {
         const services = await ensureFirebase();
-        const { auth, functions } = services;
+        const { auth } = services;
         if (cancelled) {
           return;
         }
         if (!auth || (auth as any)?.__isPlaceholder) {
           console.warn('Login telemetry skipped: Firebase auth unavailable');
-          return;
-        }
-        if (!functions || (functions as any)?.__isPlaceholder) {
-          console.warn('Login telemetry skipped: Firebase functions unavailable');
           return;
         }
 
@@ -42,8 +38,6 @@ export function useLoginTelemetry() {
           console.warn('Login telemetry skipped: onAuthStateChanged unavailable');
           return;
         }
-
-        const recordLoginCallable = httpsCallable(functions, 'recordLogin');
 
         unsubscribe = onAuthStateChanged(auth, async (user) => {
           if (!user) {
@@ -57,11 +51,25 @@ export function useLoginTelemetry() {
           }
 
           const isoTimestamp = new Date().toISOString();
+
           try {
-            await recordLoginCallable({ timestamp: isoTimestamp });
+            if (typeof user.getIdToken !== 'function') {
+              throw new Error('User tokens unavailable');
+            }
+
+            const idToken = await user.getIdToken();
+            if (!idToken) {
+              throw new Error('ID token not available');
+            }
+
+            await postHttpFunctionOrThrow('recordLogin', {
+              body: { timestamp: isoTimestamp },
+              idToken,
+            });
+
             lastRecordedSessionRef.current = sessionKey;
           } catch (error) {
-            console.warn('Failed to record login telemetry', error);
+            console.warn('Failed to record login telemetry via HTTP', error);
             lastRecordedSessionRef.current = null;
           }
         });

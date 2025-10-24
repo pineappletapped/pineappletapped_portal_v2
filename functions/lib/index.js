@@ -12431,17 +12431,28 @@ async function recordLoginForUid(uid, timestampValue) {
         timestamp,
     });
 }
-export const recordLogin = functions.https.onCall(async (data, context) => {
-    if (!context.auth?.uid) {
-        throw new functions.https.HttpsError('unauthenticated', 'Sign in required');
+export const recordLogin = onRequest({ region: 'europe-west2', cors: allowedCorsOrigins }, async (req, res) => {
+    const cors = prepareCorsResponse(req, res);
+    if (cors.handled) {
+        return;
     }
+    if (req.method !== 'POST') {
+        res.status(405).json({ error: 'Method not allowed', code: 'method-not-allowed' });
+        return;
+    }
+    const auth = await verifyAuthTokenFromRequest(req);
+    if (!auth?.uid) {
+        res.status(401).json({ error: 'Sign in required', code: 'unauthenticated' });
+        return;
+    }
+    const payload = parseJsonBody(req);
     try {
-        await recordLoginForUid(context.auth.uid, data?.timestamp);
-        return { ok: true };
+        await recordLoginForUid(auth.uid, payload?.timestamp);
+        res.status(200).json({ ok: true });
     }
     catch (error) {
         console.error('recordLogin handler failed', error);
-        throw new functions.https.HttpsError('internal', 'Failed to record login');
+        res.status(500).json({ error: 'Failed to record login', code: 'internal' });
     }
 });
 export const recordLoginEvent = recordLogin;
