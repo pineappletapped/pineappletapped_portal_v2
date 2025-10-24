@@ -1690,6 +1690,16 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 event.preventDefault();
               }}
             >
+              <input
+                type="email"
+                name="username"
+                value={email}
+                readOnly
+                tabIndex={-1}
+                aria-hidden="true"
+                autoComplete="username"
+                className="sr-only"
+              />
               <div className="grid gap-2 sm:grid-cols-2">
                 <input
                   className="input input-bordered w-full"
