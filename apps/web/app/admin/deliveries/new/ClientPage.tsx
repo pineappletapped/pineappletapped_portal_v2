@@ -24,10 +24,12 @@ interface OrderSummary {
 
 export default function AdminDeliveryFormClientPage() {
   const searchParams = useSearchParams();
-  const projectIdParam = (searchParams.get("projectId") || searchParams.get("project") || "").trim();
-  const orderIdParam = (searchParams.get("orderId") || searchParams.get("order") || "").trim();
-  const itemIdParam = (searchParams.get("itemId") || "").trim();
-  const itemNameParam = searchParams.get("itemName") || "";
+  const getParam = (key: string): string => (searchParams?.get(key) || "").trim();
+
+  const projectIdParam = getParam("projectId") || getParam("project");
+  const orderIdParam = getParam("orderId") || getParam("order");
+  const itemIdParam = getParam("itemId");
+  const itemNameParam = searchParams?.get("itemName") || "";
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations", "projects"]);
   const [order, setOrder] = useState<OrderSummary | null>(null);
   const [orderLoading, setOrderLoading] = useState<boolean>(Boolean(orderIdParam));
