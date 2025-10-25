@@ -12,7 +12,7 @@ import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 export default function EquipmentDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
-  const { id } = params;
+  const id = typeof params?.id === "string" ? params.id : "";
   const [allowed, setAllowed] = useState<boolean | null>(null);
   const [users, setUsers] = useState<any[]>([]);
   const [franchises, setFranchises] = useState<{ id: string; name: string }[]>([]);
@@ -26,6 +26,13 @@ export default function EquipmentDetailPage() {
   const defaultFranchiseId = useMemo(() => franchises[0]?.id ?? "", [franchises]);
 
   useEffect(() => {
+    if (!id) {
+      setAllowed(false);
+      setForm(null);
+      setBookings([]);
+      return;
+    }
+
     (async () => {
       const user = auth.currentUser;
       if (!user) { setAllowed(false); return; }
@@ -263,6 +270,7 @@ export default function EquipmentDetailPage() {
     }
   };
 
+  if (!id) return <p>Equipment not found.</p>;
   if (allowed === null || form === null) return <p>Loading…</p>;
   if (!allowed) return <p>You do not have permission to view this item.</p>;
 
