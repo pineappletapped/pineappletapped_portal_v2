@@ -10,6 +10,7 @@ import {
   ReactNode,
 } from "react";
 import { ProductModifierSelection, type ProductOrderFieldType } from "@/lib/products";
+import type { CartItem as SharedCartItem } from "../../../shared/types/commerce";
 
 export interface CartCampaignBooking {
   projectId: string;
@@ -54,17 +55,11 @@ export interface CartOrganiserInfo {
   source?: string | null;
 }
 
-export interface CartItem {
-  id: string;
-  name: string;
-  price: number;
-  category?: string | null;
-  variation?: string;
-  date: string;
+export interface CartItem extends SharedCartItem {
   quantity: number;
+  price: number;
+  date: string;
   modifiers?: ProductModifierSelection[];
-  location?: string | null;
-  postalCode?: string | null;
   exhibition?: {
     showDate?: string | null;
     setupDate?: string | null;
@@ -90,7 +85,6 @@ export interface CartItem {
     start: string;
     end: string;
   }[];
-  rentalTotal?: number;
   kitStatus?: "confirmed" | "pending";
   kitWarnings?: string[];
   campaignBooking?: CartCampaignBooking | null;
@@ -167,7 +161,14 @@ function loadStoredItems(): CartItem[] {
     const parsed = JSON.parse(stored);
     if (Array.isArray(parsed)) {
       return parsed.filter((item): item is CartItem =>
-        item && typeof item === "object" && "id" in item && "quantity" in item
+        Boolean(
+          item &&
+            typeof item === "object" &&
+            "id" in item &&
+            "quantity" in item &&
+            "price" in item &&
+            typeof (item as { price?: unknown }).price === "number"
+        )
       );
     }
   } catch (error) {
@@ -179,7 +180,7 @@ function loadStoredItems(): CartItem[] {
 }
 
 export function CartProvider({ children }: { children: ReactNode }) {
-  const [items, setItems] = useState<CartItem[]>(() => loadStoredItems());
+  const [items, setItems] = useState<CartItem[]>([]);
   const persistTimeout = useRef<number | null>(null);
 
   const persistCart = useCallback((nextItems: CartItem[]) => {
@@ -199,6 +200,26 @@ export function CartProvider({ children }: { children: ReactNode }) {
       }
     }, 150);
   }, []);
+
+  useEffect(() => {
+    if (!isBrowser) {
+      return;
+    }
+
+    const stored = loadStoredItems();
+    setItems((prev) => {
+      if (prev.length > 0) {
+        return prev;
+      }
+      return stored;
+    });
+
+    if (stored.length > 0) {
+      persistCart(stored);
+    } else if (window.localStorage.getItem(STORAGE_KEY)) {
+      window.localStorage.removeItem(STORAGE_KEY);
+    }
+  }, [persistCart]);
 
   useEffect(() => {
     return () => {

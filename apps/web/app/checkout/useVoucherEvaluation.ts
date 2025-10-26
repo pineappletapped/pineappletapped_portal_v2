@@ -4,15 +4,8 @@ import { useCallback, useMemo, useState } from "react";
 import { collection, getDocs, limit, query, where } from "firebase/firestore";
 
 import type { CartItem } from "@/lib/cart";
+import type { Voucher } from "../../../../shared/types/commerce";
 import { ensureFirebase } from "@/lib/firebase";
-
-export interface VoucherRecord {
-  type?: string | null;
-  amount?: number | null;
-  locations?: unknown;
-  productIds?: unknown;
-  categoryIds?: unknown;
-}
 
 export type VoucherStatus =
   | "idle"
@@ -29,7 +22,7 @@ export interface VoucherState {
   code: string | null;
   discount: number;
   message: string | null;
-  record: VoucherRecord | null;
+  record: Voucher | null;
 }
 
 const createInitialState = (): VoucherState => ({
@@ -53,7 +46,7 @@ const normaliseLocationList = (value: unknown): string[] =>
   normaliseList(value).map((entry) => entry.toLowerCase());
 
 const evaluateVoucher = (
-  record: VoucherRecord,
+  record: Voucher,
   code: string,
   items: CartItem[],
   location: string,
@@ -206,7 +199,7 @@ export function useVoucherEvaluation(items: CartItem[], location: string) {
         return;
       }
 
-      const record = snapshot.docs[0].data() as VoucherRecord;
+      const record = snapshot.docs[0].data() as Voucher;
       setState(evaluateVoucher(record, trimmed, items, location));
     } catch (error) {
       const message =

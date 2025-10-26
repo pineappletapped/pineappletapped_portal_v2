@@ -12,7 +12,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useRouter } from "next/navigation";
 import { Elements } from "@stripe/react-stripe-js";
 import { loadStripe } from "@stripe/stripe-js";
-import { httpsCallable, type Functions } from "firebase/functions";
 import {
   collection,
   doc,
@@ -165,7 +164,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   const [accountError, setAccountError] = useState<string | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
   const authRef = useRef<Auth | null>(null);
-  const functionsRef = useRef<Functions | null>(null);
   const lastIntentPayload = useRef<string | null>(null);
   const loginErrorRef = useRef<HTMLDivElement | null>(null);
   const authEmail = currentUser?.email || "";
@@ -872,7 +870,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
 
     (async () => {
       try {
-        const { auth, db, functions } = await ensureFirebase();
+        const { auth, db } = await ensureFirebase();
         if (cancelled) {
           return;
         }
@@ -882,7 +880,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         }
 
         authRef.current = auth;
-        functionsRef.current = functions ?? null;
 
         const { onAuthStateChanged } = await loadAuthModule();
         if (cancelled) {
@@ -1014,6 +1011,39 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     }
     if (error instanceof Error) {
       const firebaseError = error as FirebaseError;
+      if (firebaseError.code) {
+        const code = firebaseError.code.replace(/^functions\//, "");
+        switch (code) {
+          case "permission-denied":
+            return "You do not have permission to complete this order.";
+          case "invalid-argument":
+            return "Checkout details were incomplete. Review your information and try again.";
+          case "not-found":
+            return "We couldn't find the checkout service. Try again in a moment.";
+          case "deadline-exceeded":
+          case "resource-exhausted":
+          case "aborted":
+          case "unavailable":
+            return "The checkout service is busy. Try again in a few seconds.";
+          default:
+            break;
+        }
+      }
+
+      const genericCode = (error as { code?: unknown }).code;
+      if (typeof genericCode === "string") {
+        switch (genericCode) {
+          case "unauthenticated":
+            return "Sign in to continue with your order.";
+          case "permission-denied":
+            return "You do not have permission to complete this order.";
+          case "invalid-argument":
+            return "Checkout details were incomplete. Review your information and try again.";
+          default:
+            break;
+        }
+      }
+
       const extractDetailMessage = (payload: unknown): string | null => {
         if (!payload || typeof payload !== "object") {
           return null;
@@ -1081,71 +1111,58 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     return fallbackMessage;
   }, []);
 
-  const callCreateOrderViaApi = useCallback(
-    async (token: string | null): Promise<CreateOrderResult> => {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (token) {
-        headers.Authorization = `Bearer ${token}`;
-      }
-
+  const callCreateOrder = useCallback(
+    async (idToken: string): Promise<CreateOrderResult> => {
       const response = await fetch("/api/create-order", {
         method: "POST",
-        headers,
-        body: JSON.stringify(orderInput),
-        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: currentIntentPayload,
+        cache: "no-store",
       });
 
-      let payload: unknown;
-      try {
-        payload = await response.json();
-      } catch (parseError) {
-        if (!response.ok) {
-          const error = Object.assign(
-            new Error(`Failed to create order (${response.status})`),
-            { code: "create-order-error" },
-          );
-          throw error;
+      const text = await response.text();
+      let payload: unknown = null;
+      if (text) {
+        try {
+          payload = JSON.parse(text) as unknown;
+        } catch (error) {
+          const parseError = new Error("Order service returned invalid JSON.");
+          (parseError as Error & { details?: unknown }).details = {
+            responseSnippet: text.slice(0, 200),
+          };
+          throw parseError;
         }
-        throw parseError;
       }
 
-      const payloadRecord =
-        payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
-
-      if (!response.ok || !payloadRecord) {
+      if (!response.ok) {
         const message =
-          payloadRecord && typeof payloadRecord.error === "string" && payloadRecord.error.trim().length > 0
-            ? payloadRecord.error
-            : payloadRecord && typeof payloadRecord.message === "string" && payloadRecord.message.trim().length > 0
-              ? payloadRecord.message
-              : `Failed to create order (${response.status})`;
-        const error = Object.assign(new Error(message), {
-          code:
-            payloadRecord && typeof payloadRecord.code === "string" && payloadRecord.code.trim().length > 0
-              ? payloadRecord.code
-              : "create-order-error",
-          details: payloadRecord?.details,
-        });
+          (payload && typeof payload === "object" && payload !== null && "error" in payload &&
+            typeof (payload as { error: unknown }).error === "string"
+            ? ((payload as { error: string }).error as string)
+            : `Order service responded with ${response.status}`);
+        const error = new Error(message);
+        if (payload && typeof payload === "object" && payload !== null) {
+          const record = payload as Record<string, unknown>;
+          if (typeof record.code === "string") {
+            (error as Error & { code?: string }).code = record.code;
+          }
+          if ("details" in record) {
+            (error as Error & { details?: unknown }).details = record.details;
+          }
+        }
         throw error;
       }
 
-      const data = payloadRecord.data;
-      if (!data || typeof data !== "object") {
+      if (!payload || typeof payload !== "object") {
         return {};
       }
 
-      return data as CreateOrderResult;
+      return payload as CreateOrderResult;
     },
-    [orderInput],
-  );
-
-  const callCreateOrder = useCallback(
-    async (token: string | null): Promise<CreateOrderResult> => {
-      return await callCreateOrderViaApi(token);
-    },
-    [callCreateOrderViaApi],
+    [currentIntentPayload],
   );
 
   const ensureCheckoutUser = useCallback(async (): Promise<User | null> => {
@@ -1309,13 +1326,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return false;
       }
 
-      const { db, functions } = await ensureFirebase();
-      const functionsInstance = functionsRef.current ?? functions ?? null;
-      if (!functionsInstance) {
-        throw new Error("Firebase functions are unavailable.");
-      }
-      functionsRef.current = functionsInstance;
-
+      const { db } = await ensureFirebase();
       const token = await authUser.getIdToken();
       const orderData = await callCreateOrder(token);
       const createdOrderId: string | undefined =
@@ -1385,12 +1396,10 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return true;
       }
 
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const intentRes: any = await createIntent({
-        orderId: createdOrderId,
-        type: "deposit",
-      });
-      const secret: string | undefined = intentRes.data?.clientSecret;
+      const secret =
+        typeof orderData.clientSecret === "string" && orderData.clientSecret.trim().length > 0
+          ? orderData.clientSecret
+          : null;
       if (!secret) {
         throw new Error("Payment session could not be created.");
       }
@@ -1475,16 +1484,6 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return false;
       }
 
-      let functionsInstance = functionsRef.current;
-      if (!functionsInstance) {
-        const { functions } = await ensureFirebase();
-        functionsInstance = functions ?? null;
-        functionsRef.current = functionsInstance;
-      }
-      if (!functionsInstance) {
-        throw new Error("Firebase functions are unavailable.");
-      }
-
       const token = await authUser.getIdToken();
       const orderData = await callCreateOrder(token);
       const createdOrderId: string | undefined =
@@ -1493,12 +1492,10 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         throw new Error("Failed to create order.");
       }
 
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const intentRes: any = await createIntent({
-        orderId: createdOrderId,
-        type: "deposit",
-      });
-      const secret: string | undefined = intentRes.data?.clientSecret;
+      const secret =
+        typeof orderData.clientSecret === "string" && orderData.clientSecret.trim().length > 0
+          ? orderData.clientSecret
+          : null;
       if (!secret) {
         throw new Error("Payment session could not be created.");
       }
@@ -1693,6 +1690,16 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
                 event.preventDefault();
               }}
             >
+              <input
+                type="email"
+                name="username"
+                value={email}
+                readOnly
+                tabIndex={-1}
+                aria-hidden="true"
+                autoComplete="username"
+                className="sr-only"
+              />
               <div className="grid gap-2 sm:grid-cols-2">
                 <input
                   className="input input-bordered w-full"

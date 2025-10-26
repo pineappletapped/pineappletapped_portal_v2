@@ -2,7 +2,7 @@ import { auth } from './firebase';
 
 const FUNCTIONS_BASE_URL =
   process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL ||
-  'https://us-central1-pineapple-tapped---portal.cloudfunctions.net';
+  'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net';
 
 const USE_LEGACY_ONLY = process.env.NEXT_PUBLIC_USE_LEGACY_FUNCTIONS === '1';
 

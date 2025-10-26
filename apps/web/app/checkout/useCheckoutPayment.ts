@@ -13,7 +13,6 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import type { FirebaseError } from "firebase/app";
 import { type User } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
-import { httpsCallable, type Functions } from "firebase/functions";
 
 import { ensureFirebase } from "@/lib/firebase";
 
@@ -69,6 +68,20 @@ const describeCallableError = (error: unknown): string => {
       }
     }
 
+    const genericCode = (error as { code?: unknown }).code;
+    if (typeof genericCode === "string") {
+      switch (genericCode) {
+        case "unauthenticated":
+          return "Sign in to continue with your order.";
+        case "permission-denied":
+          return "You do not have permission to complete this order.";
+        case "invalid-argument":
+          return "Checkout details were incomplete. Review your information and try again.";
+        default:
+          break;
+      }
+    }
+
     const message = firebaseError.message?.replace(/^FirebaseError:\s*/i, "") || firebaseError.message;
     if (message && message.toLowerCase() !== "internal") {
       return message;
@@ -110,84 +123,66 @@ export function useCheckoutPayment({
   const [orderId, setOrderId] = useState<string | null>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(false);
-  const functionsRef = useRef<Functions | null>(null);
   const lastIntentPayloadRef = useRef<string | null>(null);
 
   const intentPayload = useMemo(() => createIntentPayload(orderInput), [orderInput]);
+  const orderRequestBody = useMemo(() => JSON.stringify(orderInput), [orderInput]);
   const paymentDetailsStale = useMemo(
     () => lastIntentPayloadRef.current !== null && lastIntentPayloadRef.current !== intentPayload,
     [intentPayload],
   );
-
-  const ensureFunctions = useCallback(async () => {
-    if (functionsRef.current) {
-      return functionsRef.current;
-    }
-    const { functions } = await ensureFirebase();
-    if (!functions) {
-      throw new Error("Firebase functions are unavailable.");
-    }
-    functionsRef.current = functions;
-    return functions;
-  }, []);
-
   const callCreateOrder = useCallback(
-    async (token: string | null): Promise<CreateOrderResult> => {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (token) {
-        headers.Authorization = `Bearer ${token}`;
-      }
-
+    async (idToken: string): Promise<CreateOrderResult> => {
       const response = await fetch("/api/create-order", {
         method: "POST",
-        headers,
-        body: JSON.stringify(orderInput),
-        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: orderRequestBody,
+        cache: "no-store",
       });
 
-      let payload: unknown;
-      try {
-        payload = await response.json();
-      } catch (parseError) {
-        if (!response.ok) {
-          const error = Object.assign(new Error(`Failed to create order (${response.status})`), {
-            code: "create-order-error",
-          });
-          throw error;
+      const text = await response.text();
+      let payload: unknown = null;
+      if (text) {
+        try {
+          payload = JSON.parse(text) as unknown;
+        } catch (error) {
+          const parseError = new Error("Order service returned invalid JSON.");
+          (parseError as Error & { details?: unknown }).details = {
+            responseSnippet: text.slice(0, 200),
+          };
+          throw parseError;
         }
-        throw parseError;
       }
 
-      const payloadRecord =
-        payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
-
-      if (!response.ok || !payloadRecord) {
+      if (!response.ok) {
         const message =
-          payloadRecord && typeof payloadRecord.error === "string" && payloadRecord.error.trim().length > 0
-            ? payloadRecord.error
-            : payloadRecord && typeof payloadRecord.message === "string" && payloadRecord.message.trim().length > 0
-              ? payloadRecord.message
-              : `Failed to create order (${response.status})`;
-        const error = Object.assign(new Error(message), {
-          code:
-            payloadRecord && typeof payloadRecord.code === "string" && payloadRecord.code.trim().length > 0
-              ? payloadRecord.code
-              : "create-order-error",
-          details: payloadRecord?.details,
-        });
+          (payload && typeof payload === "object" && payload !== null && "error" in payload &&
+            typeof (payload as { error: unknown }).error === "string"
+            ? ((payload as { error: string }).error as string)
+            : `Order service responded with ${response.status}`);
+        const error = new Error(message);
+        if (payload && typeof payload === "object" && payload !== null) {
+          const record = payload as Record<string, unknown>;
+          if (typeof record.code === "string") {
+            (error as Error & { code?: string }).code = record.code;
+          }
+          if ("details" in record) {
+            (error as Error & { details?: unknown }).details = record.details;
+          }
+        }
         throw error;
       }
 
-      const data = payloadRecord.data;
-      if (!data || typeof data !== "object") {
+      if (!payload || typeof payload !== "object") {
         return {};
       }
 
-      return data as CreateOrderResult;
+      return payload as CreateOrderResult;
     },
-    [orderInput],
+    [orderRequestBody],
   );
 
   const completeZeroBalanceOrder = useCallback(async () => {
@@ -239,13 +234,10 @@ export function useCheckoutPayment({
         return true;
       }
 
-      const functionsInstance = await ensureFunctions();
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const intentResponse: any = await createIntent({
-        orderId: createdOrderId,
-        type: "deposit",
-      });
-      const secret: string | undefined = intentResponse.data?.clientSecret;
+      const secret =
+        typeof orderData.clientSecret === "string" && orderData.clientSecret.trim().length > 0
+          ? orderData.clientSecret
+          : null;
       if (!secret) {
         throw new Error("Payment session could not be created.");
       }
@@ -267,15 +259,7 @@ export function useCheckoutPayment({
     } finally {
       setInitializing(false);
     }
-  }, [
-    callCreateOrder,
-    ensureFunctions,
-    ensureUser,
-    intentPayload,
-    onSuccess,
-    validate,
-    initializing,
-  ]);
+  }, [callCreateOrder, ensureUser, intentPayload, onSuccess, validate, initializing]);
 
   const initialisePayment = useCallback(async () => {
     if (initializing) {
@@ -311,13 +295,10 @@ export function useCheckoutPayment({
         throw new Error("Failed to create order.");
       }
 
-      const functionsInstance = await ensureFunctions();
-      const createIntent = httpsCallable(functionsInstance, "stripe_createPaymentIntent");
-      const intentResponse: any = await createIntent({
-        orderId: createdOrderId,
-        type: "deposit",
-      });
-      const secret: string | undefined = intentResponse.data?.clientSecret;
+      const secret =
+        typeof orderData.clientSecret === "string" && orderData.clientSecret.trim().length > 0
+          ? orderData.clientSecret
+          : null;
       if (!secret) {
         throw new Error("Payment session could not be created.");
       }
@@ -338,7 +319,6 @@ export function useCheckoutPayment({
     }
   }, [
     callCreateOrder,
-    ensureFunctions,
     ensureUser,
     hasZeroBalance,
     initializing,
@@ -364,3 +344,5 @@ export function useCheckoutPayment({
     reportPaymentError,
   };
 }
+
+export { describeCallableError };

@@ -23,22 +23,14 @@ import {
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import AssessmentOutlinedIcon from '@mui/icons-material/AssessmentOutlined';
-import AssignmentOutlinedIcon from '@mui/icons-material/AssignmentOutlined';
 import CalendarMonthOutlinedIcon from '@mui/icons-material/CalendarMonthOutlined';
-import CloudUploadOutlinedIcon from '@mui/icons-material/CloudUploadOutlined';
 import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
 import Diversity3OutlinedIcon from '@mui/icons-material/Diversity3Outlined';
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
 import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
-import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined';
 import LayersOutlinedIcon from '@mui/icons-material/LayersOutlined';
-import LocalMallOutlinedIcon from '@mui/icons-material/LocalMallOutlined';
-import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
 import MailOutlineOutlinedIcon from '@mui/icons-material/MailOutlineOutlined';
 import MenuIcon from '@mui/icons-material/Menu';
-import QueryStatsOutlinedIcon from '@mui/icons-material/QueryStatsOutlined';
-import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
-import WorkOutlineOutlinedIcon from '@mui/icons-material/WorkOutlineOutlined';
 import CloseIcon from '@mui/icons-material/Close';
 import Breadcrumbs from './Breadcrumbs';
 import { auth, ensureFirebase } from '@/lib/firebase';
@@ -110,42 +102,8 @@ const PORTAL_CONFIGS: PortalConfig[] = [
     sidebarSubtitle: 'Admin Portal',
     sidebarCopy:
       'Steer fulfilment, tooling, and enablement initiatives for every client and franchise.',
-    navigation: [
-      {
-        heading: 'Command',
-        items: [
-          { label: 'Overview', href: '/admin', icon: HomeOutlinedIcon, exact: true },
-          { label: 'Projects', href: '/admin/projects', icon: FolderOutlinedIcon },
-          { label: 'Orders', href: '/admin/orders', icon: LocalMallOutlinedIcon },
-          { label: 'Bookings', href: '/admin/bookings', icon: CalendarMonthOutlinedIcon },
-          { label: 'Deliveries', href: '/admin/deliveries', icon: CloudUploadOutlinedIcon },
-          { label: 'Analytics', href: '/admin/analytics', icon: QueryStatsOutlinedIcon },
-        ],
-      },
-      {
-        heading: 'Enablement',
-        items: [
-          { label: 'Tools hub', href: '/admin/tools', icon: GridViewOutlinedIcon },
-          { label: 'AI management', href: '/admin/ai-management', icon: SettingsOutlinedIcon },
-          { label: 'Training', href: '/admin/training', icon: LayersOutlinedIcon },
-          { label: 'Marketing', href: '/admin/marketing', icon: AssignmentOutlinedIcon },
-          { label: 'Email templates', href: '/admin/email-templates', icon: MailOutlineOutlinedIcon },
-        ],
-      },
-      {
-        heading: 'People & coverage',
-        items: [
-          { label: 'Team', href: '/admin/team', icon: Diversity3OutlinedIcon },
-          { label: 'Franchises', href: '/admin/franchises', icon: WorkOutlineOutlinedIcon },
-          { label: 'Insurance', href: '/admin/insurance', icon: LockOutlinedIcon },
-        ],
-      },
-    ],
-    quickActions: [
-      { label: 'Create proposal', href: '/admin/proposals', icon: AssignmentOutlinedIcon },
-      { label: 'Schedule production', href: '/admin/bookings', icon: CalendarMonthOutlinedIcon },
-      { label: 'Launch tools hub', href: '/admin/tools', icon: GridViewOutlinedIcon },
-    ],
+    navigation: [],
+    quickActions: [],
     surface: 'plain',
   },
   {
@@ -238,7 +196,8 @@ export default function PortalContainer({ children }: { children: React.ReactNod
     () => (portalConfig.navigation ?? []).filter((section) => section.items.length > 0),
     [portalConfig.navigation]
   );
-  const hasNavigation = navSections.length > 0;
+  const isAdminPortal = portalConfig.id === 'admin';
+  const hasNavigation = !isAdminPortal && navSections.length > 0;
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [userName, setUserName] = useState<string>('Workspace member');
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -355,7 +314,7 @@ export default function PortalContainer({ children }: { children: React.ReactNod
     </Box>
   ) : null;
 
-  const quickActions = portalConfig.quickActions ?? [];
+  const quickActions = isAdminPortal ? [] : (portalConfig.quickActions ?? []);
 
   return (
     <Box sx={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', py: { xs: 4, md: 6 } }}>
@@ -380,82 +339,89 @@ export default function PortalContainer({ children }: { children: React.ReactNod
             )}
           </Stack>
 
-          <Paper sx={{ p: { xs: 3, md: 4 }, position: 'relative', overflow: 'hidden' }}>
-            <Stack direction={{ xs: 'column', lg: 'row' }} spacing={4} justifyContent="space-between" alignItems="flex-start">
-              <Box>
-                <Chip label={portalConfig.badge} color="secondary" size="small" sx={{ mb: 2 }} />
-                <Typography variant="h4" color="text.primary" gutterBottom>
-                  {portalConfig.title}
-                </Typography>
-                {portalConfig.summary ? (
-                  <Typography variant="body1" color="text.secondary" sx={{ maxWidth: 640 }}>
-                    {portalConfig.summary}
-                  </Typography>
-                ) : null}
-              </Box>
-              <Paper
-                variant="outlined"
-                sx={{
-                  borderRadius: 3,
-                  px: 3,
-                  py: 2.5,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 2,
-                  boxShadow: 'inset 0 1px 0 rgba(15,23,42,0.06)',
-                  minWidth: 220,
-                }}
+          {!isAdminPortal ? (
+            <Paper sx={{ p: { xs: 3, md: 4 }, position: 'relative', overflow: 'hidden' }}>
+              <Stack
+                direction={{ xs: 'column', lg: 'row' }}
+                spacing={4}
+                justifyContent="space-between"
+                alignItems="flex-start"
               >
-                <Avatar sx={{ bgcolor: 'primary.main', color: 'primary.contrastText', fontWeight: 600 }}>
-                  {getUserInitials(userName)}
-                </Avatar>
                 <Box>
-                  <Typography variant="subtitle1" fontWeight={600}>
-                    {userName}
+                  <Chip label={portalConfig.badge} color="secondary" size="small" sx={{ mb: 2 }} />
+                  <Typography variant="h4" color="text.primary" gutterBottom>
+                    {portalConfig.title}
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    {userEmail ?? 'Signed in'}
-                  </Typography>
+                  {portalConfig.summary ? (
+                    <Typography variant="body1" color="text.secondary" sx={{ maxWidth: 640 }}>
+                      {portalConfig.summary}
+                    </Typography>
+                  ) : null}
                 </Box>
-              </Paper>
-            </Stack>
-            {quickActions.length > 0 ? (
-              <Grid container spacing={2} sx={{ mt: 3 }}>
-                {quickActions.map((action) => {
-                  const ActionIcon = action.icon;
-                  return (
-                    <Grid item xs={12} sm={6} lg={4} key={action.href}>
-                      <Paper
-                        component={NextLink}
-                        href={action.href}
-                        sx={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          px: 3,
-                          py: 2.5,
-                          textDecoration: 'none',
-                          color: 'text.primary',
-                          borderRadius: 3,
-                          transition: 'all 0.2s ease',
-                          '&:hover': {
-                            borderColor: 'primary.main',
-                            color: 'primary.main',
-                            transform: 'translateY(-2px)',
-                          },
-                        }}
-                      >
-                        <Typography variant="body1" fontWeight={600}>
-                          {action.label}
-                        </Typography>
-                        <ActionIcon fontSize="small" />
-                      </Paper>
-                    </Grid>
-                  );
-                })}
-              </Grid>
-            ) : null}
-          </Paper>
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    borderRadius: 3,
+                    px: 3,
+                    py: 2.5,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 2,
+                    boxShadow: 'inset 0 1px 0 rgba(15,23,42,0.06)',
+                    minWidth: 220,
+                  }}
+                >
+                  <Avatar sx={{ bgcolor: 'primary.main', color: 'primary.contrastText', fontWeight: 600 }}>
+                    {getUserInitials(userName)}
+                  </Avatar>
+                  <Box>
+                    <Typography variant="subtitle1" fontWeight={600}>
+                      {userName}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      {userEmail ?? 'Signed in'}
+                    </Typography>
+                  </Box>
+                </Paper>
+              </Stack>
+              {quickActions.length > 0 ? (
+                <Grid container spacing={2} sx={{ mt: 3 }}>
+                  {quickActions.map((action) => {
+                    const ActionIcon = action.icon;
+                    return (
+                      <Grid item xs={12} sm={6} lg={4} key={action.href}>
+                        <Paper
+                          component={NextLink}
+                          href={action.href}
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            px: 3,
+                            py: 2.5,
+                            textDecoration: 'none',
+                            color: 'text.primary',
+                            borderRadius: 3,
+                            transition: 'all 0.2s ease',
+                            '&:hover': {
+                              borderColor: 'primary.main',
+                              color: 'primary.main',
+                              transform: 'translateY(-2px)',
+                            },
+                          }}
+                        >
+                          <Typography variant="body1" fontWeight={600}>
+                            {action.label}
+                          </Typography>
+                          <ActionIcon fontSize="small" />
+                        </Paper>
+                      </Grid>
+                    );
+                  })}
+                </Grid>
+              ) : null}
+            </Paper>
+          ) : null}
 
           <Box
             sx={{

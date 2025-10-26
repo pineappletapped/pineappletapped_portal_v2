@@ -2,7 +2,8 @@
 
 import { useEffect, useRef } from 'react';
 import type { User } from 'firebase/auth';
-import { ensureFirebase, httpsCallable, loadAuthModule } from '@/lib/firebase';
+import { ensureFirebase, loadAuthModule } from '@/lib/firebase';
+import { postHttpFunctionOrThrow } from '@/lib/httpFunctions';
 
 const makeSessionKey = (user: User) => {
   const lastSignIn =
@@ -10,25 +11,22 @@ const makeSessionKey = (user: User) => {
   return `${user.uid}:${lastSignIn}`;
 };
 
-const isCallableAvailable = (callable: unknown): callable is typeof httpsCallable =>
-  typeof callable === 'function';
-
 export function useLoginTelemetry() {
   const lastRecordedSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
     let unsubscribe: (() => void) | null = null;
     let cancelled = false;
-    let callable: ((payload: Record<string, unknown>) => Promise<unknown>) | null = null;
 
     (async () => {
       try {
-        const { auth, functions } = await ensureFirebase();
+        const services = await ensureFirebase();
+        const { auth } = services;
         if (cancelled) {
           return;
         }
-        if (!auth || !functions || (functions as any)?.__isPlaceholder) {
-          console.warn('Login telemetry skipped: Firebase auth/functions unavailable');
+        if (!auth || (auth as any)?.__isPlaceholder) {
+          console.warn('Login telemetry skipped: Firebase auth unavailable');
           return;
         }
 
@@ -40,13 +38,6 @@ export function useLoginTelemetry() {
           console.warn('Login telemetry skipped: onAuthStateChanged unavailable');
           return;
         }
-
-        if (!isCallableAvailable(httpsCallable)) {
-          console.warn('Login telemetry skipped: httpsCallable unavailable');
-          return;
-        }
-
-        callable = httpsCallable(functions, 'recordLogin');
 
         unsubscribe = onAuthStateChanged(auth, async (user) => {
           if (!user) {
@@ -60,25 +51,25 @@ export function useLoginTelemetry() {
           }
 
           const isoTimestamp = new Date().toISOString();
+
           try {
-            if (!callable) {
-              if (!functions || (functions as any).__isPlaceholder) {
-                throw new Error('Firebase functions unavailable');
-              }
-              if (!isCallableAvailable(httpsCallable)) {
-                throw new Error('httpsCallable unavailable');
-              }
-              callable = httpsCallable(functions, 'recordLogin');
+            if (typeof user.getIdToken !== 'function') {
+              throw new Error('User tokens unavailable');
             }
 
-            if (!callable) {
-              throw new Error('Callable function not initialised');
+            const idToken = await user.getIdToken();
+            if (!idToken) {
+              throw new Error('ID token not available');
             }
 
-            await callable({ timestamp: isoTimestamp });
+            await postHttpFunctionOrThrow('recordLogin', {
+              body: { timestamp: isoTimestamp },
+              idToken,
+            });
+
             lastRecordedSessionRef.current = sessionKey;
           } catch (error) {
-            console.warn('Failed to record login telemetry via callable', error);
+            console.warn('Failed to record login telemetry via HTTP', error);
             lastRecordedSessionRef.current = null;
           }
         });

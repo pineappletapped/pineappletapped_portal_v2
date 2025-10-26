@@ -6,9 +6,20 @@ import { useRouter } from "next/navigation";
 
 export default function CartPage() {
   const { items, remove, updateQuantity } = useCart();
-  const productTotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
+  const getQuantity = (item: (typeof items)[number]) => {
+    if (typeof item !== "object" || item === null || !("quantity" in item)) {
+      return 1;
+    }
+    const parsed = Number((item as { quantity?: unknown }).quantity);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+  };
+
+  const productTotal = items.reduce(
+    (sum, item) => sum + item.price * getQuantity(item),
+    0
+  );
   const rentalTotal = items.reduce(
-    (sum, i) => sum + (i.rentalTotal || 0) * i.quantity,
+    (sum, item) => sum + (item.rentalTotal || 0) * getQuantity(item),
     0
   );
   const subtotal = productTotal + rentalTotal;
@@ -29,8 +40,9 @@ export default function CartPage() {
       ) : (
         <div className="space-y-4">
           {items.map((item, idx) => {
+            const quantity = getQuantity(item);
             const decreaseLabel =
-              item.quantity === 1
+              quantity === 1
                 ? `Remove ${item.name} from cart`
                 : `Decrease quantity of ${item.name}`;
             const slot = item.campaignBooking;
@@ -153,9 +165,11 @@ export default function CartPage() {
               return null;
             })();
 
+            const itemKey = `${item.id}-${idx}`;
+
             return (
               <div
-                key={idx}
+                key={itemKey}
                 className="flex flex-wrap items-center justify-between gap-4 rounded border p-4"
               >
                 <div className="min-w-[12rem] flex-1">
@@ -186,7 +200,7 @@ export default function CartPage() {
                   >
                     <button
                       type="button"
-                      onClick={() => updateQuantity(idx, item.quantity - 1)}
+                      onClick={() => updateQuantity(idx, quantity - 1)}
                       aria-label={decreaseLabel}
                       className="flex h-8 w-8 items-center justify-center rounded border border-gray-300 text-lg leading-none text-gray-700 transition hover:border-gray-400 focus-visible:border-orange focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange"
                     >
@@ -196,11 +210,11 @@ export default function CartPage() {
                       className="min-w-[2ch] text-center text-sm font-medium"
                       aria-live="polite"
                     >
-                      {item.quantity}
+                      {quantity}
                     </span>
                     <button
                       type="button"
-                      onClick={() => updateQuantity(idx, item.quantity + 1)}
+                      onClick={() => updateQuantity(idx, quantity + 1)}
                       aria-label={`Increase quantity of ${item.name}`}
                       className="flex h-8 w-8 items-center justify-center rounded border border-gray-300 text-lg leading-none text-gray-700 transition hover:border-gray-400 focus-visible:border-orange focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange"
                     >
@@ -209,11 +223,11 @@ export default function CartPage() {
                   </div>
                   <div className="text-right">
                     <span className="block">
-                      £{(item.price * item.quantity).toFixed(2)}
+                      £{(item.price * quantity).toFixed(2)}
                     </span>
                     {item.rentalTotal && (
                       <span className="block text-xs text-gray-600">
-                        £{(item.rentalTotal * item.quantity).toFixed(2)} rent
+                        £{(item.rentalTotal * quantity).toFixed(2)} rent
                       </span>
                     )}
                   </div>
