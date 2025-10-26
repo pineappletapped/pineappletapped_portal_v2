@@ -1142,7 +1142,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           (payload && typeof payload === "object" && payload !== null && "error" in payload &&
             typeof (payload as { error: unknown }).error === "string"
             ? ((payload as { error: string }).error as string)
-            : `Order service responded with ${response.status}`);
+            : response.status === 404
+              ? "Checkout service is unavailable. Please try again shortly."
+              : `Order service responded with ${response.status}`);
         const error = new Error(message);
         if (payload && typeof payload === "object" && payload !== null) {
           const record = payload as Record<string, unknown>;
@@ -1377,7 +1379,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return null;
       };
 
-      const scheduleDueAmounts = Array.isArray((snapData as { paymentSchedule?: unknown }).paymentSchedule)
+      const scheduleDueNowAmounts = Array.isArray(
+        (snapData as { paymentSchedule?: unknown }).paymentSchedule,
+      )
         ? ((snapData as { paymentSchedule?: unknown[] }).paymentSchedule ?? [])
             .map((entry) => {
               if (!entry || typeof entry !== "object") {
@@ -1385,7 +1389,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
               }
               const statusRaw = (entry as { status?: unknown }).status;
               const status = typeof statusRaw === "string" ? statusRaw.toLowerCase() : "";
-              if (!status || !["due", "pending", "overdue"].includes(status)) {
+              if (!status || !["due", "overdue"].includes(status)) {
                 return null;
               }
               const gross = parseCurrency((entry as { grossAmount?: unknown }).grossAmount);
@@ -1397,18 +1401,21 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             .filter((value): value is number => value !== null && Number.isFinite(value))
         : [];
 
-      const dueNowCandidates = [
+      const depositCandidates = [
         parseCurrency((orderData as { depositAmount?: unknown }).depositAmount),
         parseCurrency((orderData as { depositDue?: unknown }).depositDue),
         parseCurrency((snapData as { depositAmount?: unknown }).depositAmount),
         parseCurrency((snapData as { depositDue?: unknown }).depositDue),
-        parseCurrency((snapData as { balanceDue?: unknown }).balanceDue),
-        ...scheduleDueAmounts,
       ].filter((value): value is number => value !== null && Number.isFinite(value));
 
+      const immediateDueCandidates = [...depositCandidates, ...scheduleDueNowAmounts];
+
       const depositFullySatisfied =
-        dueNowCandidates.length > 0 &&
-        dueNowCandidates.every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+        (immediateDueCandidates.length > 0 &&
+          immediateDueCandidates.every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE)) ||
+        (immediateDueCandidates.length === 0 &&
+          depositCandidates.length > 0 &&
+          depositCandidates.every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE));
 
       const voucherDiscountValue =
         serverVoucherDiscountValue ?? snapData.voucherDiscount ?? null;
@@ -1431,7 +1438,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           netTotal: netTotalValue,
           voucherDiscount: voucherDiscountValue,
           discountAmount: discountAmountValue,
-          dueNowCandidates,
+          dueNowCandidates: immediateDueCandidates,
         };
         console.info(
           depositFullySatisfied && !totalsSatisfied
