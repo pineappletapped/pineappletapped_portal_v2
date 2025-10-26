@@ -17,7 +17,7 @@ interface OrderDriveSummary {
 
 export default function ProjectFilesPage() {
   const params = useParams<{ id: string }>();
-  const projectId = params.id;
+  const projectId = params?.id ?? null;
   const [loading, setLoading] = useState(true);
   const [projectName, setProjectName] = useState<string | null>(null);
   const [orderSummary, setOrderSummary] = useState<OrderDriveSummary>({
@@ -94,6 +94,19 @@ export default function ProjectFilesPage() {
     };
   }, [projectId]);
 
+  if (!projectId) {
+    return (
+      <PortalContainer>
+        <div className="space-y-4">
+          <h1 className="text-xl font-semibold text-gray-900">Project files</h1>
+          <p className="text-sm text-gray-600">
+            We couldn&apos;t find the project you&apos;re looking for. Please return to your dashboard and try again.
+          </p>
+        </div>
+      </PortalContainer>
+    );
+  }
+
   return (
     <PortalContainer>
       <div className="grid gap-6">
@@ -135,7 +148,7 @@ export default function ProjectFilesPage() {
           )}
         </div>
 
-        {orderSummary.folderId ? (
+        {orderSummary.folderId && projectId ? (
           <DriveProjectFolderViewer projectId={projectId} initialFolderId={orderSummary.folderId} />
         ) : null}
       </div>

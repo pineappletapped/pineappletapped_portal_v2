@@ -188,7 +188,7 @@ function getUserInitials(name: string): string {
 const drawerWidth = 304;
 
 export default function PortalContainer({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? '/';
   const theme = useTheme();
   const isLgUp = useMediaQuery(theme.breakpoints.up('lg'));
   const portalConfig = useMemo(() => resolvePortalConfig(pathname), [pathname]);

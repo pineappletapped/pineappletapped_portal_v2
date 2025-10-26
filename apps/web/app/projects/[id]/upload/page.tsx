@@ -8,6 +8,7 @@ import { useParams, useRouter } from 'next/navigation';
 
 export default function Upload() {
   const params = useParams<{ id: string }>();
+  const projectId = params?.id ?? null;
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [name, setName] = useState('');
@@ -16,8 +17,11 @@ export default function Upload() {
 
   // Fetch project to get orgId
   useEffect(() => {
+    if (!projectId) {
+      return;
+    }
     (async () => {
-      const projRef = doc(db, 'projects', params.id);
+      const projRef = doc(db, 'projects', projectId);
       const snap = await getDoc(projRef);
       const data = snap.data();
       let org = data?.orgId || null;
@@ -31,16 +35,20 @@ export default function Upload() {
       }
       setOrgId(org);
     })();
-  }, [params.id]);
+  }, [projectId]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) return;
+    if (!projectId) {
+      alert('Cannot determine project for this upload');
+      return;
+    }
     if (!orgId) {
       alert('Cannot determine organisation for this project');
       return;
     }
-    const key = `orgs/${orgId}/projects/${params.id}/assets/${Date.now()}-${encodeURIComponent(file.name)}`;
+    const key = `orgs/${orgId}/projects/${projectId}/assets/${Date.now()}-${encodeURIComponent(file.name)}`;
     const r = ref(storage, key);
     const task = uploadBytesResumable(r, file, { contentType: file.type });
     task.on(
@@ -51,11 +59,11 @@ export default function Upload() {
         const url = await getDownloadURL(task.snapshot.ref);
         // Determine version number based on existing assets with same name
         const assetName = name || file.name;
-        const existingSnap = await getDocs(query(collection(db,'assets'), where('projectId','==', params.id), where('name','==', assetName)));
+        const existingSnap = await getDocs(query(collection(db,'assets'), where('projectId','==', projectId), where('name','==', assetName)));
         const version = existingSnap.size + 1;
         await addDoc(collection(db, 'assets'), {
           orgId,
-          projectId: params.id,
+          projectId,
           name: assetName,
           storageKey: key,
           url,
@@ -65,10 +73,19 @@ export default function Upload() {
           version,
           createdAt: serverTimestamp()
         });
-        router.push(`/projects/${params.id}`);
+        router.push(`/projects/${projectId}`);
       }
     );
   };
+
+  if (!projectId) {
+    return (
+      <div className="max-w-lg mx-auto card grid gap-3">
+        <h1 className="text-xl font-semibold">Upload Asset</h1>
+        <p className="text-sm text-gray-600">We couldn&apos;t find that project. Please return to your dashboard and try again.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-lg mx-auto card grid gap-3">

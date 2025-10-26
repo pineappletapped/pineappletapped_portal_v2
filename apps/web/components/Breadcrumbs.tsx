@@ -55,7 +55,7 @@ export default function Breadcrumbs({
 }: {
   items?: { href: string; label: string }[];
 }) {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? '/';
   const segments = pathname.split('/').filter(Boolean);
   const shouldAutoHide = !items && segments.length === 1 && HIDDEN_ROOT_SEGMENTS.has(segments[0]);
   const trail =
