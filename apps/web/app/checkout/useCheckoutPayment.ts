@@ -220,13 +220,72 @@ export function useCheckoutPayment({
       }
 
       const snapData = orderSnap.data() ?? {};
-      const serverPrice = Number(orderData.price ?? snapData.price ?? 0);
-      const serverNetTotal = Number(orderData.netTotal ?? snapData.netTotal ?? 0);
-      const zeroBalance = [serverPrice, serverNetTotal]
-        .filter((value): value is number => Number.isFinite(value))
-        .some((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+      const parseCurrency = (value: unknown): number | null => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return value;
+        }
+        if (typeof value === "string") {
+          const normalised = Number(value.replace(/[^0-9.-]+/g, ""));
+          return Number.isFinite(normalised) ? normalised : null;
+        }
+        return null;
+      };
 
-      if (zeroBalance) {
+      const scheduleDueAmounts = Array.isArray((snapData as { paymentSchedule?: unknown }).paymentSchedule)
+        ? ((snapData as { paymentSchedule?: unknown[] }).paymentSchedule ?? [])
+            .map((entry) => {
+              if (!entry || typeof entry !== "object") {
+                return null;
+              }
+              const statusRaw = (entry as { status?: unknown }).status;
+              const status = typeof statusRaw === "string" ? statusRaw.toLowerCase() : "";
+              if (!status || !["due", "pending", "overdue"].includes(status)) {
+                return null;
+              }
+              const gross = parseCurrency((entry as { grossAmount?: unknown }).grossAmount);
+              if (gross !== null) {
+                return gross;
+              }
+              return parseCurrency((entry as { netAmount?: unknown }).netAmount);
+            })
+            .filter((value): value is number => value !== null && Number.isFinite(value))
+        : [];
+
+      const dueNowCandidates = [
+        parseCurrency((orderData as { depositAmount?: unknown }).depositAmount),
+        parseCurrency((orderData as { depositDue?: unknown }).depositDue),
+        parseCurrency((snapData as { depositAmount?: unknown }).depositAmount),
+        parseCurrency((snapData as { depositDue?: unknown }).depositDue),
+        parseCurrency((snapData as { balanceDue?: unknown }).balanceDue),
+        ...scheduleDueAmounts,
+      ].filter((value): value is number => value !== null && Number.isFinite(value));
+
+      const depositFullySatisfied =
+        dueNowCandidates.length > 0 &&
+        dueNowCandidates.every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+
+      const serverPrice = parseCurrency(orderData.price ?? snapData.price ?? 0) ?? 0;
+      const serverNetTotal = parseCurrency(orderData.netTotal ?? snapData.netTotal ?? 0) ?? 0;
+      const orderTotalsZero = [serverPrice, serverNetTotal]
+        .filter((value): value is number => Number.isFinite(value))
+        .every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+
+      if (depositFullySatisfied || orderTotalsZero) {
+        if (depositFullySatisfied && !orderTotalsZero) {
+          console.info("Zero deposit order confirmed", {
+            createdOrderId,
+            dueNowCandidates,
+            price: serverPrice,
+            netTotal: serverNetTotal,
+          });
+        } else {
+          console.info("Zero balance order confirmed", {
+            createdOrderId,
+            price: serverPrice,
+            netTotal: serverNetTotal,
+          });
+        }
+
         setOrderId(createdOrderId);
         setClientSecret(null);
         lastIntentPayloadRef.current = intentPayload;

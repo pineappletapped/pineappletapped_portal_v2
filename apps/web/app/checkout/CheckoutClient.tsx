@@ -1345,7 +1345,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           : null;
       const serverZeroBalance = [serverPrice, serverNetTotal]
         .filter((value): value is number => value !== null)
-        .some((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+        .every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
       if (!createdOrderId) {
         throw new Error("Failed to create order.");
       }
@@ -1366,29 +1366,79 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         throw new Error("Order could not be verified. Please try again.");
       }
       const snapData = orderSnap.data() ?? {};
-      const priceValue = Number(
-        snapData.price ?? (serverPrice !== null ? serverPrice : 0),
-      );
-      const netTotalValue = Number(
-        snapData.netTotal ?? (serverNetTotal !== null ? serverNetTotal : 0),
-      );
+      const parseCurrency = (value: unknown): number | null => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return value;
+        }
+        if (typeof value === "string") {
+          const normalised = Number(value.replace(/[^0-9.-]+/g, ""));
+          return Number.isFinite(normalised) ? normalised : null;
+        }
+        return null;
+      };
+
+      const scheduleDueAmounts = Array.isArray((snapData as { paymentSchedule?: unknown }).paymentSchedule)
+        ? ((snapData as { paymentSchedule?: unknown[] }).paymentSchedule ?? [])
+            .map((entry) => {
+              if (!entry || typeof entry !== "object") {
+                return null;
+              }
+              const statusRaw = (entry as { status?: unknown }).status;
+              const status = typeof statusRaw === "string" ? statusRaw.toLowerCase() : "";
+              if (!status || !["due", "pending", "overdue"].includes(status)) {
+                return null;
+              }
+              const gross = parseCurrency((entry as { grossAmount?: unknown }).grossAmount);
+              if (gross !== null) {
+                return gross;
+              }
+              return parseCurrency((entry as { netAmount?: unknown }).netAmount);
+            })
+            .filter((value): value is number => value !== null && Number.isFinite(value))
+        : [];
+
+      const dueNowCandidates = [
+        parseCurrency((orderData as { depositAmount?: unknown }).depositAmount),
+        parseCurrency((orderData as { depositDue?: unknown }).depositDue),
+        parseCurrency((snapData as { depositAmount?: unknown }).depositAmount),
+        parseCurrency((snapData as { depositDue?: unknown }).depositDue),
+        parseCurrency((snapData as { balanceDue?: unknown }).balanceDue),
+        ...scheduleDueAmounts,
+      ].filter((value): value is number => value !== null && Number.isFinite(value));
+
+      const depositFullySatisfied =
+        dueNowCandidates.length > 0 &&
+        dueNowCandidates.every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+
       const voucherDiscountValue =
         serverVoucherDiscountValue ?? snapData.voucherDiscount ?? null;
       const discountAmountValue =
         serverDiscountAmountValue ?? snapData.discountAmount ?? null;
-      const normalisedPrice = Number.isFinite(priceValue) ? priceValue : 0;
-      const normalisedNetTotal = Number.isFinite(netTotalValue) ? netTotalValue : 0;
-      if (
-        Math.abs(normalisedPrice) <= ZERO_BALANCE_TOLERANCE ||
-        Math.abs(normalisedNetTotal) <= ZERO_BALANCE_TOLERANCE
-      ) {
-        console.info("Zero balance order confirmed", {
+      const priceValue = parseCurrency(
+        snapData.price ?? (serverPrice !== null ? serverPrice : 0),
+      ) ?? 0;
+      const netTotalValue = parseCurrency(
+        snapData.netTotal ?? (serverNetTotal !== null ? serverNetTotal : 0),
+      ) ?? 0;
+      const totalsSatisfied = [priceValue, netTotalValue]
+        .filter((value): value is number => Number.isFinite(value))
+        .every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+
+      if (depositFullySatisfied || totalsSatisfied) {
+        const logPayload = {
           createdOrderId,
-          price: normalisedPrice,
-          netTotal: normalisedNetTotal,
+          price: priceValue,
+          netTotal: netTotalValue,
           voucherDiscount: voucherDiscountValue,
           discountAmount: discountAmountValue,
-        });
+          dueNowCandidates,
+        };
+        console.info(
+          depositFullySatisfied && !totalsSatisfied
+            ? "Zero deposit order confirmed"
+            : "Zero balance order confirmed",
+          logPayload,
+        );
         setOrderId(createdOrderId);
         setClientSecret(null);
         lastIntentPayload.current = currentIntentPayload;
