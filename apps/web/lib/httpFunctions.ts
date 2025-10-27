@@ -1,5 +1,9 @@
 import { functionsBaseUrl } from "./firebase";
-import { DEFAULT_FUNCTION_BASE, LEGACY_FUNCTION_BASES } from "./callableEndpoints";
+import {
+  DEFAULT_FUNCTION_BASE,
+  LEGACY_FUNCTION_BASES,
+  resolveCallableFunctionIds,
+} from "./callableEndpoints";
 
 const cleanEnv = (value?: string | null) => {
   if (typeof value !== "string") {
@@ -139,7 +143,16 @@ const buildEndpointCandidates = (
     (RELATIVE_FALLBACK_ENDPOINTS[name] ?? []).forEach((endpoint) => push(endpoint));
   }
 
-  buildBaseCandidates().forEach((base) => push(`${base}/${name}`));
+  const functionIds = resolveCallableFunctionIds(name);
+  const baseCandidates = buildBaseCandidates();
+
+  if (functionIds.length === 0) {
+    baseCandidates.forEach((base) => push(`${base}/${name}`));
+  } else {
+    baseCandidates.forEach((base) => {
+      functionIds.forEach((identifier) => push(`${base}/${identifier}`));
+    });
+  }
 
   return candidates;
 };
