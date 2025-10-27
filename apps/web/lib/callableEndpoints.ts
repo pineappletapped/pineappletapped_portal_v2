@@ -1,14 +1,21 @@
+const CLOUD_FUNCTION_HOST_SUFFIXES = ["cloudfunctions.net", "cloudfunctions.app"] as const;
+
 export const DEFAULT_FUNCTION_BASE =
-  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net";
+  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.app";
 
 export const LEGACY_FUNCTION_BASES = [
+  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net",
   "https://europe-west2-ptfbportalbackend.cloudfunctions.net",
   "https://europe-west4-pineapple-tapped---portal.cloudfunctions.net",
   "https://europe-west4-ptfbportalbackend.cloudfunctions.net",
+  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.app",
+  "https://europe-west2-ptfbportalbackend.cloudfunctions.app",
+  "https://europe-west4-pineapple-tapped---portal.cloudfunctions.app",
+  "https://europe-west4-ptfbportalbackend.cloudfunctions.app",
 ];
 
 const CLOUD_FUNCTION_REGION_HOST_PATTERN =
-  /^https:\/\/((?:[a-z]+(?:-[a-z]+)*)[0-9])-([a-z0-9-]+)\.cloudfunctions\.net$/i;
+  /^https:\/\/((?:[a-z]+(?:-[a-z]+)*)[0-9])-([a-z0-9-]+)\.cloudfunctions\.(?:net|app)$/i;
 
 const REGION_FALLBACKS = ["europe-west2", "europe-west4"];
 const CODEBASE_ENV_VARS = [
@@ -47,6 +54,21 @@ export const sanitiseProjectFragment = (value: string | null | undefined) => {
   }
 
   return trimmed;
+};
+
+const appendRegionalBases = (
+  collector: (base: string | null | undefined) => void,
+  region: string | null | undefined,
+  project: string | null | undefined,
+) => {
+  const cleanRegion = region?.trim();
+  const cleanProject = sanitiseProjectFragment(project);
+  if (!cleanRegion || !cleanProject) {
+    return;
+  }
+  for (const suffix of CLOUD_FUNCTION_HOST_SUFFIXES) {
+    collector(`https://${cleanRegion}-${cleanProject}.${suffix}`);
+  }
 };
 
 const sanitiseCodebase = (value: string | null | undefined) => {
@@ -185,19 +207,19 @@ export const resolveHostedAppContext = (
       subdomain.slice(separatorIndex + 2),
     );
     if (projectFragment) {
-      addBase(`https://${regionCandidate}-${projectFragment}.cloudfunctions.net`);
+      appendRegionalBases(addBase, regionCandidate, projectFragment);
     }
 
     const legacyFragment = trackProjectFragment(
       subdomain.slice(0, separatorIndex),
     );
     if (legacyFragment) {
-      addBase(`https://${regionCandidate}-${legacyFragment}.cloudfunctions.net`);
+      appendRegionalBases(addBase, regionCandidate, legacyFragment);
     }
   } else {
     const fragment = trackProjectFragment(subdomain);
     if (fragment) {
-      addBase(`https://${regionCandidate}-${fragment}.cloudfunctions.net`);
+      appendRegionalBases(addBase, regionCandidate, fragment);
     }
   }
 
@@ -371,6 +393,13 @@ export const collectCallableTargets = (
 const expandRegionalBases = (baseUrls: Array<string | null | undefined>) => {
   const expanded: string[] = [];
 
+  const pushBase = (candidate: string | null | undefined) => {
+    const normalisedCandidate = normaliseBaseUrl(candidate);
+    if (normalisedCandidate) {
+      expanded.push(normalisedCandidate);
+    }
+  };
+
   for (const base of baseUrls) {
     const normalised = normaliseBaseUrl(base);
     if (!normalised) {
@@ -390,7 +419,7 @@ const expandRegionalBases = (baseUrls: Array<string | null | undefined>) => {
         continue;
       }
 
-      expanded.push(`https://${fallbackRegion}-${project}.cloudfunctions.net`);
+      appendRegionalBases(pushBase, fallbackRegion, project);
     }
   }
 

@@ -7,7 +7,7 @@ the Cloud Function replies with:
 
 | Header | Value |
 | --- | --- |
-| `Access-Control-Allow-Origin` | The validated origin, including `https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app`, `https://europe-west2-pineapple-tapped---portal.cloudfunctions.net`, or `https://europe-west2-ptfbportalbackend.cloudfunctions.net`. |
+| `Access-Control-Allow-Origin` | The validated origin, including `https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app`, `https://europe-west2-pineapple-tapped---portal.cloudfunctions.app`, `https://europe-west2-pineapple-tapped---portal.cloudfunctions.net`, or `https://europe-west2-ptfbportalbackend.cloudfunctions.app` / `https://europe-west2-ptfbportalbackend.cloudfunctions.net`. |
 | `Access-Control-Allow-Credentials` | `true` |
 | `Access-Control-Allow-Methods` | `POST, OPTIONS` |
 | `Access-Control-Max-Age` | `3600` |

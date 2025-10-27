@@ -45,7 +45,9 @@ const defaultFunctionsRegion =
 
 const defaultFunctionsBaseUrl =
   explicitFunctionsBaseUrl ||
+  (projectId ? `https://${defaultFunctionsRegion}-${projectId}.cloudfunctions.app` : undefined) ||
   (projectId ? `https://${defaultFunctionsRegion}-${projectId}.cloudfunctions.net` : undefined) ||
+  `https://${defaultFunctionsRegion}-pineapple-tapped---portal.cloudfunctions.app` ||
   `https://${defaultFunctionsRegion}-pineapple-tapped---portal.cloudfunctions.net`;
 
 const firebaseProjectId = projectId;
