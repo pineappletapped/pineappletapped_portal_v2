@@ -3,6 +3,8 @@ export const DEFAULT_FUNCTION_BASE =
 
 export const LEGACY_FUNCTION_BASES = [
   "https://europe-west2-ptfbportalbackend.cloudfunctions.net",
+  "https://europe-west4-pineapple-tapped---portal.cloudfunctions.net",
+  "https://europe-west4-ptfbportalbackend.cloudfunctions.net",
 ];
 
 const CLOUD_FUNCTION_REGION_HOST_PATTERN =
