@@ -1,10 +1,9 @@
 const CLOUD_FUNCTION_HOST_SUFFIXES = ["cloudfunctions.net", "cloudfunctions.app"] as const;
 
 export const DEFAULT_FUNCTION_BASE =
-  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.app";
+  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net";
 
 export const LEGACY_FUNCTION_BASES = [
-  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net",
   "https://europe-west2-ptfbportalbackend.cloudfunctions.net",
   "https://europe-west4-pineapple-tapped---portal.cloudfunctions.net",
   "https://europe-west4-ptfbportalbackend.cloudfunctions.net",
