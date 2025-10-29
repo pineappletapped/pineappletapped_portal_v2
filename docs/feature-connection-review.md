@@ -17,6 +17,13 @@ This note captures portal features that are implemented in the codebase but are 
   1. Backfill recent login events (if required) by replaying authentication audit logs or prompting affected users.
   2. Verify that the admin login history page respects role-based access and shows scoped results for non-staff viewers after the change.
 
+## Client analytics telemetry
+- **What exists:** The analytics library can enqueue page-view events and flush them to the `analytics_track` HTTP function when a tracker mounts in the client runtime.【F:apps/web/lib/analytics.ts†L1-L520】
+- **Status:** The root layout no longer mounts the analytics tracker component so page-view collection is paused while callable errors are investigated.【F:apps/web/app/layout.tsx†L1-L120】
+- **Remaining follow-up tasks:**
+  1. Fix the callable deployment or routing so the tracker can reach a healthy endpoint before re-enabling telemetry.
+  2. Reintroduce the tracker component (and any necessary guards) once the backend is stable, ensuring failures surface as console warnings instead of noisy errors.
+
 ## CRM navigation (`/crm`)
 - **What exists:** A dedicated CRM hub exposes links to leads, groups, opportunities, proposals, and quote requests for staff or client admins.【F:apps/web/app/crm/page.tsx†L1-L36】
 - **Status:** The admin dashboard quick links now surface the CRM area under a single “CRM” link, and the franchise portal highlights the filtered leads view without referencing a separate workspace button.【F:apps/web/app/admin/ClientPage.tsx†L236-L287】【F:apps/web/app/franchise/ClientPage.tsx†L912-L977】
