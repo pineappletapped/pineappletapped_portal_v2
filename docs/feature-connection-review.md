@@ -12,7 +12,7 @@ This note captures portal features that are implemented in the codebase but are 
 
 ## Login history telemetry
 - **What exists:** A callable `recordLogin` function appends login events to the `loginHistory` collection, and the admin login history screen lists these events with timestamps and user email resolution.【F:functions/src/index.ts†L6675-L6688】【F:apps/web/app/admin/login-history/ClientPage.tsx†L1-L73】
-- **Status:** Login telemetry now runs from a global session listener so every authenticated portal mounts the `recordLogin` callable during auth initialisation, regardless of the landing page.【F:apps/web/app/layout.tsx†L6-L47】【F:apps/web/components/LoginTelemetryListener.tsx†L1-L7】【F:apps/web/hooks/useLoginTelemetry.ts†L1-L79】
+- **Status:** Login telemetry is currently disabled in the portal; the global session listener and supporting client hook were removed after repeated `recordLogin` errors to stabilise the checkout and browsing experience.【F:apps/web/app/layout.tsx†L1-L120】
 - **Remaining follow-up tasks:**
   1. Backfill recent login events (if required) by replaying authentication audit logs or prompting affected users.
   2. Verify that the admin login history page respects role-based access and shows scoped results for non-staff viewers after the change.
