@@ -22,16 +22,20 @@ import {
   useMediaQuery,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
-import AssessmentOutlinedIcon from '@mui/icons-material/AssessmentOutlined';
 import CalendarMonthOutlinedIcon from '@mui/icons-material/CalendarMonthOutlined';
+import CollectionsBookmarkOutlinedIcon from '@mui/icons-material/CollectionsBookmarkOutlined';
 import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
 import Diversity3OutlinedIcon from '@mui/icons-material/Diversity3Outlined';
+import FlagOutlinedIcon from '@mui/icons-material/FlagOutlined';
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
-import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
-import LayersOutlinedIcon from '@mui/icons-material/LayersOutlined';
+import GroupOutlinedIcon from '@mui/icons-material/GroupOutlined';
 import MailOutlineOutlinedIcon from '@mui/icons-material/MailOutlineOutlined';
 import MenuIcon from '@mui/icons-material/Menu';
 import CloseIcon from '@mui/icons-material/Close';
+import PersonOutlineOutlinedIcon from '@mui/icons-material/PersonOutlineOutlined';
+import QueryStatsOutlinedIcon from '@mui/icons-material/QueryStatsOutlined';
+import SchoolOutlinedIcon from '@mui/icons-material/SchoolOutlined';
+import ViewTimelineOutlinedIcon from '@mui/icons-material/ViewTimelineOutlined';
 import Breadcrumbs from './Breadcrumbs';
 import { auth, ensureFirebase } from '@/lib/firebase';
 
@@ -73,13 +77,18 @@ type PortalConfig = {
 const CLIENT_SEGMENTS = [
   'dashboard',
   'projects',
-  'orders',
   'bookings',
+  'orders',
   'emails',
   'analytics',
   'orgs',
   'training',
   'tasks',
+  'asset-library',
+  'planning',
+  'messages',
+  'profile',
+  'team',
 ];
 
 const isClientPath = (pathname: string) => {
@@ -124,23 +133,33 @@ const PORTAL_CONFIGS: PortalConfig[] = [
         items: [
           { label: 'Dashboard', href: '/dashboard', icon: DashboardOutlinedIcon, exact: true },
           { label: 'Projects', href: '/projects', icon: FolderOutlinedIcon },
-          { label: 'Bookings', href: '/bookings', icon: CalendarMonthOutlinedIcon },
+          { label: 'Organisations', href: '/orgs', icon: Diversity3OutlinedIcon },
+          { label: 'Asset library', href: '/asset-library', icon: CollectionsBookmarkOutlinedIcon },
+          { label: 'Training', href: '/training', icon: SchoolOutlinedIcon },
         ],
       },
       {
-        heading: 'Collaboration',
+        heading: 'Planning',
         items: [
-          { label: 'Shared inbox', href: '/emails', icon: MailOutlineOutlinedIcon },
-          { label: 'Analytics', href: '/analytics', icon: AssessmentOutlinedIcon },
-          { label: 'Content planner', href: '/dashboard/content-planner', icon: GridViewOutlinedIcon },
-          { label: 'Organisations', href: '/orgs', icon: Diversity3OutlinedIcon },
+          { label: 'Social calendar', href: '/planning/social-calendar', icon: CalendarMonthOutlinedIcon },
+          { label: 'Social analytics', href: '/planning/social-analytics', icon: QueryStatsOutlinedIcon },
+          { label: 'Goals', href: '/planning/goals', icon: FlagOutlinedIcon },
+          { label: 'Content planner', href: '/planning/content-planner', icon: ViewTimelineOutlinedIcon },
+        ],
+      },
+      {
+        heading: 'Contact',
+        items: [
+          { label: 'Messages', href: '/messages', icon: MailOutlineOutlinedIcon },
+          { label: 'Profile', href: '/profile', icon: PersonOutlineOutlinedIcon },
+          { label: 'Team', href: '/team', icon: GroupOutlinedIcon },
         ],
       },
     ],
     quickActions: [
-      { label: 'Request new project', href: '/projects/new', icon: LayersOutlinedIcon },
-      { label: 'Book a shoot', href: '/bookings', icon: CalendarMonthOutlinedIcon },
-      { label: 'Open shared inbox', href: '/emails', icon: MailOutlineOutlinedIcon },
+      { label: 'Browse asset library', href: '/asset-library', icon: CollectionsBookmarkOutlinedIcon },
+      { label: 'Plan social calendar', href: '/planning/social-calendar', icon: CalendarMonthOutlinedIcon },
+      { label: 'Send a message', href: '/messages', icon: MailOutlineOutlinedIcon },
     ],
     surface: 'card',
   },
