@@ -72,12 +72,14 @@ export async function POST(request: Request) {
 
   const authHeader = request.headers.get("authorization");
   const idToken = parseBearerToken(authHeader);
+  const hostHeader = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
 
   try {
     const result = await invokeHttpFunction<Record<string, unknown> | null>("analytics_track", {
       body: payload,
       idToken,
       allowRelativeFallback: false,
+      host: hostHeader,
     });
 
     if (!result.ok) {

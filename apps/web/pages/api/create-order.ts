@@ -46,6 +46,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     ? req.headers.authorization[0]
     : req.headers.authorization ?? null;
   const idToken = extractBearerToken(bearerHeader);
+  const hostHeader =
+    (Array.isArray(req.headers["x-forwarded-host"]) ? req.headers["x-forwarded-host"][0] : req.headers["x-forwarded-host"]) ??
+    (Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host) ??
+    null;
 
   try {
     const result = await invokeHttpFunction<Record<string, unknown> | null>("createOrder", {
@@ -53,6 +57,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       idToken,
       includeOverrides: false,
       allowRelativeFallback: false,
+      host: hostHeader,
     });
 
     const payload =
