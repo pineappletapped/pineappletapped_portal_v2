@@ -201,47 +201,32 @@ export const resolveHostedAppContext = (
     searchIndex = candidate + 2;
   }
 
+  let primaryFragment: string | null = null;
   if (separatorIndex >= 0) {
-    const projectFragment = trackProjectFragment(
-      subdomain.slice(separatorIndex + 2),
-    );
-    if (projectFragment) {
-      appendRegionalBases(addBase, regionCandidate, projectFragment);
-    }
-
-    const legacyFragment = trackProjectFragment(
-      subdomain.slice(0, separatorIndex),
-    );
-    if (legacyFragment) {
-      appendRegionalBases(addBase, regionCandidate, legacyFragment);
-    }
+    primaryFragment = trackProjectFragment(subdomain.slice(separatorIndex + 2));
+    trackProjectFragment(subdomain.slice(0, separatorIndex));
   } else {
-    const fragment = trackProjectFragment(subdomain);
-    if (fragment) {
-      appendRegionalBases(addBase, regionCandidate, fragment);
+    primaryFragment = trackProjectFragment(subdomain);
+  }
+
+  const regionTargets = new Set<string>();
+  if (regionCandidate) {
+    regionTargets.add(regionCandidate);
+  }
+  REGION_FALLBACKS.forEach((region) => regionTargets.add(region));
+
+  if (primaryFragment) {
+    for (const region of regionTargets) {
+      appendRegionalBases(addBase, region, primaryFragment);
+      addBase(
+        `https://${trimmed}/_firebase/functions/v2/projects/${primaryFragment}/locations/${region}/functions`,
+      );
     }
   }
 
-  const hostedApiVersions = ["v2", "v1", "v1beta"] as const;
-
-  for (const apiVersion of hostedApiVersions) {
-    const versionedBase = `https://${trimmed}/_firebase/functions/${apiVersion}`;
-    addBase(versionedBase);
-    addBase(`${versionedBase}/${regionCandidate}`);
-  }
-
-  if (projectFragments.size > 0) {
-    const regionTargets = new Set([regionCandidate, ...REGION_FALLBACKS]);
-
-    for (const projectFragment of projectFragments) {
-      for (const region of regionTargets) {
-        for (const apiVersion of hostedApiVersions) {
-          addBase(
-            `https://${trimmed}/_firebase/functions/${apiVersion}/projects/${projectFragment}/locations/${region}/functions`,
-          );
-        }
-      }
-    }
+  addBase(`https://${trimmed}/_firebase/functions/v2`);
+  if (regionCandidate) {
+    addBase(`https://${trimmed}/_firebase/functions/v2/${regionCandidate}`);
   }
 
   return {
