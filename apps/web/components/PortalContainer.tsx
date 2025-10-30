@@ -185,7 +185,7 @@ function getUserInitials(name: string): string {
   return initials || 'PT';
 }
 
-const drawerWidth = 304;
+const drawerWidth = 264;
 
 export default function PortalContainer({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() ?? '/';
@@ -239,7 +239,7 @@ export default function PortalContainer({ children }: { children: React.ReactNod
         bgcolor: 'background.paper',
       }}
     >
-      <Box sx={{ px: 3, py: 4, borderBottom: '1px solid', borderColor: 'divider' }}>
+      <Box sx={{ px: 3, py: 3, borderBottom: '1px solid', borderColor: 'divider' }}>
         <Stack direction="row" spacing={2} alignItems="center">
           <Avatar
             variant="rounded"
@@ -247,9 +247,9 @@ export default function PortalContainer({ children }: { children: React.ReactNod
               bgcolor: 'primary.main',
               color: 'primary.contrastText',
               fontWeight: 600,
-              width: 52,
-              height: 52,
-              fontSize: 20,
+              width: 48,
+              height: 48,
+              fontSize: 19,
             }}
           >
             {portalConfig.brandMark}
@@ -269,8 +269,8 @@ export default function PortalContainer({ children }: { children: React.ReactNod
           </Typography>
         ) : null}
       </Box>
-      <Box sx={{ flex: 1, overflowY: 'auto', px: 3, py: 4 }}>
-        <Stack spacing={4}>
+      <Box sx={{ flex: 1, overflowY: 'auto', px: 3, py: 3 }}>
+        <Stack spacing={3}>
           {navSections.map((section) => (
             <Box key={section.heading}>
               <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1.5, letterSpacing: '0.08em' }}>
@@ -289,7 +289,7 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                       onClick={() => setMobileNavOpen(false)}
                       sx={{
                         borderRadius: 2,
-                        mb: 0.5,
+                        mb: 0.25,
                         '&.Mui-selected': {
                           bgcolor: 'primary.main',
                           color: 'primary.contrastText',
@@ -299,7 +299,7 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                         },
                       }}
                     >
-                      <ListItemIcon sx={{ minWidth: 36, color: 'text.secondary' }}>
+                      <ListItemIcon sx={{ minWidth: 32, color: 'text.secondary' }}>
                         <ItemIcon fontSize="small" />
                       </ListItemIcon>
                       <ListItemText primary={item.label} primaryTypographyProps={{ fontWeight: active ? 600 : 500 }} />
@@ -317,14 +317,14 @@ export default function PortalContainer({ children }: { children: React.ReactNod
   const quickActions = isAdminPortal ? [] : (portalConfig.quickActions ?? []);
 
   return (
-    <Box sx={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', py: { xs: 4, md: 6 } }}>
-      <Container maxWidth="xl" sx={{ display: 'flex', gap: 4 }}>
+    <Box sx={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', py: { xs: 3, md: 4 } }}>
+      <Container maxWidth="xl" sx={{ display: 'flex', gap: { xs: 3, lg: 3.5 } }}>
         {hasNavigation && isLgUp ? (
           <Box component="aside" sx={{ width: drawerWidth, flexShrink: 0 }}>
             <Paper sx={{ height: '100%', overflow: 'hidden' }}>{navContent}</Paper>
           </Box>
         ) : null}
-        <Box component="main" sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <Box component="main" sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
           <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ display: { lg: 'none' } }}>
             {hasNavigation ? (
               <IconButton
@@ -340,10 +340,10 @@ export default function PortalContainer({ children }: { children: React.ReactNod
           </Stack>
 
           {!isAdminPortal ? (
-            <Paper sx={{ p: { xs: 3, md: 4 }, position: 'relative', overflow: 'hidden' }}>
+            <Paper sx={{ p: { xs: 2.5, md: 3.5 }, position: 'relative', overflow: 'hidden' }}>
               <Stack
                 direction={{ xs: 'column', lg: 'row' }}
-                spacing={4}
+                spacing={3}
                 justifyContent="space-between"
                 alignItems="flex-start"
               >
@@ -362,8 +362,8 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                   variant="outlined"
                   sx={{
                     borderRadius: 3,
-                    px: 3,
-                    py: 2.5,
+                    px: 2.5,
+                    py: 2,
                     display: 'flex',
                     alignItems: 'center',
                     gap: 2,
@@ -385,7 +385,7 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                 </Paper>
               </Stack>
               {quickActions.length > 0 ? (
-                <Grid container spacing={2} sx={{ mt: 3 }}>
+                <Grid container spacing={2} sx={{ mt: 2.5 }}>
                   {quickActions.map((action) => {
                     const ActionIcon = action.icon;
                     return (
@@ -397,11 +397,11 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'space-between',
-                            px: 3,
-                            py: 2.5,
+                            px: 2.5,
+                            py: 2.25,
                             textDecoration: 'none',
                             color: 'text.primary',
-                            borderRadius: 3,
+                            borderRadius: 2.5,
                             transition: 'all 0.2s ease',
                             '&:hover': {
                               borderColor: 'primary.main',
