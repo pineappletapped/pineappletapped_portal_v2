@@ -1,5 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
+import { resolveCallableFunctionIds } from "@/lib/callableEndpoints";
+
 import { applyApiCors, handleOptions } from "./_utils/cors";
 
 const extractBearerToken = (value: string | null | undefined): string | null => {
@@ -106,7 +108,10 @@ const extractHostedProjectFragment = (subdomain: string): string | null => {
   return subdomain.replace(/^-+/, "") || null;
 };
 
-const buildHostedAppEndpoints = (host: string | null | undefined): string[] => {
+const buildHostedAppEndpoints = (
+  host: string | null | undefined,
+  functionNames: string[],
+): string[] => {
   const sanitisedHost = sanitiseHost(host);
   if (!sanitisedHost || !sanitisedHost.endsWith(HOSTED_APP_SUFFIX)) {
     return [];
@@ -123,28 +128,55 @@ const buildHostedAppEndpoints = (host: string | null | undefined): string[] => {
 
   const endpoints = new Set<string>();
 
-  endpoints.add(`https://${sanitisedHost}/_firebase/functions/v1/createOrder`);
-  endpoints.add(`https://${sanitisedHost}/_firebase/functions/v2/createOrder`);
-  endpoints.add(`https://${sanitisedHost}/_firebase/functions/v2/${region}/createOrder`);
+  for (const functionName of functionNames) {
+    endpoints.add(`https://${sanitisedHost}/_firebase/functions/v1/${functionName}`);
+    endpoints.add(`https://${sanitisedHost}/_firebase/functions/v2/${functionName}`);
+    endpoints.add(`https://${sanitisedHost}/_firebase/functions/v2/${region}/${functionName}`);
+  }
 
   if (fragment) {
-    endpoints.add(`https://${region}-${fragment}.cloudfunctions.net/createOrder`);
-    endpoints.add(`https://${region}-${fragment}.cloudfunctions.app/createOrder`);
+    for (const functionName of functionNames) {
+      endpoints.add(`https://${region}-${fragment}.cloudfunctions.net/${functionName}`);
+      endpoints.add(`https://${region}-${fragment}.cloudfunctions.app/${functionName}`);
+    }
   }
 
   return Array.from(endpoints);
 };
 
-const LEGACY_ENDPOINTS = [
-  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net/createOrder",
-  "https://europe-west4-pineapple-tapped---portal.cloudfunctions.net/createOrder",
-  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.app/createOrder",
-  "https://europe-west4-pineapple-tapped---portal.cloudfunctions.app/createOrder",
-  "https://europe-west2-ptfbportalbackend.cloudfunctions.net/createOrder",
-  "https://europe-west4-ptfbportalbackend.cloudfunctions.net/createOrder",
-  "https://europe-west2-ptfbportalbackend.cloudfunctions.app/createOrder",
-  "https://europe-west4-ptfbportalbackend.cloudfunctions.app/createOrder",
+const LEGACY_BASES = [
+  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net",
+  "https://europe-west4-pineapple-tapped---portal.cloudfunctions.net",
+  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.app",
+  "https://europe-west4-pineapple-tapped---portal.cloudfunctions.app",
+  "https://europe-west2-ptfbportalbackend.cloudfunctions.net",
+  "https://europe-west4-ptfbportalbackend.cloudfunctions.net",
+  "https://europe-west2-ptfbportalbackend.cloudfunctions.app",
+  "https://europe-west4-ptfbportalbackend.cloudfunctions.app",
 ];
+
+const collectFunctionNames = (): string[] => {
+  const names = new Set<string>();
+  const append = (candidate: string | null | undefined) => {
+    if (!candidate) {
+      return;
+    }
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+      return;
+    }
+    names.add(trimmed);
+  };
+
+  resolveCallableFunctionIds("createOrder").forEach((identifier) => append(identifier));
+
+  append("createOrder");
+  append("default-createOrder");
+  append("ptfbportal-createOrder");
+  append("ptfbportalbackend-createOrder");
+
+  return Array.from(names);
+};
 
 const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504, 521, 522, 523]);
 
@@ -158,6 +190,7 @@ interface HttpAttemptResult<T = unknown> {
 
 const collectCreateOrderEndpoints = (hostHeader: string | null): string[] => {
   const seen = new Set<string>();
+  const functionNames = collectFunctionNames();
   const push = (candidate: string | null | undefined) => {
     const normalised = normaliseEndpoint(candidate);
     if (!normalised || seen.has(normalised)) {
@@ -167,8 +200,12 @@ const collectCreateOrderEndpoints = (hostHeader: string | null): string[] => {
   };
 
   collectEnvOverrides().forEach((endpoint) => push(endpoint));
-  buildHostedAppEndpoints(hostHeader).forEach((endpoint) => push(endpoint));
-  LEGACY_ENDPOINTS.forEach((endpoint) => push(endpoint));
+  buildHostedAppEndpoints(hostHeader, functionNames).forEach((endpoint) => push(endpoint));
+  for (const base of LEGACY_BASES) {
+    for (const functionName of functionNames) {
+      push(`${base}/${functionName}`);
+    }
+  }
 
   return Array.from(seen);
 };
