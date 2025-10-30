@@ -72,6 +72,8 @@ type PortalConfig = {
   navigation?: NavigationSection[];
   quickActions?: QuickAction[];
   surface: 'card' | 'plain';
+  showSidebarHeading?: boolean;
+  showHero?: boolean;
 };
 
 const CLIENT_SEGMENTS = [
@@ -162,6 +164,8 @@ const PORTAL_CONFIGS: PortalConfig[] = [
       { label: 'Send a message', href: '/messages', icon: MailOutlineOutlinedIcon },
     ],
     surface: 'card',
+    showSidebarHeading: false,
+    showHero: false,
   },
 ];
 
@@ -178,6 +182,8 @@ const DEFAULT_CONFIG: PortalConfig = {
   navigation: [],
   quickActions: [],
   surface: 'card',
+  showSidebarHeading: true,
+  showHero: true,
 };
 
 function isItemActive(pathname: string, item: NavigationItem): boolean {
@@ -216,6 +222,8 @@ export default function PortalContainer({ children }: { children: React.ReactNod
     [portalConfig.navigation]
   );
   const isAdminPortal = portalConfig.id === 'admin';
+  const showSidebarHeading = portalConfig.showSidebarHeading !== false;
+  const showHero = !isAdminPortal && portalConfig.showHero !== false;
   const hasNavigation = !isAdminPortal && navSections.length > 0;
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [userName, setUserName] = useState<string>('Workspace member');
@@ -258,37 +266,46 @@ export default function PortalContainer({ children }: { children: React.ReactNod
         bgcolor: 'background.paper',
       }}
     >
-      <Box sx={{ px: 3, py: 3, borderBottom: '1px solid', borderColor: 'divider' }}>
-        <Stack direction="row" spacing={2} alignItems="center">
-          <Avatar
-            variant="rounded"
-            sx={{
-              bgcolor: 'primary.main',
-              color: 'primary.contrastText',
-              fontWeight: 600,
-              width: 48,
-              height: 48,
-              fontSize: 19,
-            }}
-          >
-            {portalConfig.brandMark}
-          </Avatar>
-          <Box>
-            <Typography variant="overline" color="secondary.main" sx={{ letterSpacing: '0.28em' }}>
-              {portalConfig.sidebarTitle}
+      {showSidebarHeading ? (
+        <Box sx={{ px: 3, py: 3, borderBottom: '1px solid', borderColor: 'divider' }}>
+          <Stack direction="row" spacing={2} alignItems="center">
+            <Avatar
+              variant="rounded"
+              sx={{
+                bgcolor: 'primary.main',
+                color: 'primary.contrastText',
+                fontWeight: 600,
+                width: 48,
+                height: 48,
+                fontSize: 19,
+              }}
+            >
+              {portalConfig.brandMark}
+            </Avatar>
+            <Box>
+              <Typography variant="overline" color="secondary.main" sx={{ letterSpacing: '0.28em' }}>
+                {portalConfig.sidebarTitle}
+              </Typography>
+              <Typography variant="h6" color="text.primary">
+                {portalConfig.sidebarSubtitle}
+              </Typography>
+            </Box>
+          </Stack>
+          {portalConfig.sidebarCopy ? (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+              {portalConfig.sidebarCopy}
             </Typography>
-            <Typography variant="h6" color="text.primary">
-              {portalConfig.sidebarSubtitle}
-            </Typography>
-          </Box>
-        </Stack>
-        {portalConfig.sidebarCopy ? (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-            {portalConfig.sidebarCopy}
-          </Typography>
-        ) : null}
-      </Box>
-      <Box sx={{ flex: 1, overflowY: 'auto', px: 3, py: 3 }}>
+          ) : null}
+        </Box>
+      ) : null}
+      <Box
+        sx={{
+          flex: 1,
+          overflowY: 'auto',
+          px: 3,
+          py: showSidebarHeading ? 3 : 2.5,
+        }}
+      >
         <Stack spacing={3}>
           {navSections.map((section) => (
             <Box key={section.heading}>
@@ -358,7 +375,7 @@ export default function PortalContainer({ children }: { children: React.ReactNod
             )}
           </Stack>
 
-          {!isAdminPortal ? (
+          {showHero ? (
             <Paper sx={{ p: { xs: 2.5, md: 3.5 }, position: 'relative', overflow: 'hidden' }}>
               <Stack
                 direction={{ xs: 'column', lg: 'row' }}
@@ -440,6 +457,43 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                 </Grid>
               ) : null}
             </Paper>
+          ) : null}
+
+          {!showHero && quickActions.length > 0 ? (
+            <Grid container spacing={2}>
+              {quickActions.map((action) => {
+                const ActionIcon = action.icon;
+                return (
+                  <Grid item xs={12} sm={6} lg={4} key={action.href}>
+                    <Paper
+                      component={NextLink}
+                      href={action.href}
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        px: 2.5,
+                        py: 2.25,
+                        textDecoration: 'none',
+                        color: 'text.primary',
+                        borderRadius: 2.5,
+                        transition: 'all 0.2s ease',
+                        '&:hover': {
+                          borderColor: 'primary.main',
+                          color: 'primary.main',
+                          transform: 'translateY(-2px)',
+                        },
+                      }}
+                    >
+                      <Typography variant="body1" fontWeight={600}>
+                        {action.label}
+                      </Typography>
+                      <ActionIcon fontSize="small" />
+                    </Paper>
+                  </Grid>
+                );
+              })}
+            </Grid>
           ) : null}
 
           <Box
