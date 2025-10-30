@@ -68,6 +68,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.status(result.status).json(payload ?? null);
   } catch (error) {
     if (error instanceof HttpFunctionInvocationError) {
+      const attemptsSummary = error.attempts.length ? error.attempts.join(" | ") : "<none>";
+      console.error("create-order invocation attempts failed", {
+        host: hostHeader,
+        attempts: error.attempts,
+        summary: attemptsSummary,
+      });
       sendJson(res, 502, {
         error: "createOrder unavailable",
         code: "http-function-error",
