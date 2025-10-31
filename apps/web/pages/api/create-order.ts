@@ -32,6 +32,15 @@ interface CheckoutItemPayload {
   exhibition: unknown;
   campaignBooking: unknown;
   organiser: unknown;
+  organisation: CheckoutOrganisationPayload | null;
+}
+
+interface CheckoutOrganisationPayload {
+  id: string | null;
+  name: string | null;
+  source: string | null;
+  brandLogoUrl: string | null;
+  brandColors: string[];
 }
 
 interface CheckoutKitPayload {
@@ -57,6 +66,7 @@ interface CheckoutOrderPayload {
   voucher: string | null;
   leadSource: string | null;
   organisers: unknown[];
+  organisation: CheckoutOrganisationPayload | null;
 }
 
 interface CheckoutPricingPayload {
@@ -96,6 +106,36 @@ const normaliseString = (value: unknown): string => {
 const optionalString = (value: unknown): string | null => {
   const normalised = normaliseString(value);
   return normalised.length > 0 ? normalised : null;
+};
+
+const normaliseOrganisation = (input: unknown): CheckoutOrganisationPayload | null => {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+  const record = input as Record<string, unknown>;
+  const id = optionalString(record.id);
+  const name = optionalString(record.name);
+  const source = optionalString(record.source);
+  const brandLogoUrl = optionalString(record.brandLogoUrl);
+  const brandColors = Array.isArray(record.brandColors)
+    ? record.brandColors
+        .map((colour) => optionalString(colour))
+        .filter((colour): colour is string => Boolean(colour))
+        .map((colour) => {
+          const upper = colour.toUpperCase();
+          return upper.startsWith("#") ? upper : `#${upper}`;
+        })
+    : [];
+  if (!id && !name && !source && !brandLogoUrl && brandColors.length === 0) {
+    return null;
+  }
+  return {
+    id: id ?? null,
+    name: name ?? null,
+    source: source ?? null,
+    brandLogoUrl: brandLogoUrl ?? null,
+    brandColors: Array.from(new Set(brandColors)),
+  };
 };
 
 const ensureNumber = (value: unknown, fallback = 0): number => {
@@ -177,6 +217,7 @@ const normaliseItems = (input: unknown): CheckoutItemPayload[] => {
         exhibition: record.exhibition ?? null,
         campaignBooking: record.campaignBooking ?? null,
         organiser: record.organiser ?? null,
+        organisation: normaliseOrganisation(record.organisation),
       } satisfies CheckoutItemPayload;
     })
     .filter((item): item is CheckoutItemPayload => Boolean(item));
@@ -362,6 +403,7 @@ const parseCheckoutRequest = (body: unknown): NormalisedCheckoutData | null => {
     voucher: optionalString(orderRecord.voucher),
     leadSource: optionalString(orderRecord.leadSource) ?? "hq",
     organisers: Array.isArray(orderRecord.organisers) ? orderRecord.organisers : [],
+    organisation: normaliseOrganisation(orderRecord.organisation),
   };
 
   const pricingPayload: CheckoutPricingPayload = {
@@ -499,6 +541,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const emailFromToken = optionalString(auth.email);
     const customerEmail = parsedBody.order.userEmail ?? emailFromToken;
+    const organisationInfo = parsedBody.order.organisation ?? null;
+    const companyName =
+      optionalString(parsedBody.order.companyName) ??
+      optionalString(organisationInfo?.name) ??
+      null;
 
     const price = Math.max(0, toCurrency(parsedBody.pricing.grandTotal));
     const netTotal = Math.max(0, toCurrency(parsedBody.pricing.subtotal));
@@ -563,7 +610,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       userId: auth.uid,
       userEmail: customerEmail,
       customerName,
-      companyName: parsedBody.order.companyName,
+      companyName,
       location: parsedBody.order.location,
       postalCode: parsedBody.order.postalCode,
       kitReservationStatus: parsedBody.order.kitReservationStatus,
@@ -573,6 +620,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       source: "checkout",
       createdAt: timestamp,
       updatedAt: timestamp,
+      organisationId: organisationInfo?.id ?? null,
+      organisationName: organisationInfo?.name ?? companyName,
+      organisationSource: organisationInfo?.source ?? null,
+      organisationBrandLogoUrl: organisationInfo?.brandLogoUrl ?? null,
+      organisationBrandColors: organisationInfo?.brandColors ?? [],
     };
 
     try {
@@ -631,7 +683,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       voucherCode: parsedBody.pricing.voucherCode ?? parsedBody.order.voucher,
       leadSource: parsedBody.order.leadSource,
       customerName,
-      companyName: parsedBody.order.companyName,
+      companyName,
       location: parsedBody.order.location,
       postalCode: parsedBody.order.postalCode,
       projectId,
@@ -644,6 +696,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       createdAt: timestamp,
       updatedAt: timestamp,
       createdBy: auth.uid,
+      organisationId: organisationInfo?.id ?? null,
+      organisationName: organisationInfo?.name ?? companyName,
+      organisationSource: organisationInfo?.source ?? null,
+      organisationBrandLogoUrl: organisationInfo?.brandLogoUrl ?? null,
+      organisationBrandColors: organisationInfo?.brandColors ?? [],
     };
 
     try {

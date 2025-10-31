@@ -10,6 +10,13 @@ export interface CartItem {
   postalCode?: string | null;
   rentalTotal?: number | null;
   metadata?: Record<string, unknown> | null;
+  organisation?: {
+    id: string | null;
+    name: string;
+    source?: string | null;
+    brandLogoUrl?: string | null;
+    brandColors?: string[] | null;
+  } | null;
 }
 
 export interface Voucher {

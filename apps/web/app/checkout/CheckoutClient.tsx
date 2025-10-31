@@ -122,6 +122,29 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     (sum, i) => sum + (i.rentalTotal || 0) * i.quantity,
     0,
   );
+  const cartOrganisationName = useMemo(() => {
+    for (const item of items) {
+      const name =
+        typeof item.organisation?.name === "string"
+          ? item.organisation.name.trim()
+          : "";
+      if (name) {
+        return name;
+      }
+    }
+    return "";
+  }, [items]);
+  useEffect(() => {
+    if (!cartOrganisationName) {
+      return;
+    }
+    setCompany((prev) => {
+      if (prev.trim().length > 0) {
+        return prev;
+      }
+      return cartOrganisationName;
+    });
+  }, [cartOrganisationName]);
   const [discount, setDiscount] = useState(0);
   const router = useRouter();
   const stripePromise = useMemo(
@@ -609,7 +632,34 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             lineRole:
               item.organiser.exhibitorProductId && item.organiser.exhibitorProductId === item.id
                 ? ("exhibitor" as OrganiserLineRole)
-                : ("organiser" as OrganiserLineRole),
+            : ("organiser" as OrganiserLineRole),
+          }
+        : null;
+
+      const organisation = item.organisation
+        ? {
+            id:
+              typeof item.organisation.id === "string" && item.organisation.id.trim().length > 0
+                ? item.organisation.id.trim()
+                : null,
+            name:
+              typeof item.organisation.name === "string" && item.organisation.name.trim().length > 0
+                ? item.organisation.name.trim()
+                : null,
+            source:
+              typeof item.organisation.source === "string" && item.organisation.source.trim().length > 0
+                ? item.organisation.source.trim()
+                : null,
+            brandLogoUrl:
+              typeof item.organisation.brandLogoUrl === "string" &&
+              item.organisation.brandLogoUrl.trim().length > 0
+                ? item.organisation.brandLogoUrl.trim()
+                : null,
+            brandColors: Array.isArray(item.organisation.brandColors)
+              ? item.organisation.brandColors
+                  .map((colour) => (typeof colour === "string" ? colour.trim() : ""))
+                  .filter((colour) => colour.length > 0)
+              : [],
           }
         : null;
 
@@ -732,6 +782,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         coverage: item.coverage ?? null,
         campaignBooking,
         organiser,
+        organisation,
       };
     });
     const organiserSummary = Array.from(organiserMap.values()).map((entry) => ({
@@ -767,6 +818,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         ),
       ),
     );
+    const orderOrganisation = itemPayload.find(
+      (entry) => entry.organisation && (entry.organisation.name || entry.organisation.id),
+    )?.organisation ?? null;
+    const trimmedCompany = company.trim();
+    const resolvedCompanyName =
+      trimmedCompany.length > 0
+        ? trimmedCompany
+        : orderOrganisation?.name ?? null;
     return {
       items: itemPayload,
       kitItems: kitItemsPayload,
@@ -775,13 +834,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       kitReservationWarnings,
       userEmail: authEmail || email,
       customerName: name,
-      companyName: company || null,
+      companyName: resolvedCompanyName,
       location: location || null,
       postalCode: postalCode || null,
       projectName: projectName || null,
       voucher: voucher || null,
       leadSource: leadSourceValue,
       organisers: organiserSummary,
+      organisation: orderOrganisation,
     };
   }, [
     items,
@@ -854,6 +914,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             exhibition: item.exhibition ?? null,
             campaignBooking: item.campaignBooking,
             organiser: item.organiser,
+            organisation: item.organisation,
           })),
           kitItems: orderInput.kitItems.map((kit) => ({
             id: kit.id,
@@ -865,6 +926,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           kitReservationStatus: orderInput.kitReservationStatus,
           kitReservationWarnings: orderInput.kitReservationWarnings,
           organisers: orderInput.organisers,
+          organisation: orderInput.organisation,
         },
         pricing: pricingPayload,
       }),
