@@ -51,6 +51,7 @@ export const ADMIN_NAV_SECTIONS: AdminNavSection[] = [
       { label: 'Join Team Form', href: '/admin/join-team-steps' },
       { label: 'Franchise Network', href: '/admin/franchises' },
       { label: 'Training Library', href: '/admin/training' },
+      { label: 'Team Notice Board', href: '/admin/team-notice-board' },
     ],
   },
   {
@@ -77,7 +78,10 @@ export const ADMIN_NAV_SECTIONS: AdminNavSection[] = [
   },
   {
     title: 'Policies & Docs',
-    items: [{ label: 'Agreements & Policies', href: '/admin/agreements' }],
+    items: [
+      { label: 'Agreements & Policies', href: '/admin/agreements' },
+      { label: 'Insurance Cover', href: '/admin/insurance' },
+    ],
   },
   {
     title: 'Finance',
@@ -85,13 +89,13 @@ export const ADMIN_NAV_SECTIONS: AdminNavSection[] = [
   },
   {
     title: 'Reports',
-    items: [{ label: 'Analytics Dashboard', href: '/admin/analytics' }],
+    items: [{ label: 'Launch Analytics', href: '/admin/analytics' }],
   },
   {
     title: 'Logs & Comms',
     items: [
       { label: 'Audit Logs', href: '/admin/audit-logs' },
-      { label: 'Login History', href: '/admin/login-history' },
+      { label: 'Audit Login History', href: '/admin/login-history' },
       { label: 'Messages', href: '/admin/messages' },
     ],
   },
