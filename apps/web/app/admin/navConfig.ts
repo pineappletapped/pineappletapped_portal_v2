@@ -11,43 +11,92 @@ export interface AdminNavSection {
 
 export const ADMIN_NAV_SECTIONS: AdminNavSection[] = [
   {
-    title: 'Overview',
+    title: 'Orders & Projects',
     items: [
-      { label: 'Dashboard', href: '/admin', exact: true },
-      { label: 'Analytics', href: '/admin/analytics' },
-      { label: 'Login history', href: '/admin/login-history' },
-      { label: 'Audit logs', href: '/admin/audit-logs' },
+      { label: 'Manage Orders', href: '/admin/orders' },
+      { label: 'Project Management', href: '/admin/projects' },
+      { label: 'Manage Workflows', href: '/admin/workflows' },
+      { label: 'Quotes & Proposals', href: '/admin/proposals' },
+      { label: 'Risk Assessments & SOPs', href: '/admin/risk-assessments' },
+      { label: 'Manage Availability', href: '/admin/availability' },
+      { label: 'Routing Workflow', href: '/admin/availability/routing' },
     ],
   },
   {
-    title: 'Operations',
+    title: 'Products',
     items: [
-      { label: 'Projects', href: '/admin/projects' },
-      { label: 'Orders', href: '/admin/orders' },
-      { label: 'Bookings', href: '/admin/bookings' },
-      { label: 'Deliveries', href: '/admin/deliveries' },
-      { label: 'Products', href: '/admin/products' },
-      { label: 'Finance', href: '/admin/finance' },
+      { label: 'Manage Categories', href: '/admin/categories' },
+      { label: 'Product Management', href: '/admin/products' },
+      { label: 'Manage Modifiers', href: '/admin/modifiers' },
+      { label: 'Venue Library', href: '/admin/venues' },
     ],
   },
   {
-    title: 'Enablement',
+    title: 'Storage',
+    items: [{ label: 'Storage Automation', href: '/admin/storage' }],
+  },
+  {
+    title: 'Tools',
     items: [
-      { label: 'Marketing', href: '/admin/marketing' },
-      { label: 'Tools hub', href: '/admin/tools' },
-      { label: 'AI management', href: '/admin/ai-management' },
-      { label: 'Training', href: '/admin/training' },
-      { label: 'Email templates', href: '/admin/email-templates' },
-      { label: 'Voucher codes', href: '/admin/voucher-codes' },
+      { label: 'Production Tools', href: '/admin/tools' },
+      { label: 'QR Code Generator', href: '/admin/tools/qr-code-generator' },
+      { label: 'AI Management', href: '/admin/ai-management' },
     ],
   },
   {
-    title: 'People & coverage',
+    title: 'People',
     items: [
-      { label: 'Team', href: '/admin/team' },
-      { label: 'Franchises', href: '/admin/franchises' },
-      { label: 'Insurance', href: '/admin/insurance' },
-      { label: 'Clients', href: '/admin/users' },
+      { label: 'CRM', href: '/admin/users' },
+      { label: 'Manage Team', href: '/admin/team' },
+      { label: 'Join Team Form', href: '/admin/join-team-steps' },
+      { label: 'Franchise Network', href: '/admin/franchises' },
+      { label: 'Training Library', href: '/admin/training' },
     ],
+  },
+  {
+    title: 'Brand & Content',
+    items: [
+      { label: 'Brand Guidelines', href: '/admin/brand-guidelines' },
+      { label: 'Manage Client Logos', href: '/admin/client-logos' },
+      { label: 'Blog Management', href: '/admin/blog' },
+      { label: 'Website Design', href: '/admin/website-design' },
+      { label: 'Email Templates', href: '/admin/email-templates' },
+    ],
+  },
+  {
+    title: 'Marketing',
+    items: [
+      { label: 'Exhibitions', href: '/admin/exhibitions' },
+      { label: 'Content Planner', href: '/admin/marketing/content-planner' },
+      { label: 'Remarketing', href: '/admin/marketing/remarketing' },
+      { label: 'Affiliate Programme', href: '/admin/marketing/affiliates' },
+      { label: 'Voucher Management', href: '/admin/voucher-codes' },
+      { label: 'Email Schedules', href: '/admin/email-schedules' },
+      { label: 'HQ Social Manager', href: '/admin/social-manager' },
+    ],
+  },
+  {
+    title: 'Policies & Docs',
+    items: [{ label: 'Agreements & Policies', href: '/admin/agreements' }],
+  },
+  {
+    title: 'Finance',
+    items: [{ label: 'Finance & Expenses', href: '/admin/finance' }],
+  },
+  {
+    title: 'Reports',
+    items: [{ label: 'Analytics Dashboard', href: '/admin/analytics' }],
+  },
+  {
+    title: 'Logs & Comms',
+    items: [
+      { label: 'Audit Logs', href: '/admin/audit-logs' },
+      { label: 'Login History', href: '/admin/login-history' },
+      { label: 'Messages', href: '/admin/messages' },
+    ],
+  },
+  {
+    title: 'Equipment',
+    items: [{ label: 'Equipment Register', href: '/admin/equipment' }],
   },
 ];
