@@ -172,7 +172,7 @@ export default function AdminDeliveryFormClientPage() {
             </div>
             <div className="flex flex-col gap-2 sm:items-end">
               {projectIdParam ? (
-                <Link href={`/projects/${projectIdParam}`} className="btn btn-sm">
+                <Link href={`/admin/projects/${projectIdParam}`} className="btn btn-sm">
                   Open project workspace
                 </Link>
               ) : null}

@@ -1003,7 +1003,7 @@ export default function AdminProjectsPage() {
                                 </p>
                                 <p className="text-[11px] text-gray-500">Uploaded assets: {assetsUploaded}</p>
                                 <Link
-                                  href={`/projects/${p.id}/bookings`}
+                                  href={`/admin/projects/${p.id}#bookings`}
                                   className="mt-1 inline-flex text-[11px] font-medium text-blue-600 hover:underline"
                                 >
                                   Open booking page
@@ -1023,7 +1023,7 @@ export default function AdminProjectsPage() {
                       <button type="button" className="btn-sm btn-outline" onClick={() => setCallSheetProjectId(p.id)}>
                         Call sheet
                       </button>
-                      <Link href={`/projects/${p.id}`} className="btn-sm">
+                      <Link href={`/admin/projects/${p.id}`} className="btn-sm">
                         View
                       </Link>
                       {p.orderId && (
@@ -1090,7 +1090,7 @@ export default function AdminProjectsPage() {
                             Franchise: {franchiseLabel || 'Unassigned'}
                           </span>
                           <span>Shoot date: {formatDateDisplay(project.dueDate) || 'TBC'}</span>
-                          <Link href={`/projects/${project.id}`} className="btn-sm">
+                          <Link href={`/admin/projects/${project.id}`} className="btn-sm">
                             Open
                           </Link>
                         </div>
@@ -1168,7 +1168,7 @@ export default function AdminProjectsPage() {
                                 })}
                                 <div className="flex flex-wrap items-center gap-3">
                                   <Link
-                                    href={`/projects/${project.id}/bookings`}
+                                    href={`/admin/projects/${project.id}#bookings`}
                                     className="inline-flex w-max text-[11px] font-medium text-blue-600 hover:underline"
                                   >
                                     Manage bookings
