@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-import { FieldValue, type Firestore } from "firebase-admin/firestore";
+import { FieldValue, Timestamp, type Firestore } from "firebase-admin/firestore";
 import Stripe from "stripe";
 
 import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from "@/lib/firebase-admin";
@@ -10,6 +10,67 @@ import { applyApiCors, handleOptions } from "./_utils/cors";
 
 const ZERO_BALANCE_TOLERANCE = 0.005;
 const CURRENCY = "gbp";
+const ISO_DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+const parseDateCandidate = (value: unknown): Date | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const match = ISO_DATE_ONLY.exec(trimmed);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
+      return new Date(Date.UTC(year, month - 1, day));
+    }
+    return null;
+  }
+  const parsed = Date.parse(trimmed);
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+  return new Date(parsed);
+};
+
+const resolvePrimaryEventDate = (order: CheckoutOrderPayload): Date | null => {
+  let earliest: Date | null = null;
+
+  const consider = (candidate: unknown) => {
+    const parsed = parseDateCandidate(candidate);
+    if (!parsed) {
+      return;
+    }
+    if (!earliest || parsed.getTime() < earliest.getTime()) {
+      earliest = parsed;
+    }
+  };
+
+  order.items.forEach((item) => {
+    consider(item.date);
+    if (item.timeSlot && typeof item.timeSlot === "object") {
+      const slot = item.timeSlot as Record<string, unknown>;
+      consider(slot.start);
+      consider(slot.end);
+    }
+    if (item.campaignBooking && typeof item.campaignBooking === "object") {
+      const booking = item.campaignBooking as Record<string, unknown>;
+      consider(booking.slotStartAt);
+      consider(booking.slotEndAt);
+    }
+  });
+
+  order.kitItems.forEach((kit) => {
+    consider(kit.start);
+    consider(kit.end);
+  });
+
+  return earliest;
+};
 
 interface CheckoutItemPayload {
   id: string;
@@ -830,6 +891,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const hasZeroBalance =
       parsedBody.pricing.hasZeroBalance ?? Math.abs(price) <= ZERO_BALANCE_TOLERANCE;
     const primaryItem = parsedBody.order.items[0] ?? null;
+    const primaryEventDate = resolvePrimaryEventDate(parsedBody.order);
     const serviceId = primaryItem?.id ?? null;
     const serviceName =
       typeof primaryItem?.name === "string" && primaryItem.name.trim().length > 0
@@ -909,6 +971,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       customerWelcomePending: true,
       customerWelcomeAcknowledgedAt: null,
     };
+
+    if (primaryEventDate) {
+      const eventTimestamp = Timestamp.fromDate(primaryEventDate);
+      projectDocument.dueDate = eventTimestamp;
+      projectDocument.kickoffDate = eventTimestamp;
+      projectDocument.shootDate = eventTimestamp;
+    }
 
     try {
       await projectRef.set(projectDocument, { merge: false });
@@ -991,6 +1060,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       brandGuidelinesCompleted,
       brandGuidelinesHasAssets,
     };
+
+    if (primaryEventDate) {
+      orderDocument.shootDate = Timestamp.fromDate(primaryEventDate);
+    }
 
     try {
       await orderRef.set(orderDocument, { merge: false });

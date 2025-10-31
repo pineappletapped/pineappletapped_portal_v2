@@ -31,12 +31,16 @@ interface ProjectRecord {
   title?: string | null;
   userEmail?: string | null;
   userId?: string | null;
+  customerName?: string | null;
+  companyName?: string | null;
+  organisationName?: string | null;
   createdAt?: any;
   status?: string;
   ownerUid?: string | null;
   ownerName?: string | null;
   kickoffDate?: Timestamp | Date | null;
   dueDate?: Timestamp | Date | null;
+  shootDate?: Timestamp | Date | null;
   priority?: ProjectPriority | string | null;
   franchiseId?: string | null;
   franchiseTerritoryId?: string | null;
@@ -1064,6 +1068,33 @@ export default function AdminProjectsPage() {
                     const expanded = expandedProjects.includes(project.id);
                     const { franchiseLabel, territoryLabel, operator, hqIntake } =
                       resolveFranchiseContext(project);
+                    const projectTitle =
+                      typeof project.title === 'string' && project.title.trim().length > 0
+                        ? project.title.trim()
+                        : 'Untitled project';
+                    const clientName =
+                      typeof project.customerName === 'string' && project.customerName.trim().length > 0
+                        ? project.customerName.trim()
+                        : '';
+                    const customerEmail =
+                      typeof project.userEmail === 'string' && project.userEmail.trim().length > 0
+                        ? project.userEmail.trim()
+                        : '';
+                    const organisationName =
+                      typeof project.organisationName === 'string' && project.organisationName.trim().length > 0
+                        ? project.organisationName.trim()
+                        : typeof project.companyName === 'string' && project.companyName.trim().length > 0
+                          ? project.companyName.trim()
+                          : '';
+                    const clientDisplay = clientName || customerEmail || '—';
+                    const organisationDisplay = organisationName || '—';
+                    const shootDateDisplay =
+                      formatDateDisplay(project.shootDate ?? project.dueDate ?? project.kickoffDate) || 'TBC';
+                    const franchiseDisplay = hqIntake
+                      ? 'HQ'
+                      : franchiseLabel && franchiseLabel.length > 0
+                        ? franchiseLabel
+                        : 'Unassigned';
 
                     return (
                       <div
@@ -1075,23 +1106,42 @@ export default function AdminProjectsPage() {
                         e.dataTransfer.setData('text/plain', project.id);
                       }}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <button
-                          type="button"
-                          onClick={() => toggleProjectExpanded(project.id)}
-                          className="flex-1 text-left"
-                          aria-expanded={expanded}
-                        >
-                          <p className="font-medium text-sm">{project.title || 'Untitled'}</p>
-                          <p className="text-xs text-gray-600">{project.userEmail || ''}</p>
-                        </button>
-                        <div className="flex flex-col items-end gap-1 text-xs text-gray-500">
-                          <span className={franchiseLabel ? 'font-medium text-gray-700' : 'text-gray-400'}>
-                            Franchise: {franchiseLabel || 'Unassigned'}
-                          </span>
-                          <span>Shoot date: {formatDateDisplay(project.dueDate) || 'TBC'}</span>
+                      <div className="flex flex-col gap-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1">
+                            <p className="text-sm font-semibold text-gray-900">{projectTitle}</p>
+                            <dl className="mt-2 grid gap-1 text-xs text-gray-600">
+                              <div className="flex items-center justify-between gap-2">
+                                <dt className="text-gray-500">Client</dt>
+                                <dd className="text-right font-medium text-gray-700">{clientDisplay}</dd>
+                              </div>
+                              <div className="flex items-center justify-between gap-2">
+                                <dt className="text-gray-500">Organisation</dt>
+                                <dd className="text-right font-medium text-gray-700">{organisationDisplay}</dd>
+                              </div>
+                              <div className="flex items-center justify-between gap-2">
+                                <dt className="text-gray-500">Shoot date</dt>
+                                <dd className="text-right font-medium text-gray-700">{shootDateDisplay}</dd>
+                              </div>
+                              <div className="flex items-center justify-between gap-2">
+                                <dt className="text-gray-500">Franchise</dt>
+                                <dd className="text-right font-medium text-gray-700">{franchiseDisplay}</dd>
+                              </div>
+                            </dl>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => toggleProjectExpanded(project.id)}
+                            className="text-xs font-medium text-blue-600 hover:underline"
+                            aria-expanded={expanded}
+                          >
+                            {expanded ? 'Hide details' : 'View details'}
+                          </button>
+                        </div>
+                        <div className="flex items-center justify-between gap-2 text-xs text-gray-500">
+                          <span className="truncate">{customerEmail || '—'}</span>
                           <Link href={`/admin/projects/${project.id}`} className="btn-sm">
-                            Open
+                            Manage
                           </Link>
                         </div>
                       </div>
