@@ -20,6 +20,9 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@shared-config": [
+        "../../shared/config/hosting"
       ]
     },
     "incremental": true,

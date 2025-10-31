@@ -19,10 +19,11 @@ import {
   getCachedSocialServiceKey,
   setCachedSocialServiceKey,
 } from '@/lib/social-service-key-cache';
+import { PORTAL_PRIMARY_FUNCTION_BASE } from '@shared-config';
 
 const FUNCTIONS_BASE_URL =
   process.env.NEXT_PUBLIC_FUNCTIONS_BASE_URL ||
-  'https://europe-west2-pineapple-tapped---portal.cloudfunctions.app';
+  PORTAL_PRIMARY_FUNCTION_BASE;
 
 const SERVICE_KEY_CONFIG = createSecretConfig(
   process.env.SOCIAL_ACCOUNT_SERVICE_KEY_SECRET_NAME,

@@ -1,4 +1,12 @@
 
+import {
+  PORTAL_FUNCTION_BASE_URLS,
+  PORTAL_FUNCTION_HOST_SUFFIXES,
+  PORTAL_PRIMARY_FUNCTION_BASE,
+  PORTAL_PRIMARY_REGION,
+  buildFunctionBaseUrl,
+} from '@shared-config';
+
 const cleanEnv = (value?: string) => {
   if (!value) {
     return undefined;
@@ -41,14 +49,18 @@ const explicitFunctionsBaseUrl =
 const defaultFunctionsRegion =
   cleanEnv(process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_REGION) ||
   cleanEnv(process.env.FIREBASE_FUNCTIONS_REGION) ||
-  'europe-west2';
+  PORTAL_PRIMARY_REGION;
+
+const derivedProjectBases = projectId
+  ? PORTAL_FUNCTION_HOST_SUFFIXES.map((suffix) =>
+      buildFunctionBaseUrl(defaultFunctionsRegion, projectId, suffix),
+    )
+  : [];
 
 const defaultFunctionsBaseUrl =
   explicitFunctionsBaseUrl ||
-  (projectId ? `https://${defaultFunctionsRegion}-${projectId}.cloudfunctions.net` : undefined) ||
-  (projectId ? `https://${defaultFunctionsRegion}-${projectId}.cloudfunctions.app` : undefined) ||
-  `https://${defaultFunctionsRegion}-pineapple-tapped---portal.cloudfunctions.net` ||
-  `https://${defaultFunctionsRegion}-pineapple-tapped---portal.cloudfunctions.app`;
+  [...derivedProjectBases, ...PORTAL_FUNCTION_BASE_URLS].find((base) => base) ||
+  PORTAL_PRIMARY_FUNCTION_BASE;
 
 const firebaseProjectId = projectId;
 const functionsBaseUrl = defaultFunctionsBaseUrl;

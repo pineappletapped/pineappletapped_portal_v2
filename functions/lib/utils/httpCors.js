@@ -1,22 +1,12 @@
-const HOSTED_APP_ORIGIN = 'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app';
-const PRIMARY_FUNCTION_ORIGINS = [
-    'https://europe-west2-pineapple-tapped---portal.cloudfunctions.app',
-    'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net',
-];
-const SECONDARY_FUNCTION_ORIGINS = [
-    'https://europe-west2-ptfbportalbackend.cloudfunctions.app',
-    'https://europe-west2-ptfbportalbackend.cloudfunctions.net',
-];
-const LOCAL_DEVELOPMENT_ORIGINS = ['http://localhost:3000', 'http://localhost:5173'];
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { PORTAL_DEFAULT_CORS_ORIGINS } = require('../../shared/config/hosting.js');
 const parseEnvOrigins = (raw) => raw
     ?.split(',')
     .map((value) => value.trim())
     .filter((value) => value.length > 0) ?? [];
 const ALLOW_ORIGINS = new Set([
-    HOSTED_APP_ORIGIN,
-    ...PRIMARY_FUNCTION_ORIGINS,
-    ...SECONDARY_FUNCTION_ORIGINS,
-    ...LOCAL_DEVELOPMENT_ORIGINS,
+    ...PORTAL_DEFAULT_CORS_ORIGINS,
     ...parseEnvOrigins(process.env.ALLOWED_CORS_ORIGINS),
 ]);
 const DEFAULT_ALLOW_HEADERS = 'Content-Type, Authorization';

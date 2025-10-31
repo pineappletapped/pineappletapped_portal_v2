@@ -1,17 +1,4 @@
-const HOSTED_APP_ORIGIN =
-  'https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app';
-
-const PRIMARY_FUNCTION_ORIGINS = [
-  'https://europe-west2-pineapple-tapped---portal.cloudfunctions.app',
-  'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net',
-];
-
-const SECONDARY_FUNCTION_ORIGINS = [
-  'https://europe-west2-ptfbportalbackend.cloudfunctions.app',
-  'https://europe-west2-ptfbportalbackend.cloudfunctions.net',
-];
-
-const LOCAL_DEVELOPMENT_ORIGINS = ['http://localhost:3000', 'http://localhost:5173'];
+import { PORTAL_DEFAULT_CORS_ORIGINS } from '@shared-config';
 
 const DEFAULT_ALLOW_HEADERS = 'Content-Type, Authorization';
 const ALLOW_METHODS = 'POST, OPTIONS';
@@ -24,11 +11,10 @@ const splitEnvList = (value?: string | null) =>
     .filter((entry) => entry.length > 0) ?? [];
 
 const ALLOWED_ORIGINS = new Set<string>([
-  HOSTED_APP_ORIGIN,
-  ...PRIMARY_FUNCTION_ORIGINS,
-  ...SECONDARY_FUNCTION_ORIGINS,
-  ...LOCAL_DEVELOPMENT_ORIGINS,
-  ...splitEnvList(process.env.NEXT_PUBLIC_ALLOWED_CORS_ORIGINS ?? process.env.ALLOWED_CORS_ORIGINS),
+  ...PORTAL_DEFAULT_CORS_ORIGINS,
+  ...splitEnvList(
+    process.env.NEXT_PUBLIC_ALLOWED_CORS_ORIGINS ?? process.env.ALLOWED_CORS_ORIGINS,
+  ),
 ]);
 
 const normaliseHeaderValue = (value: string | null) => {

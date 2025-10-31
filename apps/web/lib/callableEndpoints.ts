@@ -1,22 +1,23 @@
-const CLOUD_FUNCTION_HOST_SUFFIXES = ["cloudfunctions.net", "cloudfunctions.app"] as const;
+import {
+  PORTAL_FUNCTION_BASE_URLS,
+  PORTAL_FUNCTION_HOST_SUFFIXES,
+  PORTAL_FUNCTION_REGIONS,
+  PORTAL_PRIMARY_FUNCTION_BASE,
+  PORTAL_PRIMARY_REGION,
+} from "@shared-config";
 
-export const DEFAULT_FUNCTION_BASE =
-  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net";
+const CLOUD_FUNCTION_HOST_SUFFIXES = PORTAL_FUNCTION_HOST_SUFFIXES;
 
-export const LEGACY_FUNCTION_BASES = [
-  "https://europe-west2-ptfbportalbackend.cloudfunctions.net",
-  "https://europe-west4-pineapple-tapped---portal.cloudfunctions.net",
-  "https://europe-west4-ptfbportalbackend.cloudfunctions.net",
-  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.app",
-  "https://europe-west2-ptfbportalbackend.cloudfunctions.app",
-  "https://europe-west4-pineapple-tapped---portal.cloudfunctions.app",
-  "https://europe-west4-ptfbportalbackend.cloudfunctions.app",
-];
+export const DEFAULT_FUNCTION_BASE = PORTAL_PRIMARY_FUNCTION_BASE;
+
+export const LEGACY_FUNCTION_BASES = PORTAL_FUNCTION_BASE_URLS.filter(
+  (base) => base !== DEFAULT_FUNCTION_BASE,
+);
 
 const CLOUD_FUNCTION_REGION_HOST_PATTERN =
   /^https:\/\/((?:[a-z]+(?:-[a-z]+)*)[0-9])-([a-z0-9-]+)\.cloudfunctions\.(?:net|app)$/i;
 
-const REGION_FALLBACKS = ["europe-west2", "europe-west4"];
+const REGION_FALLBACKS = PORTAL_FUNCTION_REGIONS;
 const CODEBASE_ENV_VARS = [
   "FUNCTIONS_CODEBASE",
   "NEXT_PUBLIC_FUNCTIONS_CODEBASE",
@@ -162,7 +163,7 @@ export const resolveHostedAppContext = (
   const regionCandidate =
     typeof regionSegment === "string" && /^[a-z0-9-]+$/.test(regionSegment)
       ? regionSegment
-      : "europe-west2";
+      : PORTAL_PRIMARY_REGION;
 
   const bases = new Set<string>();
   const projectFragments = new Set<string>();

@@ -2,6 +2,13 @@ import type { NextApiRequest, NextApiResponse } from "next";
 
 import { resolveCallableFunctionIds } from "@/lib/callableEndpoints";
 
+import {
+  PORTAL_FUNCTION_BASE_URLS,
+  PORTAL_FUNCTION_HOST_SUFFIXES,
+  PORTAL_FUNCTION_REGIONS,
+  PORTAL_PRIMARY_REGION,
+} from "@shared-config";
+
 import { applyApiCors, handleOptions } from "./_utils/cors";
 
 const extractBearerToken = (value: string | null | undefined): string | null => {
@@ -123,7 +130,7 @@ const buildHostedAppEndpoints = (
   }
 
   const subdomain = parts[0];
-  const region = /^[a-z0-9-]+$/.test(parts[1]) ? parts[1] : "europe-west2";
+  const region = /^[a-z0-9-]+$/.test(parts[1]) ? parts[1] : PORTAL_PRIMARY_REGION;
   const fragment = extractHostedProjectFragment(subdomain);
 
   const endpoints = new Set<string>();
@@ -135,25 +142,20 @@ const buildHostedAppEndpoints = (
   }
 
   if (fragment) {
-    for (const functionName of functionNames) {
-      endpoints.add(`https://${region}-${fragment}.cloudfunctions.net/${functionName}`);
-      endpoints.add(`https://${region}-${fragment}.cloudfunctions.app/${functionName}`);
+    const regions = new Set<string>([region, ...PORTAL_FUNCTION_REGIONS]);
+    for (const targetRegion of regions) {
+      for (const suffix of PORTAL_FUNCTION_HOST_SUFFIXES) {
+        for (const functionName of functionNames) {
+          endpoints.add(`https://${targetRegion}-${fragment}.${suffix}/${functionName}`);
+        }
+      }
     }
   }
 
   return Array.from(endpoints);
 };
 
-const LEGACY_BASES = [
-  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net",
-  "https://europe-west4-pineapple-tapped---portal.cloudfunctions.net",
-  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.app",
-  "https://europe-west4-pineapple-tapped---portal.cloudfunctions.app",
-  "https://europe-west2-ptfbportalbackend.cloudfunctions.net",
-  "https://europe-west4-ptfbportalbackend.cloudfunctions.net",
-  "https://europe-west2-ptfbportalbackend.cloudfunctions.app",
-  "https://europe-west4-ptfbportalbackend.cloudfunctions.app",
-];
+const LEGACY_BASES = PORTAL_FUNCTION_BASE_URLS;
 
 const collectFunctionNames = (): string[] => {
   const names = new Set<string>();
