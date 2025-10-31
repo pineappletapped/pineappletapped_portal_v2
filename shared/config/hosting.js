@@ -2,7 +2,7 @@ export const PORTAL_HOSTED_APP_URL =
   "https://pineappletappedportal--pineapple-tapped---portal.europe-west4.hosted.app";
 
 export const PORTAL_PRIMARY_REGION = "europe-west2";
-export const PORTAL_ADDITIONAL_REGIONS = ["europe-west4"];
+export const PORTAL_ADDITIONAL_REGIONS = ["europe-west4", "us-central1"];
 
 export const PORTAL_FUNCTION_PROJECTS = [
   "pineapple-tapped---portal",
