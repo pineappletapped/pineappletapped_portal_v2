@@ -1,3 +1,6 @@
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
 import type { NextApiRequest, NextApiResponse } from "next";
 
 import { resolveCallableFunctionIds } from "@/lib/callableEndpoints";
@@ -190,6 +193,13 @@ interface HttpAttemptResult<T = unknown> {
   attempts: string[];
 }
 
+interface LocalInvocationResult {
+  ok: boolean;
+  status: number;
+  payload: Record<string, unknown> | null;
+  attempts: string[];
+}
+
 const collectCreateOrderEndpoints = (hostHeader: string | null): string[] => {
   const seen = new Set<string>();
   const functionNames = collectFunctionNames();
@@ -306,6 +316,308 @@ const invokeCreateOrder = async <T = unknown>(
   throw Object.assign(new Error("createOrder invocation failed"), { attempts });
 };
 
+const FUNCTIONS_LIB_ENTRY = pathToFileURL(path.join(process.cwd(), "functions", "lib", "index.js")).href;
+
+type LocalCreateOrderHandler =
+  | ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<unknown> | unknown)
+  | null;
+
+let localCreateOrderHandlerPromise: Promise<LocalCreateOrderHandler> | null = null;
+
+const dynamicImport: (specifier: string) => Promise<Record<string, unknown>> = Function(
+  "specifier",
+  "return import(specifier);",
+) as (specifier: string) => Promise<Record<string, unknown>>;
+
+const loadLocalCreateOrderHandler = async (): Promise<LocalCreateOrderHandler> => {
+  if (localCreateOrderHandlerPromise) {
+    return localCreateOrderHandlerPromise;
+  }
+
+  localCreateOrderHandlerPromise = (async () => {
+    try {
+      const mod = await dynamicImport(FUNCTIONS_LIB_ENTRY);
+      const handler = (mod as Record<string, unknown>)?.createOrder;
+      return typeof handler === "function" ? (handler as LocalCreateOrderHandler) : null;
+    } catch (error) {
+      console.error("create-order local handler import failed", { error });
+      return null;
+    }
+  })();
+
+  return localCreateOrderHandlerPromise;
+};
+
+const ensureLowercaseHeaders = (headers: Record<string, string>): Record<string, string> => {
+  const normalised: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (!key) {
+      continue;
+    }
+    const trimmedKey = key.trim().toLowerCase();
+    if (!trimmedKey) {
+      continue;
+    }
+    normalised[trimmedKey] = value;
+  }
+  return normalised;
+};
+
+class LocalRequestMock {
+  method: string;
+
+  headers: Record<string, string>;
+
+  body: Record<string, unknown>;
+
+  rawBody: Buffer;
+
+  url: string;
+
+  path: string;
+
+  query: Record<string, unknown> = {};
+
+  params: Record<string, unknown> = {};
+
+  constructor({
+    method,
+    headers,
+    body,
+  }: {
+    method: string;
+    headers: Record<string, string>;
+    body: Record<string, unknown>;
+  }) {
+    this.method = method;
+    this.headers = ensureLowercaseHeaders(headers);
+    if (!this.headers["content-type"]) {
+      this.headers["content-type"] = "application/json";
+    }
+    this.body = body;
+    this.rawBody = Buffer.from(JSON.stringify(body ?? {}));
+    this.url = "/create-order";
+    this.path = "/create-order";
+  }
+
+  get(name: string): string | undefined {
+    if (!name) {
+      return undefined;
+    }
+    return this.headers[name.trim().toLowerCase()];
+  }
+}
+
+interface LocalResponseResolution {
+  status: number;
+  payload: unknown;
+  headers: Record<string, string>;
+}
+
+class LocalResponseMock {
+  statusCode = 200;
+
+  private headers = new Map<string, string>();
+
+  private finished = false;
+
+  constructor(private readonly resolve: (result: LocalResponseResolution) => void) {}
+
+  isFinished() {
+    return this.finished;
+  }
+
+  private normaliseName(name: string): string | null {
+    if (!name) {
+      return null;
+    }
+    const trimmed = name.trim().toLowerCase();
+    return trimmed.length ? trimmed : null;
+  }
+
+  status(code: number) {
+    if (Number.isFinite(code)) {
+      this.statusCode = Number(code);
+    }
+    return this;
+  }
+
+  set(name: string, value: string) {
+    this.setHeader(name, value);
+    return this;
+  }
+
+  setHeader(name: string, value: string) {
+    const key = this.normaliseName(name);
+    if (!key) {
+      return this;
+    }
+    this.headers.set(key, value);
+    return this;
+  }
+
+  append(name: string, value: string) {
+    const key = this.normaliseName(name);
+    if (!key) {
+      return this;
+    }
+    const existing = this.headers.get(key);
+    this.headers.set(key, existing ? `${existing}, ${value}` : value);
+    return this;
+  }
+
+  getHeader(name: string) {
+    const key = this.normaliseName(name);
+    return key ? this.headers.get(key) ?? null : null;
+  }
+
+  json(payload: unknown) {
+    this.finish(payload);
+    return this;
+  }
+
+  send(payload: unknown) {
+    this.finish(payload);
+    return this;
+  }
+
+  end(payload?: unknown) {
+    this.finish(payload);
+    return this;
+  }
+
+  private finish(payload: unknown) {
+    if (this.finished) {
+      return;
+    }
+    this.finished = true;
+    this.resolve({
+      status: this.statusCode,
+      payload,
+      headers: Object.fromEntries(this.headers.entries()),
+    });
+  }
+}
+
+const LOCAL_HANDLER_TIMEOUT_MS = 10_000;
+
+const parseJsonLike = (value: string): unknown => {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+};
+
+const normaliseLocalPayload = (payload: unknown): Record<string, unknown> | null => {
+  if (payload == null) {
+    return null;
+  }
+
+  if (Buffer.isBuffer(payload)) {
+    const text = payload.toString("utf8");
+    if (!text.trim()) {
+      return null;
+    }
+    const parsed = parseJsonLike(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return { value: parsed } as Record<string, unknown>;
+  }
+
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = parseJsonLike(trimmed);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return { message: payload } as Record<string, unknown>;
+  }
+
+  if (typeof payload === "object") {
+    if (Array.isArray(payload)) {
+      return { value: payload } as Record<string, unknown>;
+    }
+    return payload as Record<string, unknown>;
+  }
+
+  return { value: payload } as Record<string, unknown>;
+};
+
+const invokeLocalCreateOrderFallback = async ({
+  body,
+  idToken,
+  host,
+  priorAttempts = [],
+}: {
+  body: Record<string, unknown>;
+  idToken: string | null;
+  host: string | null;
+  priorAttempts?: string[];
+}): Promise<LocalInvocationResult | null> => {
+  const handler = await loadLocalCreateOrderHandler();
+  if (!handler) {
+    return null;
+  }
+
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+
+  if (idToken) {
+    headers.authorization = `Bearer ${idToken}`;
+  }
+
+  if (host) {
+    headers.host = host;
+    headers["x-forwarded-host"] = host;
+  }
+
+  const request = new LocalRequestMock({ method: "POST", headers, body });
+
+  try {
+    const result = await Promise.race<LocalResponseResolution>([
+      new Promise((resolve, reject) => {
+        const response = new LocalResponseMock(resolve);
+        Promise.resolve(handler(request as unknown as Record<string, unknown>, response as unknown as Record<string, unknown>))
+          .then(() => {
+            // If the handler resolved without writing a response, ensure we resolve to avoid hanging.
+            if (!response.isFinished()) {
+              response.end();
+            }
+          })
+          .catch(reject);
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("local createOrder timeout")), LOCAL_HANDLER_TIMEOUT_MS);
+      }),
+    ]);
+
+    const payload = normaliseLocalPayload(result.payload);
+    const status = Number.isFinite(result.status) ? Number(result.status) : 500;
+    const ok = status >= 200 && status < 300;
+    const summary = payload?.error ? String(payload.error) : `HTTP ${status}`;
+    return {
+      ok,
+      status,
+      payload,
+      attempts: [...priorAttempts, `local:createOrder → ${summary}`],
+    };
+  } catch (error) {
+    console.error("create-order local fallback failed", { error, host });
+    return {
+      ok: false,
+      status: 503,
+      payload: { error: "Local createOrder execution failed", code: "local-handler-error" },
+      attempts: [...priorAttempts, `local:createOrder → ${(error as Error)?.message ?? "error"}`],
+    };
+  }
+};
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === "OPTIONS") {
     handleOptions(req, res);
@@ -339,6 +651,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
 
     if (!result.ok) {
+      const fallback = await invokeLocalCreateOrderFallback({
+        body,
+        idToken,
+        host: hostHeader,
+        priorAttempts: result.attempts,
+      });
+
+      if (fallback) {
+        if (!fallback.ok) {
+          const payload = fallback.payload ?? { error: "createOrder unavailable" };
+          console.error("create-order remote invocation failed; local fallback responded with error", {
+            host: hostHeader,
+            attempts: fallback.attempts,
+            status: fallback.status,
+          });
+          sendJson(res, fallback.status, payload);
+          return;
+        }
+
+        console.warn("create-order remote invocation failed; satisfied via local fallback", {
+          host: hostHeader,
+          attempts: fallback.attempts,
+          status: fallback.status,
+        });
+        res.status(fallback.status).json(fallback.payload ?? null);
+        return;
+      }
+
       const payload =
         result.payload && typeof result.payload === "object"
           ? (result.payload as Record<string, unknown>)
@@ -364,6 +704,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.status(result.status).json(payload ?? null);
   } catch (error) {
     const attempts = (error as Error & { attempts?: string[] }).attempts ?? [];
+    const fallback = await invokeLocalCreateOrderFallback({
+      body,
+      idToken,
+      host: hostHeader,
+      priorAttempts: attempts,
+    });
+
+    if (fallback) {
+      if (!fallback.ok) {
+        const payload = fallback.payload ?? { error: "createOrder unavailable" };
+        console.error("create-order remote attempts failed; local fallback responded with error", {
+          host: hostHeader,
+          attempts: fallback.attempts,
+          status: fallback.status,
+        });
+        sendJson(res, fallback.status, payload);
+        return;
+      }
+
+      console.warn("create-order remote attempts failed; satisfied via local fallback", {
+        host: hostHeader,
+        attempts: fallback.attempts,
+        status: fallback.status,
+      });
+      res.status(fallback.status).json(fallback.payload ?? null);
+      return;
+    }
+
     const summary = attempts.length ? attempts.join(" | ") : "<none>";
     console.error("create-order invocation attempts failed", {
       host: hostHeader,
