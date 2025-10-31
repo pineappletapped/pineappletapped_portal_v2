@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, type Firestore } from "firebase-admin/firestore";
 import Stripe from "stripe";
 
 import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from "@/lib/firebase-admin";
@@ -75,6 +75,14 @@ interface CheckoutPricingPayload {
 interface NormalisedCheckoutData {
   order: CheckoutOrderPayload;
   pricing: CheckoutPricingPayload;
+}
+
+interface ProductTaskSeed {
+  productId: string;
+  productName: string | null;
+  title: string;
+  forCustomer: boolean;
+  subtasks: string[];
 }
 
 const normaliseString = (value: unknown): string => {
@@ -209,6 +217,108 @@ const normaliseWarnings = (input: unknown): string[] => {
   return input
     .map((entry) => normaliseString(entry))
     .filter((warning) => warning.length > 0);
+};
+
+const normaliseProductTaskList = (input: unknown): Array<{
+  title: string;
+  forCustomer: boolean;
+  subtasks: string[];
+}> => {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+
+      const record = entry as Record<string, unknown>;
+      const title = normaliseString(record.title);
+      if (!title) {
+        return null;
+      }
+
+      const subtasks = Array.isArray(record.subtasks)
+        ? record.subtasks
+            .map((value) => normaliseString(value))
+            .filter((value) => value.length > 0)
+        : [];
+
+      return {
+        title,
+        forCustomer: record.forCustomer === true,
+        subtasks,
+      };
+    })
+    .filter((task): task is { title: string; forCustomer: boolean; subtasks: string[] } => Boolean(task));
+};
+
+const collectProductDefaultTasks = async (
+  firestore: Firestore,
+  items: CheckoutItemPayload[],
+): Promise<ProductTaskSeed[]> => {
+  if (!items.length) {
+    return [];
+  }
+
+  const productQuantities = new Map<string, number>();
+  items.forEach((item) => {
+    const quantity = Number.isFinite(item.quantity) ? Math.max(1, Math.trunc(item.quantity)) : 1;
+    const current = productQuantities.get(item.id) ?? 0;
+    productQuantities.set(item.id, current + quantity);
+  });
+
+  const uniqueProductIds = Array.from(productQuantities.keys());
+  if (uniqueProductIds.length === 0) {
+    return [];
+  }
+
+  const productsCollection = firestore.collection("products");
+  const snapshots = await Promise.all(
+    uniqueProductIds.map(async (productId) => {
+      try {
+        const snap = await productsCollection.doc(productId).get();
+        return { productId, snap };
+      } catch (error) {
+        console.error("Failed to load product when seeding project tasks", { productId, error });
+        return null;
+      }
+    }),
+  );
+
+  const seeds: ProductTaskSeed[] = [];
+  snapshots.forEach((entry) => {
+    if (!entry) {
+      return;
+    }
+
+    const { productId, snap } = entry;
+    if (!snap.exists) {
+      console.warn("Product missing while seeding project tasks", { productId });
+      return;
+    }
+
+    const data = (snap.data() ?? {}) as Record<string, unknown>;
+    const productName = typeof data.name === "string" && data.name.trim().length > 0 ? data.name.trim() : null;
+    const tasks = normaliseProductTaskList(data.defaultTasks);
+    if (!tasks.length) {
+      return;
+    }
+
+    tasks.forEach((task) => {
+      seeds.push({
+        productId,
+        productName,
+        title: task.title,
+        forCustomer: task.forCustomer,
+        subtasks: task.subtasks,
+      });
+    });
+  });
+
+  return seeds;
 };
 
 const parseCheckoutRequest = (body: unknown): NormalisedCheckoutData | null => {
@@ -430,6 +540,58 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const timestamp = FieldValue.serverTimestamp();
+    const projectsCollection = firestore.collection("projects");
+    const projectRef = projectsCollection.doc();
+    const projectId = projectRef.id;
+
+    const preferredProjectName =
+      typeof parsedBody.order.projectName === "string" && parsedBody.order.projectName.trim().length > 0
+        ? parsedBody.order.projectName.trim()
+        : null;
+    const projectTitle = preferredProjectName ?? serviceName ?? `Order ${orderId}`;
+
+    const projectDocument: Record<string, unknown> = {
+      name: projectTitle,
+      title: projectTitle,
+      projectName: projectTitle,
+      status: "intake",
+      stage: "intake",
+      orderId,
+      orderRef: orderRef.path,
+      serviceId,
+      serviceName,
+      userId: auth.uid,
+      userEmail: customerEmail,
+      customerName,
+      companyName: parsedBody.order.companyName,
+      location: parsedBody.order.location,
+      postalCode: parsedBody.order.postalCode,
+      kitReservationStatus: parsedBody.order.kitReservationStatus,
+      kitReservationWarnings: parsedBody.order.kitReservationWarnings,
+      rentalSubtotal: parsedBody.order.rentalSubtotal,
+      channel: "client-portal",
+      source: "checkout",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+
+    try {
+      await projectRef.set(projectDocument, { merge: false });
+    } catch (error) {
+      console.error("Failed to create project for order", { error, orderId });
+      if (paymentIntent && stripeClient) {
+        try {
+          await stripeClient.paymentIntents.cancel(paymentIntent.id);
+        } catch (cancelError) {
+          console.warn("Failed to cancel payment intent after project creation error", {
+            paymentIntentId: paymentIntent.id,
+            error: cancelError,
+          });
+        }
+      }
+      respond(res, 500, { error: "Failed to create project", code: "project-creation-failed" });
+      return;
+    }
 
     const orderDocument: Record<string, unknown> = {
       userId: auth.uid,
@@ -472,7 +634,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       companyName: parsedBody.order.companyName,
       location: parsedBody.order.location,
       postalCode: parsedBody.order.postalCode,
-      projectName: parsedBody.order.projectName,
+      projectId,
+      projectRef: projectRef.path,
+      projectName: projectTitle,
       channel: "client-portal",
       paymentIntentId: paymentIntent?.id ?? null,
       paymentProvider: paymentIntent ? "stripe" : "none",
@@ -486,6 +650,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await orderRef.set(orderDocument, { merge: false });
     } catch (error) {
       console.error("Failed to persist order document", { error });
+      try {
+        await projectRef.delete();
+      } catch (projectDeleteError) {
+        console.warn("Failed to clean up project after order write error", {
+          projectId,
+          error: projectDeleteError,
+        });
+      }
       if (paymentIntent && stripeClient) {
         try {
           await stripeClient.paymentIntents.cancel(paymentIntent.id);
@@ -500,10 +672,40 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return;
     }
 
+    try {
+      const defaultTasks = await collectProductDefaultTasks(firestore, parsedBody.order.items);
+      if (defaultTasks.length > 0) {
+        const batch = firestore.batch();
+        const tasksCollection = projectRef.collection("tasks");
+        defaultTasks.forEach((task) => {
+          const taskRef = tasksCollection.doc();
+          batch.set(taskRef, {
+            title: task.title,
+            forCustomer: task.forCustomer,
+            subtasks: task.subtasks,
+            status: "todo",
+            assignedTo: null,
+            assigneeName: null,
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+            origin: {
+              type: "product-default-task",
+              productId: task.productId,
+              productName: task.productName,
+            },
+          });
+        });
+        await batch.commit();
+      }
+    } catch (error) {
+      console.error("Failed to seed project tasks from products", { error, projectId, orderId });
+    }
+
     respond(res, 200, {
       orderId,
       clientSecret: paymentIntent?.client_secret ?? null,
       paymentIntentId: paymentIntent?.id ?? null,
+      projectId,
       price,
       netTotal,
       depositAmount,
