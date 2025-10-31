@@ -1,8 +1,8 @@
 "use client";
 
-import clsx from 'clsx';
-import Link from 'next/link';
+import NextLink from 'next/link';
 import { usePathname } from 'next/navigation';
+import { Box, List, ListItemButton, ListItemText, Stack, Typography } from '@mui/material';
 import type { AdminNavSection } from './navConfig';
 
 interface AdminNavigationProps {
@@ -23,34 +23,49 @@ export default function AdminNavigation({ sections }: AdminNavigationProps) {
   const pathname = usePathname();
 
   return (
-    <nav aria-label="Admin sections" className="space-y-8">
+    <Stack component="nav" spacing={4} aria-label="Admin sections">
       {sections.map((section) => (
-        <div key={section.title} className="space-y-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+        <Box key={section.title}>
+          <Typography
+            variant="overline"
+            color="text.secondary"
+            sx={{ letterSpacing: '0.18em', display: 'block', mb: 1.5 }}
+          >
             {section.title}
-          </p>
-          <ul className="space-y-1">
+          </Typography>
+          <List disablePadding>
             {section.items.map((item) => {
               const active = matchPath(pathname, item.href, item.exact);
               return (
-                <li key={item.href}>
-                  <Link
-                    href={item.href}
-                    className={clsx(
-                      'flex items-center justify-between rounded-lg px-3 py-2 text-sm font-medium transition',
-                      active
-                        ? 'bg-amber-100 text-amber-900 shadow-sm'
-                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-                    )}
-                  >
-                    <span>{item.label}</span>
-                  </Link>
-                </li>
+                <ListItemButton
+                  key={item.href}
+                  component={NextLink}
+                  href={item.href}
+                  selected={active}
+                  sx={{
+                    borderRadius: 2,
+                    mb: 0.5,
+                    px: 1.5,
+                    py: 1.25,
+                    '&.Mui-selected': {
+                      bgcolor: 'primary.main',
+                      color: 'primary.contrastText',
+                      '&:hover': {
+                        bgcolor: 'primary.main',
+                      },
+                    },
+                  }}
+                >
+                  <ListItemText
+                    primary={item.label}
+                    primaryTypographyProps={{ fontWeight: active ? 600 : 500 }}
+                  />
+                </ListItemButton>
               );
             })}
-          </ul>
-        </div>
+          </List>
+        </Box>
       ))}
-    </nav>
+    </Stack>
   );
 }

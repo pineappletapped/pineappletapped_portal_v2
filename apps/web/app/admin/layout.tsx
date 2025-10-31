@@ -1,27 +1,54 @@
 import type { ReactNode } from 'react';
+import { Box, Chip, Container, Paper, Stack, Typography } from '@mui/material';
 import AdminNavigation from './AdminNavigation';
 import { ADMIN_NAV_SECTIONS } from './navConfig';
 
 export default function AdminLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="bg-slate-100">
-      <div className="mx-auto flex max-w-screen-xl flex-col gap-6 px-4 py-8 sm:px-6 lg:flex-row lg:gap-10 lg:px-8">
-        <aside className="lg:w-64 lg:flex-none">
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <p className="text-xs font-semibold uppercase tracking-wide text-amber-600">Admin workspace</p>
-            <h1 className="mt-2 text-2xl font-semibold text-slate-900">Control centre</h1>
-            <p className="mt-3 text-sm text-slate-600">
-              Navigate the tools that keep bookings, production, and franchise operations running smoothly.
-            </p>
-            <div className="mt-5">
-              <AdminNavigation sections={ADMIN_NAV_SECTIONS} />
-            </div>
-          </div>
-        </aside>
-        <main className="flex-1 min-w-0 space-y-6 pb-10">
-          {children}
-        </main>
-      </div>
-    </div>
+    <Box sx={{ bgcolor: 'grey.50', py: { xs: 3, md: 4 } }}>
+      <Container
+        maxWidth="xl"
+        sx={{
+          display: 'flex',
+          flexDirection: { xs: 'column', lg: 'row' },
+          gap: { xs: 3, md: 4 },
+          alignItems: 'stretch',
+        }}
+      >
+        <Box component="aside" sx={{ width: { lg: 288 }, flexShrink: 0 }}>
+          <Paper
+            elevation={0}
+            sx={{
+              borderRadius: 4,
+              border: '1px solid',
+              borderColor: 'divider',
+              p: { xs: 2.5, md: 3 },
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 3,
+              height: '100%',
+            }}
+          >
+            <Stack spacing={1.5}>
+              <Chip label="Admin workspace" color="secondary" size="small" sx={{ alignSelf: 'flex-start' }} />
+              <Box>
+                <Typography variant="h5" color="text.primary">
+                  Control centre
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>
+                  Navigate the tools that keep bookings, production, and franchise operations running smoothly.
+                </Typography>
+              </Box>
+            </Stack>
+            <AdminNavigation sections={ADMIN_NAV_SECTIONS} />
+          </Paper>
+        </Box>
+        <Box component="main" sx={{ flex: 1, minWidth: 0 }}>
+          <Stack spacing={3} pb={{ xs: 4, md: 6 }}>
+            {children}
+          </Stack>
+        </Box>
+      </Container>
+    </Box>
   );
 }
