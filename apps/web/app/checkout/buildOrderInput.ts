@@ -201,13 +201,14 @@ export function createOrderInput({
       }
 
       const accumulator = organiserMap.get(organiserKey)!;
+      const lineTotal = item.price * item.quantity;
       accumulator.quantity += item.quantity;
-      accumulator.grossSubtotal += item.price * item.quantity;
+      accumulator.grossSubtotal += lineTotal;
       const exhibitorLineTotal = organiser.exhibitorPrice
         ? organiser.exhibitorPrice * item.quantity
         : 0;
       accumulator.exhibitorSubtotal += exhibitorLineTotal;
-      accumulator.organiserSubtotal += accumulator.grossSubtotal - exhibitorLineTotal;
+      accumulator.organiserSubtotal += lineTotal - exhibitorLineTotal;
 
       const role: OrganiserLineRole = organiser.exhibitorProductId ? "exhibitor" : "organiser";
       accumulator.items.push({
@@ -215,7 +216,7 @@ export function createOrderInput({
         variation: item.variation ?? null,
         quantity: item.quantity,
         unitPrice: item.price,
-        lineTotal: item.price * item.quantity,
+        lineTotal,
         role,
       });
 

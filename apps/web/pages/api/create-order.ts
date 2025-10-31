@@ -397,8 +397,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const discountAmount = Math.max(0, toCurrency(parsedBody.pricing.discountAmount));
     const hasZeroBalance =
       parsedBody.pricing.hasZeroBalance ?? Math.abs(price) <= ZERO_BALANCE_TOLERANCE;
+    const primaryItem = parsedBody.order.items[0] ?? null;
+    const serviceId = primaryItem?.id ?? null;
+    const serviceName =
+      typeof primaryItem?.name === "string" && primaryItem.name.trim().length > 0
+        ? primaryItem.name.trim()
+        : null;
 
     const depositAmount = hasZeroBalance ? 0 : price;
+    const depositPercentage =
+      price > ZERO_BALANCE_TOLERANCE ? Math.min(1, Math.max(0, depositAmount / price)) : 0;
+    const balanceAmount = Math.max(0, toCurrency(price - depositAmount));
     const paymentStatus = depositAmount <= ZERO_BALANCE_TOLERANCE ? "paid" : "requires_payment";
     const orderStatus = depositAmount <= ZERO_BALANCE_TOLERANCE ? "confirmed" : "pending_payment";
 
@@ -442,9 +451,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         vat,
         grandTotal: price,
       },
+      serviceId,
+      serviceName,
       depositAmount,
       depositDue: depositAmount,
-      balanceDue: Math.max(0, toCurrency(price - depositAmount)),
+      balanceAmount,
+      balanceDue: balanceAmount,
+      depositPercentage,
       paymentSchedule: buildPaymentSchedule(depositAmount),
       kitReservationStatus: parsedBody.order.kitReservationStatus,
       kitReservationWarnings: parsedBody.order.kitReservationWarnings,
@@ -495,6 +508,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       netTotal,
       depositAmount,
       depositDue: depositAmount,
+      depositPercentage,
+      balanceAmount,
+      balanceDue: balanceAmount,
       discountAmount,
       voucherDiscount,
     });
