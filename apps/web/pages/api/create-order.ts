@@ -1,621 +1,335 @@
-import path from "node:path";
-import { pathToFileURL } from "node:url";
-
 import type { NextApiRequest, NextApiResponse } from "next";
 
-import { resolveCallableFunctionIds } from "@/lib/callableEndpoints";
+import { FieldValue } from "firebase-admin/firestore";
+import Stripe from "stripe";
 
-import {
-  PORTAL_FUNCTION_BASE_URLS,
-  PORTAL_FUNCTION_HOST_SUFFIXES,
-  PORTAL_FUNCTION_REGIONS,
-  PORTAL_PRIMARY_REGION,
-} from "@shared-config";
+import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from "@/lib/firebase-admin";
+import { getStripeClient } from "@/lib/stripe-config";
 
 import { applyApiCors, handleOptions } from "./_utils/cors";
 
-const extractBearerToken = (value: string | null | undefined): string | null => {
-  if (!value) {
+const ZERO_BALANCE_TOLERANCE = 0.005;
+const CURRENCY = "gbp";
+
+interface CheckoutItemPayload {
+  id: string;
+  name: string | null;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+  price: number;
+  variation: string | null;
+  date: string | null;
+  location: string | null;
+  postalCode: string | null;
+  rentalTotal: number | null;
+  modifiers: unknown;
+  kitStatus: string | null;
+  kitWarnings: string[];
+  orderFormResponses: unknown;
+  coverage: unknown;
+  timeSlot: unknown;
+  exhibition: unknown;
+  campaignBooking: unknown;
+  organiser: unknown;
+}
+
+interface CheckoutKitPayload {
+  id: string;
+  name: string | null;
+  category: string | null;
+  start: string;
+  end: string;
+}
+
+interface CheckoutOrderPayload {
+  items: CheckoutItemPayload[];
+  kitItems: CheckoutKitPayload[];
+  rentalSubtotal: number;
+  kitReservationStatus: "pending" | "confirmed";
+  kitReservationWarnings: string[];
+  userEmail: string | null;
+  customerName: string | null;
+  companyName: string | null;
+  location: string | null;
+  postalCode: string | null;
+  projectName: string | null;
+  voucher: string | null;
+  leadSource: string | null;
+  organisers: unknown[];
+}
+
+interface CheckoutPricingPayload {
+  productTotal: number;
+  rentalTotal: number;
+  voucherDiscount: number;
+  discountPercent: number;
+  discountAmount: number;
+  subtotal: number;
+  vat: number;
+  grandTotal: number;
+  hasZeroBalance?: boolean;
+  voucherCode?: string | null;
+}
+
+interface NormalisedCheckoutData {
+  order: CheckoutOrderPayload;
+  pricing: CheckoutPricingPayload;
+}
+
+const normaliseString = (value: unknown): string => {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : "";
+};
+
+const optionalString = (value: unknown): string | null => {
+  const normalised = normaliseString(value);
+  return normalised.length > 0 ? normalised : null;
+};
+
+const ensureNumber = (value: unknown, fallback = 0): number => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const cleaned = value.replace(/[^0-9.\-]+/g, "");
+    const parsed = Number.parseFloat(cleaned);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return fallback;
+};
+
+const ensureInteger = (value: unknown, fallback = 0): number => {
+  const numeric = ensureNumber(value, fallback);
+  const rounded = Math.round(numeric);
+  return Number.isFinite(rounded) ? rounded : fallback;
+};
+
+const toCurrency = (value: number): number => {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.round(value * 100) / 100;
+};
+
+const normaliseItems = (input: unknown): CheckoutItemPayload[] => {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map<CheckoutItemPayload | null>((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+
+      const record = entry as Record<string, unknown>;
+      const id = normaliseString(record.id);
+      if (!id) {
+        return null;
+      }
+
+      const quantity = Math.max(1, ensureInteger(record.quantity, 1));
+      const unitPrice = toCurrency(ensureNumber(record.unitPrice ?? record.price ?? 0));
+      const lineTotal = toCurrency(
+        ensureNumber(record.lineTotal, Number.isFinite(unitPrice * quantity) ? unitPrice * quantity : 0),
+      );
+
+      const rawWarnings = Array.isArray(record.kitWarnings)
+        ? record.kitWarnings
+            .map((warning) => normaliseString(warning))
+            .filter((warning) => warning.length > 0)
+        : [];
+
+      return {
+        id,
+        name: optionalString(record.name),
+        quantity,
+        unitPrice,
+        price: unitPrice,
+        lineTotal,
+        variation: optionalString(record.variation),
+        date: optionalString(record.date),
+        location: optionalString(record.location),
+        postalCode: optionalString(record.postalCode),
+        rentalTotal: Number.isFinite(ensureNumber(record.rentalTotal))
+          ? toCurrency(ensureNumber(record.rentalTotal))
+          : null,
+        modifiers: record.modifiers ?? null,
+        kitStatus: optionalString(record.kitStatus),
+        kitWarnings: rawWarnings,
+        orderFormResponses: record.orderFormResponses ?? null,
+        coverage: record.coverage ?? null,
+        timeSlot: record.timeSlot ?? null,
+        exhibition: record.exhibition ?? null,
+        campaignBooking: record.campaignBooking ?? null,
+        organiser: record.organiser ?? null,
+      } satisfies CheckoutItemPayload;
+    })
+    .filter((item): item is CheckoutItemPayload => Boolean(item));
+};
+
+const normaliseKitItems = (input: unknown): CheckoutKitPayload[] => {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map<CheckoutKitPayload | null>((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+      const record = entry as Record<string, unknown>;
+      const id = normaliseString(record.id);
+      const start = normaliseString(record.start);
+      const end = normaliseString(record.end);
+      if (!id || !start || !end) {
+        return null;
+      }
+      return {
+        id,
+        name: optionalString(record.name),
+        category: optionalString(record.category),
+        start,
+        end,
+      } satisfies CheckoutKitPayload;
+    })
+    .filter((item): item is CheckoutKitPayload => Boolean(item));
+};
+
+const normaliseWarnings = (input: unknown): string[] => {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return input
+    .map((entry) => normaliseString(entry))
+    .filter((warning) => warning.length > 0);
+};
+
+const parseCheckoutRequest = (body: unknown): NormalisedCheckoutData | null => {
+  if (!body || typeof body !== "object") {
     return null;
   }
-  const match = /^Bearer\s+(.+)$/i.exec(value.trim());
+  const record = body as Record<string, unknown>;
+  const orderRaw = record.order;
+  const pricingRaw = record.pricing;
+
+  if (!orderRaw || typeof orderRaw !== "object" || !pricingRaw || typeof pricingRaw !== "object") {
+    return null;
+  }
+
+  const orderRecord = orderRaw as Record<string, unknown>;
+  const pricingRecord = pricingRaw as Record<string, unknown>;
+
+  const items = normaliseItems(orderRecord.items);
+  if (items.length === 0) {
+    return null;
+  }
+
+  const kitItems = normaliseKitItems(orderRecord.kitItems);
+  const rentalSubtotal = toCurrency(ensureNumber(orderRecord.rentalSubtotal));
+  const kitReservationStatus = normaliseString(orderRecord.kitReservationStatus) === "pending"
+    ? "pending"
+    : "confirmed";
+
+  const orderPayload: CheckoutOrderPayload = {
+    items,
+    kitItems,
+    rentalSubtotal,
+    kitReservationStatus,
+    kitReservationWarnings: normaliseWarnings(orderRecord.kitReservationWarnings),
+    userEmail: optionalString(orderRecord.userEmail),
+    customerName: optionalString(orderRecord.customerName),
+    companyName: optionalString(orderRecord.companyName),
+    location: optionalString(orderRecord.location),
+    postalCode: optionalString(orderRecord.postalCode),
+    projectName: optionalString(orderRecord.projectName),
+    voucher: optionalString(orderRecord.voucher),
+    leadSource: optionalString(orderRecord.leadSource) ?? "hq",
+    organisers: Array.isArray(orderRecord.organisers) ? orderRecord.organisers : [],
+  };
+
+  const pricingPayload: CheckoutPricingPayload = {
+    productTotal: toCurrency(ensureNumber(pricingRecord.productTotal)),
+    rentalTotal: toCurrency(ensureNumber(pricingRecord.rentalTotal)),
+    voucherDiscount: toCurrency(ensureNumber(pricingRecord.voucherDiscount)),
+    discountPercent: toCurrency(ensureNumber(pricingRecord.discountPercent)),
+    discountAmount: toCurrency(ensureNumber(pricingRecord.discountAmount)),
+    subtotal: toCurrency(ensureNumber(pricingRecord.subtotal)),
+    vat: toCurrency(ensureNumber(pricingRecord.vat)),
+    grandTotal: toCurrency(ensureNumber(pricingRecord.grandTotal)),
+    hasZeroBalance:
+      typeof pricingRecord.hasZeroBalance === "boolean"
+        ? pricingRecord.hasZeroBalance
+        : undefined,
+    voucherCode: optionalString(pricingRecord.voucherCode),
+  };
+
+  return { order: orderPayload, pricing: pricingPayload };
+};
+
+const respond = (res: NextApiResponse, status: number, payload: Record<string, unknown>) => {
+  res.status(status).json(payload);
+};
+
+const extractBearerToken = (header: string | string[] | undefined): string | null => {
+  if (Array.isArray(header)) {
+    return extractBearerToken(header[0]);
+  }
+  if (typeof header !== "string") {
+    return null;
+  }
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   const token = match?.[1]?.trim();
   return token?.length ? token : null;
 };
 
-const normaliseBody = (body: unknown): Record<string, unknown> => {
-  if (body && typeof body === "object" && !Array.isArray(body)) {
-    return body as Record<string, unknown>;
-  }
-  return {};
-};
-
-const sendJson = (res: NextApiResponse, status: number, payload: Record<string, unknown>) => {
-  res.status(status).json(payload);
-};
-
-const normaliseEndpoint = (value: string | null | undefined): string | null => {
-  if (!value || typeof value !== "string") {
-    return null;
+const createPaymentIntent = async (
+  stripe: Stripe,
+  amount: number,
+  orderId: string,
+  customerEmail: string | null,
+): Promise<Stripe.PaymentIntent> => {
+  const rounded = Math.max(0, Math.round(amount * 100));
+  if (rounded <= 0) {
+    throw new Error("Payment amount must be greater than zero");
   }
 
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-    return trimmed.replace(/\/+$/, "");
-  }
-
-  const prefixed = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  return prefixed.replace(/\/+$/, "");
-};
-
-const splitEnvList = (value: string | null | undefined): string[] => {
-  if (!value) {
-    return [];
-  }
-
-  return value
-    .split(/[\s,]+/)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
-};
-
-const collectEnvOverrides = (): string[] => {
-  const envNames = [
-    "NEXT_PUBLIC_CREATE_ORDER_ENDPOINT",
-    "CREATE_ORDER_ENDPOINT",
-    "NEXT_PUBLIC_ORDER_SERVICE_ENDPOINT",
-    "ORDER_SERVICE_ENDPOINT",
-  ];
-
-  const endpoints = new Set<string>();
-
-  for (const envName of envNames) {
-    const raw = process.env[envName];
-    if (!raw) {
-      continue;
-    }
-    for (const entry of splitEnvList(raw)) {
-      const normalised = normaliseEndpoint(entry);
-      if (normalised) {
-        endpoints.add(normalised);
-      }
-    }
-  }
-
-  return Array.from(endpoints);
-};
-
-const HOSTED_APP_SUFFIX = ".hosted.app";
-
-const sanitiseHost = (host: string | null | undefined): string | null => {
-  if (!host) {
-    return null;
-  }
-
-  const trimmed = host.trim().toLowerCase();
-  if (!trimmed) {
-    return null;
-  }
-
-  return trimmed;
-};
-
-const extractHostedProjectFragment = (subdomain: string): string | null => {
-  if (!subdomain) {
-    return null;
-  }
-
-  const separator = subdomain.indexOf("--");
-  if (separator >= 0) {
-    const fragment = subdomain.slice(separator + 2).replace(/^-+/, "");
-    return fragment || null;
-  }
-
-  return subdomain.replace(/^-+/, "") || null;
-};
-
-const buildHostedAppEndpoints = (
-  host: string | null | undefined,
-  functionNames: string[],
-): string[] => {
-  const sanitisedHost = sanitiseHost(host);
-  if (!sanitisedHost || !sanitisedHost.endsWith(HOSTED_APP_SUFFIX)) {
-    return [];
-  }
-
-  const parts = sanitisedHost.split(".");
-  if (parts.length < 3) {
-    return [];
-  }
-
-  const subdomain = parts[0];
-  const region = /^[a-z0-9-]+$/.test(parts[1]) ? parts[1] : PORTAL_PRIMARY_REGION;
-  const fragment = extractHostedProjectFragment(subdomain);
-
-  const endpoints = new Set<string>();
-
-  for (const functionName of functionNames) {
-    endpoints.add(`https://${sanitisedHost}/_firebase/functions/v1/${functionName}`);
-    endpoints.add(`https://${sanitisedHost}/_firebase/functions/v2/${functionName}`);
-    endpoints.add(`https://${sanitisedHost}/_firebase/functions/v2/${region}/${functionName}`);
-  }
-
-  if (fragment) {
-    const regions = new Set<string>([region, ...PORTAL_FUNCTION_REGIONS]);
-    for (const targetRegion of regions) {
-      for (const suffix of PORTAL_FUNCTION_HOST_SUFFIXES) {
-        for (const functionName of functionNames) {
-          endpoints.add(`https://${targetRegion}-${fragment}.${suffix}/${functionName}`);
-        }
-      }
-    }
-  }
-
-  return Array.from(endpoints);
-};
-
-const LEGACY_BASES = PORTAL_FUNCTION_BASE_URLS;
-
-const collectFunctionNames = (): string[] => {
-  const names = new Set<string>();
-  const append = (candidate: string | null | undefined) => {
-    if (!candidate) {
-      return;
-    }
-    const trimmed = candidate.trim();
-    if (!trimmed) {
-      return;
-    }
-    names.add(trimmed);
-  };
-
-  resolveCallableFunctionIds("createOrder").forEach((identifier) => append(identifier));
-
-  append("createOrder");
-  append("default-createOrder");
-  append("ptfbportal-createOrder");
-  append("ptfbportalbackend-createOrder");
-
-  return Array.from(names);
-};
-
-const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504, 521, 522, 523]);
-
-interface HttpAttemptResult<T = unknown> {
-  ok: boolean;
-  status: number;
-  payload: T | null;
-  endpoint: string;
-  attempts: string[];
-}
-
-interface LocalInvocationResult {
-  ok: boolean;
-  status: number;
-  payload: Record<string, unknown> | null;
-  attempts: string[];
-}
-
-const collectCreateOrderEndpoints = (hostHeader: string | null): string[] => {
-  const seen = new Set<string>();
-  const functionNames = collectFunctionNames();
-  const push = (candidate: string | null | undefined) => {
-    const normalised = normaliseEndpoint(candidate);
-    if (!normalised || seen.has(normalised)) {
-      return;
-    }
-    seen.add(normalised);
-  };
-
-  collectEnvOverrides().forEach((endpoint) => push(endpoint));
-  buildHostedAppEndpoints(hostHeader, functionNames).forEach((endpoint) => push(endpoint));
-  for (const base of LEGACY_BASES) {
-    for (const functionName of functionNames) {
-      push(`${base}/${functionName}`);
-    }
-  }
-
-  return Array.from(seen);
-};
-
-const attemptCreateOrder = async <T = unknown>(
-  endpoint: string,
-  {
-    body,
-    idToken,
-    signal,
-  }: { body: Record<string, unknown>; idToken: string | null; signal?: AbortSignal },
-): Promise<HttpAttemptResult<T>> => {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (idToken) {
-    headers.Authorization = `Bearer ${idToken}`;
-  }
-
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    mode: "cors",
-    credentials: "omit",
-    signal,
+  return stripe.paymentIntents.create({
+    amount: rounded,
+    currency: CURRENCY,
+    metadata: {
+      orderId,
+      source: "portal-checkout",
+    },
+    receipt_email: customerEmail ?? undefined,
+    automatic_payment_methods: { enabled: true },
   });
-
-  const text = await response.text();
-  const contentType = response.headers.get("content-type") ?? "";
-  const expectsJson = /json/i.test(contentType);
-
-  let payload: T | null = null;
-
-  if (text) {
-    if (expectsJson) {
-      try {
-        payload = JSON.parse(text) as T;
-      } catch (error) {
-        throw new Error((error as Error)?.message ?? "invalid JSON");
-      }
-    } else {
-      try {
-        payload = JSON.parse(text) as T;
-      } catch {
-        payload = text as unknown as T;
-      }
-    }
-  }
-
-  return { ok: response.ok, status: response.status, payload, endpoint, attempts: [] };
 };
 
-const invokeCreateOrder = async <T = unknown>(
-  endpoints: string[],
-  options: { body: Record<string, unknown>; idToken: string | null; signal?: AbortSignal },
-): Promise<HttpAttemptResult<T>> => {
-  if (!endpoints.length) {
-    throw new Error("No createOrder endpoints configured");
+const buildPaymentSchedule = (depositAmount: number) => {
+  if (depositAmount <= ZERO_BALANCE_TOLERANCE) {
+    return [];
   }
-
-  const attempts: string[] = [];
-
-  for (let index = 0; index < endpoints.length; index += 1) {
-    const endpoint = endpoints[index];
-    const isLastAttempt = index === endpoints.length - 1;
-
-    try {
-      const result = await attemptCreateOrder<T>(endpoint, options);
-      if (result.ok) {
-        result.attempts = [...attempts];
-        return result;
-      }
-
-      const summary =
-        result.payload && typeof result.payload === "object" && result.payload !== null
-          ? String((result.payload as Record<string, unknown>).error ?? `HTTP ${result.status}`)
-          : `HTTP ${result.status}`;
-
-      attempts.push(`${endpoint} → ${summary}`);
-
-      if (!isLastAttempt && (result.status === 404 || RETRYABLE_STATUS_CODES.has(result.status))) {
-        continue;
-      }
-
-      result.attempts = [...attempts];
-      return result;
-    } catch (error) {
-      const message = (error as Error)?.message ?? "request failed";
-      attempts.push(`${endpoint} → ${message}`);
-      if (!isLastAttempt) {
-        continue;
-      }
-      throw Object.assign(new Error("createOrder invocation failed"), { attempts: [...attempts] });
-    }
-  }
-
-  throw Object.assign(new Error("createOrder invocation failed"), { attempts });
-};
-
-const FUNCTIONS_LIB_ENTRY = pathToFileURL(path.join(process.cwd(), "functions", "lib", "index.js")).href;
-
-type LocalCreateOrderHandler =
-  | ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<unknown> | unknown)
-  | null;
-
-let localCreateOrderHandlerPromise: Promise<LocalCreateOrderHandler> | null = null;
-
-const dynamicImport: (specifier: string) => Promise<Record<string, unknown>> = Function(
-  "specifier",
-  "return import(specifier);",
-) as (specifier: string) => Promise<Record<string, unknown>>;
-
-const loadLocalCreateOrderHandler = async (): Promise<LocalCreateOrderHandler> => {
-  if (localCreateOrderHandlerPromise) {
-    return localCreateOrderHandlerPromise;
-  }
-
-  localCreateOrderHandlerPromise = (async () => {
-    try {
-      const mod = await dynamicImport(FUNCTIONS_LIB_ENTRY);
-      const handler = (mod as Record<string, unknown>)?.createOrder;
-      return typeof handler === "function" ? (handler as LocalCreateOrderHandler) : null;
-    } catch (error) {
-      console.error("create-order local handler import failed", { error });
-      return null;
-    }
-  })();
-
-  return localCreateOrderHandlerPromise;
-};
-
-const ensureLowercaseHeaders = (headers: Record<string, string>): Record<string, string> => {
-  const normalised: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    if (!key) {
-      continue;
-    }
-    const trimmedKey = key.trim().toLowerCase();
-    if (!trimmedKey) {
-      continue;
-    }
-    normalised[trimmedKey] = value;
-  }
-  return normalised;
-};
-
-class LocalRequestMock {
-  method: string;
-
-  headers: Record<string, string>;
-
-  body: Record<string, unknown>;
-
-  rawBody: Buffer;
-
-  url: string;
-
-  path: string;
-
-  query: Record<string, unknown> = {};
-
-  params: Record<string, unknown> = {};
-
-  constructor({
-    method,
-    headers,
-    body,
-  }: {
-    method: string;
-    headers: Record<string, string>;
-    body: Record<string, unknown>;
-  }) {
-    this.method = method;
-    this.headers = ensureLowercaseHeaders(headers);
-    if (!this.headers["content-type"]) {
-      this.headers["content-type"] = "application/json";
-    }
-    this.body = body;
-    this.rawBody = Buffer.from(JSON.stringify(body ?? {}));
-    this.url = "/create-order";
-    this.path = "/create-order";
-  }
-
-  get(name: string): string | undefined {
-    if (!name) {
-      return undefined;
-    }
-    return this.headers[name.trim().toLowerCase()];
-  }
-}
-
-interface LocalResponseResolution {
-  status: number;
-  payload: unknown;
-  headers: Record<string, string>;
-}
-
-class LocalResponseMock {
-  statusCode = 200;
-
-  private headers = new Map<string, string>();
-
-  private finished = false;
-
-  constructor(private readonly resolve: (result: LocalResponseResolution) => void) {}
-
-  isFinished() {
-    return this.finished;
-  }
-
-  private normaliseName(name: string): string | null {
-    if (!name) {
-      return null;
-    }
-    const trimmed = name.trim().toLowerCase();
-    return trimmed.length ? trimmed : null;
-  }
-
-  status(code: number) {
-    if (Number.isFinite(code)) {
-      this.statusCode = Number(code);
-    }
-    return this;
-  }
-
-  set(name: string, value: string) {
-    this.setHeader(name, value);
-    return this;
-  }
-
-  setHeader(name: string, value: string) {
-    const key = this.normaliseName(name);
-    if (!key) {
-      return this;
-    }
-    this.headers.set(key, value);
-    return this;
-  }
-
-  append(name: string, value: string) {
-    const key = this.normaliseName(name);
-    if (!key) {
-      return this;
-    }
-    const existing = this.headers.get(key);
-    this.headers.set(key, existing ? `${existing}, ${value}` : value);
-    return this;
-  }
-
-  getHeader(name: string) {
-    const key = this.normaliseName(name);
-    return key ? this.headers.get(key) ?? null : null;
-  }
-
-  json(payload: unknown) {
-    this.finish(payload);
-    return this;
-  }
-
-  send(payload: unknown) {
-    this.finish(payload);
-    return this;
-  }
-
-  end(payload?: unknown) {
-    this.finish(payload);
-    return this;
-  }
-
-  private finish(payload: unknown) {
-    if (this.finished) {
-      return;
-    }
-    this.finished = true;
-    this.resolve({
-      status: this.statusCode,
-      payload,
-      headers: Object.fromEntries(this.headers.entries()),
-    });
-  }
-}
-
-const LOCAL_HANDLER_TIMEOUT_MS = 10_000;
-
-const parseJsonLike = (value: string): unknown => {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
-};
-
-const normaliseLocalPayload = (payload: unknown): Record<string, unknown> | null => {
-  if (payload == null) {
-    return null;
-  }
-
-  if (Buffer.isBuffer(payload)) {
-    const text = payload.toString("utf8");
-    if (!text.trim()) {
-      return null;
-    }
-    const parsed = parseJsonLike(text);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return { value: parsed } as Record<string, unknown>;
-  }
-
-  if (typeof payload === "string") {
-    const trimmed = payload.trim();
-    if (!trimmed) {
-      return null;
-    }
-    const parsed = parseJsonLike(trimmed);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return { message: payload } as Record<string, unknown>;
-  }
-
-  if (typeof payload === "object") {
-    if (Array.isArray(payload)) {
-      return { value: payload } as Record<string, unknown>;
-    }
-    return payload as Record<string, unknown>;
-  }
-
-  return { value: payload } as Record<string, unknown>;
-};
-
-const invokeLocalCreateOrderFallback = async ({
-  body,
-  idToken,
-  host,
-  priorAttempts = [],
-}: {
-  body: Record<string, unknown>;
-  idToken: string | null;
-  host: string | null;
-  priorAttempts?: string[];
-}): Promise<LocalInvocationResult | null> => {
-  const handler = await loadLocalCreateOrderHandler();
-  if (!handler) {
-    return null;
-  }
-
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-  };
-
-  if (idToken) {
-    headers.authorization = `Bearer ${idToken}`;
-  }
-
-  if (host) {
-    headers.host = host;
-    headers["x-forwarded-host"] = host;
-  }
-
-  const request = new LocalRequestMock({ method: "POST", headers, body });
-
-  try {
-    const result = await Promise.race<LocalResponseResolution>([
-      new Promise((resolve, reject) => {
-        const response = new LocalResponseMock(resolve);
-        Promise.resolve(handler(request as unknown as Record<string, unknown>, response as unknown as Record<string, unknown>))
-          .then(() => {
-            // If the handler resolved without writing a response, ensure we resolve to avoid hanging.
-            if (!response.isFinished()) {
-              response.end();
-            }
-          })
-          .catch(reject);
-      }),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error("local createOrder timeout")), LOCAL_HANDLER_TIMEOUT_MS);
-      }),
-    ]);
-
-    const payload = normaliseLocalPayload(result.payload);
-    const status = Number.isFinite(result.status) ? Number(result.status) : 500;
-    const ok = status >= 200 && status < 300;
-    const summary = payload?.error ? String(payload.error) : `HTTP ${status}`;
-    return {
-      ok,
-      status,
-      payload,
-      attempts: [...priorAttempts, `local:createOrder → ${summary}`],
-    };
-  } catch (error) {
-    console.error("create-order local fallback failed", { error, host });
-    return {
-      ok: false,
-      status: 503,
-      payload: { error: "Local createOrder execution failed", code: "local-handler-error" },
-      attempts: [...priorAttempts, `local:createOrder → ${(error as Error)?.message ?? "error"}`],
-    };
-  }
+  const timestamp = FieldValue.serverTimestamp();
+  return [
+    {
+      id: "due-now",
+      label: "Deposit",
+      status: "due",
+      percentage: 100,
+      dueDays: 0,
+      grossAmount: depositAmount,
+      netAmount: depositAmount,
+      createdAt: timestamp,
+      dueAt: timestamp,
+    },
+  ];
 };
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -628,121 +342,165 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
-    sendJson(res, 405, { error: "Method not allowed", code: "method-not-allowed" });
+    respond(res, 405, { error: "Method not allowed", code: "method-not-allowed" });
     return;
   }
 
-  const body = normaliseBody(req.body);
-  const bearerHeader = Array.isArray(req.headers.authorization)
-    ? req.headers.authorization[0]
-    : req.headers.authorization ?? null;
-  const idToken = extractBearerToken(bearerHeader);
-  const hostHeader =
-    (Array.isArray(req.headers["x-forwarded-host"]) ? req.headers["x-forwarded-host"][0] : req.headers["x-forwarded-host"]) ??
-    (Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host) ??
-    null;
+  const idToken = extractBearerToken(req.headers.authorization);
+  if (!idToken) {
+    respond(res, 401, { error: "Sign in required", code: "unauthenticated" });
+    return;
+  }
 
-  const endpoints = collectCreateOrderEndpoints(hostHeader);
+  let rawBody: unknown = req.body;
+  if (typeof rawBody === "string") {
+    try {
+      rawBody = JSON.parse(rawBody);
+    } catch (error) {
+      console.error("create-order body parse failed", { error });
+      respond(res, 400, { error: "Invalid checkout payload", code: "invalid-argument" });
+      return;
+    }
+  }
+
+  const parsedBody = parseCheckoutRequest(rawBody);
+  if (!parsedBody) {
+    respond(res, 400, { error: "Invalid checkout payload", code: "invalid-argument" });
+    return;
+  }
 
   try {
-    const result = await invokeCreateOrder<Record<string, unknown> | null>(endpoints, {
-      body,
-      idToken,
-    });
+    const auth = await getFirebaseAdminAuth().verifyIdToken(idToken);
+    if (!auth?.uid) {
+      respond(res, 401, { error: "Sign in required", code: "unauthenticated" });
+      return;
+    }
 
-    if (!result.ok) {
-      const fallback = await invokeLocalCreateOrderFallback({
-        body,
-        idToken,
-        host: hostHeader,
-        priorAttempts: result.attempts,
-      });
+    const firestore = getFirebaseAdminFirestore();
+    const ordersCollection = firestore.collection("orders");
+    const orderRef = ordersCollection.doc();
+    const orderId = orderRef.id;
 
-      if (fallback) {
-        if (!fallback.ok) {
-          const payload = fallback.payload ?? { error: "createOrder unavailable" };
-          console.error("create-order remote invocation failed; local fallback responded with error", {
-            host: hostHeader,
-            attempts: fallback.attempts,
-            status: fallback.status,
+    const customerName = parsedBody.order.customerName ?? optionalString(auth.name) ?? null;
+    if (!customerName) {
+      respond(res, 400, { error: "Customer name is required", code: "invalid-argument" });
+      return;
+    }
+
+    const emailFromToken = optionalString(auth.email);
+    const customerEmail = parsedBody.order.userEmail ?? emailFromToken;
+
+    const price = Math.max(0, toCurrency(parsedBody.pricing.grandTotal));
+    const netTotal = Math.max(0, toCurrency(parsedBody.pricing.subtotal));
+    const vat = Math.max(0, toCurrency(parsedBody.pricing.vat));
+    const voucherDiscount = Math.max(0, toCurrency(parsedBody.pricing.voucherDiscount));
+    const discountAmount = Math.max(0, toCurrency(parsedBody.pricing.discountAmount));
+    const hasZeroBalance =
+      parsedBody.pricing.hasZeroBalance ?? Math.abs(price) <= ZERO_BALANCE_TOLERANCE;
+
+    const depositAmount = hasZeroBalance ? 0 : price;
+    const paymentStatus = depositAmount <= ZERO_BALANCE_TOLERANCE ? "paid" : "requires_payment";
+    const orderStatus = depositAmount <= ZERO_BALANCE_TOLERANCE ? "confirmed" : "pending_payment";
+
+    let stripeClient: Stripe | null = null;
+    let paymentIntent: Stripe.PaymentIntent | null = null;
+
+    if (depositAmount > ZERO_BALANCE_TOLERANCE) {
+      stripeClient = await getStripeClient();
+      if (!stripeClient) {
+        respond(res, 503, { error: "Stripe configuration unavailable", code: "stripe-misconfigured" });
+        return;
+      }
+      try {
+        paymentIntent = await createPaymentIntent(stripeClient, depositAmount, orderId, customerEmail);
+      } catch (error) {
+        console.error("Failed to create Stripe payment intent", { error });
+        respond(res, 502, { error: "Payment session could not be created", code: "payment-intent-error" });
+        return;
+      }
+    }
+
+    const timestamp = FieldValue.serverTimestamp();
+
+    const orderDocument: Record<string, unknown> = {
+      userId: auth.uid,
+      userEmail: customerEmail,
+      status: orderStatus,
+      paymentStatus,
+      price,
+      netTotal,
+      subtotal: netTotal,
+      vat,
+      discountAmount,
+      voucherDiscount,
+      totals: {
+        productTotal: parsedBody.pricing.productTotal,
+        rentalTotal: parsedBody.pricing.rentalTotal,
+        discountAmount,
+        voucherDiscount,
+        subtotal: netTotal,
+        vat,
+        grandTotal: price,
+      },
+      depositAmount,
+      depositDue: depositAmount,
+      balanceDue: Math.max(0, toCurrency(price - depositAmount)),
+      paymentSchedule: buildPaymentSchedule(depositAmount),
+      kitReservationStatus: parsedBody.order.kitReservationStatus,
+      kitReservationWarnings: parsedBody.order.kitReservationWarnings,
+      rentalSubtotal: parsedBody.order.rentalSubtotal,
+      items: parsedBody.order.items,
+      kitItems: parsedBody.order.kitItems,
+      organisers: parsedBody.order.organisers,
+      voucher: parsedBody.order.voucher,
+      voucherCode: parsedBody.pricing.voucherCode ?? parsedBody.order.voucher,
+      leadSource: parsedBody.order.leadSource,
+      customerName,
+      companyName: parsedBody.order.companyName,
+      location: parsedBody.order.location,
+      postalCode: parsedBody.order.postalCode,
+      projectName: parsedBody.order.projectName,
+      channel: "client-portal",
+      paymentIntentId: paymentIntent?.id ?? null,
+      paymentProvider: paymentIntent ? "stripe" : "none",
+      zeroBalanceConfirmed: depositAmount <= ZERO_BALANCE_TOLERANCE,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      createdBy: auth.uid,
+    };
+
+    try {
+      await orderRef.set(orderDocument, { merge: false });
+    } catch (error) {
+      console.error("Failed to persist order document", { error });
+      if (paymentIntent && stripeClient) {
+        try {
+          await stripeClient.paymentIntents.cancel(paymentIntent.id);
+        } catch (cancelError) {
+          console.warn("Failed to cancel payment intent after Firestore error", {
+            paymentIntentId: paymentIntent.id,
+            error: cancelError,
           });
-          sendJson(res, fallback.status, payload);
-          return;
         }
-
-        console.warn("create-order remote invocation failed; satisfied via local fallback", {
-          host: hostHeader,
-          attempts: fallback.attempts,
-          status: fallback.status,
-        });
-        res.status(fallback.status).json(fallback.payload ?? null);
-        return;
       }
-
-      const payload =
-        result.payload && typeof result.payload === "object"
-          ? (result.payload as Record<string, unknown>)
-          : { error: `HTTP ${result.status}` };
-
-      const summary = result.attempts.length ? result.attempts.join(" | ") : "<none>";
-      console.error("create-order invocation responded with failure", {
-        host: hostHeader,
-        attempts: result.attempts,
-        summary,
-        status: result.status,
-      });
-
-      sendJson(res, result.status, payload);
+      respond(res, 500, { error: "Failed to create order", code: "internal" });
       return;
     }
 
-    const payload =
-      result.payload && typeof result.payload === "object"
-        ? (result.payload as Record<string, unknown>)
-        : { ok: result.ok };
-
-    res.status(result.status).json(payload ?? null);
+    respond(res, 200, {
+      orderId,
+      clientSecret: paymentIntent?.client_secret ?? null,
+      paymentIntentId: paymentIntent?.id ?? null,
+      price,
+      netTotal,
+      depositAmount,
+      depositDue: depositAmount,
+      discountAmount,
+      voucherDiscount,
+    });
   } catch (error) {
-    const attempts = (error as Error & { attempts?: string[] }).attempts ?? [];
-    const fallback = await invokeLocalCreateOrderFallback({
-      body,
-      idToken,
-      host: hostHeader,
-      priorAttempts: attempts,
-    });
-
-    if (fallback) {
-      if (!fallback.ok) {
-        const payload = fallback.payload ?? { error: "createOrder unavailable" };
-        console.error("create-order remote attempts failed; local fallback responded with error", {
-          host: hostHeader,
-          attempts: fallback.attempts,
-          status: fallback.status,
-        });
-        sendJson(res, fallback.status, payload);
-        return;
-      }
-
-      console.warn("create-order remote attempts failed; satisfied via local fallback", {
-        host: hostHeader,
-        attempts: fallback.attempts,
-        status: fallback.status,
-      });
-      res.status(fallback.status).json(fallback.payload ?? null);
-      return;
-    }
-
-    const summary = attempts.length ? attempts.join(" | ") : "<none>";
-    console.error("create-order invocation attempts failed", {
-      host: hostHeader,
-      attempts,
-      summary,
-    });
-    sendJson(res, 502, {
-      error: "createOrder unavailable",
-      code: "http-function-error",
-      attempts,
-    });
+    console.error("create-order handler failed", { error });
+    respond(res, 500, { error: "Checkout service failed", code: "internal" });
   }
 }
 

@@ -16,11 +16,16 @@ import { doc, getDoc } from "firebase/firestore";
 
 import { ensureFirebase } from "@/lib/firebase";
 
-import { createIntentPayload, type CheckoutOrderInput } from "./buildOrderInput";
+import {
+  createIntentPayload,
+  type CheckoutOrderInput,
+  type CheckoutPricingSnapshot,
+} from "./buildOrderInput";
 import { ZERO_BALANCE_TOLERANCE } from "./useCheckoutTotals";
 
 interface UseCheckoutPaymentArgs {
   orderInput: CheckoutOrderInput;
+  pricing: CheckoutPricingSnapshot;
   hasZeroBalance: boolean;
   stripePromise: Promise<unknown> | null;
   ensureUser: () => Promise<User>;
@@ -113,6 +118,7 @@ export interface CheckoutPaymentState {
 
 export function useCheckoutPayment({
   orderInput,
+  pricing,
   hasZeroBalance,
   stripePromise,
   ensureUser,
@@ -125,8 +131,7 @@ export function useCheckoutPayment({
   const [initializing, setInitializing] = useState(false);
   const lastIntentPayloadRef = useRef<string | null>(null);
 
-  const intentPayload = useMemo(() => createIntentPayload(orderInput), [orderInput]);
-  const orderRequestBody = useMemo(() => JSON.stringify(orderInput), [orderInput]);
+  const intentPayload = useMemo(() => createIntentPayload(orderInput, pricing), [orderInput, pricing]);
   const paymentDetailsStale = useMemo(
     () => lastIntentPayloadRef.current !== null && lastIntentPayloadRef.current !== intentPayload,
     [intentPayload],
@@ -139,7 +144,7 @@ export function useCheckoutPayment({
           "Content-Type": "application/json",
           Authorization: `Bearer ${idToken}`,
         },
-        body: orderRequestBody,
+        body: intentPayload,
         cache: "no-store",
       });
 
@@ -184,7 +189,7 @@ export function useCheckoutPayment({
 
       return payload as CreateOrderResult;
     },
-    [orderRequestBody],
+    [intentPayload],
   );
 
   const completeZeroBalanceOrder = useCallback(async () => {

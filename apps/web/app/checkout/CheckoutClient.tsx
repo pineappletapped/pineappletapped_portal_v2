@@ -715,7 +715,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         : [];
       return {
         id: item.id,
+        name: item.name,
         quantity: item.quantity,
+        price: item.price,
         rentalTotal: item.rentalTotal ?? 0,
         modifiers: (item.modifiers ?? []).map((mod) => ({ ...mod })),
         kitStatus: item.kitStatus === "pending" ? "pending" : "confirmed",
@@ -794,44 +796,79 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     voucher,
     leadSourceValue,
   ]);
+  const pricingPayload = useMemo(
+    () => ({
+      productTotal,
+      rentalTotal,
+      voucherDiscount,
+      discountPercent: discount,
+      discountAmount,
+      subtotal: finalTotal,
+      vat,
+      grandTotal,
+      hasZeroBalance,
+      voucherCode: voucherLabel,
+    }),
+    [
+      productTotal,
+      rentalTotal,
+      voucherDiscount,
+      discount,
+      discountAmount,
+      finalTotal,
+      vat,
+      grandTotal,
+      hasZeroBalance,
+      voucherLabel,
+    ],
+  );
   const currentIntentPayload = useMemo(
     () =>
       JSON.stringify({
-        ...orderInput,
-        items: orderInput.items.map((item) => ({
-          id: item.id,
-          quantity: item.quantity,
-          rentalTotal: item.rentalTotal,
-          modifiers: (item.modifiers ?? []).map((mod) => ({
-            groupId: mod.groupId,
-            optionId: mod.optionId,
-            price: mod.price ?? null,
+        order: {
+          ...orderInput,
+          items: orderInput.items.map((item) => ({
+            id: item.id,
+            name: item.name,
+            quantity: item.quantity,
+            unitPrice: item.price,
+            price: item.price,
+            lineTotal: Number.isFinite(item.price * item.quantity)
+              ? Number((item.price * item.quantity).toFixed(2))
+              : item.price,
+            rentalTotal: item.rentalTotal,
+            modifiers: (item.modifiers ?? []).map((mod) => ({
+              groupId: mod.groupId,
+              optionId: mod.optionId,
+              price: mod.price ?? null,
+            })),
+            kitStatus: item.kitStatus,
+            kitWarnings: item.kitWarnings,
+            variation: item.variation,
+            date: item.date,
+            location: item.location,
+            postalCode: item.postalCode,
+            orderFormResponses: item.orderFormResponses,
+            coverage: item.coverage,
+            timeSlot: item.timeSlot ?? null,
+            exhibition: item.exhibition ?? null,
+            campaignBooking: item.campaignBooking,
+            organiser: item.organiser,
           })),
-          kitStatus: item.kitStatus,
-          kitWarnings: item.kitWarnings,
-          variation: item.variation,
-          date: item.date,
-          location: item.location,
-          postalCode: item.postalCode,
-          orderFormResponses: item.orderFormResponses,
-          coverage: item.coverage,
-          timeSlot: item.timeSlot ?? null,
-          exhibition: item.exhibition ?? null,
-          campaignBooking: item.campaignBooking,
-          organiser: item.organiser,
-        })),
-        kitItems: orderInput.kitItems.map((kit) => ({
-          id: kit.id,
-          name: kit.name ?? null,
-          category: kit.category ?? null,
-          start: kit.start,
-          end: kit.end,
-        })),
-        kitReservationStatus: orderInput.kitReservationStatus,
-        kitReservationWarnings: orderInput.kitReservationWarnings,
-        organisers: orderInput.organisers,
+          kitItems: orderInput.kitItems.map((kit) => ({
+            id: kit.id,
+            name: kit.name ?? null,
+            category: kit.category ?? null,
+            start: kit.start,
+            end: kit.end,
+          })),
+          kitReservationStatus: orderInput.kitReservationStatus,
+          kitReservationWarnings: orderInput.kitReservationWarnings,
+          organisers: orderInput.organisers,
+        },
+        pricing: pricingPayload,
       }),
-    [orderInput],
+    [orderInput, pricingPayload],
   );
   const zeroBalanceBlockingMessage = useMemo(() => {
     if (items.length === 0) {

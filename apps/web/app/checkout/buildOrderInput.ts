@@ -315,35 +315,60 @@ export function createOrderInput({
   };
 }
 
-export const createIntentPayload = (input: CheckoutOrderInput): string =>
+export interface CheckoutPricingSnapshot {
+  productTotal: number;
+  rentalTotal: number;
+  voucherDiscount: number;
+  discountPercent: number;
+  discountAmount: number;
+  subtotal: number;
+  vat: number;
+  grandTotal: number;
+  hasZeroBalance?: boolean;
+  voucherCode?: string | null;
+}
+
+export const createIntentPayload = (
+  input: CheckoutOrderInput,
+  pricing: CheckoutPricingSnapshot,
+): string =>
   JSON.stringify({
-    ...input,
-    items: input.items.map((item) => ({
-      id: item.id,
-      quantity: item.quantity,
-      rentalTotal: item.rentalTotal,
-      modifiers: item.modifiers,
-      kitStatus: item.kitStatus,
-      kitWarnings: item.kitWarnings,
-      variation: item.variation,
-      date: item.date,
-      location: item.location,
-      postalCode: item.postalCode,
-      orderFormResponses: item.orderFormResponses,
-      coverage: item.coverage,
-      timeSlot: item.timeSlot,
-      exhibition: item.exhibition,
-      campaignBooking: item.campaignBooking,
-      organiser: item.organiser,
-    })),
-    kitItems: input.kitItems.map((kit) => ({
-      id: kit.id,
-      name: kit.name ?? null,
-      category: kit.category ?? null,
-      start: kit.start,
-      end: kit.end,
-    })),
-    kitReservationStatus: input.kitReservationStatus,
-    kitReservationWarnings: input.kitReservationWarnings,
-    organisers: input.organisers,
+    order: {
+      ...input,
+      items: input.items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        quantity: item.quantity,
+        unitPrice: item.price,
+        price: item.price,
+        lineTotal: Number.isFinite(item.price * item.quantity)
+          ? Number((item.price * item.quantity).toFixed(2))
+          : item.price,
+        rentalTotal: item.rentalTotal,
+        modifiers: item.modifiers,
+        kitStatus: item.kitStatus,
+        kitWarnings: item.kitWarnings,
+        variation: item.variation,
+        date: item.date,
+        location: item.location,
+        postalCode: item.postalCode,
+        orderFormResponses: item.orderFormResponses,
+        coverage: item.coverage,
+        timeSlot: item.timeSlot,
+        exhibition: item.exhibition,
+        campaignBooking: item.campaignBooking,
+        organiser: item.organiser,
+      })),
+      kitItems: input.kitItems.map((kit) => ({
+        id: kit.id,
+        name: kit.name ?? null,
+        category: kit.category ?? null,
+        start: kit.start,
+        end: kit.end,
+      })),
+      kitReservationStatus: input.kitReservationStatus,
+      kitReservationWarnings: input.kitReservationWarnings,
+      organisers: input.organisers,
+    },
+    pricing,
   });
