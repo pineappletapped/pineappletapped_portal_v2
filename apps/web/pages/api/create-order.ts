@@ -95,6 +95,268 @@ interface ProductTaskSeed {
   subtasks: string[];
 }
 
+type BrandGuidelinesStatus = "needs_setup" | "needs_amendments" | "complete";
+
+interface OrganisationResolution {
+  organisation: CheckoutOrganisationPayload | null;
+  brandStatus: BrandGuidelinesStatus;
+  needsAmendments: boolean;
+  guidelinesCompleted: boolean;
+  hasGuidelineDetails: boolean;
+}
+
+const normaliseBrandColours = (input: unknown): string[] => {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  const unique = new Set<string>();
+  input.forEach((entry) => {
+    const colour = optionalString(entry);
+    if (!colour) {
+      return;
+    }
+    const upper = colour.toUpperCase();
+    unique.add(upper.startsWith("#") ? upper : `#${upper}`);
+  });
+  return Array.from(unique);
+};
+
+const hasStoredBrandGuidelines = (data: Record<string, unknown> | null | undefined): boolean => {
+  if (!data) {
+    return false;
+  }
+  if (typeof data.brandLogoUrl === "string" && data.brandLogoUrl.trim().length > 0) {
+    return true;
+  }
+  if (data.brandGuidelines && typeof data.brandGuidelines === "object") {
+    if (Object.keys(data.brandGuidelines as Record<string, unknown>).length > 0) {
+      return true;
+    }
+    const status = (data.brandGuidelines as Record<string, unknown>).status;
+    if (typeof status === "string" && status.toLowerCase() === "needs_amendments") {
+      return true;
+    }
+  }
+  if (data.brandGuidelinesUpdatedAt) {
+    return true;
+  }
+  if (Array.isArray(data.brandColors)) {
+    return data.brandColors.some((value) => typeof value === "string" && value.trim().length > 0);
+  }
+  return false;
+};
+
+const resolveBrandGuidelinesStatus = (
+  data: Record<string, unknown> | null | undefined,
+): {
+  status: BrandGuidelinesStatus;
+  needsAmendments: boolean;
+  completed: boolean;
+  hasDetails: boolean;
+} => {
+  if (!data) {
+    return { status: "needs_setup", needsAmendments: false, completed: false, hasDetails: false };
+  }
+
+  const rawStatus = typeof data.brandGuidelinesStatus === "string" ? data.brandGuidelinesStatus : "";
+  const guidelineRecord =
+    data.brandGuidelines && typeof data.brandGuidelines === "object"
+      ? (data.brandGuidelines as Record<string, unknown>)
+      : null;
+  const guidelineStatus =
+    typeof guidelineRecord?.status === "string" ? guidelineRecord.status.toLowerCase() : "";
+  const needsAmendments =
+    data.brandGuidelinesNeedsAmendments === true ||
+    rawStatus === "needs_amendments" ||
+    guidelineStatus === "needs_amendments";
+  const hasGuidelines = hasStoredBrandGuidelines(data);
+
+  if (needsAmendments) {
+    return { status: "needs_amendments", needsAmendments: true, completed: false, hasDetails: hasGuidelines };
+  }
+
+  if (rawStatus === "complete" || guidelineStatus === "complete" || hasGuidelines) {
+    return {
+      status: "complete",
+      needsAmendments: false,
+      completed: hasGuidelines || rawStatus === "complete" || guidelineStatus === "complete",
+      hasDetails: hasGuidelines,
+    };
+  }
+
+  return { status: "needs_setup", needsAmendments: false, completed: false, hasDetails: false };
+};
+
+const resolveOrganisationContext = async (
+  firestore: Firestore,
+  userId: string,
+  customerName: string,
+  customerEmail: string | null,
+  organisationInput: CheckoutOrganisationPayload | null,
+): Promise<OrganisationResolution> => {
+  if (!organisationInput) {
+    return {
+      organisation: null,
+      brandStatus: "needs_setup",
+      needsAmendments: false,
+      guidelinesCompleted: false,
+      hasGuidelineDetails: false,
+    };
+  }
+
+  const orgsCollection = firestore.collection("orgs");
+  const membershipsCollection = firestore.collection("memberships");
+  const requestedId = optionalString(organisationInput.id);
+  const desiredName = optionalString(organisationInput.name);
+  const desiredSource = optionalString(organisationInput.source);
+  const desiredLogo = optionalString(organisationInput.brandLogoUrl);
+  const desiredColours = normaliseBrandColours(organisationInput.brandColors);
+
+  let organisation: CheckoutOrganisationPayload | null = {
+    id: requestedId,
+    name: desiredName,
+    source: desiredSource,
+    brandLogoUrl: desiredLogo,
+    brandColors: desiredColours,
+  };
+
+  let brandStatus: BrandGuidelinesStatus = "needs_setup";
+  let needsAmendments = false;
+  let guidelinesCompleted = false;
+  let hasGuidelineDetails = false;
+  let orgRef = requestedId ? orgsCollection.doc(requestedId) : null;
+
+  try {
+    if (orgRef) {
+      const existingSnap = await orgRef.get();
+      if (existingSnap.exists) {
+        const existingData = (existingSnap.data() ?? {}) as Record<string, unknown>;
+        const statusInfo = resolveBrandGuidelinesStatus(existingData);
+        brandStatus = statusInfo.status;
+        needsAmendments = statusInfo.needsAmendments;
+        guidelinesCompleted = statusInfo.completed;
+        hasGuidelineDetails = statusInfo.hasDetails;
+
+        const resolvedName = desiredName ?? optionalString(existingData.name);
+        const resolvedSource = desiredSource ?? optionalString(existingData.source);
+        const resolvedLogo = desiredLogo ?? optionalString(existingData.brandLogoUrl);
+        const resolvedColours =
+          desiredColours.length > 0 ? desiredColours : normaliseBrandColours(existingData.brandColors);
+
+        organisation = {
+          id: orgRef.id,
+          name: resolvedName ?? null,
+          source: resolvedSource ?? null,
+          brandLogoUrl: resolvedLogo ?? null,
+          brandColors: resolvedColours,
+        };
+
+        const updates: Record<string, unknown> = {};
+        if (resolvedName && resolvedName !== optionalString(existingData.name)) {
+          updates.name = resolvedName;
+        }
+        if (resolvedSource && resolvedSource !== optionalString(existingData.source)) {
+          updates.source = resolvedSource;
+        }
+        if (resolvedLogo && resolvedLogo !== optionalString(existingData.brandLogoUrl)) {
+          updates.brandLogoUrl = resolvedLogo;
+        }
+        if (resolvedColours.length > 0) {
+          const existingColours = normaliseBrandColours(existingData.brandColors);
+          if (resolvedColours.join("|") !== existingColours.join("|")) {
+            updates.brandColors = resolvedColours;
+          }
+        }
+        if (typeof existingData.brandGuidelinesStatus !== "string" || existingData.brandGuidelinesStatus !== brandStatus) {
+          updates.brandGuidelinesStatus = brandStatus;
+        }
+        if (Boolean(existingData.brandGuidelinesNeedsAmendments) !== needsAmendments) {
+          updates.brandGuidelinesNeedsAmendments = needsAmendments;
+        }
+        if (Boolean(existingData.brandGuidelinesHasAssets) !== hasGuidelineDetails) {
+          updates.brandGuidelinesHasAssets = hasGuidelineDetails;
+        }
+
+        if (Object.keys(updates).length > 0) {
+          updates.updatedAt = FieldValue.serverTimestamp();
+          await orgRef.set(updates, { merge: true });
+        }
+      } else {
+        orgRef = null;
+      }
+    }
+
+    if (!orgRef) {
+      const newOrgRef = requestedId ? orgsCollection.doc(requestedId) : orgsCollection.doc();
+      orgRef = newOrgRef;
+      const fallbackName =
+        desiredName ??
+        customerName ??
+        (customerEmail ? customerEmail.split("@")[0] : null) ??
+        "Organisation";
+      organisation = {
+        id: newOrgRef.id,
+        name: fallbackName,
+        source: desiredSource,
+        brandLogoUrl: desiredLogo,
+        brandColors: desiredColours,
+      };
+
+      await newOrgRef.set(
+        {
+          name: fallbackName,
+          source: desiredSource ?? null,
+          ownerId: userId,
+          ownerName: customerName,
+          ownerEmail: customerEmail ?? null,
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+          brandLogoUrl: desiredLogo ?? null,
+          brandColors: desiredColours,
+          brandGuidelinesStatus: "needs_setup",
+          brandGuidelinesNeedsAmendments: false,
+          brandGuidelinesHasAssets: false,
+        },
+        { merge: false },
+      );
+
+      brandStatus = "needs_setup";
+      needsAmendments = false;
+      guidelinesCompleted = false;
+      hasGuidelineDetails = false;
+    }
+
+    if (orgRef) {
+      const membershipRef = membershipsCollection.doc(`${orgRef.id}_${userId}`);
+      const membershipSnap = await membershipRef.get();
+      if (!membershipSnap.exists) {
+        await membershipRef.set(
+          {
+            orgId: orgRef.id,
+            userId,
+            role: "client_admin",
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: false },
+        );
+      } else {
+        await membershipRef.set({ updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+      }
+    }
+  } catch (error) {
+    console.error("Failed to resolve organisation for order", { error });
+  }
+
+  return {
+    organisation,
+    brandStatus,
+    needsAmendments,
+    guidelinesCompleted,
+    hasGuidelineDetails,
+  };
+};
+
 const normaliseString = (value: unknown): string => {
   if (typeof value !== "string") {
     return "";
@@ -541,10 +803,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const emailFromToken = optionalString(auth.email);
     const customerEmail = parsedBody.order.userEmail ?? emailFromToken;
-    const organisationInfo = parsedBody.order.organisation ?? null;
+    const requestedOrganisation = parsedBody.order.organisation ?? null;
+    const organisationResolution = await resolveOrganisationContext(
+      firestore,
+      auth.uid,
+      customerName,
+      customerEmail ?? null,
+      requestedOrganisation,
+    );
+    const resolvedOrganisation = organisationResolution.organisation;
+    const brandGuidelinesStatus = organisationResolution.brandStatus;
+    const brandGuidelinesNeedsAmendments = organisationResolution.needsAmendments;
+    const brandGuidelinesCompleted = organisationResolution.guidelinesCompleted;
+    const brandGuidelinesHasAssets =
+      organisationResolution.hasGuidelineDetails || organisationResolution.guidelinesCompleted;
     const companyName =
       optionalString(parsedBody.order.companyName) ??
-      optionalString(organisationInfo?.name) ??
+      optionalString(resolvedOrganisation?.name) ??
       null;
 
     const price = Math.max(0, toCurrency(parsedBody.pricing.grandTotal));
@@ -620,11 +895,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       source: "checkout",
       createdAt: timestamp,
       updatedAt: timestamp,
-      organisationId: organisationInfo?.id ?? null,
-      organisationName: organisationInfo?.name ?? companyName,
-      organisationSource: organisationInfo?.source ?? null,
-      organisationBrandLogoUrl: organisationInfo?.brandLogoUrl ?? null,
-      organisationBrandColors: organisationInfo?.brandColors ?? [],
+      organisationId: resolvedOrganisation?.id ?? null,
+      organisationName: resolvedOrganisation?.name ?? companyName,
+      organisationSource: resolvedOrganisation?.source ?? null,
+      organisationBrandLogoUrl: resolvedOrganisation?.brandLogoUrl ?? null,
+      organisationBrandColors: resolvedOrganisation?.brandColors ?? [],
+      orgId: resolvedOrganisation?.id ?? null,
+      orgName: resolvedOrganisation?.name ?? companyName,
+      brandGuidelinesStatus,
+      brandGuidelinesNeedsAmendments,
+      brandGuidelinesCompleted,
+      brandGuidelinesHasAssets,
+      customerWelcomePending: true,
+      customerWelcomeAcknowledgedAt: null,
     };
 
     try {
@@ -696,11 +979,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       createdAt: timestamp,
       updatedAt: timestamp,
       createdBy: auth.uid,
-      organisationId: organisationInfo?.id ?? null,
-      organisationName: organisationInfo?.name ?? companyName,
-      organisationSource: organisationInfo?.source ?? null,
-      organisationBrandLogoUrl: organisationInfo?.brandLogoUrl ?? null,
-      organisationBrandColors: organisationInfo?.brandColors ?? [],
+      organisationId: resolvedOrganisation?.id ?? null,
+      organisationName: resolvedOrganisation?.name ?? companyName,
+      organisationSource: resolvedOrganisation?.source ?? null,
+      organisationBrandLogoUrl: resolvedOrganisation?.brandLogoUrl ?? null,
+      organisationBrandColors: resolvedOrganisation?.brandColors ?? [],
+      orgId: resolvedOrganisation?.id ?? null,
+      orgName: resolvedOrganisation?.name ?? companyName,
+      brandGuidelinesStatus,
+      brandGuidelinesNeedsAmendments,
+      brandGuidelinesCompleted,
+      brandGuidelinesHasAssets,
     };
 
     try {

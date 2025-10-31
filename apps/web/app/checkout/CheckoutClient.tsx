@@ -98,6 +98,7 @@ interface CreateOrderResult {
   netTotal?: number;
   discountAmount?: number;
   voucherDiscount?: number;
+  projectId?: string;
   [key: string]: unknown;
 }
 
@@ -117,6 +118,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   }, []);
 
   const { items, clear } = useCart();
+  const projectIdRef = useRef<string | null>(null);
   const productTotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
   const rentalTotal = items.reduce(
     (sum, i) => sum + (i.rentalTotal || 0) * i.quantity,
@@ -1212,6 +1214,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
 
   const callCreateOrder = useCallback(
     async (idToken: string): Promise<CreateOrderResult> => {
+      projectIdRef.current = null;
       const response = await fetch("/api/create-order", {
         method: "POST",
         headers: {
@@ -1261,7 +1264,11 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return {};
       }
 
-      return payload as CreateOrderResult;
+      const result = payload as CreateOrderResult;
+      const returnedProjectId =
+        typeof result.projectId === "string" && result.projectId.trim().length > 0 ? result.projectId : null;
+      projectIdRef.current = returnedProjectId;
+      return result;
     },
     [currentIntentPayload],
   );
@@ -1380,7 +1387,13 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
 
   const handlePaymentSuccess = useCallback(
     (completedOrderId: string) => {
+      const destinationProjectId = projectIdRef.current;
       clear();
+      projectIdRef.current = null;
+      if (destinationProjectId) {
+        router.push(`/projects/${destinationProjectId}`);
+        return;
+      }
       router.push(`/orders/${completedOrderId}`);
     },
     [clear, router],

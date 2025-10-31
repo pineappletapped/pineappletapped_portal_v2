@@ -444,6 +444,12 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [organisationGuidelines, setOrganisationGuidelines] = useState<BrandGuidelinesState | null>(null);
   const [organisationHasGuidelines, setOrganisationHasGuidelines] = useState(false);
   const [organisationGuidelinesUpdatedAt, setOrganisationGuidelinesUpdatedAt] = useState<Date | null>(null);
+  const [organisationBrandStatus, setOrganisationBrandStatus] = useState<
+    'complete' | 'needs_setup' | 'needs_amendments' | null
+  >(null);
+  const [organisationNeedsAmendments, setOrganisationNeedsAmendments] = useState(false);
+  const [showWelcomeBanner, setShowWelcomeBanner] = useState(false);
+  const [acknowledgingWelcome, setAcknowledgingWelcome] = useState(false);
 
   // Internal messages (staff/contractor comms)
   const [internalMessages, setInternalMessages] = useState<any[]>([]);
@@ -574,6 +580,32 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
     }
   };
 
+  const acknowledgeWelcome = useCallback(async () => {
+    if (!project?.id || acknowledgingWelcome) {
+      return;
+    }
+    setAcknowledgingWelcome(true);
+    try {
+      await updateDoc(doc(db, 'projects', project.id), {
+        customerWelcomePending: false,
+        customerWelcomeAcknowledgedAt: serverTimestamp(),
+      });
+      setProject((prev: any) =>
+        prev
+          ? {
+              ...prev,
+              customerWelcomePending: false,
+            }
+          : prev,
+      );
+      setShowWelcomeBanner(false);
+    } catch (err) {
+      console.error('Failed to acknowledge project welcome', err);
+    } finally {
+      setAcknowledgingWelcome(false);
+    }
+  }, [acknowledgingWelcome, project?.id]);
+
   useEffect(()=>{
     (async()=>{
       const pd = await getDoc(doc(db, 'projects', params.id));
@@ -583,6 +615,28 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       }
       const data = pd.data();
       setProject({ id: pd.id, ...data });
+      setShowWelcomeBanner(Boolean((data as any)?.customerWelcomePending));
+      const projectBrandStatus =
+        typeof (data as any)?.brandGuidelinesStatus === 'string'
+          ? ((data as any).brandGuidelinesStatus as 'complete' | 'needs_setup' | 'needs_amendments')
+          : null;
+      const projectBrandCompleted = Boolean((data as any)?.brandGuidelinesCompleted);
+      const projectBrandHasAssets = Boolean((data as any)?.brandGuidelinesHasAssets);
+      const projectBrandNeedsAmendments = Boolean((data as any)?.brandGuidelinesNeedsAmendments);
+      const initialBrandStatus = projectBrandNeedsAmendments
+        ? 'needs_amendments'
+        : projectBrandStatus && ['complete', 'needs_amendments', 'needs_setup'].includes(projectBrandStatus)
+          ? projectBrandStatus
+          : projectBrandCompleted || projectBrandHasAssets
+            ? 'complete'
+            : 'needs_setup';
+      const initialBrandNeedsAmendments =
+        projectBrandNeedsAmendments || initialBrandStatus === 'needs_amendments';
+      setOrganisationBrandStatus(initialBrandStatus);
+      setOrganisationNeedsAmendments(initialBrandNeedsAmendments);
+      setOrganisationHasGuidelines(
+        projectBrandHasAssets || projectBrandCompleted || initialBrandNeedsAmendments,
+      );
       setVenueSelection(((data as any)?.venueId as string) || '');
       if (data?.orderId) {
         try {
@@ -642,8 +696,19 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
     if (!project?.orgId) {
       setOrganisation(null);
       setOrganisationGuidelines(null);
-      setOrganisationHasGuidelines(false);
+      const fallbackHasGuidelines =
+        Boolean(project?.brandGuidelinesHasAssets) ||
+        Boolean(project?.brandGuidelinesCompleted) ||
+        Boolean(project?.brandGuidelinesNeedsAmendments);
+      setOrganisationHasGuidelines(fallbackHasGuidelines);
       setOrganisationGuidelinesUpdatedAt(null);
+      const fallbackStatus = project?.brandGuidelinesNeedsAmendments
+        ? 'needs_amendments'
+        : fallbackHasGuidelines
+          ? 'complete'
+          : 'needs_setup';
+      setOrganisationBrandStatus(fallbackStatus);
+      setOrganisationNeedsAmendments(Boolean(project?.brandGuidelinesNeedsAmendments));
       return;
     }
 
@@ -658,6 +723,8 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
           setOrganisationGuidelines(null);
           setOrganisationHasGuidelines(false);
           setOrganisationGuidelinesUpdatedAt(null);
+          setOrganisationBrandStatus('needs_setup');
+          setOrganisationNeedsAmendments(false);
           return;
         }
 
@@ -671,17 +738,29 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
             orgData?.brandGuidelinesUpdatedAt
         );
         const updatedAt = parseFirestoreDate(orgData?.brandGuidelinesUpdatedAt);
+        const rawStatus = typeof orgData?.brandGuidelinesStatus === 'string' ? orgData.brandGuidelinesStatus : null;
+        const normalisedStatus: 'complete' | 'needs_setup' | 'needs_amendments' =
+          rawStatus === 'complete' || rawStatus === 'needs_amendments' || rawStatus === 'needs_setup'
+            ? rawStatus
+            : hasGuidelines
+              ? 'complete'
+              : 'needs_setup';
+        const needsAmendments = Boolean(orgData?.brandGuidelinesNeedsAmendments) || normalisedStatus === 'needs_amendments';
 
         setOrganisation({ id: orgSnap.id, name: orgName });
         setOrganisationGuidelines(guidelines);
-        setOrganisationHasGuidelines(hasGuidelines);
+        setOrganisationHasGuidelines(hasGuidelines || needsAmendments);
         setOrganisationGuidelinesUpdatedAt(updatedAt);
+        setOrganisationBrandStatus(normalisedStatus);
+        setOrganisationNeedsAmendments(needsAmendments);
       } catch (err) {
         console.error('Failed to load organisation brand guidelines', err);
         if (!cancelled) {
           setOrganisationGuidelines(null);
           setOrganisationHasGuidelines(false);
           setOrganisationGuidelinesUpdatedAt(null);
+          setOrganisationBrandStatus(null);
+          setOrganisationNeedsAmendments(false);
         }
       }
     })();
@@ -689,7 +768,12 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
     return () => {
       cancelled = true;
     };
-  }, [project?.orgId]);
+  }, [
+    project?.orgId,
+    project?.brandGuidelinesHasAssets,
+    project?.brandGuidelinesCompleted,
+    project?.brandGuidelinesNeedsAmendments,
+  ]);
 
   useEffect(() => {
     let active = true;
@@ -881,9 +965,49 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
     ? (project.budgetItems as any[])
     : [];
 
+  const derivedBrandStatus: 'complete' | 'needs_setup' | 'needs_amendments' =
+    organisationNeedsAmendments || organisationBrandStatus === 'needs_amendments'
+      ? 'needs_amendments'
+      : organisationBrandStatus === 'complete'
+        ? 'complete'
+        : organisationBrandStatus === 'needs_setup'
+          ? 'needs_setup'
+          : project?.brandGuidelinesNeedsAmendments
+            ? 'needs_amendments'
+            : project?.brandGuidelinesCompleted || project?.brandGuidelinesHasAssets
+              ? 'complete'
+              : 'needs_setup';
+
+  const hasAnyBrandGuidelines =
+    organisationHasGuidelines ||
+    derivedBrandStatus !== 'needs_setup' ||
+    Boolean(project?.brandGuidelinesCompleted) ||
+    Boolean(project?.brandGuidelinesHasAssets);
+
   return (
     <PortalContainer>
       <div className="grid gap-6">
+        {showWelcomeBanner ? (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="space-y-1">
+                <p className="text-base font-semibold text-emerald-900">Thank you for your order!</p>
+                <p>
+                  We&apos;ve set up your project workspace. Keep an eye on this page for progress updates and next steps from the
+                  production team.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn-sm btn-outline border-emerald-300 text-emerald-900 hover:bg-emerald-100"
+                onClick={acknowledgeWelcome}
+                disabled={acknowledgingWelcome}
+              >
+                {acknowledgingWelcome ? 'Closing…' : 'Great, thanks'}
+              </button>
+            </div>
+          </div>
+        ) : null}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0 space-y-1">
             <h1 className="text-lg font-semibold text-gray-900">{project.name || 'Project overview'}</h1>
@@ -1596,61 +1720,90 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       {/* Brand guidelines task */}
       <div className="card">
         <h2 className="mb-2 text-base font-semibold text-gray-900">Brand Guidelines</h2>
+        {project?.orgId || hasAnyBrandGuidelines ? (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {derivedBrandStatus === 'needs_amendments' ? (
+              <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-amber-800">
+                Needs amendments
+              </span>
+            ) : derivedBrandStatus === 'complete' ? (
+              <span className="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-800">
+                Guidelines complete
+              </span>
+            ) : (
+              <span className="inline-flex items-center rounded-full bg-slate-200 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-700">
+                Needs setup
+              </span>
+            )}
+          </div>
+        ) : null}
         {!project?.orgId ? (
           <div className="grid gap-2">
             <p className="text-sm text-gray-600">
               Assign this project to an organisation to manage shared brand assets and keep every booking aligned.
             </p>
           </div>
-        ) : organisationHasGuidelines && organisationGuidelines ? (
+        ) : hasAnyBrandGuidelines ? (
           <div className="grid gap-3 text-sm">
-            <p className="text-emerald-700">
-              Brand guidelines configured{organisation?.name ? ` for ${organisation.name}` : ''}.
-            </p>
-            <div className="grid gap-3 text-gray-700 sm:grid-cols-2">
-              <div className="space-y-1">
-                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Primary font</p>
-                <p className="text-sm text-gray-900">{organisationGuidelines.fonts.primary || '—'}</p>
-                {organisationGuidelines.fonts.headingStyle ? (
-                  <p className="text-xs text-gray-500">{organisationGuidelines.fonts.headingStyle}</p>
-                ) : null}
+            {organisationNeedsAmendments || organisationBrandStatus === 'needs_amendments' ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-700">
+                {organisation?.name
+                  ? `${organisation.name}'s brand guidelines need amendments before the next deliverable.`
+                  : 'The shared brand guidelines need amendments before the next deliverable.'}
               </div>
-              {organisationGuidelines.fonts.secondary ? (
-                <div className="space-y-1">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Secondary font</p>
-                  <p className="text-sm text-gray-900">{organisationGuidelines.fonts.secondary}</p>
-                </div>
-              ) : null}
-              {organisationGuidelines.fonts.accent ? (
-                <div className="space-y-1">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Accent font</p>
-                  <p className="text-sm text-gray-900">{organisationGuidelines.fonts.accent}</p>
-                </div>
-              ) : null}
-            </div>
-            <div className="flex flex-wrap gap-3">
-              {(['primary', 'secondary', 'accent', 'neutral', 'highlight'] as const).map((colorKey) => {
-                const value = organisationGuidelines.colors[colorKey];
-                if (!value) return null;
-                return (
-                  <div
-                    key={colorKey}
-                    className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 shadow-sm"
-                  >
-                    <span
-                      className="h-8 w-8 rounded-full border border-slate-300"
-                      style={{ backgroundColor: value }}
-                    />
-                    <div>
-                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                        {BRAND_COLOR_LABELS[colorKey]}
-                      </p>
-                      <p className="text-sm font-medium text-slate-900">{value}</p>
-                    </div>
+            ) : (
+              <p className="text-emerald-700">
+                Brand guidelines configured{organisation?.name ? ` for ${organisation.name}` : ''}.
+              </p>
+            )}
+            {organisationGuidelines ? (
+              <>
+                <div className="grid gap-3 text-gray-700 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Primary font</p>
+                    <p className="text-sm text-gray-900">{organisationGuidelines.fonts.primary || '—'}</p>
+                    {organisationGuidelines.fonts.headingStyle ? (
+                      <p className="text-xs text-gray-500">{organisationGuidelines.fonts.headingStyle}</p>
+                    ) : null}
                   </div>
-                );
-              })}
-            </div>
+                  {organisationGuidelines.fonts.secondary ? (
+                    <div className="space-y-1">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Secondary font</p>
+                      <p className="text-sm text-gray-900">{organisationGuidelines.fonts.secondary}</p>
+                    </div>
+                  ) : null}
+                  {organisationGuidelines.fonts.accent ? (
+                    <div className="space-y-1">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Accent font</p>
+                      <p className="text-sm text-gray-900">{organisationGuidelines.fonts.accent}</p>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  {(['primary', 'secondary', 'accent', 'neutral', 'highlight'] as const).map((colorKey) => {
+                    const value = organisationGuidelines.colors[colorKey];
+                    if (!value) return null;
+                    return (
+                      <div
+                        key={colorKey}
+                        className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 shadow-sm"
+                      >
+                        <span
+                          className="h-8 w-8 rounded-full border border-slate-300"
+                          style={{ backgroundColor: value }}
+                        />
+                        <div>
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                            {BRAND_COLOR_LABELS[colorKey]}
+                          </p>
+                          <p className="text-sm font-medium text-slate-900">{value}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
             {organisationGuidelinesUpdatedAt ? (
               <p className="text-xs text-gray-500">
                 Updated {brandGuidelinesTimestampFormatter.format(organisationGuidelinesUpdatedAt)}
@@ -1669,7 +1822,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
               ) : null}
             </div>
           </div>
-        ) : project.brandGuidelinesCompleted ? (
+        ) : project.brandGuidelinesCompleted || project.brandGuidelinesHasAssets ? (
           <div className="grid gap-3 text-sm">
             <p className="text-amber-700">
               These guidelines were saved against the project before organisation workspaces were introduced.

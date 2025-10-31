@@ -39,6 +39,7 @@ interface CreateOrderResult {
   netTotal?: number;
   discountAmount?: number;
   voucherDiscount?: number;
+  projectId?: string;
   [key: string]: unknown;
 }
 
