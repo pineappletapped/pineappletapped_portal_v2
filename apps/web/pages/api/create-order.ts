@@ -9,6 +9,7 @@ import {
   setupClientDriveStructure,
   type DriveOrderProductContext,
 } from "@/lib/server/clientDrive";
+import { HttpFunctionInvocationError, invokeHttpFunction } from "@/lib/httpFunctions";
 
 import { applyApiCors, handleOptions } from "./_utils/cors";
 
@@ -864,6 +865,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return;
   }
 
+  let projectCreated = false;
+  let orderCreated = false;
+
   try {
     const auth = await getFirebaseAdminAuth().verifyIdToken(idToken);
     if (!auth?.uid) {
@@ -1025,6 +1029,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     try {
       await projectRef.set(projectDocument, { merge: false });
+      projectCreated = true;
     } catch (error) {
       console.error("Failed to create project for order", { error, orderId });
       if (paymentIntent && stripeClient) {
@@ -1113,6 +1118,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     try {
       await orderRef.set(orderDocument, { merge: false });
+      orderCreated = true;
     } catch (error) {
       console.error("Failed to persist order document", { error });
       try {
@@ -1227,6 +1233,64 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
   } catch (error) {
     console.error("create-order handler failed", { error });
+
+    if (!projectCreated && !orderCreated) {
+      try {
+        const hostHeader = Array.isArray(req.headers.host)
+          ? req.headers.host[0]
+          : typeof req.headers.host === "string"
+            ? req.headers.host
+            : null;
+        const forwardedHost = Array.isArray(req.headers["x-forwarded-host"])
+          ? req.headers["x-forwarded-host"][0]
+          : typeof req.headers["x-forwarded-host"] === "string"
+            ? req.headers["x-forwarded-host"]
+            : null;
+        const fallbackHost = forwardedHost ?? hostHeader;
+
+        const fallback = await invokeHttpFunction<Record<string, unknown>>("createOrder", {
+          body: parsedBody,
+          idToken,
+          host: fallbackHost,
+        });
+
+        if (fallback.ok) {
+          res.status(fallback.status).json((fallback.payload as Record<string, unknown>) ?? {});
+          return;
+        }
+
+        console.error("Legacy createOrder invocation returned non-OK status", {
+          status: fallback.status,
+          attempts: fallback.attempts,
+        });
+
+        if (fallback.payload && typeof fallback.payload === "object") {
+          res.status(fallback.status).json(fallback.payload as Record<string, unknown>);
+          return;
+        }
+
+        respond(res, fallback.status, {
+          error: "Checkout service failed",
+          code: fallback.status === 404 ? "not-found" : "http-error",
+          attempts: fallback.attempts,
+        });
+        return;
+      } catch (fallbackError) {
+        if (fallbackError instanceof HttpFunctionInvocationError) {
+          console.error("Legacy createOrder invocation failed", {
+            attempts: fallbackError.attempts,
+          });
+          respond(res, 502, {
+            error: "Checkout service unavailable",
+            code: "fallback-unavailable",
+            attempts: fallbackError.attempts,
+          });
+          return;
+        }
+        console.error("Unexpected legacy createOrder invocation error", fallbackError);
+      }
+    }
+
     respond(res, 500, { error: "Checkout service failed", code: "internal" });
   }
 }
