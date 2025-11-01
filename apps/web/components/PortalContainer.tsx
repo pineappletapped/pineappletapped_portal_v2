@@ -22,16 +22,20 @@ import {
   useMediaQuery,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
-import AssessmentOutlinedIcon from '@mui/icons-material/AssessmentOutlined';
 import CalendarMonthOutlinedIcon from '@mui/icons-material/CalendarMonthOutlined';
+import CollectionsBookmarkOutlinedIcon from '@mui/icons-material/CollectionsBookmarkOutlined';
 import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
 import Diversity3OutlinedIcon from '@mui/icons-material/Diversity3Outlined';
+import FlagOutlinedIcon from '@mui/icons-material/FlagOutlined';
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
-import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
-import LayersOutlinedIcon from '@mui/icons-material/LayersOutlined';
+import GroupOutlinedIcon from '@mui/icons-material/GroupOutlined';
 import MailOutlineOutlinedIcon from '@mui/icons-material/MailOutlineOutlined';
 import MenuIcon from '@mui/icons-material/Menu';
 import CloseIcon from '@mui/icons-material/Close';
+import PersonOutlineOutlinedIcon from '@mui/icons-material/PersonOutlineOutlined';
+import QueryStatsOutlinedIcon from '@mui/icons-material/QueryStatsOutlined';
+import SchoolOutlinedIcon from '@mui/icons-material/SchoolOutlined';
+import ViewTimelineOutlinedIcon from '@mui/icons-material/ViewTimelineOutlined';
 import Breadcrumbs from './Breadcrumbs';
 import { auth, ensureFirebase } from '@/lib/firebase';
 
@@ -68,18 +72,25 @@ type PortalConfig = {
   navigation?: NavigationSection[];
   quickActions?: QuickAction[];
   surface: 'card' | 'plain';
+  showSidebarHeading?: boolean;
+  showHero?: boolean;
 };
 
 const CLIENT_SEGMENTS = [
   'dashboard',
   'projects',
-  'orders',
   'bookings',
+  'orders',
   'emails',
   'analytics',
   'orgs',
   'training',
   'tasks',
+  'asset-library',
+  'planning',
+  'messages',
+  'profile',
+  'team',
 ];
 
 const isClientPath = (pathname: string) => {
@@ -124,25 +135,37 @@ const PORTAL_CONFIGS: PortalConfig[] = [
         items: [
           { label: 'Dashboard', href: '/dashboard', icon: DashboardOutlinedIcon, exact: true },
           { label: 'Projects', href: '/projects', icon: FolderOutlinedIcon },
-          { label: 'Bookings', href: '/bookings', icon: CalendarMonthOutlinedIcon },
+          { label: 'Organisations', href: '/orgs', icon: Diversity3OutlinedIcon },
+          { label: 'Asset library', href: '/asset-library', icon: CollectionsBookmarkOutlinedIcon },
+          { label: 'Training', href: '/training', icon: SchoolOutlinedIcon },
         ],
       },
       {
-        heading: 'Collaboration',
+        heading: 'Planning',
         items: [
-          { label: 'Shared inbox', href: '/emails', icon: MailOutlineOutlinedIcon },
-          { label: 'Analytics', href: '/analytics', icon: AssessmentOutlinedIcon },
-          { label: 'Content planner', href: '/dashboard/content-planner', icon: GridViewOutlinedIcon },
-          { label: 'Organisations', href: '/orgs', icon: Diversity3OutlinedIcon },
+          { label: 'Social calendar', href: '/planning/social-calendar', icon: CalendarMonthOutlinedIcon },
+          { label: 'Social analytics', href: '/planning/social-analytics', icon: QueryStatsOutlinedIcon },
+          { label: 'Goals', href: '/planning/goals', icon: FlagOutlinedIcon },
+          { label: 'Content planner', href: '/planning/content-planner', icon: ViewTimelineOutlinedIcon },
+        ],
+      },
+      {
+        heading: 'Contact',
+        items: [
+          { label: 'Messages', href: '/messages', icon: MailOutlineOutlinedIcon },
+          { label: 'Profile', href: '/profile', icon: PersonOutlineOutlinedIcon },
+          { label: 'Team', href: '/team', icon: GroupOutlinedIcon },
         ],
       },
     ],
     quickActions: [
-      { label: 'Request new project', href: '/projects/new', icon: LayersOutlinedIcon },
-      { label: 'Book a shoot', href: '/bookings', icon: CalendarMonthOutlinedIcon },
-      { label: 'Open shared inbox', href: '/emails', icon: MailOutlineOutlinedIcon },
+      { label: 'Browse asset library', href: '/asset-library', icon: CollectionsBookmarkOutlinedIcon },
+      { label: 'Plan social calendar', href: '/planning/social-calendar', icon: CalendarMonthOutlinedIcon },
+      { label: 'Send a message', href: '/messages', icon: MailOutlineOutlinedIcon },
     ],
     surface: 'card',
+    showSidebarHeading: false,
+    showHero: false,
   },
 ];
 
@@ -159,6 +182,8 @@ const DEFAULT_CONFIG: PortalConfig = {
   navigation: [],
   quickActions: [],
   surface: 'card',
+  showSidebarHeading: true,
+  showHero: true,
 };
 
 function isItemActive(pathname: string, item: NavigationItem): boolean {
@@ -185,10 +210,10 @@ function getUserInitials(name: string): string {
   return initials || 'PT';
 }
 
-const drawerWidth = 304;
+const drawerWidth = 264;
 
 export default function PortalContainer({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? '/';
   const theme = useTheme();
   const isLgUp = useMediaQuery(theme.breakpoints.up('lg'));
   const portalConfig = useMemo(() => resolvePortalConfig(pathname), [pathname]);
@@ -197,6 +222,8 @@ export default function PortalContainer({ children }: { children: React.ReactNod
     [portalConfig.navigation]
   );
   const isAdminPortal = portalConfig.id === 'admin';
+  const showSidebarHeading = portalConfig.showSidebarHeading !== false;
+  const showHero = !isAdminPortal && portalConfig.showHero !== false;
   const hasNavigation = !isAdminPortal && navSections.length > 0;
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [userName, setUserName] = useState<string>('Workspace member');
@@ -239,38 +266,47 @@ export default function PortalContainer({ children }: { children: React.ReactNod
         bgcolor: 'background.paper',
       }}
     >
-      <Box sx={{ px: 3, py: 4, borderBottom: '1px solid', borderColor: 'divider' }}>
-        <Stack direction="row" spacing={2} alignItems="center">
-          <Avatar
-            variant="rounded"
-            sx={{
-              bgcolor: 'primary.main',
-              color: 'primary.contrastText',
-              fontWeight: 600,
-              width: 52,
-              height: 52,
-              fontSize: 20,
-            }}
-          >
-            {portalConfig.brandMark}
-          </Avatar>
-          <Box>
-            <Typography variant="overline" color="secondary.main" sx={{ letterSpacing: '0.28em' }}>
-              {portalConfig.sidebarTitle}
+      {showSidebarHeading ? (
+        <Box sx={{ px: 3, py: 3, borderBottom: '1px solid', borderColor: 'divider' }}>
+          <Stack direction="row" spacing={2} alignItems="center">
+            <Avatar
+              variant="rounded"
+              sx={{
+                bgcolor: 'primary.main',
+                color: 'primary.contrastText',
+                fontWeight: 600,
+                width: 48,
+                height: 48,
+                fontSize: 19,
+              }}
+            >
+              {portalConfig.brandMark}
+            </Avatar>
+            <Box>
+              <Typography variant="overline" color="secondary.main" sx={{ letterSpacing: '0.28em' }}>
+                {portalConfig.sidebarTitle}
+              </Typography>
+              <Typography variant="h6" color="text.primary">
+                {portalConfig.sidebarSubtitle}
+              </Typography>
+            </Box>
+          </Stack>
+          {portalConfig.sidebarCopy ? (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+              {portalConfig.sidebarCopy}
             </Typography>
-            <Typography variant="h6" color="text.primary">
-              {portalConfig.sidebarSubtitle}
-            </Typography>
-          </Box>
-        </Stack>
-        {portalConfig.sidebarCopy ? (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-            {portalConfig.sidebarCopy}
-          </Typography>
-        ) : null}
-      </Box>
-      <Box sx={{ flex: 1, overflowY: 'auto', px: 3, py: 4 }}>
-        <Stack spacing={4}>
+          ) : null}
+        </Box>
+      ) : null}
+      <Box
+        sx={{
+          flex: 1,
+          overflowY: 'auto',
+          px: 3,
+          py: showSidebarHeading ? 3 : 2.5,
+        }}
+      >
+        <Stack spacing={3}>
           {navSections.map((section) => (
             <Box key={section.heading}>
               <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1.5, letterSpacing: '0.08em' }}>
@@ -289,7 +325,7 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                       onClick={() => setMobileNavOpen(false)}
                       sx={{
                         borderRadius: 2,
-                        mb: 0.5,
+                        mb: 0.25,
                         '&.Mui-selected': {
                           bgcolor: 'primary.main',
                           color: 'primary.contrastText',
@@ -299,7 +335,7 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                         },
                       }}
                     >
-                      <ListItemIcon sx={{ minWidth: 36, color: 'text.secondary' }}>
+                      <ListItemIcon sx={{ minWidth: 32, color: 'text.secondary' }}>
                         <ItemIcon fontSize="small" />
                       </ListItemIcon>
                       <ListItemText primary={item.label} primaryTypographyProps={{ fontWeight: active ? 600 : 500 }} />
@@ -317,14 +353,14 @@ export default function PortalContainer({ children }: { children: React.ReactNod
   const quickActions = isAdminPortal ? [] : (portalConfig.quickActions ?? []);
 
   return (
-    <Box sx={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', py: { xs: 4, md: 6 } }}>
-      <Container maxWidth="xl" sx={{ display: 'flex', gap: 4 }}>
+    <Box sx={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', py: { xs: 3, md: 4 } }}>
+      <Container maxWidth="xl" sx={{ display: 'flex', gap: { xs: 3, lg: 3.5 } }}>
         {hasNavigation && isLgUp ? (
           <Box component="aside" sx={{ width: drawerWidth, flexShrink: 0 }}>
             <Paper sx={{ height: '100%', overflow: 'hidden' }}>{navContent}</Paper>
           </Box>
         ) : null}
-        <Box component="main" sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <Box component="main" sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
           <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ display: { lg: 'none' } }}>
             {hasNavigation ? (
               <IconButton
@@ -339,11 +375,11 @@ export default function PortalContainer({ children }: { children: React.ReactNod
             )}
           </Stack>
 
-          {!isAdminPortal ? (
-            <Paper sx={{ p: { xs: 3, md: 4 }, position: 'relative', overflow: 'hidden' }}>
+          {showHero ? (
+            <Paper sx={{ p: { xs: 2.5, md: 3.5 }, position: 'relative', overflow: 'hidden' }}>
               <Stack
                 direction={{ xs: 'column', lg: 'row' }}
-                spacing={4}
+                spacing={3}
                 justifyContent="space-between"
                 alignItems="flex-start"
               >
@@ -362,8 +398,8 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                   variant="outlined"
                   sx={{
                     borderRadius: 3,
-                    px: 3,
-                    py: 2.5,
+                    px: 2.5,
+                    py: 2,
                     display: 'flex',
                     alignItems: 'center',
                     gap: 2,
@@ -385,7 +421,7 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                 </Paper>
               </Stack>
               {quickActions.length > 0 ? (
-                <Grid container spacing={2} sx={{ mt: 3 }}>
+                <Grid container spacing={2} sx={{ mt: 2.5 }}>
                   {quickActions.map((action) => {
                     const ActionIcon = action.icon;
                     return (
@@ -397,11 +433,11 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'space-between',
-                            px: 3,
-                            py: 2.5,
+                            px: 2.5,
+                            py: 2.25,
                             textDecoration: 'none',
                             color: 'text.primary',
-                            borderRadius: 3,
+                            borderRadius: 2.5,
                             transition: 'all 0.2s ease',
                             '&:hover': {
                               borderColor: 'primary.main',
@@ -421,6 +457,43 @@ export default function PortalContainer({ children }: { children: React.ReactNod
                 </Grid>
               ) : null}
             </Paper>
+          ) : null}
+
+          {!showHero && quickActions.length > 0 ? (
+            <Grid container spacing={2}>
+              {quickActions.map((action) => {
+                const ActionIcon = action.icon;
+                return (
+                  <Grid item xs={12} sm={6} lg={4} key={action.href}>
+                    <Paper
+                      component={NextLink}
+                      href={action.href}
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        px: 2.5,
+                        py: 2.25,
+                        textDecoration: 'none',
+                        color: 'text.primary',
+                        borderRadius: 2.5,
+                        transition: 'all 0.2s ease',
+                        '&:hover': {
+                          borderColor: 'primary.main',
+                          color: 'primary.main',
+                          transform: 'translateY(-2px)',
+                        },
+                      }}
+                    >
+                      <Typography variant="body1" fontWeight={600}>
+                        {action.label}
+                      </Typography>
+                      <ActionIcon fontSize="small" />
+                    </Paper>
+                  </Grid>
+                );
+              })}
+            </Grid>
           ) : null}
 
           <Box

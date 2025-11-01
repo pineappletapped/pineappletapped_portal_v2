@@ -23,6 +23,10 @@ const nextConfig = {
   },
   webpack: (config) => {
     config.resolve.alias['@'] = path.resolve(__dirname);
+    config.resolve.alias['@shared-config'] = path.resolve(
+      __dirname,
+      '../../shared/config/hosting.js',
+    );
     return config;
   },
 };

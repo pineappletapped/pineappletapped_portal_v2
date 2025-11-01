@@ -16,11 +16,16 @@ import { doc, getDoc } from "firebase/firestore";
 
 import { ensureFirebase } from "@/lib/firebase";
 
-import { createIntentPayload, type CheckoutOrderInput } from "./buildOrderInput";
+import {
+  createIntentPayload,
+  type CheckoutOrderInput,
+  type CheckoutPricingSnapshot,
+} from "./buildOrderInput";
 import { ZERO_BALANCE_TOLERANCE } from "./useCheckoutTotals";
 
 interface UseCheckoutPaymentArgs {
   orderInput: CheckoutOrderInput;
+  pricing: CheckoutPricingSnapshot;
   hasZeroBalance: boolean;
   stripePromise: Promise<unknown> | null;
   ensureUser: () => Promise<User>;
@@ -34,6 +39,7 @@ interface CreateOrderResult {
   netTotal?: number;
   discountAmount?: number;
   voucherDiscount?: number;
+  projectId?: string;
   [key: string]: unknown;
 }
 
@@ -113,6 +119,7 @@ export interface CheckoutPaymentState {
 
 export function useCheckoutPayment({
   orderInput,
+  pricing,
   hasZeroBalance,
   stripePromise,
   ensureUser,
@@ -125,8 +132,7 @@ export function useCheckoutPayment({
   const [initializing, setInitializing] = useState(false);
   const lastIntentPayloadRef = useRef<string | null>(null);
 
-  const intentPayload = useMemo(() => createIntentPayload(orderInput), [orderInput]);
-  const orderRequestBody = useMemo(() => JSON.stringify(orderInput), [orderInput]);
+  const intentPayload = useMemo(() => createIntentPayload(orderInput, pricing), [orderInput, pricing]);
   const paymentDetailsStale = useMemo(
     () => lastIntentPayloadRef.current !== null && lastIntentPayloadRef.current !== intentPayload,
     [intentPayload],
@@ -139,7 +145,7 @@ export function useCheckoutPayment({
           "Content-Type": "application/json",
           Authorization: `Bearer ${idToken}`,
         },
-        body: orderRequestBody,
+        body: intentPayload,
         cache: "no-store",
       });
 
@@ -162,7 +168,9 @@ export function useCheckoutPayment({
           (payload && typeof payload === "object" && payload !== null && "error" in payload &&
             typeof (payload as { error: unknown }).error === "string"
             ? ((payload as { error: string }).error as string)
-            : `Order service responded with ${response.status}`);
+            : response.status === 404
+              ? "Checkout service is unavailable. Please try again shortly."
+              : `Order service responded with ${response.status}`);
         const error = new Error(message);
         if (payload && typeof payload === "object" && payload !== null) {
           const record = payload as Record<string, unknown>;
@@ -182,7 +190,7 @@ export function useCheckoutPayment({
 
       return payload as CreateOrderResult;
     },
-    [orderRequestBody],
+    [intentPayload],
   );
 
   const completeZeroBalanceOrder = useCallback(async () => {
@@ -220,13 +228,77 @@ export function useCheckoutPayment({
       }
 
       const snapData = orderSnap.data() ?? {};
-      const serverPrice = Number(orderData.price ?? snapData.price ?? 0);
-      const serverNetTotal = Number(orderData.netTotal ?? snapData.netTotal ?? 0);
-      const zeroBalance = [serverPrice, serverNetTotal]
-        .filter((value): value is number => Number.isFinite(value))
-        .some((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+      const parseCurrency = (value: unknown): number | null => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return value;
+        }
+        if (typeof value === "string") {
+          const normalised = Number(value.replace(/[^0-9.-]+/g, ""));
+          return Number.isFinite(normalised) ? normalised : null;
+        }
+        return null;
+      };
 
-      if (zeroBalance) {
+      const scheduleDueNowAmounts = Array.isArray(
+        (snapData as { paymentSchedule?: unknown }).paymentSchedule,
+      )
+        ? ((snapData as { paymentSchedule?: unknown[] }).paymentSchedule ?? [])
+            .map((entry) => {
+              if (!entry || typeof entry !== "object") {
+                return null;
+              }
+              const statusRaw = (entry as { status?: unknown }).status;
+              const status = typeof statusRaw === "string" ? statusRaw.toLowerCase() : "";
+              if (!status || !["due", "overdue"].includes(status)) {
+                return null;
+              }
+              const gross = parseCurrency((entry as { grossAmount?: unknown }).grossAmount);
+              if (gross !== null) {
+                return gross;
+              }
+              return parseCurrency((entry as { netAmount?: unknown }).netAmount);
+            })
+            .filter((value): value is number => value !== null && Number.isFinite(value))
+        : [];
+
+      const depositCandidates = [
+        parseCurrency((orderData as { depositAmount?: unknown }).depositAmount),
+        parseCurrency((orderData as { depositDue?: unknown }).depositDue),
+        parseCurrency((snapData as { depositAmount?: unknown }).depositAmount),
+        parseCurrency((snapData as { depositDue?: unknown }).depositDue),
+      ].filter((value): value is number => value !== null && Number.isFinite(value));
+
+      const immediateDueCandidates = [...depositCandidates, ...scheduleDueNowAmounts];
+
+      const depositFullySatisfied =
+        (immediateDueCandidates.length > 0 &&
+          immediateDueCandidates.every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE)) ||
+        (immediateDueCandidates.length === 0 &&
+          depositCandidates.length > 0 &&
+          depositCandidates.every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE));
+
+      const serverPrice = parseCurrency(orderData.price ?? snapData.price ?? 0) ?? 0;
+      const serverNetTotal = parseCurrency(orderData.netTotal ?? snapData.netTotal ?? 0) ?? 0;
+      const orderTotalsZero = [serverPrice, serverNetTotal]
+        .filter((value): value is number => Number.isFinite(value))
+        .every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+
+      if (depositFullySatisfied || orderTotalsZero) {
+        if (depositFullySatisfied && !orderTotalsZero) {
+          console.info("Zero deposit order confirmed", {
+            createdOrderId,
+            dueNowCandidates: immediateDueCandidates,
+            price: serverPrice,
+            netTotal: serverNetTotal,
+          });
+        } else {
+          console.info("Zero balance order confirmed", {
+            createdOrderId,
+            price: serverPrice,
+            netTotal: serverNetTotal,
+          });
+        }
+
         setOrderId(createdOrderId);
         setClientSecret(null);
         lastIntentPayloadRef.current = intentPayload;

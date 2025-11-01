@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 import {
   Product,
   ProductModifierSelection,
@@ -14,8 +15,18 @@ import {
   type ProductOrderFieldType,
 } from "@/lib/products";
 import { useCart } from "@/lib/cart";
-import { db, ensureFirebase } from "@/lib/firebase";
-import { collection, doc, getDoc, getDocs } from "firebase/firestore";
+import { db, ensureFirebase, loadAuthModule } from "@/lib/firebase";
+import {
+  addDoc,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+} from "firebase/firestore";
 import {
   isOrganiserProgramEnabled,
   normaliseOrganiserId,
@@ -27,6 +38,8 @@ import ProductDatePicker, {
   type ProductAvailabilityScope,
   type ProductAvailabilityStatus,
 } from "./ProductDatePicker";
+import { parseBrandGuidelines } from "@/lib/brand-guidelines";
+import type { User } from "firebase/auth";
 import {
   getPriceForTier,
   normalisePriceTierLevel,
@@ -157,6 +170,40 @@ type OrderFormQuestion = {
   description: string | null;
   required: boolean;
   type: ProductOrderFieldType;
+};
+
+interface OrganisationOption {
+  id: string;
+  name: string;
+  role: string | null;
+  brandLogoUrl: string | null;
+  brandColors: string[];
+  source: "existing" | "created";
+}
+
+const normaliseColour = (value: unknown): string | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const upper = trimmed.toUpperCase();
+  return upper.startsWith("#") ? upper : `#${upper}`;
+};
+
+const extractBrandColours = (guidelines: ReturnType<typeof parseBrandGuidelines>): string[] => {
+  const palette = [
+    guidelines.colors.primary,
+    guidelines.colors.secondary,
+    guidelines.colors.accent,
+    guidelines.colors.neutral,
+    guidelines.colors.highlight,
+  ]
+    .map(normaliseColour)
+    .filter((colour): colour is string => Boolean(colour));
+  return Array.from(new Set(palette));
 };
 
 const normalisePostalCode = (value: string): string | null => {
@@ -804,6 +851,15 @@ export default function AddToCartWizard({
   const [conflicts, setConflicts] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [liveMessage, setLiveMessage] = useState("Add this product to your cart");
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [organisationOptions, setOrganisationOptions] = useState<OrganisationOption[]>([]);
+  const [organisationLoading, setOrganisationLoading] = useState(false);
+  const [organisationError, setOrganisationError] = useState<string | null>(null);
+  const [selectedOrganisationId, setSelectedOrganisationId] = useState<string | null>(null);
+  const [showCreateOrganisation, setShowCreateOrganisation] = useState(false);
+  const [newOrganisationName, setNewOrganisationName] = useState("");
+  const [creatingOrganisation, setCreatingOrganisation] = useState(false);
+  const [organisationNameInput, setOrganisationNameInput] = useState("");
   const [organiserQueryToken, setOrganiserQueryToken] = useState<string | null>(null);
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -813,6 +869,157 @@ export default function AddToCartWizard({
     const token = params.get("organiser") ?? params.get("organiserId");
     setOrganiserQueryToken(token);
   }, []);
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { auth } = await ensureFirebase();
+        if (!auth) {
+          setCurrentUser(null);
+          return;
+        }
+        const authModule = await loadAuthModule();
+        if (!authModule?.onAuthStateChanged) {
+          setCurrentUser(auth.currentUser ?? null);
+          return;
+        }
+        unsubscribe = authModule.onAuthStateChanged(auth, (user: User | null) => {
+          if (cancelled) {
+            return;
+          }
+          setCurrentUser(user ?? null);
+        });
+      } catch (authError) {
+        console.error("Failed to initialise auth for organisation selection", authError);
+        if (!cancelled) {
+          setCurrentUser(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === "function") {
+        unsubscribe();
+      }
+    };
+  }, []);
+  useEffect(() => {
+    if (!currentUser) {
+      lastOrganisationUserIdRef.current = null;
+      setOrganisationOptions([]);
+      setSelectedOrganisationId(null);
+      setShowCreateOrganisation(false);
+      setOrganisationNameInput("");
+      return;
+    }
+
+    if (lastOrganisationUserIdRef.current === currentUser.uid && organisationOptions.length > 0) {
+      return;
+    }
+
+    let cancelled = false;
+    lastOrganisationUserIdRef.current = currentUser.uid;
+    setOrganisationLoading(true);
+    setOrganisationError(null);
+
+    (async () => {
+      try {
+        await ensureFirebase();
+        const membershipsSnap = await getDocs(
+          query(collection(db, "memberships"), where("userId", "==", currentUser.uid)),
+        );
+        const membershipMap = new Map<string, string | null>();
+        membershipsSnap.forEach((docSnap) => {
+          const data = docSnap.data() as Record<string, unknown>;
+          const orgId = typeof data.orgId === "string" ? data.orgId : null;
+          if (!orgId) {
+            return;
+          }
+          const role =
+            typeof data.role === "string" && data.role.trim().length > 0
+              ? data.role.trim()
+              : null;
+          membershipMap.set(orgId, role);
+        });
+
+        if (membershipMap.size === 0) {
+          if (!cancelled) {
+            setOrganisationOptions([]);
+            setSelectedOrganisationId(null);
+          }
+          return;
+        }
+
+        const snaps = await Promise.all(
+          Array.from(membershipMap.keys()).map((orgId) => getDoc(doc(db, "orgs", orgId))),
+        );
+
+        const options = snaps
+          .filter((snap) => snap.exists())
+          .map((snap) => {
+            const data = (snap.data() as Record<string, unknown>) ?? {};
+            const guidelines = parseBrandGuidelines(data?.brandGuidelines);
+            const colors = extractBrandColours(guidelines);
+            const name =
+              typeof data?.name === "string" && data.name.trim().length > 0
+                ? data.name.trim()
+                : "Untitled organisation";
+            const brandLogoUrl =
+              typeof data?.brandLogoUrl === "string" && data.brandLogoUrl.trim().length > 0
+                ? data.brandLogoUrl.trim()
+                : null;
+            return {
+              id: snap.id,
+              name,
+              role: membershipMap.get(snap.id) ?? null,
+              brandLogoUrl,
+              brandColors: colors,
+              source: "existing" as const,
+            } satisfies OrganisationOption;
+          })
+          .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+
+        if (cancelled) {
+          return;
+        }
+
+        setOrganisationOptions(options);
+        setOrganisationError(null);
+
+        setSelectedOrganisationId((prev) => {
+          if (prev && options.some((option) => option.id === prev)) {
+            return prev;
+          }
+          return options.length === 1 ? options[0].id : null;
+        });
+      } catch (loadError) {
+        console.error("Failed to load organisations for checkout wizard", loadError);
+        if (!cancelled) {
+          setOrganisationOptions([]);
+          setOrganisationError(
+            "We couldn’t load your organisations. Create a new one or try again shortly.",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setOrganisationLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, organisationOptions.length]);
+  const selectedOrganisation = useMemo(
+    () =>
+      organisationOptions.find((option) => option.id === selectedOrganisationId) ?? null,
+    [organisationOptions, selectedOrganisationId],
+  );
+  const organisationPreviewColours = selectedOrganisation?.brandColors ?? [];
   const normalisedOrganiserProgram = useMemo(
     () => normaliseOrganiserProgram(product.organiserProgram ?? null),
     [product.organiserProgram]
@@ -993,6 +1200,7 @@ export default function AddToCartWizard({
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const territoriesRef = useRef<TerritoryRecord[] | null>(null);
   const franchiseMapRef = useRef<Map<string, FranchiseRecord> | null>(null);
+  const lastOrganisationUserIdRef = useRef<string | null>(null);
   const hasPresetVenue = Boolean(
     (product.venueId && product.venueId.trim().length > 0) ||
       product.venueCoverage ||
@@ -1267,14 +1475,24 @@ export default function AddToCartWizard({
   }, [product]);
 
   const hasLocationStep = !hasPresetVenue || overrideLocation;
+  const hasOrganisationStep = true;
   const hasOrderFields = orderFormQuestions.length > 0;
   const totalSteps =
-    groups.length + (hasLocationStep ? 1 : 0) + (hasOrderFields ? 1 : 0) + 1;
+    groups.length +
+    (hasLocationStep ? 1 : 0) +
+    (hasOrganisationStep ? 1 : 0) +
+    (hasOrderFields ? 1 : 0) +
+    1;
   const locationStep = hasLocationStep && step === 0;
-  const orderFieldsStepIndex = hasLocationStep ? 1 : 0;
+  const organisationStepIndex = hasLocationStep ? 1 : 0;
+  const organisationStep = hasOrganisationStep && step === organisationStepIndex;
+  const orderFieldsStepIndex = organisationStepIndex + (hasOrganisationStep ? 1 : 0);
   const orderFieldsStep = hasOrderFields && step === orderFieldsStepIndex;
   const modifierIndex =
-    step - (hasLocationStep ? 1 : 0) - (hasOrderFields ? 1 : 0);
+    step -
+    (hasLocationStep ? 1 : 0) -
+    (hasOrganisationStep ? 1 : 0) -
+    (hasOrderFields ? 1 : 0);
   const currentGroup =
     modifierIndex >= 0 && modifierIndex < groups.length ? groups[modifierIndex] : null;
   const dateStep = step === totalSteps - 1;
@@ -1282,19 +1500,23 @@ export default function AddToCartWizard({
     ? overrideLocation && hasPresetVenue
       ? "Enter the alternate filming location"
       : "Confirm the filming location"
-    : orderFieldsStep
-      ? orderFormQuestions.length > 1
-        ? "Answer the booking questions"
-        : "Provide the booking detail"
-      : currentGroup
-        ? `Choose ${currentGroup.multiple ? "one or more" : "an"} option for ${currentGroup.name}`
-        : isCampaignProduct
-          ? "Choose a campaign slot"
-          : "Confirm the production date";
+    : organisationStep
+      ? currentUser
+        ? "Select the organisation this project belongs to"
+        : "Tell us which organisation this project is for"
+      : orderFieldsStep
+        ? orderFormQuestions.length > 1
+          ? "Answer the booking questions"
+          : "Provide the booking detail"
+        : currentGroup
+          ? `Choose ${currentGroup.multiple ? "one or more" : "an"} option for ${currentGroup.name}`
+          : isCampaignProduct
+            ? "Choose a campaign slot"
+            : "Confirm the production date";
 
   useEffect(() => {
     setStep(0);
-  }, [hasLocationStep, hasOrderFields]);
+  }, [hasLocationStep, hasOrderFields, hasOrganisationStep]);
 
   useEffect(() => {
     setLiveMessage(`Step ${step + 1} of ${totalSteps}: ${stepLabel}`);
@@ -1353,6 +1575,72 @@ export default function AddToCartWizard({
       return [];
     }
   }, []);
+
+  const createOrganisationFromWizard = useCallback(async () => {
+    if (creatingOrganisation) {
+      return;
+    }
+    const trimmedName = newOrganisationName.trim();
+    if (!currentUser) {
+      setOrganisationError("Sign in to create an organisation.");
+      return;
+    }
+    if (!trimmedName) {
+      setOrganisationError("Enter an organisation name to continue.");
+      return;
+    }
+
+    setCreatingOrganisation(true);
+    setOrganisationError(null);
+
+    try {
+      await ensureFirebase();
+      const orgRef = await addDoc(collection(db, "orgs"), {
+        name: trimmedName,
+        createdAt: serverTimestamp(),
+        createdBy: currentUser.uid,
+      });
+
+      await setDoc(
+        doc(db, "memberships", `${orgRef.id}_${currentUser.uid}`),
+        {
+          orgId: orgRef.id,
+          userId: currentUser.uid,
+          role: "client_admin",
+          createdAt: serverTimestamp(),
+          source: "checkout",
+        },
+        { merge: false },
+      );
+
+      const guidelines = parseBrandGuidelines(null);
+      const option: OrganisationOption = {
+        id: orgRef.id,
+        name: trimmedName,
+        role: "client_admin",
+        brandLogoUrl: null,
+        brandColors: extractBrandColours(guidelines),
+        source: "created",
+      };
+
+      setOrganisationOptions((prev) => {
+        const next = [...prev, option].sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+        );
+        return next;
+      });
+      setSelectedOrganisationId(orgRef.id);
+      setShowCreateOrganisation(false);
+      setNewOrganisationName("");
+    } catch (creationError) {
+      console.error("Failed to create organisation from checkout wizard", creationError);
+      setOrganisationError(
+        "We couldn’t create the organisation right now. Try again in a moment.",
+      );
+    } finally {
+      setCreatingOrganisation(false);
+    }
+  }, [creatingOrganisation, currentUser, newOrganisationName]);
 
   const loadFranchises = useCallback(async () => {
     if (franchiseMapRef.current) {
@@ -1645,7 +1933,7 @@ export default function AddToCartWizard({
       setCoverage(null);
       setCoverageStatus("error");
       setCoverageError(
-        "We couldn't verify coverage right now. Double-check the postcode and try again."
+        "We couldn’t verify coverage right now. Double-check the postcode and try again."
       );
       setLiveMessage("Coverage lookup failed");
     }
@@ -1714,6 +2002,23 @@ export default function AddToCartWizard({
 
   const next = () => {
     setError(null);
+    if (organisationStep) {
+      if (creatingOrganisation) {
+        setLiveMessage("Please wait while we create your organisation");
+        return;
+      }
+      if (currentUser) {
+        if (!selectedOrganisationId) {
+          setError("Select an organisation to continue.");
+          setLiveMessage("Organisation selection required before continuing");
+          return;
+        }
+      } else if (organisationNameInput.trim().length === 0) {
+        setError("Enter your organisation name to continue.");
+        setLiveMessage("Organisation name required before continuing");
+        return;
+      }
+    }
     if (orderFieldsStep && !validateOrderForm()) {
       setLiveMessage("Answer the required booking questions to continue");
       return;
@@ -1728,6 +2033,36 @@ export default function AddToCartWizard({
   const handleFinish = async () => {
     setError(null);
     setConflicts([]);
+    const trimmedGuestOrganisation = organisationNameInput.trim();
+    const organisationSelection = currentUser
+      ? selectedOrganisation
+        ? {
+            id: selectedOrganisation.id,
+            name: selectedOrganisation.name,
+            source: selectedOrganisation.source,
+            brandLogoUrl: selectedOrganisation.brandLogoUrl,
+            brandColors: organisationPreviewColours,
+          }
+        : null
+      : trimmedGuestOrganisation
+        ? {
+            id: null,
+            name: trimmedGuestOrganisation,
+            source: "guest" as const,
+            brandLogoUrl: null,
+            brandColors: [] as string[],
+          }
+        : null;
+
+    if (!organisationSelection) {
+      setLiveMessage("Organisation required before adding to cart");
+      setError("Select or enter an organisation to continue.");
+      if (hasOrganisationStep) {
+        setStep(organisationStepIndex);
+      }
+      return;
+    }
+
     if (!validateOrderForm()) {
       setLiveMessage("Answer the required booking questions to continue");
       if (hasOrderFields) {
@@ -2004,7 +2339,7 @@ export default function AddToCartWizard({
         }
         if (typeof window !== "undefined") {
           const message = [
-            "We've added this to your cart, but kit availability still needs manual confirmation.",
+            "We’ve added this to your cart, but kit availability still needs manual confirmation.",
             ...warnings,
           ].join("\n\n");
           window.alert(message);
@@ -2144,6 +2479,7 @@ export default function AddToCartWizard({
           }
           return null;
         })(),
+        organisation: organisationSelection,
       });
       setLiveMessage(
         reservationStatus === "pending"
@@ -2165,7 +2501,7 @@ export default function AddToCartWizard({
           : [];
         if (missingStandards.includes(DRONE_STANDARD_ID)) {
           setError(
-            "Drone coverage isn't available yet because no registered kit meets the drone compliance standard. Please upload pilot licences and insurance on your equipment before trying again."
+            "Drone coverage isn’t available yet because no registered kit meets the drone compliance standard. Please upload pilot licences and insurance on your equipment before trying again."
           );
           setLiveMessage("Drone compliance missing – reservation blocked");
           return;
@@ -2178,14 +2514,20 @@ export default function AddToCartWizard({
           return;
         }
       }
-      setError("We couldn't reserve the equipment right now. Try again in a moment.");
+      setError("We couldn’t reserve the equipment right now. Try again in a moment.");
       setLiveMessage("Reservation failed");
     }
   };
 
+  const organisationReady = currentUser
+    ? Boolean(selectedOrganisationId)
+    : organisationNameInput.trim().length > 0;
+
   const canNext = locationStep
     ? coverageStatus === "success" && !!coverage && locationInput.trim().length > 0
-    : orderFieldsStep
+    : organisationStep
+      ? organisationReady && !creatingOrganisation
+      : orderFieldsStep
       ? orderFormQuestions.every((question) => {
           if (!question.required) {
             return true;
@@ -2384,8 +2726,186 @@ export default function AddToCartWizard({
               Confirming the filming location routes your booking to the right franchise or HQ
               team before we show available production dates.
             </p>
+        </div>
+      ) : organisationStep ? (
+        currentUser ? (
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,16rem)]">
+            <div className="space-y-4">
+              <div>
+                <label
+                  htmlFor="wizard-organisation"
+                  className="block text-sm font-semibold text-gray-900"
+                >
+                  Choose your organisation
+                </label>
+                <select
+                  id="wizard-organisation"
+                  className="select select-bordered mt-1 w-full"
+                  value={selectedOrganisationId ?? ""}
+                  onChange={(event) => {
+                    setOrganisationError(null);
+                    const value = event.target.value;
+                    if (!value) {
+                      setSelectedOrganisationId(null);
+                      return;
+                    }
+                    setShowCreateOrganisation(false);
+                    setSelectedOrganisationId(value);
+                  }}
+                  disabled={organisationLoading || creatingOrganisation}
+                >
+                  <option value="">Select an organisation</option>
+                  {organisationOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.name}
+                      {option.role ? ` (${option.role.replace(/_/g, " ")})` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {organisationLoading && (
+                <p className="text-xs text-gray-500">Loading your organisations…</p>
+              )}
+              {organisationError && (
+                <p className="text-xs text-red-600">{organisationError}</p>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="btn btn-xs btn-outline"
+                  onClick={() => {
+                    setOrganisationError(null);
+                    setShowCreateOrganisation((prev) => !prev);
+                    if (!showCreateOrganisation) {
+                      setSelectedOrganisationId(null);
+                    }
+                  }}
+                >
+                  {showCreateOrganisation ? "Cancel" : "Create new organisation"}
+                </button>
+                <span className="text-xs text-slate-500">
+                  Update branding after your order is confirmed.
+                </span>
+              </div>
+              {showCreateOrganisation && (
+                <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                  <div>
+                    <label
+                      htmlFor="wizard-new-organisation"
+                      className="block text-sm font-semibold text-gray-900"
+                    >
+                      Organisation name
+                    </label>
+                    <input
+                      id="wizard-new-organisation"
+                      className="input input-bordered mt-1 w-full"
+                      value={newOrganisationName}
+                      onChange={(event) => setNewOrganisationName(event.target.value)}
+                      placeholder="e.g. Acme Studios"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary"
+                    onClick={createOrganisationFromWizard}
+                    disabled={
+                      creatingOrganisation || newOrganisationName.trim().length === 0
+                    }
+                  >
+                    {creatingOrganisation ? "Creating…" : "Save organisation"}
+                  </button>
+                  <p className="text-xs text-slate-500">
+                    We’ll prompt you to add brand assets after checkout.
+                  </p>
+                </div>
+              )}
+              {!organisationLoading &&
+                !showCreateOrganisation &&
+                organisationOptions.length === 0 && (
+                  <p className="text-xs text-slate-500">
+                    You haven’t created any organisations yet. Create one now to continue.
+                  </p>
+                )}
+            </div>
+            <aside className="space-y-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">
+                  {selectedOrganisation ? selectedOrganisation.name : "Brand preview"}
+                </h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  {selectedOrganisation
+                    ? "We’ll apply these brand cues to your project workspace."
+                    : "Select an organisation to preview its brand palette."}
+                </p>
+              </div>
+              {selectedOrganisation?.brandLogoUrl ? (
+                <div className="relative h-16 w-full max-w-[10rem]">
+                  <Image
+                    src={selectedOrganisation.brandLogoUrl}
+                    alt={`${selectedOrganisation.name} logo`}
+                    fill
+                    sizes="160px"
+                    className="rounded-md border border-slate-200 bg-white object-contain p-2"
+                  />
+                </div>
+              ) : (
+                <div className="flex h-16 items-center justify-center rounded-md border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-500">
+                  No logo uploaded yet
+                </div>
+              )}
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Brand palette
+                </h4>
+                {organisationPreviewColours.length > 0 ? (
+                  <div className="mt-2 flex gap-2">
+                    {organisationPreviewColours.map((colour) => (
+                      <div
+                        key={colour}
+                        className="flex h-10 w-10 items-center justify-center rounded-md border border-white/70 text-[10px] font-medium uppercase text-white shadow-sm"
+                        style={{ backgroundColor: colour }}
+                      >
+                        {colour.replace("#", "")}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-slate-500">
+                    Add brand colours in your organisation settings after checkout.
+                  </p>
+                )}
+              </div>
+            </aside>
           </div>
-        ) : orderFieldsStep ? (
+        ) : (
+          <div className="space-y-3">
+            <div>
+              <label
+                htmlFor="wizard-organisation-name"
+                className="block text-sm font-semibold text-gray-900"
+              >
+                Organisation name
+              </label>
+              <input
+                id="wizard-organisation-name"
+                className="input input-bordered mt-1 w-full"
+                value={organisationNameInput}
+                onChange={(event) => {
+                  setOrganisationNameInput(event.target.value);
+                  setOrganisationError(null);
+                }}
+                placeholder="e.g. Acme Studios"
+              />
+            </div>
+            {organisationError && (
+              <p className="text-xs text-red-600">{organisationError}</p>
+            )}
+            <p className="text-xs text-slate-500">
+              We’ll ask for brand colours and assets after your order is confirmed.
+            </p>
+          </div>
+        )
+      ) : orderFieldsStep ? (
           <div className="space-y-3">
             {orderFormQuestions.map((question) => {
               const inputId = `order-question-${question.id}`;

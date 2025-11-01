@@ -48,63 +48,35 @@ export default function AdminPage() {
     { label: 'Proposals pending', value: stats.proposalsPending },
   ];
 
-  const heroActions = [
+  const primaryShortcuts = [
+    {
+      label: 'Project management',
+      description: 'Coordinate bookings, milestones, and delivery tasks.',
+      href: '/admin/projects',
+    },
     {
       label: 'Manage orders',
-      description: 'Review fulfilment and release status.',
+      description: 'Review fulfilment status and payment progress.',
       href: '/admin/orders',
     },
     {
-      label: 'Production tools',
-      description: 'Generate post-ready copy and package deliverables.',
-      href: '/admin/tools',
+      label: 'CRM',
+      description: 'Access client records and contact preferences.',
+      href: '/admin/users',
     },
     {
-      label: 'AI management',
-      description: 'Connect models, review prompts, and monitor token spend.',
-      href: '/admin/ai-management',
+      label: 'Quotes & proposals',
+      description: 'Draft, approve, and track proposal workflows.',
+      href: '/admin/proposals',
     },
     {
-      label: 'Email templates',
-      description: 'Control automated messaging and sending identities.',
-      href: '/admin/email-templates',
-    },
-    {
-      label: 'HQ social manager',
-      description: 'Connect Pineapple-owned channels and monitor OAuth health.',
-      href: '/admin/social-manager',
-    },
-    {
-      label: 'QR code generator',
-      description: 'Create scannable links for campaign assets.',
-      href: '/admin/tools/qr-code-generator',
-    },
-    {
-      label: 'Training library',
-      description: 'Create and curate onboarding content for every audience.',
-      href: '/admin/training',
-    },
-    {
-      label: 'Insurance cover',
-      description: 'Upload policies, enforce standards, and monitor franchise coverage.',
-      href: '/admin/insurance',
-    },
-    {
-      label: 'Team notice board',
-      description: 'Publish crew updates and control who can post to the portal.',
-      href: '/admin/team/notice-board',
-    },
-    {
-      label: 'Launch analytics',
-      description: 'Monitor marketing and production performance.',
-      href: '/admin/analytics',
-    },
-    {
-      label: 'Audit login history',
-      description: 'Check recent sign-ins across the platform.',
-      href: '/admin/login-history',
+      label: 'Manage availability',
+      description: 'Plan staffing, logistics, and routing coverage.',
+      href: '/admin/availability',
     },
   ];
+
+  const heroActions = primaryShortcuts;
   useEffect(() => {
     if (guardLoading || !allowed) return;
 
@@ -332,105 +304,21 @@ export default function AdminPage() {
 
           <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
             <h2 className="text-lg font-semibold mb-2">Quick Links</h2>
-            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {[
-                {
-                  title: 'Orders & Projects',
-                  links: [
-                    { href: '/admin/orders', label: 'Manage Orders' },
-                    { href: '/admin/projects', label: 'Project Management' },
-                    { href: '/admin/workflows', label: 'Manage Workflows' },
-                    { href: '/admin/proposals', label: 'Quotes & Proposals' },
-                    { href: '/admin/risk-assessments', label: 'Risk Assessments & SOPs' },
-                    { href: '/admin/availability', label: 'Manage Availability' },
-                    { href: '/admin/availability/routing', label: 'Routing Workflow' },
-                  ],
-                },
-                {
-                  title: 'Products',
-                  links: [
-                    { href: '/admin/categories', label: 'Manage Categories' },
-                    { href: '/admin/products', label: 'Product Management' },
-                    { href: '/admin/modifiers', label: 'Manage Modifiers' },
-                    { href: '/admin/venues', label: 'Venue Library' },
-                  ],
-                },
-                {
-                  title: 'Storage',
-                  links: [
-                    { href: '/admin/storage', label: 'Storage Automation' },
-                  ],
-                },
-                {
-                  title: 'Tools',
-                  links: [
-                    { href: '/admin/tools', label: 'Production Tools' },
-                    { href: '/admin/tools/qr-code-generator', label: 'QR Code Generator' },
-                    { href: '/admin/ai-management', label: 'AI Management' },
-                  ],
-                },
-                {
-                  title: 'People',
-                  links: [
-                    { href: '/admin/users', label: 'CRM' },
-                    { href: '/admin/team', label: 'Manage Team' },
-                    { href: '/admin/join-team-steps', label: 'Join Team Form' },
-                    { href: '/admin/franchises', label: 'Franchise Network' },
-                    { href: '/admin/training', label: 'Training Library' },
-                  ],
-                },
-                {
-                  title: 'Brand & Content',
-                  links: [
-                    { href: '/admin/brand-guidelines', label: 'Brand Guidelines' },
-                    { href: '/admin/client-logos', label: 'Manage Client Logos' },
-                    { href: '/admin/blog', label: 'Blog Management' },
-                    { href: '/admin/website-design', label: 'Website Design' },
-                    { href: '/admin/email-templates', label: 'Email Templates' },
-                  ],
-                },
-                {
-                  title: 'Marketing',
-                  links: [
-                    { href: '/admin/exhibitions', label: 'Exhibitions' },
-                    { href: '/admin/marketing/content-planner', label: 'Content Planner' },
-                    { href: '/admin/marketing/remarketing', label: 'Remarketing' },
-                    { href: '/admin/marketing/affiliates', label: 'Affiliate Programme' },
-                    { href: '/admin/voucher-codes', label: 'Voucher Management' },
-                    { href: '/admin/email-schedules', label: 'Email Schedules' },
-                    { href: '/admin/social-manager', label: 'HQ Social Manager' },
-                  ],
-                },
-                {
-                  title: 'Policies & Docs',
-                  links: [
-                    { href: '/admin/agreements', label: 'Agreements & Policies' },
-                  ],
-                },
-                { title: 'Finance', links: [ { href: '/admin/finance', label: 'Finance & Expenses' } ] },
-                { title: 'Reports', links: [ { href: '/admin/analytics', label: 'Analytics Dashboard' } ] },
-                {
-                  title: 'Logs & Comms',
-                  links: [
-                    { href: '/admin/audit-logs', label: 'Audit Logs' },
-                    { href: '/admin/login-history', label: 'Login History' },
-                    { href: '/admin/messages', label: 'Messages' },
-                  ],
-                },
-                { title: 'Equipment', links: [ { href: '/admin/equipment', label: 'Equipment Register' } ] },
-              ].map((group) => (
-                <div key={group.title}>
-                  <h3 className="font-medium text-gray-900">{group.title}</h3>
-                  <ul className="mt-1 grid gap-1 list-disc list-inside text-sm text-gray-600">
-                    {group.links.map((l) => (
-                      <li key={l.href}>
-                        <Link href={l.href} className="text-orange-600 hover:underline">
-                          {l.label}
-                        </Link>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+            <p className="text-sm text-gray-500">
+              Jump straight into the most common admin workflows.
+            </p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {primaryShortcuts.map((shortcut) => (
+                <Link
+                  key={shortcut.href}
+                  href={shortcut.href}
+                  className="group flex flex-col justify-between rounded-2xl border border-gray-200 bg-gray-50 p-4 transition hover:border-orange-300 hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-500"
+                >
+                  <span className="text-sm font-semibold text-gray-900 group-hover:text-orange-600">
+                    {shortcut.label}
+                  </span>
+                  <span className="mt-1 text-xs text-gray-500">{shortcut.description}</span>
+                </Link>
               ))}
             </div>
           </section>

@@ -1,5 +1,10 @@
 import { functionsBaseUrl } from "./firebase";
-import { DEFAULT_FUNCTION_BASE, LEGACY_FUNCTION_BASES } from "./callableEndpoints";
+import {
+  DEFAULT_FUNCTION_BASE,
+  LEGACY_FUNCTION_BASES,
+  resolveCallableFunctionIds,
+  resolveHostedAppBases,
+} from "./callableEndpoints";
 
 const cleanEnv = (value?: string | null) => {
   if (typeof value !== "string") {
@@ -35,7 +40,6 @@ const summariseDetails = (value: string | null | undefined) => {
 const FUNCTION_ENDPOINT_OVERRIDES: Record<string, string | undefined> = {
   createOrder: cleanEnv(process.env.NEXT_PUBLIC_CREATE_ORDER_ENDPOINT),
   analytics_track: cleanEnv(process.env.NEXT_PUBLIC_ANALYTICS_TRACK_ENDPOINT),
-  recordLogin: "/api/record-login",
 };
 
 const RELATIVE_FALLBACK_ENDPOINTS: Record<string, string[]> = {
@@ -57,7 +61,34 @@ const ADDITIONAL_BASE_ENVS = [
 
 const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504, 521, 522, 523]);
 
-const buildBaseCandidates = (): string[] => {
+const getWindowHost = (): string | null => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    return window.location?.host ?? null;
+  } catch {
+    return null;
+  }
+};
+
+const appendHostedBases = (
+  append: (candidate?: string | null) => void,
+  host: string | null | undefined,
+) => {
+  if (!host) {
+    return;
+  }
+
+  try {
+    const bases = resolveHostedAppBases(host);
+    bases.forEach((base) => append(base));
+  } catch (error) {
+    console.warn("Failed to resolve hosted app bases", { host, error });
+  }
+};
+
+const buildBaseCandidates = (host?: string | null): string[] => {
   const bases = new Set<string>();
 
   const addBase = (candidate?: string | null) => {
@@ -77,6 +108,11 @@ const buildBaseCandidates = (): string[] => {
     }
     addBase(value);
   });
+
+  appendHostedBases(addBase, host ?? null);
+  if (!host) {
+    appendHostedBases(addBase, getWindowHost());
+  }
 
   addBase(DEFAULT_FUNCTION_BASE);
 
@@ -116,7 +152,8 @@ const buildEndpointCandidates = (
   {
     allowRelativeFallback = false,
     includeOverrides = true,
-  }: { allowRelativeFallback?: boolean; includeOverrides?: boolean } = {},
+    host,
+  }: { allowRelativeFallback?: boolean; includeOverrides?: boolean; host?: string | null } = {},
 ): string[] => {
   const candidates: string[] = [];
   const seen = new Set<string>();
@@ -139,14 +176,23 @@ const buildEndpointCandidates = (
     (RELATIVE_FALLBACK_ENDPOINTS[name] ?? []).forEach((endpoint) => push(endpoint));
   }
 
-  buildBaseCandidates().forEach((base) => push(`${base}/${name}`));
+  const functionIds = resolveCallableFunctionIds(name);
+  const baseCandidates = buildBaseCandidates(host);
+
+  if (functionIds.length === 0) {
+    baseCandidates.forEach((base) => push(`${base}/${name}`));
+  } else {
+    baseCandidates.forEach((base) => {
+      functionIds.forEach((identifier) => push(`${base}/${identifier}`));
+    });
+  }
 
   return candidates;
 };
 
 export function resolveHttpFunctionUrl(
   name: string,
-  options: { allowRelativeFallback?: boolean; includeOverrides?: boolean } = {},
+  options: { allowRelativeFallback?: boolean; includeOverrides?: boolean; host?: string | null } = {},
 ): string {
   const endpoints = buildEndpointCandidates(name, options);
   if (endpoints.length === 0) {
@@ -161,6 +207,7 @@ export interface InvokeHttpFunctionOptions {
   signal?: AbortSignal;
   allowRelativeFallback?: boolean;
   includeOverrides?: boolean;
+  host?: string | null;
 }
 
 export interface HttpFunctionResponse<T = unknown> {
@@ -189,9 +236,10 @@ export async function invokeHttpFunction<T = unknown>(
     signal,
     allowRelativeFallback,
     includeOverrides = true,
+    host,
   }: InvokeHttpFunctionOptions = {},
 ): Promise<HttpFunctionResponse<T>> {
-  const endpoints = buildEndpointCandidates(name, { allowRelativeFallback, includeOverrides });
+  const endpoints = buildEndpointCandidates(name, { allowRelativeFallback, includeOverrides, host });
   if (endpoints.length === 0) {
     throw new HttpFunctionInvocationError(`No endpoints configured for ${name}`, []);
   }

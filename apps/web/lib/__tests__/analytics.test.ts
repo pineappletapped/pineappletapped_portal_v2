@@ -108,7 +108,7 @@ describe('analytics tracker', () => {
     });
     expect(fetchMock).toHaveBeenCalled();
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      'https://europe-west2-pineapple-tapped---portal.cloudfunctions.net/analytics_track',
+      'https://europe-west2-pineapple-tapped---portal.cloudfunctions.app/analytics_track',
     );
   });
 });

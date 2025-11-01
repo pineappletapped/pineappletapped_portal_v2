@@ -1,14 +1,23 @@
-export const DEFAULT_FUNCTION_BASE =
-  "https://europe-west2-pineapple-tapped---portal.cloudfunctions.net";
+import {
+  PORTAL_FUNCTION_BASE_URLS,
+  PORTAL_FUNCTION_HOST_SUFFIXES,
+  PORTAL_FUNCTION_REGIONS,
+  PORTAL_PRIMARY_FUNCTION_BASE,
+  PORTAL_PRIMARY_REGION,
+} from "@shared-config";
 
-export const LEGACY_FUNCTION_BASES = [
-  "https://europe-west2-ptfbportalbackend.cloudfunctions.net",
-];
+const CLOUD_FUNCTION_HOST_SUFFIXES = PORTAL_FUNCTION_HOST_SUFFIXES;
+
+export const DEFAULT_FUNCTION_BASE = PORTAL_PRIMARY_FUNCTION_BASE;
+
+export const LEGACY_FUNCTION_BASES = PORTAL_FUNCTION_BASE_URLS.filter(
+  (base) => base !== DEFAULT_FUNCTION_BASE,
+);
 
 const CLOUD_FUNCTION_REGION_HOST_PATTERN =
-  /^https:\/\/((?:[a-z]+(?:-[a-z]+)*)[0-9])-([a-z0-9-]+)\.cloudfunctions\.net$/i;
+  /^https:\/\/((?:[a-z]+(?:-[a-z]+)*)[0-9])-([a-z0-9-]+)\.cloudfunctions\.(?:net|app)$/i;
 
-const REGION_FALLBACKS = ["europe-west2", "europe-west4"];
+const REGION_FALLBACKS = PORTAL_FUNCTION_REGIONS;
 const CODEBASE_ENV_VARS = [
   "FUNCTIONS_CODEBASE",
   "NEXT_PUBLIC_FUNCTIONS_CODEBASE",
@@ -45,6 +54,21 @@ export const sanitiseProjectFragment = (value: string | null | undefined) => {
   }
 
   return trimmed;
+};
+
+const appendRegionalBases = (
+  collector: (base: string | null | undefined) => void,
+  region: string | null | undefined,
+  project: string | null | undefined,
+) => {
+  const cleanRegion = region?.trim();
+  const cleanProject = sanitiseProjectFragment(project);
+  if (!cleanRegion || !cleanProject) {
+    return;
+  }
+  for (const suffix of CLOUD_FUNCTION_HOST_SUFFIXES) {
+    collector(`https://${cleanRegion}-${cleanProject}.${suffix}`);
+  }
 };
 
 const sanitiseCodebase = (value: string | null | undefined) => {
@@ -139,7 +163,7 @@ export const resolveHostedAppContext = (
   const regionCandidate =
     typeof regionSegment === "string" && /^[a-z0-9-]+$/.test(regionSegment)
       ? regionSegment
-      : "europe-west2";
+      : PORTAL_PRIMARY_REGION;
 
   const bases = new Set<string>();
   const projectFragments = new Set<string>();
@@ -178,47 +202,32 @@ export const resolveHostedAppContext = (
     searchIndex = candidate + 2;
   }
 
+  let primaryFragment: string | null = null;
   if (separatorIndex >= 0) {
-    const projectFragment = trackProjectFragment(
-      subdomain.slice(separatorIndex + 2),
-    );
-    if (projectFragment) {
-      addBase(`https://${regionCandidate}-${projectFragment}.cloudfunctions.net`);
-    }
-
-    const legacyFragment = trackProjectFragment(
-      subdomain.slice(0, separatorIndex),
-    );
-    if (legacyFragment) {
-      addBase(`https://${regionCandidate}-${legacyFragment}.cloudfunctions.net`);
-    }
+    primaryFragment = trackProjectFragment(subdomain.slice(separatorIndex + 2));
+    trackProjectFragment(subdomain.slice(0, separatorIndex));
   } else {
-    const fragment = trackProjectFragment(subdomain);
-    if (fragment) {
-      addBase(`https://${regionCandidate}-${fragment}.cloudfunctions.net`);
+    primaryFragment = trackProjectFragment(subdomain);
+  }
+
+  const regionTargets = new Set<string>();
+  if (regionCandidate) {
+    regionTargets.add(regionCandidate);
+  }
+  REGION_FALLBACKS.forEach((region) => regionTargets.add(region));
+
+  if (primaryFragment) {
+    for (const region of regionTargets) {
+      appendRegionalBases(addBase, region, primaryFragment);
+      addBase(
+        `https://${trimmed}/_firebase/functions/v2/projects/${primaryFragment}/locations/${region}/functions`,
+      );
     }
   }
 
-  const hostedApiVersions = ["v2", "v1", "v1beta"] as const;
-
-  for (const apiVersion of hostedApiVersions) {
-    const versionedBase = `https://${trimmed}/_firebase/functions/${apiVersion}`;
-    addBase(versionedBase);
-    addBase(`${versionedBase}/${regionCandidate}`);
-  }
-
-  if (projectFragments.size > 0) {
-    const regionTargets = new Set([regionCandidate, ...REGION_FALLBACKS]);
-
-    for (const projectFragment of projectFragments) {
-      for (const region of regionTargets) {
-        for (const apiVersion of hostedApiVersions) {
-          addBase(
-            `https://${trimmed}/_firebase/functions/${apiVersion}/projects/${projectFragment}/locations/${region}/functions`,
-          );
-        }
-      }
-    }
+  addBase(`https://${trimmed}/_firebase/functions/v2`);
+  if (regionCandidate) {
+    addBase(`https://${trimmed}/_firebase/functions/v2/${regionCandidate}`);
   }
 
   return {
@@ -369,6 +378,13 @@ export const collectCallableTargets = (
 const expandRegionalBases = (baseUrls: Array<string | null | undefined>) => {
   const expanded: string[] = [];
 
+  const pushBase = (candidate: string | null | undefined) => {
+    const normalisedCandidate = normaliseBaseUrl(candidate);
+    if (normalisedCandidate) {
+      expanded.push(normalisedCandidate);
+    }
+  };
+
   for (const base of baseUrls) {
     const normalised = normaliseBaseUrl(base);
     if (!normalised) {
@@ -388,7 +404,7 @@ const expandRegionalBases = (baseUrls: Array<string | null | undefined>) => {
         continue;
       }
 
-      expanded.push(`https://${fallbackRegion}-${project}.cloudfunctions.net`);
+      appendRegionalBases(pushBase, fallbackRegion, project);
     }
   }
 

@@ -11,6 +11,14 @@ export interface OrganiserLineItem {
   role: "organiser" | "exhibitor";
 }
 
+export interface OrderInputOrganisation {
+  id: string | null;
+  name: string | null;
+  source: string | null;
+  brandLogoUrl: string | null;
+  brandColors: string[];
+}
+
 export interface OrganiserSummaryEntry {
   key: string;
   organiserId: string | null;
@@ -49,6 +57,7 @@ export interface OrderInputItem {
   kitWarnings?: string[] | null;
   campaignBooking?: unknown;
   organiser?: unknown;
+  organisation?: OrderInputOrganisation | null;
 }
 
 export interface OrderInputKitItem {
@@ -74,6 +83,7 @@ export interface CheckoutOrderInput {
   voucher: string | null;
   leadSource: string;
   organisers: OrganiserSummaryEntry[];
+  organisation: OrderInputOrganisation | null;
 }
 
 interface CreateOrderInputParams {
@@ -92,6 +102,37 @@ interface CreateOrderInputParams {
 
 const normaliseString = (value: string | null | undefined): string =>
   typeof value === "string" ? value.trim() : "";
+
+const normaliseOrganisation = (
+  organisation: CartItem["organisation"] | null | undefined,
+): OrderInputOrganisation | null => {
+  if (!organisation) {
+    return null;
+  }
+  const id = typeof organisation.id === "string" ? organisation.id.trim() : "";
+  const name = normaliseString(organisation.name);
+  const source = normaliseString(organisation.source ?? null);
+  const brandLogoUrl = normaliseString(organisation.brandLogoUrl ?? null);
+  const colours = Array.isArray(organisation.brandColors)
+    ? organisation.brandColors
+        .map((colour) => normaliseString(colour))
+        .filter((colour) => colour.length > 0)
+        .map((colour) => {
+          const upper = colour.toUpperCase();
+          return upper.startsWith("#") ? upper : `#${upper}`;
+        })
+    : [];
+  if (!id && !name && !brandLogoUrl && colours.length === 0) {
+    return null;
+  }
+  return {
+    id: id || null,
+    name: name || null,
+    source: source || null,
+    brandLogoUrl: brandLogoUrl || null,
+    brandColors: Array.from(new Set(colours)),
+  };
+};
 
 export function createOrderInput({
   items,
@@ -172,6 +213,8 @@ export function createOrderInput({
         }
       : null;
 
+    const organisation = normaliseOrganisation(item.organisation ?? null);
+
     if (organiser) {
       const keyParts = [organiser.organiserId || "unknown"];
       if (organiser.programKey) {
@@ -201,13 +244,14 @@ export function createOrderInput({
       }
 
       const accumulator = organiserMap.get(organiserKey)!;
+      const lineTotal = item.price * item.quantity;
       accumulator.quantity += item.quantity;
-      accumulator.grossSubtotal += item.price * item.quantity;
+      accumulator.grossSubtotal += lineTotal;
       const exhibitorLineTotal = organiser.exhibitorPrice
         ? organiser.exhibitorPrice * item.quantity
         : 0;
       accumulator.exhibitorSubtotal += exhibitorLineTotal;
-      accumulator.organiserSubtotal += accumulator.grossSubtotal - exhibitorLineTotal;
+      accumulator.organiserSubtotal += lineTotal - exhibitorLineTotal;
 
       const role: OrganiserLineRole = organiser.exhibitorProductId ? "exhibitor" : "organiser";
       accumulator.items.push({
@@ -215,7 +259,7 @@ export function createOrderInput({
         variation: item.variation ?? null,
         quantity: item.quantity,
         unitPrice: item.price,
-        lineTotal: item.price * item.quantity,
+        lineTotal,
         role,
       });
 
@@ -254,6 +298,7 @@ export function createOrderInput({
       kitWarnings: warnings,
       campaignBooking,
       organiser,
+      organisation,
     } satisfies OrderInputItem;
   });
 
@@ -296,6 +341,23 @@ export function createOrderInput({
   );
 
   const email = normaliseString(userEmail) || normaliseString(fallbackEmail);
+  const orderOrganisation = (() => {
+    for (const item of items) {
+      const organisationInfo = normaliseOrganisation(item.organisation ?? null);
+      if (organisationInfo && (organisationInfo.id || organisationInfo.name)) {
+        return organisationInfo;
+      }
+    }
+    return null;
+  })();
+  const resolvedCompanyName = (() => {
+    const trimmed = normaliseString(companyName);
+    if (trimmed) {
+      return trimmed;
+    }
+    const organisationName = normaliseString(orderOrganisation?.name ?? null);
+    return organisationName || null;
+  })();
 
   return {
     items: itemPayload,
@@ -304,46 +366,73 @@ export function createOrderInput({
     kitReservationStatus,
     kitReservationWarnings,
     userEmail: email,
-    customerName: customerName,
-    companyName: normaliseString(companyName) || null,
+    customerName,
+    companyName: resolvedCompanyName,
     location: normaliseString(location) || null,
     postalCode: normaliseString(postalCode) || null,
     projectName: normaliseString(projectName) || null,
     voucher: normaliseString(voucher) || null,
     leadSource,
     organisers: organiserSummary,
+    organisation: orderOrganisation,
   };
 }
 
-export const createIntentPayload = (input: CheckoutOrderInput): string =>
+export interface CheckoutPricingSnapshot {
+  productTotal: number;
+  rentalTotal: number;
+  voucherDiscount: number;
+  discountPercent: number;
+  discountAmount: number;
+  subtotal: number;
+  vat: number;
+  grandTotal: number;
+  hasZeroBalance?: boolean;
+  voucherCode?: string | null;
+}
+
+export const createIntentPayload = (
+  input: CheckoutOrderInput,
+  pricing: CheckoutPricingSnapshot,
+): string =>
   JSON.stringify({
-    ...input,
-    items: input.items.map((item) => ({
-      id: item.id,
-      quantity: item.quantity,
-      rentalTotal: item.rentalTotal,
-      modifiers: item.modifiers,
-      kitStatus: item.kitStatus,
-      kitWarnings: item.kitWarnings,
-      variation: item.variation,
-      date: item.date,
-      location: item.location,
-      postalCode: item.postalCode,
-      orderFormResponses: item.orderFormResponses,
-      coverage: item.coverage,
-      timeSlot: item.timeSlot,
-      exhibition: item.exhibition,
-      campaignBooking: item.campaignBooking,
-      organiser: item.organiser,
-    })),
-    kitItems: input.kitItems.map((kit) => ({
-      id: kit.id,
-      name: kit.name ?? null,
-      category: kit.category ?? null,
-      start: kit.start,
-      end: kit.end,
-    })),
-    kitReservationStatus: input.kitReservationStatus,
-    kitReservationWarnings: input.kitReservationWarnings,
-    organisers: input.organisers,
+    order: {
+      ...input,
+      items: input.items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        quantity: item.quantity,
+        unitPrice: item.price,
+        price: item.price,
+        lineTotal: Number.isFinite(item.price * item.quantity)
+          ? Number((item.price * item.quantity).toFixed(2))
+          : item.price,
+        rentalTotal: item.rentalTotal,
+        modifiers: item.modifiers,
+        kitStatus: item.kitStatus,
+        kitWarnings: item.kitWarnings,
+        variation: item.variation,
+        date: item.date,
+        location: item.location,
+        postalCode: item.postalCode,
+        orderFormResponses: item.orderFormResponses,
+        coverage: item.coverage,
+        timeSlot: item.timeSlot,
+        exhibition: item.exhibition,
+        campaignBooking: item.campaignBooking,
+        organiser: item.organiser,
+        organisation: item.organisation,
+      })),
+      kitItems: input.kitItems.map((kit) => ({
+        id: kit.id,
+        name: kit.name ?? null,
+        category: kit.category ?? null,
+        start: kit.start,
+        end: kit.end,
+      })),
+      kitReservationStatus: input.kitReservationStatus,
+      kitReservationWarnings: input.kitReservationWarnings,
+      organisers: input.organisers,
+    },
+    pricing,
   });

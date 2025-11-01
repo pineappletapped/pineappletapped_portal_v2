@@ -231,7 +231,7 @@ These snippets can populate `defaultCopy` fields and be localised later.
 
 ## Integration Notes
 - Use `@/lib/firebase.ensureFirebase()` before accessing auth or Firestore inside client components.
-- Keep analytics optional: track block interactions but swallow failures to avoid UI flicker (see `apps/web/components/AnalyticsTracker.tsx`).
+- Keep analytics optional: track block interactions but swallow failures to avoid UI flicker. The shared tracker is currently disabled in the root layout while backend routing errors are triaged.【F:apps/web/lib/analytics.ts†L1-L520】【F:apps/web/app/layout.tsx†L1-L120】
 - For PDF generation, reuse existing pipeline (likely via Next.js route or Cloud Function) and pass fully resolved block data to renderer.
 
 ## Next Steps for Implementation

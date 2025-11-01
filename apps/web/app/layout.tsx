@@ -6,8 +6,6 @@ import { getCategories } from '@/lib/categories';
 import { getProducts } from '@/lib/products';
 import CookieBanner from '@/components/CookieBanner';
 import AnalyticsScripts from '@/components/AnalyticsScripts';
-import AnalyticsTracker from '@/components/AnalyticsTracker';
-import LoginTelemetryListener from '@/components/LoginTelemetryListener';
 import PineappleThemeProvider from '@/components/theme/ThemeProvider';
 import {
   Box,
@@ -40,7 +38,6 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       <body>
         <PineappleThemeProvider>
           <CartProvider>
-            <LoginTelemetryListener />
             <SiteHeader categories={categories} products={products} />
             <Box component="main" sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
               {children}
@@ -113,7 +110,6 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             </Box>
             <CookieBanner />
             <AnalyticsScripts />
-            <AnalyticsTracker />
           </CartProvider>
         </PineappleThemeProvider>
       </body>

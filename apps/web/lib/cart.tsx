@@ -131,6 +131,7 @@ interface ProductInput {
   kitWarnings?: string[];
   campaignBooking?: CartCampaignBooking | null;
   organiser?: CartOrganiserInfo | null;
+  organisation?: SharedCartItem["organisation"];
 }
 
 interface CartContextProps {
@@ -263,6 +264,8 @@ export function CartProvider({ children }: { children: ReactNode }) {
             JSON.stringify(product.orderFormResponses || []) &&
           JSON.stringify(i.organiser || null) ===
             JSON.stringify(product.organiser || null) &&
+          JSON.stringify(i.organisation || null) ===
+            JSON.stringify(product.organisation || null) &&
           (i.kitStatus || "confirmed") === (product.kitStatus || "confirmed") &&
           JSON.stringify(i.kitWarnings || []) ===
             JSON.stringify(product.kitWarnings || [])
@@ -272,7 +275,14 @@ export function CartProvider({ children }: { children: ReactNode }) {
           i === existing ? { ...i, quantity: i.quantity + 1 } : i
         );
       }
-      return [...prev, { ...product, quantity: 1 }];
+      return [
+        ...prev,
+        {
+          ...product,
+          quantity: 1,
+          organisation: product.organisation ?? null,
+        },
+      ];
     });
   };
 

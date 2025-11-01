@@ -34,6 +34,72 @@ export interface ProposalTemplateItem {
   description?: string;
 }
 
+export type ProposalTemplateElementType =
+  | "text"
+  | "placeholder"
+  | "image"
+  | "shape";
+
+export type ProposalTemplateElementRole =
+  | "title"
+  | "subtitle"
+  | "body"
+  | "list"
+  | "notes"
+  | "custom";
+
+export interface ProposalTemplateElementBase {
+  id: string;
+  type: ProposalTemplateElementType;
+  role?: ProposalTemplateElementRole;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation?: number;
+  order: number;
+}
+
+export interface ProposalTemplateTextElement
+  extends ProposalTemplateElementBase {
+  type: "text" | "placeholder";
+  content: string;
+  fontSize: number;
+  fontWeight: "regular" | "medium" | "bold";
+  align: "left" | "center" | "right";
+  color: string;
+  lineHeight: number;
+  placeholderToken?: string | null;
+}
+
+export interface ProposalTemplateImageElement
+  extends ProposalTemplateElementBase {
+  type: "image";
+  url: string;
+  fit: "cover" | "contain";
+  borderRadius: number;
+}
+
+export interface ProposalTemplateShapeElement
+  extends ProposalTemplateElementBase {
+  type: "shape";
+  shape: "rectangle" | "rounded" | "pill";
+  fill: string;
+  opacity: number;
+  borderRadius: number;
+}
+
+export type ProposalTemplateElement =
+  | ProposalTemplateTextElement
+  | ProposalTemplateImageElement
+  | ProposalTemplateShapeElement;
+
+export interface ProposalTemplateCanvasSettings {
+  aspectRatio: "16:9" | "4:3";
+  backgroundColor?: string | null;
+  padding?: number;
+}
+
 export interface ProposalTemplatePage {
   id: string;
   type: ProposalTemplatePageType;
@@ -48,6 +114,8 @@ export interface ProposalTemplatePage {
   displayMode?: "quote" | "estimate";
   autoContents?: boolean;
   notes?: string;
+  elements?: ProposalTemplateElement[];
+  canvas?: ProposalTemplateCanvasSettings;
 }
 
 export interface ProposalTemplateStyling {
@@ -222,6 +290,13 @@ const createPageId = () =>
         .toString(36)
         .slice(2, 10)}`;
 
+const createElementId = () =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `element-${Date.now().toString(36)}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+
 const fallbackBrand = DEFAULT_BRAND_GUIDELINES;
 
 const fallbackString = (value: unknown, fallback = ""): string => {
@@ -255,17 +330,252 @@ const buildAboutCopy = (brand: BrandGuidelinesState): string => {
   return `${principles}\n\nImagery: ${imagery}`.trim();
 };
 
-const createBasePage = (
+const defaultCanvasSettings = (
+  canvas?: ProposalTemplateCanvasSettings | null,
+): ProposalTemplateCanvasSettings => ({
+  aspectRatio: canvas?.aspectRatio ?? "16:9",
+  backgroundColor: canvas?.backgroundColor ?? null,
+  padding: canvas?.padding ?? 8,
+});
+
+const normaliseElementBase = <T extends ProposalTemplateElement>(
+  element: T,
+  index: number,
+): T => {
+  const base = {
+    ...element,
+    id: element.id || createElementId(),
+    order: element.order ?? index,
+    x: element.x ?? 10,
+    y: element.y ?? 12 + index * 14,
+    width: element.width ?? 80,
+    height: element.height ?? 12,
+    rotation: element.rotation ?? 0,
+  } as ProposalTemplateElement;
+
+  if (base.type === "image") {
+    const image = element as ProposalTemplateImageElement;
+    return {
+      ...(base as ProposalTemplateImageElement),
+      type: "image",
+      url: image.url || "",
+      fit: image.fit || "cover",
+      borderRadius: image.borderRadius ?? 0,
+    } as T;
+  }
+
+  if (base.type === "shape") {
+    const shape = element as ProposalTemplateShapeElement;
+    return {
+      ...(base as ProposalTemplateShapeElement),
+      type: "shape",
+      shape: shape.shape || "rectangle",
+      fill: shape.fill || "#E5E7EB",
+      opacity: shape.opacity ?? 1,
+      borderRadius: shape.borderRadius ?? 0,
+    } as T;
+  }
+
+  const typed = element as ProposalTemplateTextElement;
+  const role = typed.role;
+  const fontSize =
+    typed.fontSize ??
+    (role === "title"
+      ? 42
+      : role === "subtitle"
+        ? 26
+        : role === "notes"
+          ? 14
+          : 18);
+  const fontWeight =
+    typed.fontWeight ?? (role === "title" ? "bold" : role === "subtitle" ? "medium" : "regular");
+  const align = typed.align ?? (role === "title" ? "center" : "left");
+
+  return {
+    ...(base as ProposalTemplateTextElement),
+    type: typed.type || "text",
+    content: typed.content ?? typed.placeholderToken ?? "",
+    fontSize,
+    fontWeight,
+    align,
+    color: typed.color || "#111827",
+    lineHeight: typed.lineHeight ?? 1.4,
+    placeholderToken:
+      typed.placeholderToken ?? (typed.type === "placeholder" ? "{{clientName}}" : null),
+  } as T;
+};
+
+const createTextElement = (
+  content: string,
+  overrides: Partial<ProposalTemplateTextElement> = {},
+): ProposalTemplateTextElement =>
+  normaliseElementBase<ProposalTemplateTextElement>(
+    {
+      id: createElementId(),
+      type: overrides.type ?? "text",
+      content,
+      fontSize: overrides.fontSize ?? 28,
+      fontWeight: overrides.fontWeight ?? "regular",
+      align: overrides.align ?? "left",
+      color: overrides.color ?? "#111827",
+      lineHeight: overrides.lineHeight ?? 1.4,
+      placeholderToken: overrides.placeholderToken ?? null,
+      role: overrides.role,
+      x: overrides.x ?? 10,
+      y: overrides.y ?? 18,
+      width: overrides.width ?? 80,
+      height: overrides.height ?? 12,
+      rotation: overrides.rotation ?? 0,
+      order: overrides.order ?? 0,
+    },
+    overrides.order ?? 0,
+  );
+
+export const ensurePageElements = (
+  page: ProposalTemplatePage,
+  options?: { brand?: BrandGuidelinesState },
+): ProposalTemplatePage => {
+  const accent =
+    options?.brand?.colors?.secondary ?? fallbackBrand.colors.secondary ?? "#111827";
+
+  if (Array.isArray(page.elements) && page.elements.length > 0) {
+    const normalised = page.elements.map((element, index) =>
+      normaliseElementBase(element, index),
+    );
+    return {
+      ...page,
+      elements: normalised,
+      canvas: defaultCanvasSettings(page.canvas),
+    };
+  }
+
+  const elements: ProposalTemplateElement[] = [];
+
+  if (page.title) {
+    elements.push(
+      createTextElement(page.title, {
+        role: "title",
+        align: "center",
+        fontSize: 44,
+        fontWeight: "bold",
+        color: accent,
+        y: 18,
+        width: 80,
+        x: 10,
+        order: 0,
+      }),
+    );
+  }
+
+  if (page.subtitle) {
+    elements.push(
+      createTextElement(page.subtitle, {
+        role: "subtitle",
+        align: "center",
+        fontSize: 26,
+        fontWeight: "medium",
+        color: "#1F2937",
+        y: page.title ? 34 : 22,
+        width: 80,
+        x: 10,
+        order: elements.length,
+      }),
+    );
+  }
+
+  if (page.body) {
+    elements.push(
+      createTextElement(page.body, {
+        role: "body",
+        align: "left",
+        fontSize: 18,
+        color: "#111827",
+        y: elements.length ? elements[elements.length - 1].y + 12 : 32,
+        width: 80,
+        x: 10,
+        order: elements.length,
+      }),
+    );
+  }
+
+  if (Array.isArray(page.sections) && page.sections.length > 0) {
+    elements.push(
+      createTextElement(page.sections.join("\n"), {
+        role: "list",
+        align: "left",
+        fontSize: 18,
+        color: "#111827",
+        y: elements.length ? elements[elements.length - 1].y + 14 : 40,
+        width: 80,
+        x: 10,
+        order: elements.length,
+      }),
+    );
+  }
+
+  return {
+    ...page,
+    elements,
+    canvas: defaultCanvasSettings(page.canvas),
+  };
+};
+
+export const syncPageFieldsFromElements = (
+  page: ProposalTemplatePage,
+): ProposalTemplatePage => {
+  if (!Array.isArray(page.elements) || page.elements.length === 0) {
+    return {
+      ...page,
+      canvas: defaultCanvasSettings(page.canvas),
+    };
+  }
+
+  const next = { ...page };
+  const getText = (
+    role: ProposalTemplateElementRole,
+  ): ProposalTemplateTextElement | null => {
+    const match = page.elements?.find(
+      (element): element is ProposalTemplateTextElement =>
+        (element.type === "text" || element.type === "placeholder") &&
+        element.role === role,
+    );
+    return match || null;
+  };
+
+  const title = getText("title");
+  const subtitle = getText("subtitle");
+  const body = getText("body");
+
+  next.title = title?.content?.trim() || next.title || "Untitled page";
+  next.subtitle = subtitle?.content?.trim() || undefined;
+  next.body = body?.content?.trim() || undefined;
+
+  return {
+    ...next,
+    elements: page.elements.map((element, index) =>
+      normaliseElementBase(element, index),
+    ),
+    canvas: defaultCanvasSettings(page.canvas),
+  };
+};
+
+function createBasePage(
   type: ProposalTemplatePageType,
   overrides: Partial<ProposalTemplatePage>,
-): ProposalTemplatePage => ({
-  id: createPageId(),
-  type,
-  layout: "hero",
-  title: "Untitled page",
-  includeInContents: type !== "cover",
-  ...overrides,
-});
+): ProposalTemplatePage {
+  return ensurePageElements({
+    id: createPageId(),
+    type,
+    layout: "hero",
+    title: "Untitled page",
+    includeInContents: type !== "cover",
+    canvas: {
+      aspectRatio: "16:9",
+      padding: 8,
+    },
+    ...overrides,
+  });
+}
 
 export const TEMPLATE_LAYOUT_OPTIONS: TemplateLayoutOption[] = [
   {
@@ -364,9 +674,10 @@ export const createBlankPage = (
   product?: TemplateProductSummary | null,
 ): ProposalTemplatePage => {
   const layout = defaultLayoutForType(type);
+  let base: ProposalTemplatePage;
   switch (type) {
     case "cover":
-      return createBasePage(type, {
+      base = createBasePage(type, {
         layout,
         title: product?.name || "Proposal",
         subtitle: fallbackString(
@@ -375,41 +686,47 @@ export const createBlankPage = (
         ),
         includeInContents: false,
       });
+      break;
     case "intro":
-      return createBasePage(type, {
+      base = createBasePage(type, {
         layout,
         title: "Project vision",
         body: buildHeroCopy(brand),
       });
+      break;
     case "about":
-      return createBasePage(type, {
+      base = createBasePage(type, {
         layout,
         title: "Why Pineapple Tapped",
         body: buildAboutCopy(brand),
       });
+      break;
     case "contents":
-      return createBasePage(type, {
+      base = createBasePage(type, {
         layout: "columns",
         title: "Contents",
         body: "Auto-generated list of sections",
         autoContents: true,
       });
+      break;
     case "service_overview":
-      return createBasePage(type, {
+      base = createBasePage(type, {
         layout,
         title: product?.name || "Service overview",
         subtitle: fallbackString(product?.summary, "Key outcomes"),
         sections: ["overview"],
       });
+      break;
     case "storyboard":
-      return createBasePage(type, {
+      base = createBasePage(type, {
         layout,
         title: "Storyboard",
         subtitle: "Scene-by-scene breakdown",
         sections: ["storyboard"],
       });
+      break;
     case "operations":
-      return createBasePage(type, {
+      base = createBasePage(type, {
         layout,
         title: "Operations & logistics",
         subtitle: fallbackString(
@@ -418,25 +735,31 @@ export const createBlankPage = (
         ),
         sections: ["operations"],
       });
+      break;
     case "quote":
     case "estimate":
-      return createBasePage(type, {
+      base = createBasePage(type, {
         layout,
         title: type === "quote" ? "Investment" : "Estimate",
         displayMode: type,
       });
+      break;
     case "terms":
-      return createBasePage(type, {
+      base = createBasePage(type, {
         layout,
         title: "Terms & Conditions",
         includeInContents: true,
       });
+      break;
     default:
-      return createBasePage(type, {
+      base = createBasePage(type, {
         layout,
         title: "Custom page",
       });
+      break;
   }
+
+  return ensurePageElements(base, { brand });
 };
 
 export const defaultTemplateStyling = (

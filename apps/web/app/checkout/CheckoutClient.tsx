@@ -98,6 +98,7 @@ interface CreateOrderResult {
   netTotal?: number;
   discountAmount?: number;
   voucherDiscount?: number;
+  projectId?: string;
   [key: string]: unknown;
 }
 
@@ -117,11 +118,35 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
   }, []);
 
   const { items, clear } = useCart();
+  const projectIdRef = useRef<string | null>(null);
   const productTotal = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
   const rentalTotal = items.reduce(
     (sum, i) => sum + (i.rentalTotal || 0) * i.quantity,
     0,
   );
+  const cartOrganisationName = useMemo(() => {
+    for (const item of items) {
+      const name =
+        typeof item.organisation?.name === "string"
+          ? item.organisation.name.trim()
+          : "";
+      if (name) {
+        return name;
+      }
+    }
+    return "";
+  }, [items]);
+  useEffect(() => {
+    if (!cartOrganisationName) {
+      return;
+    }
+    setCompany((prev) => {
+      if (prev.trim().length > 0) {
+        return prev;
+      }
+      return cartOrganisationName;
+    });
+  }, [cartOrganisationName]);
   const [discount, setDiscount] = useState(0);
   const router = useRouter();
   const stripePromise = useMemo(
@@ -609,7 +634,34 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             lineRole:
               item.organiser.exhibitorProductId && item.organiser.exhibitorProductId === item.id
                 ? ("exhibitor" as OrganiserLineRole)
-                : ("organiser" as OrganiserLineRole),
+            : ("organiser" as OrganiserLineRole),
+          }
+        : null;
+
+      const organisation = item.organisation
+        ? {
+            id:
+              typeof item.organisation.id === "string" && item.organisation.id.trim().length > 0
+                ? item.organisation.id.trim()
+                : null,
+            name:
+              typeof item.organisation.name === "string" && item.organisation.name.trim().length > 0
+                ? item.organisation.name.trim()
+                : null,
+            source:
+              typeof item.organisation.source === "string" && item.organisation.source.trim().length > 0
+                ? item.organisation.source.trim()
+                : null,
+            brandLogoUrl:
+              typeof item.organisation.brandLogoUrl === "string" &&
+              item.organisation.brandLogoUrl.trim().length > 0
+                ? item.organisation.brandLogoUrl.trim()
+                : null,
+            brandColors: Array.isArray(item.organisation.brandColors)
+              ? item.organisation.brandColors
+                  .map((colour) => (typeof colour === "string" ? colour.trim() : ""))
+                  .filter((colour) => colour.length > 0)
+              : [],
           }
         : null;
 
@@ -715,7 +767,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         : [];
       return {
         id: item.id,
+        name: item.name,
         quantity: item.quantity,
+        price: item.price,
         rentalTotal: item.rentalTotal ?? 0,
         modifiers: (item.modifiers ?? []).map((mod) => ({ ...mod })),
         kitStatus: item.kitStatus === "pending" ? "pending" : "confirmed",
@@ -730,6 +784,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         coverage: item.coverage ?? null,
         campaignBooking,
         organiser,
+        organisation,
       };
     });
     const organiserSummary = Array.from(organiserMap.values()).map((entry) => ({
@@ -765,6 +820,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         ),
       ),
     );
+    const orderOrganisation = itemPayload.find(
+      (entry) => entry.organisation && (entry.organisation.name || entry.organisation.id),
+    )?.organisation ?? null;
+    const trimmedCompany = company.trim();
+    const resolvedCompanyName =
+      trimmedCompany.length > 0
+        ? trimmedCompany
+        : orderOrganisation?.name ?? null;
     return {
       items: itemPayload,
       kitItems: kitItemsPayload,
@@ -773,13 +836,14 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       kitReservationWarnings,
       userEmail: authEmail || email,
       customerName: name,
-      companyName: company || null,
+      companyName: resolvedCompanyName,
       location: location || null,
       postalCode: postalCode || null,
       projectName: projectName || null,
       voucher: voucher || null,
       leadSource: leadSourceValue,
       organisers: organiserSummary,
+      organisation: orderOrganisation,
     };
   }, [
     items,
@@ -794,44 +858,81 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
     voucher,
     leadSourceValue,
   ]);
+  const pricingPayload = useMemo(
+    () => ({
+      productTotal,
+      rentalTotal,
+      voucherDiscount,
+      discountPercent: discount,
+      discountAmount,
+      subtotal: finalTotal,
+      vat,
+      grandTotal,
+      hasZeroBalance,
+      voucherCode: voucherLabel,
+    }),
+    [
+      productTotal,
+      rentalTotal,
+      voucherDiscount,
+      discount,
+      discountAmount,
+      finalTotal,
+      vat,
+      grandTotal,
+      hasZeroBalance,
+      voucherLabel,
+    ],
+  );
   const currentIntentPayload = useMemo(
     () =>
       JSON.stringify({
-        ...orderInput,
-        items: orderInput.items.map((item) => ({
-          id: item.id,
-          quantity: item.quantity,
-          rentalTotal: item.rentalTotal,
-          modifiers: (item.modifiers ?? []).map((mod) => ({
-            groupId: mod.groupId,
-            optionId: mod.optionId,
-            price: mod.price ?? null,
+        order: {
+          ...orderInput,
+          items: orderInput.items.map((item) => ({
+            id: item.id,
+            name: item.name,
+            quantity: item.quantity,
+            unitPrice: item.price,
+            price: item.price,
+            lineTotal: Number.isFinite(item.price * item.quantity)
+              ? Number((item.price * item.quantity).toFixed(2))
+              : item.price,
+            rentalTotal: item.rentalTotal,
+            modifiers: (item.modifiers ?? []).map((mod) => ({
+              groupId: mod.groupId,
+              optionId: mod.optionId,
+              price: mod.price ?? null,
+            })),
+            kitStatus: item.kitStatus,
+            kitWarnings: item.kitWarnings,
+            variation: item.variation,
+            date: item.date,
+            location: item.location,
+            postalCode: item.postalCode,
+            orderFormResponses: item.orderFormResponses,
+            coverage: item.coverage,
+            timeSlot: item.timeSlot ?? null,
+            exhibition: item.exhibition ?? null,
+            campaignBooking: item.campaignBooking,
+            organiser: item.organiser,
+            organisation: item.organisation,
           })),
-          kitStatus: item.kitStatus,
-          kitWarnings: item.kitWarnings,
-          variation: item.variation,
-          date: item.date,
-          location: item.location,
-          postalCode: item.postalCode,
-          orderFormResponses: item.orderFormResponses,
-          coverage: item.coverage,
-          timeSlot: item.timeSlot ?? null,
-          exhibition: item.exhibition ?? null,
-          campaignBooking: item.campaignBooking,
-          organiser: item.organiser,
-        })),
-        kitItems: orderInput.kitItems.map((kit) => ({
-          id: kit.id,
-          name: kit.name ?? null,
-          category: kit.category ?? null,
-          start: kit.start,
-          end: kit.end,
-        })),
-        kitReservationStatus: orderInput.kitReservationStatus,
-        kitReservationWarnings: orderInput.kitReservationWarnings,
-        organisers: orderInput.organisers,
+          kitItems: orderInput.kitItems.map((kit) => ({
+            id: kit.id,
+            name: kit.name ?? null,
+            category: kit.category ?? null,
+            start: kit.start,
+            end: kit.end,
+          })),
+          kitReservationStatus: orderInput.kitReservationStatus,
+          kitReservationWarnings: orderInput.kitReservationWarnings,
+          organisers: orderInput.organisers,
+          organisation: orderInput.organisation,
+        },
+        pricing: pricingPayload,
       }),
-    [orderInput],
+    [orderInput, pricingPayload],
   );
   const zeroBalanceBlockingMessage = useMemo(() => {
     if (items.length === 0) {
@@ -1113,6 +1214,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
 
   const callCreateOrder = useCallback(
     async (idToken: string): Promise<CreateOrderResult> => {
+      projectIdRef.current = null;
       const response = await fetch("/api/create-order", {
         method: "POST",
         headers: {
@@ -1142,7 +1244,9 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           (payload && typeof payload === "object" && payload !== null && "error" in payload &&
             typeof (payload as { error: unknown }).error === "string"
             ? ((payload as { error: string }).error as string)
-            : `Order service responded with ${response.status}`);
+            : response.status === 404
+              ? "Checkout service is unavailable. Please try again shortly."
+              : `Order service responded with ${response.status}`);
         const error = new Error(message);
         if (payload && typeof payload === "object" && payload !== null) {
           const record = payload as Record<string, unknown>;
@@ -1160,7 +1264,11 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         return {};
       }
 
-      return payload as CreateOrderResult;
+      const result = payload as CreateOrderResult;
+      const returnedProjectId =
+        typeof result.projectId === "string" && result.projectId.trim().length > 0 ? result.projectId : null;
+      projectIdRef.current = returnedProjectId;
+      return result;
     },
     [currentIntentPayload],
   );
@@ -1279,7 +1387,13 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
 
   const handlePaymentSuccess = useCallback(
     (completedOrderId: string) => {
+      const destinationProjectId = projectIdRef.current;
       clear();
+      projectIdRef.current = null;
+      if (destinationProjectId) {
+        router.push(`/projects/${destinationProjectId}`);
+        return;
+      }
       router.push(`/orders/${completedOrderId}`);
     },
     [clear, router],
@@ -1345,7 +1459,7 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
           : null;
       const serverZeroBalance = [serverPrice, serverNetTotal]
         .filter((value): value is number => value !== null)
-        .some((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+        .every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
       if (!createdOrderId) {
         throw new Error("Failed to create order.");
       }
@@ -1366,29 +1480,84 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
         throw new Error("Order could not be verified. Please try again.");
       }
       const snapData = orderSnap.data() ?? {};
-      const priceValue = Number(
-        snapData.price ?? (serverPrice !== null ? serverPrice : 0),
-      );
-      const netTotalValue = Number(
-        snapData.netTotal ?? (serverNetTotal !== null ? serverNetTotal : 0),
-      );
+      const parseCurrency = (value: unknown): number | null => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return value;
+        }
+        if (typeof value === "string") {
+          const normalised = Number(value.replace(/[^0-9.-]+/g, ""));
+          return Number.isFinite(normalised) ? normalised : null;
+        }
+        return null;
+      };
+
+      const scheduleDueNowAmounts = Array.isArray(
+        (snapData as { paymentSchedule?: unknown }).paymentSchedule,
+      )
+        ? ((snapData as { paymentSchedule?: unknown[] }).paymentSchedule ?? [])
+            .map((entry) => {
+              if (!entry || typeof entry !== "object") {
+                return null;
+              }
+              const statusRaw = (entry as { status?: unknown }).status;
+              const status = typeof statusRaw === "string" ? statusRaw.toLowerCase() : "";
+              if (!status || !["due", "overdue"].includes(status)) {
+                return null;
+              }
+              const gross = parseCurrency((entry as { grossAmount?: unknown }).grossAmount);
+              if (gross !== null) {
+                return gross;
+              }
+              return parseCurrency((entry as { netAmount?: unknown }).netAmount);
+            })
+            .filter((value): value is number => value !== null && Number.isFinite(value))
+        : [];
+
+      const depositCandidates = [
+        parseCurrency((orderData as { depositAmount?: unknown }).depositAmount),
+        parseCurrency((orderData as { depositDue?: unknown }).depositDue),
+        parseCurrency((snapData as { depositAmount?: unknown }).depositAmount),
+        parseCurrency((snapData as { depositDue?: unknown }).depositDue),
+      ].filter((value): value is number => value !== null && Number.isFinite(value));
+
+      const immediateDueCandidates = [...depositCandidates, ...scheduleDueNowAmounts];
+
+      const depositFullySatisfied =
+        (immediateDueCandidates.length > 0 &&
+          immediateDueCandidates.every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE)) ||
+        (immediateDueCandidates.length === 0 &&
+          depositCandidates.length > 0 &&
+          depositCandidates.every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE));
+
       const voucherDiscountValue =
         serverVoucherDiscountValue ?? snapData.voucherDiscount ?? null;
       const discountAmountValue =
         serverDiscountAmountValue ?? snapData.discountAmount ?? null;
-      const normalisedPrice = Number.isFinite(priceValue) ? priceValue : 0;
-      const normalisedNetTotal = Number.isFinite(netTotalValue) ? netTotalValue : 0;
-      if (
-        Math.abs(normalisedPrice) <= ZERO_BALANCE_TOLERANCE ||
-        Math.abs(normalisedNetTotal) <= ZERO_BALANCE_TOLERANCE
-      ) {
-        console.info("Zero balance order confirmed", {
+      const priceValue = parseCurrency(
+        snapData.price ?? (serverPrice !== null ? serverPrice : 0),
+      ) ?? 0;
+      const netTotalValue = parseCurrency(
+        snapData.netTotal ?? (serverNetTotal !== null ? serverNetTotal : 0),
+      ) ?? 0;
+      const totalsSatisfied = [priceValue, netTotalValue]
+        .filter((value): value is number => Number.isFinite(value))
+        .every((value) => Math.abs(value) <= ZERO_BALANCE_TOLERANCE);
+
+      if (depositFullySatisfied || totalsSatisfied) {
+        const logPayload = {
           createdOrderId,
-          price: normalisedPrice,
-          netTotal: normalisedNetTotal,
+          price: priceValue,
+          netTotal: netTotalValue,
           voucherDiscount: voucherDiscountValue,
           discountAmount: discountAmountValue,
-        });
+          dueNowCandidates: immediateDueCandidates,
+        };
+        console.info(
+          depositFullySatisfied && !totalsSatisfied
+            ? "Zero deposit order confirmed"
+            : "Zero balance order confirmed",
+          logPayload,
+        );
         setOrderId(createdOrderId);
         setClientSecret(null);
         lastIntentPayload.current = currentIntentPayload;

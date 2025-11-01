@@ -598,7 +598,7 @@ export default function AdminOrdersPage() {
                       </td>
                       <td className="px-4 py-3 text-sm">
                         {projectId ? (
-                          <Link href={`/projects/${projectId}`} className="text-orange-600 underline">
+                          <Link href={`/admin/projects/${projectId}`} className="text-orange-600 underline">
                             View
                           </Link>
                         ) : (
@@ -651,7 +651,7 @@ export default function AdminOrdersPage() {
                                   )}
                                   <div className="flex flex-wrap gap-2 text-xs">
                                     {projectId ? (
-                                      <Link href={`/projects/${projectId}`} className="text-orange-600 underline">
+                                      <Link href={`/admin/projects/${projectId}`} className="text-orange-600 underline">
                                         Open project
                                       </Link>
                                     ) : (

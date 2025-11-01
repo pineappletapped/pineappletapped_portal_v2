@@ -735,7 +735,7 @@ const buildModifierSelectionFromOption = (
 export default function EditProductPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
-  const { id } = params;
+  const { id } = params ?? { id: "" };
 
   const { allowed, loading: guardLoading } = useRoleGate(["admin", "operations"]);
   const [loading, setLoading] = useState(true);
@@ -1286,6 +1286,10 @@ export default function EditProductPage() {
     (async () => {
       if (guardLoading) return;
       if (!allowed) {
+        setLoading(false);
+        return;
+      }
+      if (!id) {
         setLoading(false);
         return;
       }
@@ -3199,6 +3203,17 @@ export default function EditProductPage() {
   }, [digitalReleaseSnapshot]);
   if (guardLoading || loading) return <p>Loading…</p>;
   if (!allowed) return <p>You do not have permission to edit products.</p>;
+  if (!id) {
+    return (
+      <div className="p-6">
+        <h2 className="text-lg font-semibold">Product not found</h2>
+        <p className="mt-2 text-sm text-muted-foreground">
+          We couldn&apos;t determine which product you wanted to edit. Please return to the
+          product list and try again.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <>

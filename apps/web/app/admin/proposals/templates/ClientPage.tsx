@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Fragment, useEffect, useMemo, useState, type CSSProperties } from "react";
 import clsx from "clsx";
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -20,19 +20,24 @@ import {
   PAGE_TYPE_LABELS,
   TEMPLATE_KINDS,
   TEMPLATE_LAYOUT_OPTIONS,
-  PROPOSAL_PLACEHOLDER_CATEGORY_LABELS,
   PROPOSAL_PLACEHOLDER_TOKENS,
-  type ProposalPlaceholderToken,
   allowedTemplateKinds,
   createBlankPage,
   createTemplatePreset,
   defaultTemplateStyling,
+  ensurePageElements,
   summarisePageForContents,
+  syncPageFieldsFromElements,
+  type ProposalTemplateElement,
+  type ProposalTemplateElementRole,
+  type ProposalTemplateImageElement,
   type ProposalTemplateItem,
   type ProposalTemplateKind,
   type ProposalTemplatePage,
   type ProposalTemplatePageType,
+  type ProposalTemplateShapeElement,
   type ProposalTemplateStyling,
+  type ProposalTemplateTextElement,
   type TemplateProductSummary,
 } from "@/lib/proposal-templates";
 
@@ -72,8 +77,6 @@ const findTemplateKindDescriptor = (id: string | null | undefined) =>
   TEMPLATE_KINDS.find((kind) => kind.id === id);
 
 type PageUpdate = Partial<ProposalTemplatePage>;
-
-type EditableField = "title" | "subtitle" | "body";
 
 type BuilderState = {
   name: string;
@@ -118,6 +121,11 @@ const deriveContentsEntries = (
     .filter((page) => page.id !== activeId && page.includeInContents !== false)
     .map((page) => summarisePageForContents(page));
 
+const createLocalElementId = () =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `element-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
 export default function ProposalTemplatesWorkspace() {
   const { allowed, loading: roleLoading } = useRoleGate(["admin", "sales"]);
   const [loading, setLoading] = useState(true);
@@ -135,13 +143,8 @@ export default function ProposalTemplatesWorkspace() {
   );
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [presetSeeded, setPresetSeeded] = useState(false);
-  const [activeEditorField, setActiveEditorField] = useState<{
-    pageId: string;
-    field: EditableField;
-  } | null>(null);
-  const editorFieldRefs = useRef<
-    Record<string, HTMLInputElement | HTMLTextAreaElement | null>
-  >({});
+  const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
+  const [pageLibraryOpen, setPageLibraryOpen] = useState(false);
 
   useEffect(() => {
     if (roleLoading) return;
@@ -166,24 +169,31 @@ export default function ProposalTemplatesWorkspace() {
 
         if (cancelled) return;
 
+        let activeBrand = brandGuidelines;
         if (brandingSnap.exists()) {
           const data = brandingSnap.data() as any;
           if (typeof data?.logoUrl === "string") {
             setBrandLogoUrl(data.logoUrl);
           }
           const parsed = parseBrandGuidelines(data?.brandGuidelines);
+          activeBrand = parsed;
           setBrandGuidelines(parsed);
-          setBuilder((prev) => ({
-            ...createInitialBuilderState(parsed),
-            name: prev.name,
-            summary: prev.summary,
-            kind: prev.kind,
-            baseProductId: prev.baseProductId,
-            pages: prev.pages.length > 0 ? prev.pages : [],
-            items: prev.items,
-            agreements: prev.agreements,
-            metadata: prev.metadata,
-          }));
+          setBuilder((prev) => {
+            const nextPages = prev.pages.length
+              ? prev.pages.map((page) => ensurePageElements(page, { brand: parsed }))
+              : [];
+            return {
+              ...createInitialBuilderState(parsed),
+              name: prev.name,
+              summary: prev.summary,
+              kind: prev.kind,
+              baseProductId: prev.baseProductId,
+              pages: nextPages,
+              items: prev.items,
+              agreements: prev.agreements,
+              metadata: prev.metadata,
+            };
+          });
         }
 
         const templateRecords = templateSnap.docs.map((docSnap) => {
@@ -193,7 +203,11 @@ export default function ProposalTemplatesWorkspace() {
             name: normaliseString(data?.name) || docSnap.id,
             category: normaliseString(data?.category) || undefined,
             summary: normaliseString(data?.summary) || null,
-            pages: Array.isArray(data?.pages) ? (data.pages as ProposalTemplatePage[]) : [],
+            pages: Array.isArray(data?.pages)
+              ? (data.pages as ProposalTemplatePage[]).map((page) =>
+                  ensurePageElements(page, { brand: activeBrand }),
+                )
+              : [],
             styling: data?.styling || null,
             brandColor: normaliseString(data?.brandColor) || null,
             logoUrl: normaliseString(data?.logoUrl) || null,
@@ -276,10 +290,19 @@ export default function ProposalTemplatesWorkspace() {
   }, [allowed, brandGuidelines, builder.kind, presetSeeded, selectedProduct]);
 
   const handleBuilderChange = (updates: Partial<BuilderState>) => {
-    setBuilder((prev) => ({
-      ...prev,
-      ...updates,
-    }));
+    setBuilder((prev) => {
+      const next: BuilderState = { ...prev, ...updates } as BuilderState;
+      if (updates.pages) {
+        next.pages = updates.pages.map((page) =>
+          syncPageFieldsFromElements(
+            Array.isArray(page.elements) && page.elements.length
+              ? page
+              : ensurePageElements(page, { brand: brandGuidelines }),
+          ),
+        );
+      }
+      return next;
+    });
   };
 
   const handleTemplateKindChange = (kind: ProposalTemplateKind) => {
@@ -316,10 +339,15 @@ export default function ProposalTemplatesWorkspace() {
       });
     }
     const newPage = createBlankPage(type, brandGuidelines, selectedProduct || undefined);
-    setBuilder((prev) => ({
-      ...prev,
-      pages: [...prev.pages, newPage],
-    }));
+    setBuilder((prev) => {
+      const nextPages = [...prev.pages, newPage].map((page) =>
+        syncPageFieldsFromElements(page),
+      );
+      return {
+        ...prev,
+        pages: nextPages,
+      };
+    });
     setActivePageId(newPage.id);
   };
 
@@ -353,14 +381,15 @@ export default function ProposalTemplatesWorkspace() {
   const handleUpdatePage = (id: string, updates: PageUpdate) => {
     setBuilder((prev) => ({
       ...prev,
-      pages: prev.pages.map((page) =>
-        page.id === id
-          ? {
-              ...page,
-              ...updates,
-            }
-          : page,
-      ),
+      pages: prev.pages.map((page) => {
+        if (page.id !== id) return page;
+        const merged = { ...page, ...updates } as ProposalTemplatePage;
+        const ensured =
+          Array.isArray(merged.elements) && merged.elements.length
+            ? merged
+            : ensurePageElements(merged, { brand: brandGuidelines });
+        return syncPageFieldsFromElements(ensured);
+      }),
     }));
   };
 
@@ -379,8 +408,150 @@ export default function ProposalTemplatesWorkspace() {
   }, [activePage, builder.pages]);
 
   useEffect(() => {
-    setActiveEditorField(null);
+    setSelectedElementId(null);
   }, [activePageId]);
+
+  const updateActivePageElements = (
+    mutate: (elements: ProposalTemplateElement[]) => ProposalTemplateElement[],
+  ) => {
+    if (!activePage) return;
+    setBuilder((prev) => ({
+      ...prev,
+      pages: prev.pages.map((page) => {
+        if (page.id !== activePage.id) return page;
+        const existing = Array.isArray(page.elements) ? [...page.elements] : [];
+        const nextElements = mutate(existing).map((element, index) => ({
+          ...element,
+          order: element.order ?? index,
+        }));
+        return syncPageFieldsFromElements({
+          ...page,
+          elements: nextElements,
+        });
+      }),
+    }));
+  };
+
+  const handleSelectElement = (id: string | null) => {
+    setSelectedElementId(id);
+  };
+
+  const handleAddElement = (
+    type: "text" | "placeholder" | "image" | "shape",
+    options?: { token?: string },
+  ) => {
+    if (!activePage) return;
+    updateActivePageElements((elements) => {
+      const positionOffset = elements.length * 8;
+      if (type === "image") {
+        const image: ProposalTemplateImageElement = {
+          id: createLocalElementId(),
+          type: "image",
+          url: "",
+          fit: "cover",
+          borderRadius: 12,
+          x: 55,
+          y: 20 + positionOffset,
+          width: 30,
+          height: 30,
+          rotation: 0,
+          order: elements.length,
+        };
+        return [...elements, image];
+      }
+      if (type === "shape") {
+        const shape: ProposalTemplateShapeElement = {
+          id: createLocalElementId(),
+          type: "shape",
+          shape: "rectangle",
+          fill: brandGuidelines.colors?.secondary || "#6366F1",
+          opacity: 0.2,
+          borderRadius: 16,
+          x: 8,
+          y: 18 + positionOffset,
+          width: 84,
+          height: 20,
+          rotation: 0,
+          order: elements.length,
+        };
+        return [...elements, shape];
+      }
+
+      const baseText: ProposalTemplateTextElement = {
+        id: createLocalElementId(),
+        type,
+        role: type === "text" ? "custom" : "body",
+        content:
+          type === "placeholder"
+            ? options?.token || "{{clientName}}"
+            : type === "text"
+              ? "Double-click to edit"
+              : "",
+        placeholderToken: type === "placeholder" ? options?.token || "{{clientName}}" : null,
+        fontSize: type === "text" ? 24 : 20,
+        fontWeight: type === "text" ? "medium" : "regular",
+        align: "left",
+        color: "#111827",
+        lineHeight: 1.4,
+        x: 10,
+        y: 18 + positionOffset,
+        width: 80,
+        height: 12,
+        rotation: 0,
+        order: elements.length,
+      };
+      return [...elements, baseText];
+    });
+  };
+
+  const handleUpdateElement = (
+    elementId: string,
+    updates:
+      | Partial<ProposalTemplateTextElement>
+      | Partial<ProposalTemplateImageElement>
+      | Partial<ProposalTemplateShapeElement>,
+  ) => {
+    updateActivePageElements((elements) =>
+      elements.map((element) =>
+        element.id === elementId
+          ? ({
+              ...element,
+              ...updates,
+            } as ProposalTemplateElement)
+          : element,
+      ),
+    );
+  };
+
+  const handleRemoveElement = (elementId: string) => {
+    updateActivePageElements((elements) =>
+      elements.filter((element) => element.id !== elementId),
+    );
+    if (selectedElementId === elementId) {
+      setSelectedElementId(null);
+    }
+  };
+
+  const handleDuplicateElement = (elementId: string) => {
+    updateActivePageElements((elements) => {
+      const index = elements.findIndex((element) => element.id === elementId);
+      if (index === -1) return elements;
+      const original = elements[index];
+      const clone: ProposalTemplateElement = {
+        ...original,
+        id: createLocalElementId(),
+        x: Math.min(original.x + 4, 90),
+        y: Math.min(original.y + 6, 90),
+        order: elements.length,
+      } as ProposalTemplateElement;
+      return [...elements, clone];
+    });
+  };
+
+  const activePageElements = activePage?.elements ?? [];
+  const selectedElement = activePageElements.find(
+    (element) => element.id === selectedElementId,
+  );
 
   const handleToggleAgreement = (id: string) => {
     handleBuilderChange({
@@ -464,39 +635,6 @@ export default function ProposalTemplatesWorkspace() {
     [activePage, builder.pages],
   );
 
-  const placeholderGroups = useMemo(() => {
-    const grouped = new Map<
-      string,
-      {
-        label: string;
-        tokens: ProposalPlaceholderToken[];
-      }
-    >();
-    PROPOSAL_PLACEHOLDER_TOKENS.forEach((token) => {
-      const label = PROPOSAL_PLACEHOLDER_CATEGORY_LABELS[token.category];
-      const existing = grouped.get(token.category);
-      const entryTokens = existing?.tokens ? [...existing.tokens, token] : [token];
-      grouped.set(token.category, { label, tokens: entryTokens });
-    });
-    return Array.from(grouped.entries()).map(([category, data]) => ({
-      category,
-      label: data.label,
-      tokens: [...data.tokens].sort((a, b) => a.label.localeCompare(b.label)),
-    }));
-  }, []);
-
-  const currencyFormatter = useMemo(
-    () =>
-      typeof Intl !== "undefined"
-        ? new Intl.NumberFormat("en-GB", {
-            style: "currency",
-            currency: "GBP",
-            maximumFractionDigits: 0,
-          })
-        : null,
-    [],
-  );
-
   const refreshTemplates = async () => {
     try {
       const { db } = await ensureFirebase();
@@ -509,7 +647,11 @@ export default function ProposalTemplatesWorkspace() {
           name: normaliseString(data?.name) || docSnap.id,
           category: normaliseString(data?.category) || undefined,
           summary: normaliseString(data?.summary) || null,
-          pages: Array.isArray(data?.pages) ? (data.pages as ProposalTemplatePage[]) : [],
+          pages: Array.isArray(data?.pages)
+            ? (data.pages as ProposalTemplatePage[]).map((page) =>
+                ensurePageElements(page, { brand: brandGuidelines }),
+              )
+            : [],
           styling: data?.styling || null,
           brandColor: normaliseString(data?.brandColor) || null,
           logoUrl: normaliseString(data?.logoUrl) || null,
@@ -584,17 +726,52 @@ export default function ProposalTemplatesWorkspace() {
   };
 
   const renderPageList = () => (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-slate-900">Pages</h3>
-        <button
-          type="button"
-          onClick={regenerateFromPreset}
-          className="btn-outline"
-        >
-          Regenerate from preset
-        </button>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-900">Pages</h3>
+          <p className="text-xs text-slate-500">Organise the flow of your proposal.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPageLibraryOpen((prev) => !prev)}
+            className="btn"
+          >
+            {pageLibraryOpen ? "Close library" : "Add page"}
+          </button>
+          <button
+            type="button"
+            onClick={regenerateFromPreset}
+            className="btn-outline"
+          >
+            Use preset
+          </button>
+        </div>
       </div>
+      {pageLibraryOpen && (
+        <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+            Page library
+          </p>
+          <div className="grid gap-3">
+            {PAGE_LIBRARY.map((entry) => (
+              <button
+                type="button"
+                key={entry.type}
+                onClick={() => {
+                  handleAddPage(entry.type);
+                  setPageLibraryOpen(false);
+                }}
+                className="rounded-2xl border border-slate-200 p-4 text-left transition hover:border-slate-900/50 hover:shadow-sm"
+              >
+                <p className="text-sm font-semibold text-slate-900">{entry.label}</p>
+                <p className="mt-1 text-xs text-slate-500">{entry.description}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {builder.pages.length === 0 ? (
         <p className="text-sm text-slate-600">No pages yet. Add a page to begin.</p>
       ) : (
@@ -605,7 +782,7 @@ export default function ProposalTemplatesWorkspace() {
               <li key={page.id}>
                 <div
                   className={clsx(
-                    "flex items-center justify-between rounded-2xl border p-3",
+                    "flex items-center justify-between rounded-2xl border px-3 py-2",
                     activePage?.id === page.id
                       ? "border-slate-900 bg-slate-900/5"
                       : "border-slate-200 bg-white",
@@ -616,12 +793,14 @@ export default function ProposalTemplatesWorkspace() {
                     onClick={() => setActivePageId(page.id)}
                     className="flex flex-1 flex-col text-left"
                   >
-                    <span className="text-sm font-semibold text-slate-900">{label}</span>
-                    <span className="text-xs text-slate-500">
+                    <span className="text-[13px] font-semibold text-slate-900">
+                      {index + 1}. {label}
+                    </span>
+                    <span className="text-[11px] text-slate-500">
                       {page.title?.trim() ? page.title : "Untitled page"}
                     </span>
                   </button>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1">
                     <button
                       type="button"
                       onClick={() => handleMovePage(page.id, "up")}
@@ -656,24 +835,6 @@ export default function ProposalTemplatesWorkspace() {
     </div>
   );
 
-  const renderAddPageLibrary = () => (
-    <div className="space-y-3">
-      <h3 className="text-sm font-semibold text-slate-900">Add a page</h3>
-      <div className="grid gap-3 sm:grid-cols-2">
-        {PAGE_LIBRARY.map((entry) => (
-          <button
-            type="button"
-            key={entry.type}
-            onClick={() => handleAddPage(entry.type)}
-            className="rounded-2xl border border-slate-200 p-4 text-left transition hover:border-slate-900/60 hover:shadow-sm"
-          >
-            <p className="text-sm font-semibold text-slate-900">{entry.label}</p>
-            <p className="mt-1 text-xs text-slate-500">{entry.description}</p>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
 
   const renderPageEditor = () => {
     if (!activePage) {
@@ -684,85 +845,10 @@ export default function ProposalTemplatesWorkspace() {
       );
     }
 
-    const handleFieldChange = (field: keyof ProposalTemplatePage, value: any) => {
-      handleUpdatePage(activePage.id, { [field]: value });
-    };
-
     const layoutOptions = TEMPLATE_LAYOUT_OPTIONS;
-    const contentsEntries = contentsPreview;
-    const bulletPointValue = (activePage.bulletPoints || []).join("\n");
-
-    const fieldLabelMap: Record<EditableField, string> = {
-      title: "Title",
-      subtitle: "Subtitle",
-      body: "Body copy",
-    };
-    const canInsertTokens =
-      !!activeEditorField && activeEditorField.pageId === activePage.id;
-    const registerFieldRef =
-      (field: EditableField) =>
-      (element: HTMLInputElement | HTMLTextAreaElement | null) => {
-        const key = `${activePage.id}:${field}`;
-        if (element) {
-          editorFieldRefs.current[key] = element;
-        } else {
-          delete editorFieldRefs.current[key];
-        }
-      };
-    const getFieldValue = (field: EditableField): string => {
-      switch (field) {
-        case "title":
-          return activePage.title || "";
-        case "subtitle":
-          return activePage.subtitle || "";
-        case "body":
-          return activePage.body || "";
-        default:
-          return "";
-      }
-    };
-    const insertPlaceholder = (token: string) => {
-      if (!canInsertTokens || !activeEditorField) return;
-      const targetField = activeEditorField.field;
-      const key = `${activePage.id}:${targetField}`;
-      const element = editorFieldRefs.current[key];
-      const currentValue = getFieldValue(targetField);
-      if (element && typeof element.selectionStart === "number") {
-        const start = element.selectionStart;
-        const end =
-          typeof element.selectionEnd === "number"
-            ? element.selectionEnd
-            : start;
-        const nextValue =
-          currentValue.slice(0, start) + token + currentValue.slice(end);
-        handleFieldChange(targetField, nextValue);
-        setTimeout(() => {
-          if (element instanceof HTMLElement) {
-            element.focus();
-            const cursor = start + token.length;
-            try {
-              const targetElement =
-                element as HTMLInputElement | HTMLTextAreaElement;
-              targetElement.selectionStart = cursor;
-              targetElement.selectionEnd = cursor;
-            } catch {
-              // ignore selection restoration errors in non-DOM environments
-            }
-          }
-        }, 0);
-        return;
-      }
-      const needsSpace =
-        currentValue.length > 0 && !/\s$/.test(currentValue);
-      const nextValue = needsSpace
-        ? `${currentValue} ${token}`
-        : `${currentValue}${token}`;
-      handleFieldChange(targetField, nextValue);
-    };
-    const placeholderTargetLabel = canInsertTokens
-      ? fieldLabelMap[activeEditorField.field]
-      : "Focus a field";
-
+    const pageIndex = builder.pages.findIndex((page) => page.id === activePage.id);
+    const aspectClass =
+      activePage.canvas?.aspectRatio === "4:3" ? "aspect-[4/3]" : "aspect-[16/9]";
     const accentColor =
       builder.styling.accentColor ||
       brandGuidelines.colors?.secondary ||
@@ -772,409 +858,177 @@ export default function ProposalTemplatesWorkspace() {
       brandGuidelines.colors?.accent ||
       DEFAULT_BRAND_GUIDELINES.colors.accent;
 
-    const baseTitleColor =
-      builder.styling.background === "gradient" ? "text-white" : "text-slate-900";
-    const baseSubtitleColor =
-      builder.styling.background === "gradient"
-        ? "text-white/80"
-        : "text-slate-500";
-    const baseBodyColor =
-      builder.styling.background === "gradient"
-        ? "text-white/85"
-        : "text-slate-600";
-
-    const titleFont =
-      builder.styling.theme === "classic"
-        ? "font-serif text-2xl"
-        : builder.styling.theme === "spotlight"
-        ? "font-bold uppercase tracking-[0.28em] text-lg"
-        : "font-semibold text-xl tracking-tight";
-    const subtitleFont =
-      builder.styling.theme === "classic"
-        ? "font-serif italic text-base"
-        : builder.styling.theme === "spotlight"
-        ? "font-semibold uppercase tracking-[0.3em] text-xs"
-        : "font-medium text-sm";
-    const bodyFont =
-      builder.styling.theme === "classic"
-        ? "font-serif"
-        : builder.styling.theme === "spotlight"
-        ? "font-medium"
-        : "font-normal";
-
-    const titleClass = clsx(baseTitleColor, titleFont);
-    const subtitleClass = clsx(baseSubtitleColor, subtitleFont);
-    const bodyClass = clsx(baseBodyColor, "text-sm leading-relaxed", bodyFont);
-
-    const rawBody = (activePage.body || "").trim();
-    const fallbackBodyByType: Partial<
-      Record<ProposalTemplatePageType, string[]>
-    > = {
-      intro: [
-        "Summarise the project vision and the value Pineapple Tapped will deliver.",
-      ],
-      about: [
-        "Share credentials, differentiators, and the Pineapple Tapped approach.",
-      ],
-      service_overview: [
-        "Highlight the core outcomes and inclusions for this service.",
-      ],
-      storyboard: [
-        "Describe the creative flow and how each scene delivers the brief.",
-      ],
-      operations: [
-        "Map out the logistics, crew call, and production cadence.",
-      ],
-    };
-    const previewBodyParagraphs =
-      rawBody.length > 0
-        ? rawBody
-            .split(/\n{2,}/)
-            .map((paragraph) => paragraph.trim())
-            .filter(Boolean)
-        : fallbackBodyByType[activePage.type] || [
-            "Use this space to outline the story, deliverables, and experience your team will bring to the project.",
-          ];
-    const previewTitle =
-      activePage.title?.trim() ||
-      (activePage.autoContents ? "Table of contents" : "Add a page title");
-    const previewSubtitle =
-      activePage.subtitle?.trim() ||
-      (activePage.autoContents
-        ? "Contents generate automatically as you add pages."
-        : "Add a subtitle or placeholder token to tailor this page.");
-    const previewContents =
-      contentsEntries.length > 0
-        ? contentsEntries
-        : ["Add pages and mark them for the contents to build this list."];
-    const bulletPoints = activePage.bulletPoints || [];
-    const previewItems = (
-      builder.items.length > 0
-        ? builder.items
-        : [
-            { type: "custom" as const, name: "Production crew", price: 1250 },
-            { type: "custom" as const, name: "Livestream package", price: 850 },
-            { type: "custom" as const, name: "Highlights edit", price: 650 },
-          ]
-    ).slice(0, 3);
-    const computedTotal = builder.items.reduce(
-      (sum, item) => sum + (typeof item.price === "number" ? item.price : 0),
-      0,
-    );
-    const fallbackTotal = previewItems.reduce(
-      (sum, item) => sum + (typeof item.price === "number" ? item.price : 0),
-      0,
-    );
-    const displayTotal = computedTotal > 0 ? computedTotal : fallbackTotal;
-    const pageIndex = builder.pages.findIndex(
-      (page) => page.id === activePage.id,
-    );
-
-    const previewSurfaceClass = clsx(
-      "relative overflow-hidden rounded-2xl border border-slate-100 p-5 shadow-sm transition-colors",
-      builder.styling.background === "clean" && "bg-white text-slate-900",
-      builder.styling.background === "gradient" && "text-white",
-      builder.styling.background === "texture" && "bg-slate-50 text-slate-900",
-    );
-    const previewSurfaceStyle: CSSProperties =
+    const canvasBackground: CSSProperties =
       builder.styling.background === "gradient"
         ? {
             backgroundImage: `linear-gradient(135deg, ${accentColor}, ${secondaryColor})`,
           }
         : builder.styling.background === "texture"
-        ? {
-            backgroundImage: `linear-gradient(135deg, ${accentColor}1a 25%, transparent 25%, transparent 50%, ${accentColor}1a 50%, ${accentColor}1a 75%, transparent 75%, transparent)`,
-            backgroundSize: "28px 28px",
-          }
-        : {};
+          ? {
+              backgroundImage: `linear-gradient(135deg, ${accentColor}1a 25%, transparent 25%, transparent 50%, ${accentColor}1a 50%, ${accentColor}1a 75%, transparent 75%, transparent)`,
+              backgroundSize: "24px 24px",
+              backgroundColor: activePage.canvas?.backgroundColor || "#ffffff",
+            }
+          : { backgroundColor: activePage.canvas?.backgroundColor || "#ffffff" };
 
-    const layoutPreview = (() => {
-      switch (activePage.layout) {
-        case "split":
-          return (
-            <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <div className="rounded-xl border border-white/30 border-dashed bg-white/10 p-4 text-xs uppercase tracking-wide opacity-80">
-                <div className="h-24 rounded-lg border border-white/40 border-dashed" />
-                <p className="mt-3">Visual placeholder</p>
-              </div>
-              <div className="space-y-2">
-                {previewBodyParagraphs.slice(0, 2).map((paragraph, index) => (
-                  <p key={`${paragraph}-${index}`} className={bodyClass}>
-                    {paragraph}
-                  </p>
-                ))}
-                {bulletPoints.length > 0 && (
-                  <ul className="space-y-1 text-sm">
-                    {bulletPoints.slice(0, 3).map((point, index) => (
-                      <li key={`${point}-${index}`} className="flex items-start gap-2">
-                        <span
-                          className="mt-1 inline-block h-2.5 w-2.5 rounded-full"
-                          style={{ backgroundColor: accentColor }}
-                        />
-                        <span className={clsx(bodyClass, "flex-1")}>{point}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </div>
-          );
-        case "columns":
-          return (
-            <div className="grid gap-3 sm:grid-cols-3">
-              {[0, 1, 2].map((index) => (
-                <div
-                  key={index}
-                  className="rounded-xl border border-white/30 bg-white/10 p-3 text-sm"
-                >
-                  <p
-                    className="text-xs font-semibold uppercase tracking-wide"
-                    style={{ color: accentColor }}
-                  >
-                    Column {index + 1}
-                  </p>
-                  <p className="mt-1 text-xs opacity-80">
-                    {bulletPoints[index] ||
-                      previewBodyParagraphs[index] ||
-                      "Add highlights to populate these columns."}
-                  </p>
-                </div>
-              ))}
-            </div>
-          );
-        case "gallery":
-          return (
-            <div className="grid gap-2 sm:grid-cols-3">
-              {[0, 1, 2].map((index) => (
-                <div
-                  key={index}
-                  className="rounded-xl border border-white/30 bg-white/10 p-3 text-sm"
-                >
-                  <div className="mb-2 h-20 rounded-lg border border-dashed border-white/40" />
-                  <p className="text-xs opacity-85">
-                    {bulletPoints[index] || `Storyboard ${index + 1}`}
-                  </p>
-                </div>
-              ))}
-            </div>
-          );
-        case "timeline": {
-          const timelineSource =
-            bulletPoints.length > 0 ? bulletPoints : previewBodyParagraphs;
-          return (
-            <ol className="space-y-3 border-l border-white/30 pl-4">
-              {timelineSource.slice(0, 4).map((entry, index) => (
-                <li key={`${entry}-${index}`} className="relative">
-                  <span
-                    className="absolute -left-[9px] top-1 h-3 w-3 rounded-full"
-                    style={{ backgroundColor: accentColor }}
-                  />
-                  <p className="text-xs font-semibold uppercase tracking-wide opacity-75">{`Phase ${
-                    index + 1
-                  }`}</p>
-                  <p className={clsx(bodyClass, "opacity-90")}>{entry}</p>
-                </li>
-              ))}
-            </ol>
-          );
-        }
-        case "table": {
-          const formatCurrency = (value: number) =>
-            currencyFormatter
-              ? currencyFormatter.format(value)
-              : `£${value.toLocaleString("en-GB")}`;
-          return (
-            <div className="overflow-hidden rounded-xl border border-white/30 text-sm">
-              <div className="grid grid-cols-[2fr_1fr] bg-white/10 text-xs font-semibold uppercase tracking-wide">
-                <div className="px-3 py-2">Line item</div>
-                <div className="px-3 py-2 text-right">Amount</div>
-              </div>
-              <div className="divide-y divide-white/10">
-                {previewItems.map((item, index) => (
-                  <div
-                    key={`${item.name}-${index}`}
-                    className="grid grid-cols-[2fr_1fr] px-3 py-2"
-                  >
-                    <div className="pr-2">{item.name}</div>
-                    <div className="text-right">
-                      {typeof item.price === "number"
-                        ? formatCurrency(item.price)
-                        : "—"}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="grid grid-cols-[2fr_1fr] bg-white/10 px-3 py-2 text-sm font-semibold">
-                <div>Total</div>
-                <div className="text-right">
-                  {displayTotal > 0 ? formatCurrency(displayTotal) : "—"}
-                </div>
-              </div>
-            </div>
-          );
-        }
+    const elementRoleOptions: { value: ProposalTemplateElementRole; label: string }[] = [
+      { value: "title", label: "Title" },
+      { value: "subtitle", label: "Subtitle" },
+      { value: "body", label: "Body" },
+      { value: "list", label: "List" },
+      { value: "notes", label: "Notes" },
+      { value: "custom", label: "Custom" },
+    ];
+
+    const textWeight = (weight: ProposalTemplateTextElement["fontWeight"]): number => {
+      switch (weight) {
+        case "bold":
+          return 700;
+        case "medium":
+          return 600;
         default:
-          if (activePage.type === "contents") {
-            return (
-              <ol className="space-y-2 text-sm">
-                {previewContents.map((entry, index) => (
-                  <li key={`${entry}-${index}`} className="flex items-center gap-2">
-                    <span
-                      className="inline-flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold"
-                      style={{ borderColor: accentColor, color: accentColor }}
-                    >
-                      {index + 1}
-                    </span>
-                    <span className={bodyClass}>{entry}</span>
-                  </li>
-                ))}
-              </ol>
-            );
-          }
-          return (
-            <div className="space-y-2">
-              {previewBodyParagraphs.map((paragraph, index) => (
-                <p key={`${paragraph}-${index}`} className={bodyClass}>
-                  {paragraph}
-                </p>
-              ))}
-              {bulletPoints.length > 0 && (
-                <ul className="space-y-1 text-sm">
-                  {bulletPoints.slice(0, 4).map((point, index) => (
-                    <li key={`${point}-${index}`} className="flex items-start gap-2">
-                      <span
-                        className="mt-1 inline-block h-2 w-2 rounded-full"
-                        style={{ backgroundColor: accentColor }}
-                      />
-                      <span className={clsx(bodyClass, "flex-1")}>{point}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          );
+          return 400;
       }
-    })();
+    };
 
-    const placeholderPanel = (
-      <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-sm font-semibold text-slate-900">Placeholder tokens</p>
-          <span className="text-[11px] uppercase tracking-wide text-slate-400">
-            {placeholderTargetLabel}
-          </span>
-        </div>
-        <p className="mt-2 text-xs text-slate-500">
-          Merge tags pull live client, project, and pricing details into your template. Focus a title,
-          subtitle, or body field and tap a token to insert it.
-        </p>
-        <div className="mt-3 space-y-4">
-          {placeholderGroups.map((group) => (
-            <div key={group.category}>
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
-                {group.label}
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {group.tokens.map((token) => (
-                  <button
-                    key={token.token}
-                    type="button"
-                    className={clsx(
-                      "flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] font-medium text-slate-700 transition hover:border-slate-400 hover:bg-white focus:outline-none focus:ring-2 focus:ring-slate-300",
-                      !canInsertTokens && "pointer-events-none opacity-50",
-                    )}
-                    onClick={() => insertPlaceholder(token.token)}
-                    aria-disabled={!canInsertTokens}
-                    title={token.description}
-                  >
-                    <span className="font-mono text-[11px]">{token.token}</span>
-                    <span className="hidden text-[10px] uppercase tracking-wide text-slate-400 md:inline">
-                      {token.label}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
+    const renderElement = (element: ProposalTemplateElement) => {
+      const baseStyle: CSSProperties = {
+        left: `${element.x}%`,
+        top: `${element.y}%`,
+        width: `${element.width}%`,
+        minHeight: `${element.height}%`,
+        transform: `rotate(${element.rotation ?? 0}deg)`,
+        zIndex: element.order ?? 0,
+      };
 
-    const previewPanel = (
-      <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-sm font-semibold text-slate-900">Live preview</p>
-          <span className="text-[11px] uppercase tracking-wide text-slate-400">
-            {builder.styling.theme === "modern"
-              ? "Modern theme"
-              : builder.styling.theme === "spotlight"
-              ? "Spotlight theme"
-              : "Classic theme"}
-          </span>
-        </div>
-        <div className="mt-3">
-          <div className={previewSurfaceClass} style={previewSurfaceStyle}>
-            <span
-              className="inline-flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.32em]"
+      const wrapperClass = clsx(
+        "absolute cursor-pointer rounded-xl border border-transparent shadow-sm transition focus-visible:outline-none",
+        selectedElementId === element.id
+          ? "ring-2 ring-indigo-500"
+          : "hover:ring-2 hover:ring-indigo-400",
+      );
+
+      if (element.type === "shape") {
+        const shape = element as ProposalTemplateShapeElement;
+        return (
+          <div
+            key={element.id}
+            className={clsx(wrapperClass, "overflow-hidden")}
+            style={baseStyle}
+            onClick={(event) => {
+              event.stopPropagation();
+              handleSelectElement(element.id);
+            }}
+          >
+            <div
+              className="h-full w-full"
               style={{
-                color:
-                  builder.styling.background === "gradient"
-                    ? "rgba(255,255,255,0.8)"
-                    : accentColor,
+                backgroundColor: shape.fill,
+                opacity: shape.opacity,
+                borderRadius:
+                  shape.shape === "pill"
+                    ? 999
+                    : shape.shape === "rounded"
+                      ? shape.borderRadius || 16
+                      : shape.borderRadius || 12,
               }}
-            >
-              <span
-                className="inline-block h-2 w-2 rounded-full"
-                style={{ backgroundColor: accentColor }}
+            />
+          </div>
+        );
+      }
+
+      if (element.type === "image") {
+        const image = element as ProposalTemplateImageElement;
+        return (
+          <div
+            key={element.id}
+            className={clsx(wrapperClass, "overflow-hidden bg-slate-100")}
+            style={baseStyle}
+            onClick={(event) => {
+              event.stopPropagation();
+              handleSelectElement(element.id);
+            }}
+          >
+            {image.url ? (
+              <img
+                src={image.url}
+                alt="Proposal element"
+                className={clsx(
+                  "h-full w-full object-cover",
+                  image.fit === "contain" && "object-contain",
+                )}
+                style={{ borderRadius: image.borderRadius }}
               />
-              {PAGE_TYPE_LABELS[activePage.type] || "Page"}
-            </span>
-            <h4 className={clsx("mt-3", titleClass)}>{previewTitle}</h4>
-            {activePage.type !== "contents" && (
-              <p className={clsx("mt-2", subtitleClass)}>{previewSubtitle}</p>
-            )}
-            <div className="mt-4 space-y-3">{layoutPreview}</div>
-            {builder.styling.includePageNumbers && (
-              <div className="mt-6 flex justify-end">
-                <span
-                  className={clsx(
-                    "rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-wide",
-                    builder.styling.background === "gradient"
-                      ? "border-white/40 text-white/80"
-                      : "border-slate-200 text-slate-500",
-                  )}
-                >
-                  {pageIndex >= 0 ? `Page ${pageIndex + 1}` : "Page"}
-                </span>
+            ) : (
+              <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-xs text-slate-500">
+                <span className="rounded-full bg-white/80 px-3 py-1">Image placeholder</span>
+                <span>Add a URL from the toolbar</span>
               </div>
             )}
           </div>
+        );
+      }
+
+      const text = element as ProposalTemplateTextElement;
+      return (
+        <div
+          key={element.id}
+          className={clsx(wrapperClass, "bg-white/70 backdrop-blur")}
+          style={baseStyle}
+          onClick={(event) => {
+            event.stopPropagation();
+            handleSelectElement(element.id);
+          }}
+        >
+          <div
+            contentEditable
+            suppressContentEditableWarning
+            className="h-full w-full rounded-lg px-3 py-2 text-left text-sm outline-none"
+            style={{
+              fontSize: `${text.fontSize}px`,
+              fontWeight: textWeight(text.fontWeight),
+              color: text.color,
+              lineHeight: text.lineHeight,
+              textAlign: text.align,
+            }}
+            onBlur={(event) =>
+              handleUpdateElement(element.id, {
+                content: event.currentTarget.innerText,
+              })
+            }
+            onFocus={() => handleSelectElement(element.id)}
+          >
+            {text.type === "placeholder"
+              ? text.placeholderToken || text.content
+              : text.content}
+          </div>
         </div>
-        <p className="mt-2 text-[11px] text-slate-500">
-          Preview updates as you edit copy, placeholders, and styling controls.
-        </p>
-      </div>
-    );
+      );
+    };
 
     return (
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.45fr)]">
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="space-y-4">
+        <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <h3 className="text-sm font-semibold text-slate-900">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Page {pageIndex + 1} of {builder.pages.length}
+              </p>
+              <h3 className="text-lg font-semibold text-slate-900">
                 {PAGE_TYPE_LABELS[activePage.type] || "Page"}
               </h3>
-              <p className="text-xs text-slate-500">
-                Configure layout, copy, and visibility for this page.
-              </p>
             </div>
-            <div className="flex gap-2">
-              <label className="text-xs text-slate-600">
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Layout
                 <select
-                  className="input ml-2"
+                  className="input mt-1"
                   value={activePage.layout}
-                  onChange={(event) => handleFieldChange("layout", event.target.value)}
+                  onChange={(event) =>
+                    handleUpdatePage(activePage.id, {
+                      layout: event.target.value as ProposalTemplatePage["layout"],
+                    })
+                  }
                 >
                   {layoutOptions.map((option) => (
                     <option key={option.id} value={option.id}>
@@ -1183,164 +1037,424 @@ export default function ProposalTemplatesWorkspace() {
                   ))}
                 </select>
               </label>
-              {activePage.type !== "cover" && (
+              <label className="flex items-center gap-2 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={activePage.includeInContents !== false}
+                  onChange={(event) =>
+                    handleUpdatePage(activePage.id, {
+                      includeInContents: event.target.checked,
+                    })
+                  }
+                />
+                Include in contents
+              </label>
+              {activePage.type === "contents" && (
                 <label className="flex items-center gap-2 text-xs text-slate-600">
                   <input
                     type="checkbox"
-                    checked={activePage.includeInContents !== false}
+                    checked={activePage.autoContents !== false}
                     onChange={(event) =>
-                      handleFieldChange("includeInContents", event.target.checked)
+                      handleUpdatePage(activePage.id, {
+                        autoContents: event.target.checked,
+                      })
                     }
                   />
-                  Show in contents
+                  Auto-generate
                 </label>
               )}
+              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Aspect ratio
+                <select
+                  className="input mt-1"
+                  value={activePage.canvas?.aspectRatio || "16:9"}
+                  onChange={(event) =>
+                    handleUpdatePage(activePage.id, {
+                      canvas: {
+                        aspectRatio: event.target.value as "16:9" | "4:3",
+                        padding: activePage.canvas?.padding,
+                        backgroundColor: activePage.canvas?.backgroundColor,
+                      },
+                    })
+                  }
+                >
+                  <option value="16:9">16:9</option>
+                  <option value="4:3">4:3</option>
+                </select>
+              </label>
+              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Canvas colour
+                <input
+                  className="input mt-1"
+                  type="color"
+                  value={activePage.canvas?.backgroundColor || "#ffffff"}
+                  onChange={(event) =>
+                    handleUpdatePage(activePage.id, {
+                      canvas: {
+                        aspectRatio: activePage.canvas?.aspectRatio || "16:9",
+                        padding: activePage.canvas?.padding,
+                        backgroundColor: event.target.value,
+                      },
+                    })
+                  }
+                />
+              </label>
             </div>
           </div>
 
-          <div className="grid gap-3">
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Title
-              <input
-                ref={registerFieldRef("title")}
-                className="input mt-1"
-                type="text"
-                value={activePage.title || ""}
-                onFocus={() =>
-                  setActiveEditorField({ pageId: activePage.id, field: "title" })
-                }
-                onChange={(event) => handleFieldChange("title", event.target.value)}
-                disabled={activePage.autoContents}
-              />
-            </label>
-            {activePage.type !== "contents" && (
-              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Subtitle
-                <input
-                  ref={registerFieldRef("subtitle")}
-                  className="input mt-1"
-                  type="text"
-                  value={activePage.subtitle || ""}
-                  onFocus={() =>
-                    setActiveEditorField({ pageId: activePage.id, field: "subtitle" })
-                  }
-                  onChange={(event) => handleFieldChange("subtitle", event.target.value)}
-                />
-              </label>
-            )}
-            {activePage.type === "contents" ? (
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
-                <p className="font-medium text-slate-900">Contents preview</p>
-                {contentsEntries.length === 0 ? (
-                  <p className="mt-1 text-xs text-slate-500">
-                    Pages marked for the table of contents will appear here once added.
-                  </p>
-                ) : (
-                  <ol className="mt-2 space-y-1 text-xs">
-                    {contentsEntries.map((entry) => (
-                      <li key={entry} className="rounded bg-slate-100 px-3 py-1">
-                        {entry}
-                      </li>
-                    ))}
-                  </ol>
+          <div className="mt-6 rounded-3xl bg-slate-900/5 p-6">
+            <div
+              className={clsx(
+                "relative mx-auto w-full max-w-4xl overflow-hidden rounded-2xl border border-slate-200 shadow-xl",
+                aspectClass,
+              )}
+              style={canvasBackground}
+              onClick={() => handleSelectElement(null)}
+            >
+              <div className="absolute inset-0">
+                {activePageElements.length === 0 && (
+                  <div className="flex h-full w-full items-center justify-center text-sm text-slate-500">
+                    Add elements below to start designing this page.
+                  </div>
                 )}
+                {activePageElements.map((element) => renderElement(element))}
               </div>
-            ) : (
-              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Body copy
-                <textarea
-                  ref={registerFieldRef("body")}
-                  className="input mt-1 min-h-[120px]"
-                  value={activePage.body || ""}
-                  onFocus={() =>
-                    setActiveEditorField({ pageId: activePage.id, field: "body" })
-                  }
-                  onChange={(event) => handleFieldChange("body", event.target.value)}
-                />
-              </label>
-            )}
-
-            {[
-              "service_overview",
-              "storyboard",
-              "operations",
-              "custom",
-            ].includes(activePage.type) && (
-              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Highlights / bullet points
-                <textarea
-                  className="input mt-1 min-h-[100px]"
-                  value={bulletPointValue}
-                  onChange={(event) =>
-                    handleFieldChange(
-                      "bulletPoints",
-                      event.target.value
-                        .split("\n")
-                        .map((line) => line.trim())
-                        .filter(Boolean),
-                    )
-                  }
-                />
-                <span className="mt-1 block text-[10px] uppercase tracking-wide text-slate-400">
-                  One item per line
-                </span>
-              </label>
-            )}
-
-            {[
-              "service_overview",
-              "storyboard",
-              "operations",
-              "custom",
-            ].includes(activePage.type) && (
-              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Reference product (optional)
-                <select
-                  className="input mt-1"
-                  value={activePage.productId || builder.baseProductId || ""}
-                  onChange={(event) => handleFieldChange("productId", event.target.value)}
-                >
-                  <option value="">No linked product</option>
-                  {products.map((product) => (
-                    <option key={product.id} value={product.id}>
-                      {product.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-
-            {activePage.type === "quote" || activePage.type === "estimate" ? (
-              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Quote mode
-                <select
-                  className="input mt-1"
-                  value={activePage.displayMode || activePage.type}
-                  onChange={(event) => handleFieldChange("displayMode", event.target.value)}
-                >
-                  <option value="quote">Quote</option>
-                  <option value="estimate">Estimate</option>
-                </select>
-              </label>
-            ) : null}
-
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Notes for the proposal editor
-              <textarea
-                className="input mt-1 min-h-[80px]"
-                value={activePage.notes || ""}
-                onChange={(event) => handleFieldChange("notes", event.target.value)}
-              />
-            </label>
+            </div>
           </div>
         </div>
-        <div className="space-y-4">
-          {placeholderPanel}
-          {previewPanel}
+
+        <div className="rounded-2xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Element options
+            </p>
+            {selectedElement && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={() => handleDuplicateElement(selectedElement.id)}
+                >
+                  Duplicate
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost text-red-600"
+                  onClick={() => handleRemoveElement(selectedElement.id)}
+                >
+                  Remove
+                </button>
+              </div>
+            )}
+          </div>
+          {!selectedElement ? (
+            <p className="mt-3 text-sm text-slate-600">
+              Select an element on the canvas to adjust typography, colour, and placement.
+            </p>
+          ) : (
+            <div className="mt-4 space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                {(["x", "y", "width", "height"] as const).map((dimension) => (
+                  <label
+                    key={dimension}
+                    className="text-[11px] font-semibold uppercase tracking-wide text-slate-500"
+                  >
+                    {dimension === "x"
+                      ? "Left %"
+                      : dimension === "y"
+                        ? "Top %"
+                        : dimension === "width"
+                          ? "Width %"
+                          : "Height %"}
+                    <input
+                      className="input mt-1"
+                      type="number"
+                      value={Number((selectedElement as any)[dimension] ?? 0)}
+                      onChange={(event) =>
+                        handleUpdateElement(selectedElement.id, {
+                          [dimension]: Number(event.target.value),
+                        } as any)
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  Rotation°
+                  <input
+                    className="input mt-1"
+                    type="number"
+                    value={Number(selectedElement.rotation ?? 0)}
+                    onChange={(event) =>
+                      handleUpdateElement(selectedElement.id, {
+                        rotation: Number(event.target.value),
+                      } as any)
+                    }
+                  />
+                </label>
+                <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  Layer order
+                  <input
+                    className="input mt-1"
+                    type="number"
+                    value={Number(selectedElement.order ?? 0)}
+                    onChange={(event) =>
+                      handleUpdateElement(selectedElement.id, {
+                        order: Number(event.target.value),
+                      } as any)
+                    }
+                  />
+                </label>
+              </div>
+
+              {selectedElement.type !== "shape" && selectedElement.type !== "image" && (
+                <Fragment>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      Font size
+                      <input
+                        className="input mt-1"
+                        type="number"
+                        value={(selectedElement as ProposalTemplateTextElement).fontSize}
+                        onChange={(event) =>
+                          handleUpdateElement(selectedElement.id, {
+                            fontSize: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      Line height
+                      <input
+                        className="input mt-1"
+                        type="number"
+                        step="0.05"
+                        value={(selectedElement as ProposalTemplateTextElement).lineHeight}
+                        onChange={(event) =>
+                          handleUpdateElement(selectedElement.id, {
+                            lineHeight: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      Font weight
+                      <select
+                        className="input mt-1"
+                        value={(selectedElement as ProposalTemplateTextElement).fontWeight}
+                        onChange={(event) =>
+                          handleUpdateElement(selectedElement.id, {
+                            fontWeight: event.target.value as ProposalTemplateTextElement["fontWeight"],
+                          })
+                        }
+                      >
+                        <option value="regular">Regular</option>
+                        <option value="medium">Medium</option>
+                        <option value="bold">Bold</option>
+                      </select>
+                    </label>
+                    <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      Text colour
+                      <input
+                        className="input mt-1"
+                        type="color"
+                        value={(selectedElement as ProposalTemplateTextElement).color}
+                        onChange={(event) =>
+                          handleUpdateElement(selectedElement.id, {
+                            color: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {(["left", "center", "right"] as const).map((alignment) => (
+                        <button
+                          key={alignment}
+                          type="button"
+                        className={clsx(
+                          "btn-ghost px-3 py-1 text-xs",
+                          (selectedElement as ProposalTemplateTextElement).align === alignment &&
+                            "bg-slate-900 text-white",
+                        )}
+                        onClick={() =>
+                          handleUpdateElement(selectedElement.id, { align: alignment })
+                        }
+                      >
+                        {alignment}
+                      </button>
+                      ))}
+                    </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      Element role
+                      <select
+                        className="input mt-1"
+                        value={(selectedElement as ProposalTemplateTextElement).role || "custom"}
+                        onChange={(event) =>
+                          handleUpdateElement(selectedElement.id, {
+                            role: event.target.value as ProposalTemplateElementRole,
+                          })
+                        }
+                      >
+                        {elementRoleOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {selectedElement.type === "placeholder" && (
+                      <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                        Placeholder token
+                        <select
+                          className="input mt-1"
+                          value={
+                            (selectedElement as ProposalTemplateTextElement).placeholderToken ||
+                            ""
+                          }
+                          onChange={(event) =>
+                            handleUpdateElement(selectedElement.id, {
+                              placeholderToken: event.target.value,
+                              content: event.target.value,
+                            })
+                          }
+                        >
+                          {PROPOSAL_PLACEHOLDER_TOKENS.map((token) => (
+                            <option key={token.token} value={token.token}>
+                              {token.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                  </div>
+                </Fragment>
+              )}
+
+              {selectedElement.type === "image" && (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Image URL
+                    <input
+                      className="input mt-1"
+                      type="url"
+                      value={(selectedElement as ProposalTemplateImageElement).url}
+                      onChange={(event) =>
+                        handleUpdateElement(selectedElement.id, {
+                          url: event.target.value,
+                        })
+                      }
+                      placeholder="https://example.com/image.jpg"
+                    />
+                  </label>
+                  <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Fit
+                    <select
+                      className="input mt-1"
+                      value={(selectedElement as ProposalTemplateImageElement).fit}
+                      onChange={(event) =>
+                        handleUpdateElement(selectedElement.id, {
+                          fit: event.target.value as ProposalTemplateImageElement["fit"],
+                        })
+                      }
+                    >
+                      <option value="cover">Cover</option>
+                      <option value="contain">Contain</option>
+                    </select>
+                  </label>
+                  <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Border radius
+                    <input
+                      className="input mt-1"
+                      type="number"
+                      value={(selectedElement as ProposalTemplateImageElement).borderRadius}
+                      onChange={(event) =>
+                        handleUpdateElement(selectedElement.id, {
+                          borderRadius: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+              )}
+
+              {selectedElement.type === "shape" && (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Fill colour
+                    <input
+                      className="input mt-1"
+                      type="color"
+                      value={(selectedElement as ProposalTemplateShapeElement).fill}
+                      onChange={(event) =>
+                        handleUpdateElement(selectedElement.id, {
+                          fill: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Opacity
+                    <input
+                      className="input mt-1"
+                      type="number"
+                      step="0.05"
+                      value={(selectedElement as ProposalTemplateShapeElement).opacity}
+                      onChange={(event) =>
+                        handleUpdateElement(selectedElement.id, {
+                          opacity: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Add elements
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <button type="button" className="btn-outline" onClick={() => handleAddElement("text")}>
+              Text box
+            </button>
+            <div className="relative">
+              <select
+                className="input pr-8"
+                onChange={(event) => {
+                  if (!event.target.value) return;
+                  handleAddElement("placeholder", { token: event.target.value });
+                  event.target.value = "";
+                }}
+              >
+                <option value="">Placeholder token…</option>
+                {PROPOSAL_PLACEHOLDER_TOKENS.map((token) => (
+                  <option key={token.token} value={token.token}>
+                    {token.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button type="button" className="btn-outline" onClick={() => handleAddElement("image")}>
+              Image
+            </button>
+            <button type="button" className="btn-outline" onClick={() => handleAddElement("shape")}>
+              Shape
+            </button>
+          </div>
+          <p className="mt-3 text-xs text-slate-500">
+            Tokens pull live client, project, and pricing details into the proposal. Shapes and text help you
+            storyboard the slide before export.
+          </p>
         </div>
       </div>
     );
-  };
+    };
 
   if (loading) {
     return <p className="p-6 text-sm text-slate-600">Loading proposal templates…</p>;
@@ -1563,18 +1677,15 @@ export default function ProposalTemplatesWorkspace() {
           </div>
         </section>
 
-        <section className="grid gap-6 xl:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
-          <div className="space-y-6">
-            <div className="rounded-3xl border border-slate-200 bg-white p-5 space-y-4">
+        <section className="grid gap-6 xl:grid-cols-[220px_minmax(0,1fr)]">
+          <aside className="space-y-6">
+            <div className="rounded-3xl border border-slate-200 bg-white p-5">
               {renderPageList()}
-              {renderAddPageLibrary()}
             </div>
-          </div>
+          </aside>
 
           <div className="space-y-6">
-            <div className="rounded-3xl border border-slate-200 bg-white p-5">
-              {renderPageEditor()}
-            </div>
+            {renderPageEditor()}
 
             <div className="rounded-3xl border border-slate-200 bg-white p-5 space-y-4">
               <div className="flex items-center justify-between">
