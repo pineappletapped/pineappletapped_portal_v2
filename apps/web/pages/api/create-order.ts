@@ -5,6 +5,10 @@ import Stripe from "stripe";
 
 import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from "@/lib/firebase-admin";
 import { getStripeClient } from "@/lib/stripe-config";
+import {
+  setupClientDriveStructure,
+  type DriveOrderProductContext,
+} from "@/lib/server/clientDrive";
 
 import { applyApiCors, handleOptions } from "./_utils/cors";
 
@@ -622,9 +626,9 @@ const normaliseProductTaskList = (input: unknown): Array<{
 const collectProductDefaultTasks = async (
   firestore: Firestore,
   items: CheckoutItemPayload[],
-): Promise<ProductTaskSeed[]> => {
+): Promise<{ tasks: ProductTaskSeed[]; driveProducts: DriveOrderProductContext[] }> => {
   if (!items.length) {
-    return [];
+    return { tasks: [], driveProducts: [] };
   }
 
   const productQuantities = new Map<string, number>();
@@ -636,7 +640,7 @@ const collectProductDefaultTasks = async (
 
   const uniqueProductIds = Array.from(productQuantities.keys());
   if (uniqueProductIds.length === 0) {
-    return [];
+    return { tasks: [], driveProducts: [] };
   }
 
   const productsCollection = firestore.collection("products");
@@ -653,6 +657,7 @@ const collectProductDefaultTasks = async (
   );
 
   const seeds: ProductTaskSeed[] = [];
+  const driveProducts: DriveOrderProductContext[] = [];
   snapshots.forEach((entry) => {
     if (!entry) {
       return;
@@ -666,6 +671,21 @@ const collectProductDefaultTasks = async (
 
     const data = (snap.data() ?? {}) as Record<string, unknown>;
     const productName = typeof data.name === "string" && data.name.trim().length > 0 ? data.name.trim() : null;
+
+    const quantity = productQuantities.get(productId) ?? 1;
+    const templateFolderIdRaw =
+      typeof data.driveTemplateFolderId === "string" ? data.driveTemplateFolderId.trim() : "";
+    const folderNameOverrideRaw =
+      typeof data.driveFolderName === "string" ? data.driveFolderName.trim() : "";
+
+    driveProducts.push({
+      productId,
+      name: productName ?? productId,
+      quantity,
+      templateFolderId: templateFolderIdRaw.length > 0 ? templateFolderIdRaw : null,
+      folderName: folderNameOverrideRaw.length > 0 ? folderNameOverrideRaw : null,
+    });
+
     const tasks = normaliseProductTaskList(data.defaultTasks);
     if (!tasks.length) {
       return;
@@ -682,7 +702,7 @@ const collectProductDefaultTasks = async (
     });
   });
 
-  return seeds;
+  return { tasks: seeds, driveProducts };
 };
 
 const parseCheckoutRequest = (body: unknown): NormalisedCheckoutData | null => {
@@ -905,6 +925,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const paymentStatus = depositAmount <= ZERO_BALANCE_TOLERANCE ? "paid" : "requires_payment";
     const orderStatus = depositAmount <= ZERO_BALANCE_TOLERANCE ? "confirmed" : "pending_payment";
 
+    const driveEmailCandidates = new Set<string>();
+    if (customerEmail) {
+      driveEmailCandidates.add(customerEmail.trim().toLowerCase());
+    }
+    if (emailFromToken) {
+      driveEmailCandidates.add(emailFromToken.trim().toLowerCase());
+    }
+    if (typeof parsedBody.order.userEmail === "string") {
+      const trimmed = parsedBody.order.userEmail.trim().toLowerCase();
+      if (trimmed) {
+        driveEmailCandidates.add(trimmed);
+      }
+    }
+
+    const driveEmails = Array.from(driveEmailCandidates);
+    const driveClientKeyType: "user_id" | "email" | null = auth.uid ? "user_id" : driveEmails.length > 0 ? "email" : null;
+    const primaryDriveEmail = driveEmails[0] ?? null;
+    const driveClientKey =
+      driveClientKeyType === "user_id"
+        ? `uid:${auth.uid}`
+        : driveClientKeyType === "email" && primaryDriveEmail
+          ? `email:${primaryDriveEmail}`
+          : `order:${orderId}`;
+
     let stripeClient: Stripe | null = null;
     let paymentIntent: Stripe.PaymentIntent | null = null;
 
@@ -1045,6 +1089,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       paymentIntentId: paymentIntent?.id ?? null,
       paymentProvider: paymentIntent ? "stripe" : "none",
       zeroBalanceConfirmed: depositAmount <= ZERO_BALANCE_TOLERANCE,
+      driveClientKey,
+      driveClientKeyType,
       createdAt: timestamp,
       updatedAt: timestamp,
       createdBy: auth.uid,
@@ -1091,12 +1137,56 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return;
     }
 
+    let productDefaults: { tasks: ProductTaskSeed[]; driveProducts: DriveOrderProductContext[] } = {
+      tasks: [],
+      driveProducts: [],
+    };
     try {
-      const defaultTasks = await collectProductDefaultTasks(firestore, parsedBody.order.items);
-      if (defaultTasks.length > 0) {
+      productDefaults = await collectProductDefaultTasks(firestore, parsedBody.order.items);
+    } catch (error) {
+      console.error("Failed to load product defaults for project", { error, projectId, orderId });
+    }
+
+    try {
+      await setupClientDriveStructure(
+        { firestore, FieldValue, Timestamp },
+        {
+          orderId,
+          orderRef,
+          clientKey: driveClientKey,
+          clientKeyType: driveClientKeyType,
+          companyName,
+          customerName,
+          projectName: projectTitle,
+          emails: driveEmails,
+          franchise: { id: null, label: null, emails: [] },
+          products: productDefaults.driveProducts,
+          affiliate: null,
+        },
+      );
+    } catch (error) {
+      console.error("Failed to set up Drive structure for order", { error, orderId });
+      try {
+        await orderRef.set(
+          {
+            drive: {
+              status: "error",
+              errorMessage: error instanceof Error ? error.message : "drive_setup_failed",
+              updatedAt: FieldValue.serverTimestamp(),
+            },
+          },
+          { merge: true },
+        );
+      } catch (driveUpdateError) {
+        console.warn("Failed to record Drive setup error state", { orderId, error: driveUpdateError });
+      }
+    }
+
+    if (productDefaults.tasks.length > 0) {
+      try {
         const batch = firestore.batch();
         const tasksCollection = projectRef.collection("tasks");
-        defaultTasks.forEach((task) => {
+        productDefaults.tasks.forEach((task) => {
           const taskRef = tasksCollection.doc();
           batch.set(taskRef, {
             title: task.title,
@@ -1115,9 +1205,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           });
         });
         await batch.commit();
+      } catch (error) {
+        console.error("Failed to seed project tasks from products", { error, projectId, orderId });
       }
-    } catch (error) {
-      console.error("Failed to seed project tasks from products", { error, projectId, orderId });
     }
 
     respond(res, 200, {
