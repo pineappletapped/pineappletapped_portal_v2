@@ -28,6 +28,7 @@ import {
   RISK_DOCUMENT_KIND_LABELS,
 } from '@/lib/risk-documents';
 import type { ResolvedRiskDocument } from '@/lib/risk-documents';
+import { useProjectMessaging, formatProjectMessageTimestamp } from '@/hooks/useProjectMessaging';
 
 const brandGuidelinesTimestampFormatter = new Intl.DateTimeFormat('en-GB', {
   dateStyle: 'medium',
@@ -81,8 +82,6 @@ const parseFirestoreDate = (value: unknown): Date | null => {
 export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [project, setProject] = useState<any>(null);
   const [assets, setAssets] = useState<any[]>([]);
-  const [messages, setMessages] = useState<any[]>([]);
-  const [newMessage, setNewMessage] = useState('');
   const [organisation, setOrganisation] = useState<{ id: string; name: string | null } | null>(null);
   const [organisationGuidelines, setOrganisationGuidelines] = useState<BrandGuidelinesState | null>(null);
   const [organisationHasGuidelines, setOrganisationHasGuidelines] = useState(false);
@@ -94,9 +93,6 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [showWelcomeBanner, setShowWelcomeBanner] = useState(false);
   const [acknowledgingWelcome, setAcknowledgingWelcome] = useState(false);
 
-  // Internal messages (staff/contractor comms)
-  const [internalMessages, setInternalMessages] = useState<any[]>([]);
-  const [newInternalMessage, setNewInternalMessage] = useState('');
   const [isStaffUser, setIsStaffUser] = useState(false);
   const [venues, setVenues] = useState<Venue[]>([]);
   const [locationForm, setLocationForm] = useState({ address: '', postalCode: '' });
@@ -108,6 +104,27 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
   const [order, setOrder] = useState<any | null>(null);
   const genericRiskLibrary = useMemo(() => createGenericRiskDocumentsSample(), []);
   const customRiskLibrary = useMemo(() => createCustomRiskDocumentsSample(), []);
+  const {
+    threads: messageThreads,
+    activeThreadId,
+    setActiveThreadId,
+    activeThread,
+    messages: threadMessages,
+    loading: messagesLoading,
+    sending: sendingMessage,
+    error: messagesError,
+    feedback: messageFeedback,
+    draft: messageDraft,
+    setDraft: setMessageDraft,
+    sendMessage: submitMessage,
+  } = useProjectMessaging({
+    firestore: db,
+    auth,
+    projectId: params.id,
+    projectName: typeof project?.name === 'string' ? project.name : null,
+    organisationId: typeof project?.orgId === 'string' ? project.orgId : null,
+    isStaffUser,
+  });
   const normalisePostcode = (value: string | null | undefined) =>
     typeof value === 'string' ? value.replace(/\s+/g, '').toUpperCase() : '';
   const deliverableAssets = useMemo(
@@ -146,32 +163,6 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
 
   // Signature request
   const [pendingSignature, setPendingSignature] = useState<any | null>(null);
-
-  // Helper to load messages in order
-  const loadMessages = useCallback(async () => {
-    const mq = query(collection(db,'messages'), where('projectId','==', params.id));
-    const md = await getDocs(mq);
-    const items = md.docs.map(d => ({ id: d.id, ...d.data() }));
-    items.sort((a:any,b:any)=>{
-      const at=a.createdAt?.toMillis? a.createdAt.toMillis():0;
-      const bt=b.createdAt?.toMillis? b.createdAt.toMillis():0;
-      return at-bt;
-    });
-    setMessages(items);
-  }, [params.id]);
-
-  // Load internal contractor messages
-  const loadInternalMessages = useCallback(async () => {
-    const iq = query(collection(db,'contractorMessages'), where('projectId','==', params.id));
-    const idocs = await getDocs(iq);
-    const items = idocs.docs.map(d => ({ id: d.id, ...d.data() }));
-    items.sort((a:any,b:any)=>{
-      const at=a.createdAt?.toMillis? a.createdAt.toMillis():0;
-      const bt=b.createdAt?.toMillis? b.createdAt.toMillis():0;
-      return at-bt;
-    });
-    setInternalMessages(items);
-  }, [params.id]);
 
   const handleManualLocationSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -252,18 +243,30 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
           : `Client confirmed the filming address as ${address}${postal ? ` (${postal})` : ''}.`;
 
       try {
+        const internalBody =
+          previousPostcodeNormalised !== newPostcodeNormalised
+            ? `${bodyMessage} Review potential travel surcharges.`
+            : bodyMessage;
         await addDoc(collection(db,'contractorMessages'), {
           projectId: project.id,
           fromUid: user?.uid ?? null,
-          body:
-            previousPostcodeNormalised !== newPostcodeNormalised
-              ? `${bodyMessage} Review potential travel surcharges.`
-              : bodyMessage,
+          body: internalBody,
           createdAt: serverTimestamp(),
           systemGenerated: true,
           kind: 'location_update',
         });
-        await loadInternalMessages();
+        await addDoc(collection(db, 'projectMessages'), {
+          projectId: project.id,
+          threadId: 'production',
+          audience: 'team',
+          body: internalBody,
+          createdAt: serverTimestamp(),
+          fromUid: user?.uid ?? null,
+          fromName: user?.displayName ?? null,
+          fromEmail: user?.email ?? null,
+          systemGenerated: true,
+          context: 'location_update',
+        });
       } catch (notifyErr) {
         console.error('Failed to log location change internally', notifyErr);
       }
@@ -359,8 +362,6 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
       const aq = query(collection(db,'assets'), where('projectId','==', params.id));
       const ad = await getDocs(aq);
       setAssets(ad.docs.map(d=>({id:d.id, ...d.data()})));
-      await loadMessages();
-      await loadInternalMessages();
       const venueSnap = await getDocs(collection(db,'venues'));
       const venueList = venueSnap.docs
         .map((d) => ({ id: d.id, ...(d.data() as any) } as Venue))
@@ -386,7 +387,7 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
         }
       }
     })();
-  },[params.id, loadMessages, loadInternalMessages]);
+  },[params.id]);
 
   useEffect(() => {
     if (!project?.orgId) {
@@ -470,60 +471,6 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
     project?.brandGuidelinesCompleted,
     project?.brandGuidelinesNeedsAmendments,
   ]);
-
-
-  // Send a new message
-  const sendMessage = async () => {
-    const user = auth.currentUser;
-    if (!user) return alert('You must be signed in to send messages');
-    const body = newMessage.trim();
-    if (!body) return;
-    const msgRef = await addDoc(collection(db,'messages'), {
-      projectId: params.id,
-      uid: user.uid,
-      body,
-      createdAt: serverTimestamp()
-    });
-    // Create notifications for other project members
-    try {
-      // Fetch project to get orgId
-      const pSnap = await getDoc(doc(db, 'projects', params.id));
-      const pData = pSnap.data() as any;
-      const orgId = pData?.orgId;
-      if (orgId) {
-        // Find all memberships for org
-        const memSnap = await getDocs(query(collection(db,'memberships'), where('orgId','==', orgId)));
-        const userIds = memSnap.docs.map(m => (m.data() as any).userId).filter(uid => uid !== user.uid);
-        for (const uid of userIds) {
-          await addDoc(collection(db,'notifications'), {
-            userId: uid,
-            message: `New message on project ${pData?.name || params.id}`,
-            createdAt: serverTimestamp(),
-          });
-        }
-      }
-    } catch (err) {
-      console.error('notification error', err);
-    }
-    setNewMessage('');
-    await loadMessages();
-  };
-
-  // Send internal contractor message (only for staff)
-  const sendInternalMessage = async () => {
-    const user = auth.currentUser;
-    if (!user) return alert('You must be signed in');
-    const body = newInternalMessage.trim();
-    if (!body) return;
-    await addDoc(collection(db,'contractorMessages'), {
-      projectId: params.id,
-      fromUid: user.uid,
-      body,
-      createdAt: serverTimestamp()
-    });
-    setNewInternalMessage('');
-    await loadInternalMessages();
-  };
 
   // Update project brand pack
   const updateBrandPack = async (packId: string) => {
@@ -1041,59 +988,126 @@ export default function ProjectDetail({ params }: { params: { id: string } }) {
           </div>
         </div>
 
-        <div className="card">
-          <h2 className="mb-2 text-base font-semibold text-gray-900">Messages</h2>
-          <div className="grid gap-2 mb-3">
-            {messages.length === 0 ? (
-              <p className="text-sm text-gray-600">No messages yet. Start the conversation below.</p>
+        <div className="card space-y-4">
+          <div className="space-y-1">
+            <h2 className="text-base font-semibold text-gray-900">Messages &amp; collaboration</h2>
+            <p className="text-sm text-gray-600">
+              Coordinate with your production team, franchise managers, and HQ using dedicated conversation threads.
+            </p>
+          </div>
+
+          {messageThreads.length > 1 ? (
+            <div className="flex flex-wrap gap-2">
+              {messageThreads.map((thread) => {
+                const isActive = thread.id === activeThreadId;
+                return (
+                  <button
+                    key={thread.id}
+                    type="button"
+                    onClick={() => setActiveThreadId(thread.id)}
+                    className={`rounded-full border px-3 py-1.5 text-sm font-medium transition ${
+                      isActive
+                        ? 'border-slate-900 bg-slate-900 text-white shadow-sm'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:text-slate-900'
+                    }`}
+                    aria-pressed={isActive}
+                  >
+                    {thread.label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {activeThread ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <p className="text-sm font-medium text-slate-800">Who can see this thread?</p>
+              <p className="text-xs text-slate-600">{activeThread.description}</p>
+              <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-600">
+                {activeThread.participants.map((participant) => (
+                  <li key={participant}>{participant}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {messagesError ? (
+            <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{messagesError}</div>
+          ) : null}
+
+          {messageFeedback ? (
+            <div
+              className={`rounded-md border p-3 text-sm ${
+                messageFeedback.kind === 'success'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : 'border-rose-200 bg-rose-50 text-rose-700'
+              }`}
+            >
+              {messageFeedback.message}
+            </div>
+          ) : null}
+
+          <div className="rounded-lg border border-slate-200 bg-white p-3">
+            {messagesLoading ? (
+              <p className="text-sm text-slate-500">Loading messages…</p>
+            ) : threadMessages.length === 0 ? (
+              <p className="text-sm text-slate-600">No messages yet. Start the conversation below.</p>
             ) : (
-              messages.map((m) => (
-                <div key={m.id} className="rounded border border-gray-200 p-2 text-sm text-gray-700">
-                  {m.body}
-                </div>
-              ))
+              <ul className="grid gap-3">
+                {threadMessages.map((message) => (
+                  <li key={message.id} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                      <span className="font-medium text-slate-700">
+                        {message.fromName || message.fromEmail || 'Team member'}
+                      </span>
+                      <span>{formatProjectMessageTimestamp(message.createdAt)}</span>
+                    </div>
+                    <p className="mt-2 whitespace-pre-line text-sm text-slate-800">{message.body}</p>
+                    {message.source === 'legacy' ? (
+                      <p className="mt-2 text-[11px] uppercase tracking-wide text-slate-400">
+                        Imported from legacy thread
+                      </p>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
-          <div className="flex gap-2">
-            <input
-              className="input flex-1"
-              placeholder="Write a message…"
-              value={newMessage}
-              onChange={(e) => setNewMessage(e.target.value)}
-            />
-            <button type="button" className="btn" onClick={sendMessage}>
-              Send
-            </button>
-          </div>
-        </div>
 
-        {isStaffUser && (
-          <div className="card">
-            <h2 className="mb-2 text-base font-semibold text-gray-900">Internal Notes</h2>
-            <div className="grid gap-2 mb-3">
-              {internalMessages.length === 0 ? (
-                <p className="text-sm text-gray-600">No internal messages.</p>
-              ) : (
-                internalMessages.map((m) => (
-                  <div key={m.id} className="rounded border border-gray-200 p-2 text-sm text-gray-700">
-                    {m.body}
-                  </div>
-                ))
-              )}
-            </div>
-            <div className="flex gap-2">
-              <input
-                className="input flex-1"
-                placeholder="Write an internal note…"
-                value={newInternalMessage}
-                onChange={(e) => setNewInternalMessage(e.target.value)}
-              />
-              <button type="button" className="btn" onClick={sendInternalMessage}>
-                Send
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitMessage();
+            }}
+            className="grid gap-2"
+          >
+            <label className="text-sm font-medium text-slate-900" htmlFor="project-message-input">
+              New message
+            </label>
+            <textarea
+              id="project-message-input"
+              className="input min-h-[96px]"
+              value={messageDraft}
+              onChange={(event) => setMessageDraft(event.target.value)}
+              placeholder="Share an update with your team…"
+              disabled={!activeThread || sendingMessage}
+            />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs text-slate-500">
+                {activeThread
+                  ? `Visible to: ${activeThread.participants.join(', ')}`
+                  : 'Choose a conversation to see who can view it.'}
+              </span>
+              <button
+                type="submit"
+                className="btn btn-sm"
+                disabled={!activeThread || sendingMessage || !messageDraft.trim()}
+              >
+                {sendingMessage ? 'Sending…' : 'Send message'}
               </button>
             </div>
-          </div>
-        )}
+          </form>
+        </div>
 
         {pendingSignature && (
           <div className="card">

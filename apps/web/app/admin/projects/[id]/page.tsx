@@ -16,9 +16,12 @@ import {
   Link as MUILink,
   Paper,
   Stack,
+  TextField,
   Typography,
 } from '@mui/material';
 import { collection, doc, getDoc, getDocs } from 'firebase/firestore';
+import type { Firestore } from 'firebase/firestore';
+import type { Auth } from 'firebase/auth';
 import { summariseKitItems, type KitSummary } from '@/lib/kit-summary';
 import CallSheetBuilder, {
   type ProjectBookingRecordLike,
@@ -29,6 +32,7 @@ import { ensureFirebase } from '@/lib/firebase';
 import { useRoleGate } from '@/hooks/useRoleGate';
 import { adminListUsers } from '@/lib/admin';
 import { extractUserRoles, type UserRoles } from '@/lib/roles';
+import { useProjectMessaging, formatProjectMessageTimestamp } from '@/hooks/useProjectMessaging';
 
 type ProjectTaskRecord = {
   id: string;
@@ -174,6 +178,7 @@ export default function AdminProjectDetailPage({ params }: { params: { id: strin
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [callSheetOpen, setCallSheetOpen] = useState(false);
+  const [firebaseClient, setFirebaseClient] = useState<{ db: Firestore; auth: Auth } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -183,7 +188,9 @@ export default function AdminProjectDetailPage({ params }: { params: { id: strin
       try {
         setLoading(true);
         setError(null);
-        const { db } = await ensureFirebase();
+        const { db, auth } = await ensureFirebase();
+        if (!active) return;
+        setFirebaseClient({ db, auth });
         if (!db) {
           throw new Error('Firestore is unavailable');
         }
@@ -315,6 +322,28 @@ export default function AdminProjectDetailPage({ params }: { params: { id: strin
       active = false;
     };
   }, []);
+
+  const {
+    threads: messagingThreads,
+    activeThreadId: activeMessagingThreadId,
+    setActiveThreadId: setActiveMessagingThreadId,
+    activeThread: activeMessagingThread,
+    messages: messagingMessages,
+    loading: messagingLoading,
+    sending: messagingSending,
+    error: messagingError,
+    feedback: messagingFeedback,
+    draft: messagingDraft,
+    setDraft: setMessagingDraft,
+    sendMessage: sendMessagingMessage,
+  } = useProjectMessaging({
+    firestore: firebaseClient?.db,
+    auth: firebaseClient?.auth,
+    projectId,
+    projectName: project && typeof (project as any).name === 'string' ? (project as any).name : null,
+    organisationId: project && typeof (project as any).orgId === 'string' ? (project as any).orgId : null,
+    isStaffUser: true,
+  });
 
   const projectStatus = ((project as any)?.status as string | undefined) ?? 'Pending';
   const statusChipColor = statusColor((project as any)?.status);
@@ -581,6 +610,135 @@ export default function AdminProjectDetailPage({ params }: { params: { id: strin
             ))}
           </Stack>
         )}
+      </Paper>
+
+      <Paper sx={{ p: { xs: 3, md: 4 }, borderRadius: 4, display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} justifyContent="space-between" alignItems={{ sm: 'flex-end' }}>
+          <Box>
+            <Typography variant="overline" color="text.secondary" sx={{ letterSpacing: '0.2em' }}>
+              Collaboration
+            </Typography>
+            <Typography variant="h5" color="text.primary">
+              Project messaging
+            </Typography>
+          </Box>
+          <Typography variant="body2" color="text.secondary">
+            {messagingMessages.length === 0
+              ? 'No messages yet'
+              : `${messagingMessages.length} message${messagingMessages.length === 1 ? '' : 's'}`}
+          </Typography>
+        </Stack>
+
+        {messagingThreads.length > 1 ? (
+          <Stack direction="row" spacing={1} flexWrap="wrap">
+            {messagingThreads.map((thread) => (
+              <Button
+                key={thread.id}
+                variant={thread.id === activeMessagingThreadId ? 'contained' : 'outlined'}
+                color={thread.id === activeMessagingThreadId ? 'primary' : 'inherit'}
+                size="small"
+                onClick={() => setActiveMessagingThreadId(thread.id)}
+              >
+                {thread.label}
+              </Button>
+            ))}
+          </Stack>
+        ) : null}
+
+        {activeMessagingThread ? (
+          <Card variant="outlined" sx={{ borderRadius: 3 }}>
+            <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+              <Typography variant="subtitle2" color="text.primary">
+                Visibility
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {activeMessagingThread.description}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                {activeMessagingThread.participants.join(' • ')}
+              </Typography>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {messagingError ? (
+          <Alert severity="error" sx={{ borderRadius: 3 }}>
+            {messagingError}
+          </Alert>
+        ) : null}
+
+        {messagingFeedback ? (
+          <Alert severity={messagingFeedback.kind === 'success' ? 'success' : 'error'} sx={{ borderRadius: 3 }}>
+            {messagingFeedback.message}
+          </Alert>
+        ) : null}
+
+        <Stack spacing={1.5} sx={{ maxHeight: 320, overflowY: 'auto', pr: 1 }}>
+          {messagingLoading ? (
+            <Typography variant="body2" color="text.secondary">
+              Loading conversation…
+            </Typography>
+          ) : messagingMessages.length === 0 ? (
+            <Typography variant="body2" color="text.secondary">
+              No messages recorded yet.
+            </Typography>
+          ) : (
+            messagingMessages.map((message) => (
+              <Card key={message.id} variant="outlined" sx={{ borderRadius: 3 }}>
+                <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                  <Stack direction="row" spacing={1} justifyContent="space-between" alignItems="baseline">
+                    <Typography variant="subtitle2" color="text.primary">
+                      {message.fromName || message.fromEmail || 'Team member'}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {formatProjectMessageTimestamp(message.createdAt)}
+                    </Typography>
+                  </Stack>
+                  <Typography variant="body2" color="text.primary" sx={{ whiteSpace: 'pre-line' }}>
+                    {message.body}
+                  </Typography>
+                  {message.source === 'legacy' ? (
+                    <Typography variant="caption" color="text.disabled">
+                      Imported from legacy thread
+                    </Typography>
+                  ) : null}
+                </CardContent>
+              </Card>
+            ))
+          )}
+        </Stack>
+
+        <Stack
+          component="form"
+          spacing={1.5}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void sendMessagingMessage();
+          }}
+        >
+          <TextField
+            label="New message"
+            value={messagingDraft}
+            onChange={(event) => setMessagingDraft(event.target.value)}
+            multiline
+            minRows={3}
+            disabled={!activeMessagingThread || messagingSending}
+          />
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} justifyContent="space-between" alignItems={{ sm: 'center' }}>
+            <Typography variant="caption" color="text.secondary">
+              {activeMessagingThread
+                ? `Visible to ${activeMessagingThread.participants.join(', ')}`
+                : 'Select a thread to enable messaging.'}
+            </Typography>
+            <Button
+              type="submit"
+              variant="contained"
+              disabled={!activeMessagingThread || messagingSending || messagingDraft.trim().length === 0}
+            >
+              {messagingSending ? 'Sending…' : 'Send message'}
+            </Button>
+          </Stack>
+        </Stack>
       </Paper>
 
       <Paper sx={{ p: { xs: 3, md: 4 }, borderRadius: 4, display: 'flex', flexDirection: 'column', gap: 3 }}>
