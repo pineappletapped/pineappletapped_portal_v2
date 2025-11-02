@@ -28,8 +28,15 @@ export default function StorageIntegrationClientPage() {
   const [status, setStatus] = useState<IntegrationStatus>("loading");
 
   useEffect(() => {
-    const supportsAbort = typeof AbortController !== "undefined";
-    const controller = supportsAbort ? new AbortController() : null;
+    let controller: AbortController | null = null;
+    if (typeof AbortController === "function") {
+      try {
+        controller = new AbortController();
+      } catch (error) {
+        console.warn("AbortController is present but could not be constructed – continuing without request abort support", error);
+        controller = null;
+      }
+    }
     let cancelled = false;
 
     const checkStatus = async () => {
