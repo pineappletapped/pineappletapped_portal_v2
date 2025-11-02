@@ -149,12 +149,16 @@ const createDriveService = async (): Promise<drive_v3.Drive | null> => {
     console.warn("Missing Google service account credentials for Drive automation");
     return null;
   }
+
+  const delegatedUser = process.env.GOOGLE_SERVICE_ACCOUNT_DELEGATED_USER?.trim();
+
   try {
     const keyJson = JSON.parse(Buffer.from(keyB64, "base64").toString());
     const auth = new google.auth.JWT({
       email: keyJson.client_email,
       key: keyJson.private_key,
       scopes: DRIVE_SCOPES,
+      subject: delegatedUser ? delegatedUser : undefined,
     });
     await auth.authorize();
     return google.drive({ version: "v3", auth });
