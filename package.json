@@ -2,7 +2,7 @@
   "name": "pineapple-portal-root",
   "private": true,
   "scripts": {
-    "build": "npm --prefix apps/web install --no-progress --no-fund && npm --prefix apps/web run build && node scripts/verify-next-build.mjs",
+    "build": "npm --prefix apps/web install --no-progress --no-fund && node scripts/run-next-build.mjs && node scripts/verify-next-build.mjs",
     "start": "node apps/web/.next/standalone/server.js",
     "test": "npm --prefix apps/web run lint",
     "deploy": "npm --prefix functions run build && firebase deploy --only firestore:rules,functions"
