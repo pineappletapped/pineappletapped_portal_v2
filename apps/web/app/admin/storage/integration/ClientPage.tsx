@@ -28,7 +28,8 @@ export default function StorageIntegrationClientPage() {
   const [status, setStatus] = useState<IntegrationStatus>("loading");
 
   useEffect(() => {
-    const controller = new AbortController();
+    const supportsAbort = typeof AbortController !== "undefined";
+    const controller = supportsAbort ? new AbortController() : null;
     let cancelled = false;
 
     const checkStatus = async () => {
@@ -36,7 +37,7 @@ export default function StorageIntegrationClientPage() {
         const res = await fetch("/api/storage/integration/status", {
           method: "GET",
           cache: "no-store",
-          signal: controller.signal,
+          signal: controller?.signal,
         });
         if (!res.ok) {
           throw new Error(`Unexpected response: ${res.status}`);
@@ -64,7 +65,7 @@ export default function StorageIntegrationClientPage() {
 
     return () => {
       cancelled = true;
-      controller.abort();
+      controller?.abort();
     };
   }, []);
 
