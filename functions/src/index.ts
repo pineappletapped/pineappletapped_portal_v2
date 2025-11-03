@@ -2,6 +2,7 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions';
 import { onRequest } from 'firebase-functions/v2/https';
+import { google } from 'googleapis';
 import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import Stripe from 'stripe';
 import type { DocumentData, DocumentReference, DocumentSnapshot } from 'firebase-admin/firestore';
@@ -14,8 +15,19 @@ import * as crypto from 'crypto';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import ColorThief from 'color-thief-node';
-import { google } from 'googleapis';
-import type { drive_v3 } from 'googleapis';
+import {
+  createClientFolder,
+  createFolder as createDriveFolder,
+  ensureChildFolder,
+  getUploadUrl,
+  listChildFolders as listDriveChildFolders,
+  resolveExistingFolder,
+  shareFolder as shareDriveFolder,
+  tryGetDriveClient,
+  copyFolderContents,
+  type DriveClient,
+  type DriveFile,
+} from './googleDrive';
 import { Readable } from 'stream';
 import fetch from 'node-fetch';
 import { bookingConflictsWithRange } from './utils/availability.js';
@@ -68,12 +80,19 @@ const parseJsonBody = (req: ExpressRequest): Record<string, any> => {
 };
 
 const resolveGoogleServiceAccountDelegatedUser = (): string | null => {
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_DELEGATED_USER;
-  if (typeof raw !== 'string') {
-    return null;
+  const candidates = [
+    process.env.GDRIVE_DELEGATED_USER,
+    process.env.GOOGLE_SERVICE_ACCOUNT_DELEGATED_USER,
+  ];
+  for (const value of candidates) {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
   }
-  const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  return null;
 };
 
 const verifyAuthTokenFromRequest = async (
@@ -2411,229 +2430,8 @@ function buildProductFolderName(
   return base;
 }
 
-async function createDriveService(): Promise<drive_v3.Drive | null> {
-  const keyB64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64;
-  if (!keyB64) {
-    console.warn('Missing Google service account credentials for Drive automation');
-    return null;
-  }
-  try {
-    const keyJson = JSON.parse(Buffer.from(keyB64, 'base64').toString());
-    const delegatedUser = resolveGoogleServiceAccountDelegatedUser();
-    const auth = new google.auth.JWT({
-      email: keyJson.client_email,
-      key: keyJson.private_key,
-      scopes: ['https://www.googleapis.com/auth/drive'],
-      subject: delegatedUser ?? undefined,
-    });
-    await auth.authorize();
-    return google.drive({ version: 'v3', auth });
-  } catch (error) {
-    console.error('Failed to initialise Drive service', error);
-    return null;
-  }
-}
-
-async function resolveExistingFolder(
-  drive: drive_v3.Drive,
-  folderId: string | null
-): Promise<string | null> {
-  if (!folderId) {
-    return null;
-  }
-  try {
-    const res = await drive.files.get({
-      fileId: folderId,
-      fields: 'id, trashed',
-      supportsAllDrives: true,
-    });
-    if (res.data?.trashed) {
-      return null;
-    }
-    return res.data?.id ?? folderId;
-  } catch {
-    return null;
-  }
-}
-
-async function createDriveFolder(
-  drive: drive_v3.Drive,
-  name: string,
-  parentId: string | null
-): Promise<string | null> {
-  try {
-    const metadata: drive_v3.Schema$File = {
-      name,
-      mimeType: 'application/vnd.google-apps.folder',
-    };
-    if (parentId) {
-      metadata.parents = [parentId];
-    }
-    const res = await drive.files.create({
-      requestBody: metadata,
-      fields: 'id',
-      supportsAllDrives: true,
-    });
-    return res.data.id ?? null;
-  } catch (error) {
-    console.error('Failed to create Drive folder', name, error);
-    return null;
-  }
-}
-
-async function listDriveChildren(
-  drive: drive_v3.Drive,
-  parentId: string
-): Promise<drive_v3.Schema$File[]> {
-  const files: drive_v3.Schema$File[] = [];
-  let pageToken: string | undefined;
-  do {
-    const res = await drive.files.list({
-      q: `'${parentId}' in parents and trashed = false`,
-      fields: 'nextPageToken, files(id, name, mimeType)',
-      pageSize: 100,
-      pageToken,
-      includeItemsFromAllDrives: true,
-      supportsAllDrives: true,
-    });
-    if (res.data.files) {
-      files.push(...res.data.files);
-    }
-    pageToken = res.data.nextPageToken ?? undefined;
-  } while (pageToken);
-  return files;
-}
-
-async function listDriveChildFolders(
-  drive: drive_v3.Drive,
-  parentId: string
-): Promise<drive_v3.Schema$File[]> {
-  const folders: drive_v3.Schema$File[] = [];
-  let pageToken: string | undefined;
-  do {
-    const res = await drive.files.list({
-      q: `'${parentId}' in parents and trashed = false and mimeType = 'application/vnd.google-apps.folder'`,
-      fields: 'nextPageToken, files(id, name, mimeType)',
-      pageSize: 100,
-      pageToken,
-      includeItemsFromAllDrives: true,
-      supportsAllDrives: true,
-      orderBy: 'name_natural',
-    });
-    if (res.data.files) {
-      folders.push(...res.data.files);
-    }
-    pageToken = res.data.nextPageToken ?? undefined;
-  } while (pageToken);
-  return folders;
-}
-
-async function copyDriveContents(
-  drive: drive_v3.Drive,
-  sourceFolderId: string,
-  destinationFolderId: string
-): Promise<void> {
-  const children = await listDriveChildren(drive, sourceFolderId);
-  for (const child of children) {
-    if (!child.id) continue;
-    if (child.mimeType === 'application/vnd.google-apps.folder') {
-      const folderName = sanitiseDriveName(child.name ?? 'Folder', 'Folder');
-      const newFolderId = await createDriveFolder(drive, folderName, destinationFolderId);
-      if (newFolderId) {
-        await copyDriveContents(drive, child.id, newFolderId);
-      }
-    } else {
-      try {
-        await drive.files.copy({
-          fileId: child.id,
-          requestBody: {
-            name: child.name ?? undefined,
-            parents: [destinationFolderId],
-          },
-          supportsAllDrives: true,
-        });
-      } catch (error) {
-        console.error('Failed to copy Drive file', child.id, error);
-      }
-    }
-  }
-}
-
-async function ensureChildFolder(
-  drive: drive_v3.Drive,
-  parentId: string,
-  desiredName: string,
-  existingFolderId?: string | null,
-  templateFolderId?: string | null
-): Promise<{ id: string | null; created: boolean }> {
-  const existing = await resolveExistingFolder(
-    drive,
-    normaliseDriveId(existingFolderId)
-  );
-  if (existing) {
-    return { id: existing, created: false };
-  }
-  try {
-    const escapedName = desiredName.replace(/'/g, "\\'");
-    const search = await drive.files.list({
-      q: `mimeType = 'application/vnd.google-apps.folder' and trashed = false and '${parentId}' in parents and name = '${escapedName}'`,
-      fields: 'files(id, name)',
-      pageSize: 1,
-      includeItemsFromAllDrives: true,
-      supportsAllDrives: true,
-    });
-    const matchId = search.data.files?.[0]?.id ?? null;
-    if (matchId) {
-      return { id: matchId, created: false };
-    }
-  } catch (error) {
-    console.warn('Failed to look up Drive folder by name', error);
-  }
-  const folderId = await createDriveFolder(drive, desiredName, parentId);
-  if (folderId && templateFolderId) {
-    try {
-      await copyDriveContents(drive, templateFolderId, folderId);
-    } catch (error) {
-      console.error('Failed to copy Drive template into folder', error);
-    }
-  }
-  return { id: folderId, created: true };
-}
-
-async function shareDriveFolder(
-  drive: drive_v3.Drive,
-  folderId: string,
-  emails: string[]
-): Promise<void> {
-  const seen = new Set<string>();
-  for (const email of emails) {
-    const trimmed = typeof email === 'string' ? email.trim().toLowerCase() : '';
-    if (!trimmed || seen.has(trimmed)) {
-      continue;
-    }
-    seen.add(trimmed);
-    try {
-      await drive.permissions.create({
-        fileId: folderId,
-        supportsAllDrives: true,
-        sendNotificationEmail: false,
-        requestBody: {
-          type: 'user',
-          role: 'writer',
-          emailAddress: trimmed,
-        },
-      });
-    } catch (error: any) {
-      if (error?.code === 409) {
-        continue;
-      }
-      console.warn('Failed to apply Drive permission', folderId, trimmed, error);
-    }
-  }
-}
-
 async function setupClientDriveStructure(context: DriveSetupContext): Promise<void> {
-  const drive = await createDriveService();
+  const drive = await tryGetDriveClient();
   if (!drive) {
     await context.orderRef.set(
       {
@@ -2729,13 +2527,13 @@ async function setupClientDriveStructure(context: DriveSetupContext): Promise<vo
   const clientFolderName = buildClientFolderName(context);
   let clientFolderId =
     (await resolveExistingFolder(
-      drive,
-      normaliseDriveId(driveInfo.rootFolderId ?? driveInfo.clientFolderId)
+      normaliseDriveId(driveInfo.rootFolderId ?? driveInfo.clientFolderId),
+      drive
     )) ?? null;
   let clientFolderCreated = false;
   if (!clientFolderId) {
-    clientFolderId = await createDriveFolder(drive, clientFolderName, rootFolderId);
-    clientFolderCreated = true;
+    clientFolderId = await createClientFolder(clientFolderName, rootFolderId, drive);
+    clientFolderCreated = Boolean(clientFolderId);
   }
   if (!clientFolderId) {
     throw new Error('Unable to create client Drive folder');
@@ -2756,7 +2554,7 @@ async function setupClientDriveStructure(context: DriveSetupContext): Promise<vo
   );
   const ordersRootFolderId = orders.id ?? clientFolderId;
   const orderFolderName = buildOrderFolderName(context);
-  const orderFolderId = await createDriveFolder(drive, orderFolderName, ordersRootFolderId);
+  const orderFolderId = await createDriveFolder(orderFolderName, ordersRootFolderId, drive);
   if (!orderFolderId) {
     throw new Error('Unable to create order Drive folder');
   }
@@ -2774,12 +2572,12 @@ async function setupClientDriveStructure(context: DriveSetupContext): Promise<vo
     const count = product.quantity > 0 ? product.quantity : 1;
     for (let i = 0; i < count; i += 1) {
       const folderName = buildProductFolderName(product, i, count);
-      const folderId = await createDriveFolder(drive, folderName, orderFolderId);
+      const folderId = await createDriveFolder(folderName, orderFolderId, drive);
       if (!folderId) {
         continue;
       }
       if (product.templateFolderId) {
-        await copyDriveContents(drive, product.templateFolderId, folderId);
+        await copyFolderContents(product.templateFolderId, folderId, drive);
       }
       productFolders.push({
         productId: product.productId,
@@ -3026,7 +2824,7 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
     }
   }
 
-  const drive = await createDriveService();
+  const drive = await tryGetDriveClient();
   if (!drive) {
     throw new functions.https.HttpsError(
       'failed-precondition',
@@ -3070,7 +2868,7 @@ export const drive_listProjectFolder = functions.https.onCall(async (data, conte
     }
   }
 
-  const driveFiles: drive_v3.Schema$File[] = [];
+  const driveFiles: DriveFile[] = [];
   let pageToken: string | undefined;
   let safetyCounter = 0;
 
@@ -3179,7 +2977,7 @@ export const drive_listTemplateFolders = functions.https.onCall(async (data, con
     );
   }
 
-  const drive = await createDriveService();
+  const drive = await tryGetDriveClient();
   if (!drive) {
     throw new functions.https.HttpsError(
       'failed-precondition',
@@ -3222,7 +3020,7 @@ export const drive_listTemplateFolders = functions.https.onCall(async (data, con
   breadcrumbs.push({ id: rootFolderId, name: currentFolderName });
 
   for (const segment of pathSegments) {
-    const children = await listDriveChildFolders(drive, currentFolderId);
+    const children = await listDriveChildFolders(currentFolderId, drive);
     const match = children.find((child) => {
       const id = typeof child.id === 'string' ? child.id : null;
       const name = typeof child.name === 'string' ? child.name.trim() : '';
@@ -3274,9 +3072,9 @@ export const drive_listTemplateFolders = functions.https.onCall(async (data, con
     });
   }
 
-  let folderEntries: drive_v3.Schema$File[] = [];
+  let folderEntries: DriveFile[] = [];
   try {
-    folderEntries = await listDriveChildFolders(drive, targetFolderId);
+    folderEntries = await listDriveChildFolders(targetFolderId, drive);
   } catch (error) {
     console.error('drive_listTemplateFolders failed to list child folders', targetFolderId, error);
     throw new functions.https.HttpsError(
@@ -3393,7 +3191,7 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
   let digitalStatus =
     digitalStatusFromOrder ?? computeAggregateDigitalStatus(normalisedDigitalMap) ?? null;
 
-  const drive = await createDriveService();
+  const drive = await tryGetDriveClient();
   if (!drive) {
     throw new functions.https.HttpsError(
       'failed-precondition',
@@ -3401,7 +3199,7 @@ export const drive_stageAssetFromFile = functions.https.onCall(async (data, cont
     );
   }
 
-  let fileMeta: drive_v3.Schema$File;
+  let fileMeta: DriveFile;
   try {
     const metadataRes = await drive.files.get({
       fileId: driveFileId,
@@ -13686,34 +13484,27 @@ export const uploadToDrive = functions.https.onCall(async (data, context) => {
   }
 
   try {
-    const keyB64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64;
-    if (!keyB64) {
-      throw new Error('Missing Google service account credentials');
+    const parentId = normaliseDriveId(typeof folderId === 'string' ? folderId : null);
+    const uploadUrl = await getUploadUrl(
+      parentId,
+      fileName,
+      mimeType || 'application/octet-stream'
+    );
+    const buffer = Buffer.from(content, 'base64');
+    const uploadRes = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': mimeType || 'application/octet-stream',
+        'Content-Length': buffer.byteLength.toString(),
+      },
+      body: buffer,
+    });
+    if (!uploadRes.ok) {
+      const text = await uploadRes.text().catch(() => '');
+      throw new Error(`Drive upload failed with status ${uploadRes.status}: ${text}`);
     }
-    const keyJson = JSON.parse(Buffer.from(keyB64, 'base64').toString());
-    const delegatedUser = resolveGoogleServiceAccountDelegatedUser();
-    const auth = new google.auth.JWT({
-      email: keyJson.client_email,
-      key: keyJson.private_key,
-      scopes: ['https://www.googleapis.com/auth/drive.file'],
-      subject: delegatedUser ?? undefined,
-    });
-    await auth.authorize();
-
-    const drive = google.drive({ version: 'v3', auth });
-
-    const fileMetadata: any = { name: fileName };
-    if (folderId) fileMetadata.parents = [folderId];
-    const media = {
-      mimeType: mimeType || 'application/octet-stream',
-      body: Readable.from(Buffer.from(content, 'base64')),
-    };
-    const res = await drive.files.create({
-      requestBody: fileMetadata,
-      media,
-      fields: 'id',
-    });
-    return { fileId: res.data.id };
+    const responseJson = (await uploadRes.json().catch(() => null)) as { id?: string } | null;
+    return { fileId: responseJson?.id ?? null };
   } catch (err) {
     console.error('uploadToDrive error:', err);
     throw new functions.https.HttpsError('internal', 'Drive upload failed');
