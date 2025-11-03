@@ -1,4 +1,3 @@
-
 # Pineapple Portal — Firebase Monorepo Starter
 
 This starter uses **Firebase** (Auth, Firestore, Cloud Functions, optional Storage), with a **Next.js** web app and pluggable **storage adapters**:
@@ -49,6 +48,16 @@ Set env `STORAGE_ADAPTER` to one of: `firebase`, `gdrive`, `local`.
 - **local**: Run `services/local-storage-server` to store on disk and use signed PUT/GET URLs.
 
 See `packages/storage-adapters/README.md`.
+
+## Static Assets via GCS (immutable)
+Next.js static output (`.next/static/**`) and public assets (`public/**`) are uploaded to a dedicated Cloud Storage bucket on every deploy. The app renders all asset URLs with `NEXT_ASSET_BASE_URL`, which points to `https://storage.googleapis.com/<your-bucket>`, so every hashed chunk is fetched directly from Cloud Storage.
+
+Deployment flow:
+1. `npm run build` with `NEXT_ASSET_BASE_URL` exported (CI fills this automatically).
+2. `scripts/upload-static.sh` syncs the local `.next/static` and `public` directories to `gs://$GCS_BUCKET`, enables bucket versioning, and applies `Cache-Control: public,max-age=31536000,immutable` metadata.
+3. `firebase deploy --only apphosting` publishes the updated container image. The runtime also receives `NEXT_ASSET_BASE_URL`, so HTML references always target Cloud Storage.
+
+Because Cloud Storage retains previous objects (via versioning and not deleting old hashes), clients stuck on an older HTML payload can still load matching chunks without 404s, eliminating the `ChunkLoadError` during rollouts.
 
 ## Notes
 - Security Rules included in `firestore.rules` and `storage.rules` (tighten per your needs).

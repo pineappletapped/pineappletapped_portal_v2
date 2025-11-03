@@ -11,6 +11,7 @@ import { useCart } from '@/lib/cart';
 import type { Category } from '@/lib/categories';
 import type { Product } from '@/lib/products';
 import { getDb } from '@/lib/firebase';
+import { getAssetUrl } from '@/lib/asset-url';
 
 export default function SiteHeader({
   categories,
@@ -25,7 +26,7 @@ export default function SiteHeader({
   const [cartOpen, setCartOpen] = useState(false);
   const [openCat, setOpenCat] = useState<string | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [logoUrl, setLogoUrl] = useState('/logo-rectangle.svg');
+  const [logoUrl, setLogoUrl] = useState(() => getAssetUrl('/logo-rectangle.svg'));
   const flyoutRef = useRef<HTMLDivElement | null>(null);
   const cartSectionRef = useRef<HTMLDivElement | null>(null);
   const flyoutId = 'site-header-category-flyout';
@@ -118,7 +119,11 @@ export default function SiteHeader({
         if (!database) return;
         const snap = await getDoc(doc(database, 'settings', 'branding'));
         const data = snap.data() as any;
-        if (data?.logoUrl) setLogoUrl(data.logoUrl);
+        if (data?.logoUrl) {
+          setLogoUrl(
+            data.logoUrl.startsWith('http') ? data.logoUrl : getAssetUrl(data.logoUrl),
+          );
+        }
       } catch {
         // ignore
       }
