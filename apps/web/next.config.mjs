@@ -31,6 +31,10 @@ const nextConfig = {
       __dirname,
       '../../shared/config/hosting.js',
     );
+    config.resolve.alias['@backend'] = path.resolve(
+      __dirname,
+      '../../functions/src',
+    );
     return config;
   },
 };

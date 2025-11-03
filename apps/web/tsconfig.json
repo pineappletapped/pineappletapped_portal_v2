@@ -23,6 +23,12 @@
       ],
       "@shared-config": [
         "../../shared/config/hosting"
+      ],
+      "@backend": [
+        "../../functions/src"
+      ],
+      "@backend/*": [
+        "../../functions/src/*"
       ]
     },
     "incremental": true,
