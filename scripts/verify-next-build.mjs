@@ -15,6 +15,7 @@ async function main() {
   const requiredArtifacts = [
     'apps/web/.next/BUILD_ID',
     'apps/web/.next/standalone/server.js',
+    'apps/web/.next/standalone/_next/static',
   ];
 
   await Promise.all(requiredArtifacts.map((artifact) => ensureExists(artifact)));
