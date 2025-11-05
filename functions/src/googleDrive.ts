@@ -5,10 +5,13 @@ const DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive'];
 
 export type DriveClient = drive_v3.Drive;
 export type DriveFile = drive_v3.Schema$File;
-export type DrivePermissionInput = Pick<
-  drive_v3.Schema$Permission,
-  'type' | 'role' | 'emailAddress' | 'domain' | 'allowFileDiscovery'
->;
+export interface DrivePermissionInput {
+  type: NonNullable<drive_v3.Schema$Permission['type']>;
+  role: NonNullable<drive_v3.Schema$Permission['role']>;
+  emailAddress?: drive_v3.Schema$Permission['emailAddress'];
+  domain?: drive_v3.Schema$Permission['domain'];
+  allowFileDiscovery?: drive_v3.Schema$Permission['allowFileDiscovery'];
+}
 
 type DriveErrorContext = Record<string, unknown>;
 

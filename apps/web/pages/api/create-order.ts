@@ -1138,9 +1138,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const projectTitle = preferredProjectName ?? serviceName ?? `Order ${orderId}`;
 
     const franchiseEmailCandidates = new Set<string>();
-    if (assignmentMember?.userProfile?.email) {
-      franchiseEmailCandidates.add(assignmentMember.userProfile.email);
-    }
     const franchiseEmails = normaliseEmailList(franchiseEmailCandidates);
 
     const { parentFolderId, hqEmails } = await loadDriveSharingSettings(firestore);
