@@ -29,6 +29,11 @@ gsutil uniformbucketlevelaccess set on "${GCS_URI}" || true
 
 gsutil versioning set on "${GCS_URI}" || true
 
+# Ensure the bucket is publicly readable so static assets can be fetched by browsers.
+if ! gsutil iam get "${GCS_URI}" | grep -q 'roles/storage.objectViewer'; then
+  gsutil iam ch allUsers:objectViewer "${GCS_URI}"
+fi
+
 gsutil -m rsync -r "${BUILD_DIR}/static" "${GCS_URI}/_next/static"
 
 gsutil -m rsync -r "${PUBLIC_DIR}" "${GCS_URI}/public"

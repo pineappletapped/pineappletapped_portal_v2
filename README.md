@@ -54,7 +54,7 @@ Next.js static output (`.next/static/**`) and public assets (`public/**`) are up
 
 Deployment flow:
 1. `npm run build` with `NEXT_ASSET_BASE_URL` exported (CI fills this automatically).
-2. `scripts/upload-static.sh` syncs the local `.next/static` and `public` directories to `gs://$GCS_BUCKET`, enables bucket versioning, and applies `Cache-Control: public,max-age=31536000,immutable` metadata.
+2. `scripts/upload-static.sh` syncs the local `.next/static` and `public` directories to `gs://$GCS_BUCKET`, enables bucket versioning, applies `Cache-Control: public,max-age=31536000,immutable` metadata, and grants public read access (`roles/storage.objectViewer`) so browsers can fetch the assets.
 3. `firebase deploy --only apphosting` publishes the updated container image. The runtime also receives `NEXT_ASSET_BASE_URL`, so HTML references always target Cloud Storage.
 
 Because Cloud Storage retains previous objects (via versioning and not deleting old hashes), clients stuck on an older HTML payload can still load matching chunks without 404s, eliminating the `ChunkLoadError` during rollouts.
