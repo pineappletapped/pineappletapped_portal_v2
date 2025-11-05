@@ -1,0 +1,86 @@
+name: Drive Integration Tests
+
+on:
+  push:
+    branches:
+      - codex/fix-google-drive-integration-error
+
+jobs:
+  drive-integration:
+    runs-on: ubuntu-latest
+    env:
+      GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+      GDRIVE_DELEGATED_USER: ${{ secrets.GDRIVE_DELEGATED_USER }}
+      GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
+      NEXT_ASSET_BASE_URL: ${{ secrets.GCS_BUCKET != '' && format('https://storage.googleapis.com/{0}', secrets.GCS_BUCKET) || 'https://storage.googleapis.com/placeholder-bucket' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install web dependencies
+        run: npm --prefix apps/web ci
+
+      - name: Install functions dependencies
+        run: npm --prefix functions ci
+
+      - name: Type check Firebase Functions
+        run: npm --prefix functions exec tsc --noEmit
+
+      - name: Type check Next.js application
+        run: npm --prefix apps/web exec tsc --noEmit
+
+      - name: Lint Next.js API routes
+        run: npm --prefix apps/web run lint
+
+      - name: Mock Drive API smoke test
+        if: env.GDRIVE_SA_JSON != ''
+        run: |
+          node <<'NODE'
+          const { google } = require('googleapis');
+          const raw = process.env.GDRIVE_SA_JSON;
+          const decode = (value) => {
+            if (!value) return null;
+            if (value.trim().startsWith('{')) {
+              return value;
+            }
+            try {
+              return Buffer.from(value, 'base64').toString('utf8');
+            } catch (error) {
+              console.warn('Unable to decode base64 Drive credentials; falling back to raw value');
+              return value;
+            }
+          };
+          const decoded = decode(raw);
+          if (!decoded) {
+            console.log('Drive credentials missing after decode step; skipping smoke test.');
+            process.exit(0);
+          }
+          const parsed = JSON.parse(decoded);
+          const auth = new google.auth.GoogleAuth({
+            credentials: parsed,
+            scopes: ['https://www.googleapis.com/auth/drive.metadata.readonly'],
+            clientOptions: process.env.GDRIVE_DELEGATED_USER
+              ? { subject: process.env.GDRIVE_DELEGATED_USER }
+              : undefined,
+          });
+          auth
+            .getClient()
+            .then(() => console.log('Drive mock authentication succeeded.'))
+            .catch((error) => {
+              console.error('Drive mock authentication failed', error);
+              process.exitCode = 1;
+            });
+          NODE
+
+      - name: Note missing Drive credentials
+        if: env.GDRIVE_SA_JSON == ''
+        run: echo 'GDRIVE_SA_JSON not provided; skipping Drive smoke test.'

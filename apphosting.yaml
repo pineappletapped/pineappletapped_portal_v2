@@ -39,6 +39,11 @@ env:
     availability:
       - BUILD
       - RUNTIME
+  - variable: NEXT_ASSET_BASE_URL
+    value: https://storage.googleapis.com/pt-portal-static
+    availability:
+      - BUILD
+      - RUNTIME
 
   # Grant access to secrets in Cloud Secret Manager.
   # See https://firebase.google.com/docs/app-hosting/configure#secret-parameters

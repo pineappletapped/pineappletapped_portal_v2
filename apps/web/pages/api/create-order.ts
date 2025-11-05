@@ -5,10 +5,6 @@ import Stripe from "stripe";
 
 import { getFirebaseAdminAuth, getFirebaseAdminFirestore } from "@/lib/firebase-admin";
 import { getStripeClient } from "@/lib/stripe-config";
-import {
-  setupClientDriveStructure,
-  type DriveOrderProductContext,
-} from "@/lib/server/clientDrive";
 import { HttpFunctionInvocationError, invokeHttpFunction } from "@/lib/httpFunctions";
 
 import { applyApiCors, handleOptions } from "./_utils/cors";
@@ -627,9 +623,9 @@ const normaliseProductTaskList = (input: unknown): Array<{
 const collectProductDefaultTasks = async (
   firestore: Firestore,
   items: CheckoutItemPayload[],
-): Promise<{ tasks: ProductTaskSeed[]; driveProducts: DriveOrderProductContext[] }> => {
+): Promise<ProductTaskSeed[]> => {
   if (!items.length) {
-    return { tasks: [], driveProducts: [] };
+    return [];
   }
 
   const productQuantities = new Map<string, number>();
@@ -641,7 +637,7 @@ const collectProductDefaultTasks = async (
 
   const uniqueProductIds = Array.from(productQuantities.keys());
   if (uniqueProductIds.length === 0) {
-    return { tasks: [], driveProducts: [] };
+    return [];
   }
 
   const productsCollection = firestore.collection("products");
@@ -658,7 +654,6 @@ const collectProductDefaultTasks = async (
   );
 
   const seeds: ProductTaskSeed[] = [];
-  const driveProducts: DriveOrderProductContext[] = [];
   snapshots.forEach((entry) => {
     if (!entry) {
       return;
@@ -674,19 +669,6 @@ const collectProductDefaultTasks = async (
     const productName = typeof data.name === "string" && data.name.trim().length > 0 ? data.name.trim() : null;
 
     const quantity = productQuantities.get(productId) ?? 1;
-    const templateFolderIdRaw =
-      typeof data.driveTemplateFolderId === "string" ? data.driveTemplateFolderId.trim() : "";
-    const folderNameOverrideRaw =
-      typeof data.driveFolderName === "string" ? data.driveFolderName.trim() : "";
-
-    driveProducts.push({
-      productId,
-      name: productName ?? productId,
-      quantity,
-      templateFolderId: templateFolderIdRaw.length > 0 ? templateFolderIdRaw : null,
-      folderName: folderNameOverrideRaw.length > 0 ? folderNameOverrideRaw : null,
-    });
-
     const tasks = normaliseProductTaskList(data.defaultTasks);
     if (!tasks.length) {
       return;
@@ -703,7 +685,180 @@ const collectProductDefaultTasks = async (
     });
   });
 
-  return { tasks: seeds, driveProducts };
+  return seeds;
+};
+
+interface DriveFolderMetadata {
+  id: string;
+  name: string | null;
+  parents: string[] | null | undefined;
+  webViewLink: string | null;
+}
+
+interface DriveProvisionRequest {
+  clientName: string;
+  orderId: string;
+  parentFolderId: string | null;
+  clientEmails: string[];
+  hqEmails: string[];
+  franchiseEmails: string[];
+}
+
+interface DriveProvisionResponse {
+  folder: {
+    id: string;
+    name?: string | null;
+    webViewLink?: string | null;
+    parents?: string[] | null;
+  };
+  orderId?: string | null;
+}
+
+const resolveHeaderValue = (value: string | string[] | undefined): string | null => {
+  if (Array.isArray(value)) {
+    return value[0] ?? null;
+  }
+  return typeof value === "string" ? value : null;
+};
+
+const resolveRequestOrigin = (req: NextApiRequest): string => {
+  const explicit = process.env.INTERNAL_APP_BASE_URL || process.env.NEXT_PUBLIC_APP_ORIGIN;
+  if (explicit) {
+    return explicit;
+  }
+
+  const forwardedProto = resolveHeaderValue(req.headers["x-forwarded-proto"]);
+  const forwardedHost = resolveHeaderValue(req.headers["x-forwarded-host"]);
+  const hostHeader = resolveHeaderValue(req.headers.host);
+
+  const protocol = forwardedProto?.split(",")[0]?.trim() || "https";
+  const host = forwardedHost || hostHeader || "localhost:3000";
+
+  return `${protocol}://${host}`;
+};
+
+const normaliseEmailList = (values: Iterable<string>): string[] => {
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const trimmed = raw.trim().toLowerCase();
+    if (trimmed) {
+      seen.add(trimmed);
+    }
+  }
+  return Array.from(seen);
+};
+
+const loadDriveSharingSettings = async (
+  firestore: Firestore,
+): Promise<{ parentFolderId: string | null; hqEmails: string[] }> => {
+  try {
+    const settingsSnap = await firestore.collection("settings").doc("clientDrive").get();
+    const data = (settingsSnap.data() ?? {}) as Record<string, unknown>;
+    const rootIdRaw = typeof data.clientRootFolderId === "string" ? data.clientRootFolderId.trim() : "";
+    const parentFolderId = rootIdRaw.length > 0 ? rootIdRaw : null;
+    const hqEmailsRaw = Array.isArray(data.hqEmails) ? data.hqEmails : [];
+    const hqEmails = normaliseEmailList(
+      hqEmailsRaw.map((value) => (typeof value === "string" ? value : "")),
+    );
+    return { parentFolderId, hqEmails };
+  } catch (error) {
+    console.warn("Failed to load Drive sharing settings", error);
+    return { parentFolderId: null, hqEmails: [] };
+  }
+};
+
+const requestDriveFolderProvision = async (
+  req: NextApiRequest,
+  payload: DriveProvisionRequest,
+): Promise<DriveFolderMetadata> => {
+  const origin = resolveRequestOrigin(req);
+  const endpoint = new URL("/api/drive/create-client-folder", origin);
+
+  const response = await fetch(endpoint.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      clientName: payload.clientName,
+      parentFolderId: payload.parentFolderId,
+      orderId: payload.orderId,
+      clientEmails: payload.clientEmails,
+      hqEmails: payload.hqEmails,
+      franchiseEmails: payload.franchiseEmails,
+    }),
+  });
+
+  const rawBody = await response.text();
+  let parsedBody: unknown = null;
+  if (rawBody) {
+    try {
+      parsedBody = JSON.parse(rawBody) as unknown;
+    } catch (error) {
+      if (response.ok) {
+        const parseError = new Error("Drive folder provisioning returned invalid JSON.");
+        (parseError as Error & { details?: unknown }).details = {
+          responseSnippet: rawBody.slice(0, 200),
+          cause: error instanceof Error ? error.message : "parse_error",
+        };
+        throw parseError;
+      }
+    }
+  }
+
+  if (!response.ok) {
+    let message = `Drive folder provisioning failed with status ${response.status}`;
+    let errorCode: string | undefined;
+    if (parsedBody && typeof parsedBody === "object") {
+      const record = parsedBody as Record<string, unknown>;
+      if (record.error === true && typeof record.message === "string") {
+        message = record.message;
+      } else if (typeof record.error === "string") {
+        message = record.error;
+      }
+      if (typeof record.code === "string") {
+        errorCode = record.code;
+      }
+    } else if (rawBody) {
+      message = `${message}: ${rawBody}`;
+    }
+    const error = new Error(message);
+    if (errorCode) {
+      (error as Error & { code?: string }).code = errorCode;
+    }
+    (error as Error & { details?: unknown }).details = parsedBody ?? rawBody;
+    throw error;
+  }
+
+  if (!parsedBody || typeof parsedBody !== "object") {
+    throw new Error("Drive folder provisioning response missing payload");
+  }
+
+  const body = parsedBody as DriveProvisionResponse;
+  if (!body.folder || typeof body.folder.id !== "string") {
+    throw new Error("Drive folder provisioning response missing folder details");
+  }
+
+  return {
+    id: body.folder.id,
+    name: body.folder.name ?? null,
+    parents: body.folder.parents,
+    webViewLink: body.folder.webViewLink ?? null,
+  };
+};
+
+const buildClientDocumentId = (orderId: string, clientKey: string | null): string => {
+  if (clientKey) {
+    const slug = clientKey
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    if (slug.length >= 6 && slug.length <= 100) {
+      return slug;
+    }
+  }
+  return `order-${orderId}`;
 };
 
 const parseCheckoutRequest = (body: unknown): NormalisedCheckoutData | null => {
@@ -982,6 +1137,52 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         : null;
     const projectTitle = preferredProjectName ?? serviceName ?? `Order ${orderId}`;
 
+    const franchiseEmailCandidates = new Set<string>();
+    const franchiseEmails = normaliseEmailList(franchiseEmailCandidates);
+
+    const { parentFolderId, hqEmails } = await loadDriveSharingSettings(firestore);
+
+    let driveFolder: DriveFolderMetadata | null = null;
+    try {
+      driveFolder = await requestDriveFolderProvision(req, {
+        clientName: companyName ?? customerName ?? projectTitle,
+        orderId,
+        parentFolderId,
+        clientEmails: driveEmails,
+        hqEmails,
+        franchiseEmails,
+      });
+    } catch (error) {
+      console.error("Failed to provision Drive folder for order", {
+        error,
+        orderId,
+      });
+      if (paymentIntent && stripeClient) {
+        try {
+          await stripeClient.paymentIntents.cancel(paymentIntent.id);
+        } catch (cancelError) {
+          console.warn("Failed to cancel payment intent after Drive provisioning error", {
+            paymentIntentId: paymentIntent.id,
+            error: cancelError,
+          });
+        }
+      }
+      const driveErrorDetails =
+        error && typeof error === "object"
+          ? {
+              message: (error as Error).message ?? null,
+              code: (error as Error & { code?: string }).code ?? null,
+            }
+          : null;
+      respond(res, 502, {
+        error: true,
+        message: "Unable to prepare the Drive workspace for this order. Please try again later.",
+        code: "drive-folder-error",
+        details: driveErrorDetails,
+      });
+      return;
+    }
+
     const projectDocument: Record<string, unknown> = {
       name: projectTitle,
       title: projectTitle,
@@ -1019,6 +1220,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       customerWelcomePending: true,
       customerWelcomeAcknowledgedAt: null,
     };
+
+    if (driveFolder) {
+      projectDocument.driveFolderId = driveFolder.id;
+      projectDocument.driveFolderName = driveFolder.name ?? null;
+      projectDocument.driveFolderUrl = driveFolder.webViewLink ?? null;
+    }
 
     if (primaryEventDate) {
       const eventTimestamp = Timestamp.fromDate(primaryEventDate);
@@ -1116,6 +1323,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       orderDocument.shootDate = Timestamp.fromDate(primaryEventDate);
     }
 
+    if (driveFolder) {
+      orderDocument.drive = {
+        status: "ready",
+        clientFolderId: driveFolder.id,
+        clientFolderName: driveFolder.name ?? null,
+        clientFolderUrl: driveFolder.webViewLink ?? null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+    }
+
     try {
       await orderRef.set(orderDocument, { merge: false });
       orderCreated = true;
@@ -1143,56 +1361,52 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return;
     }
 
-    let productDefaults: { tasks: ProductTaskSeed[]; driveProducts: DriveOrderProductContext[] } = {
-      tasks: [],
-      driveProducts: [],
-    };
+    let productDefaultTasks: ProductTaskSeed[] = [];
     try {
-      productDefaults = await collectProductDefaultTasks(firestore, parsedBody.order.items);
+      productDefaultTasks = await collectProductDefaultTasks(firestore, parsedBody.order.items);
     } catch (error) {
       console.error("Failed to load product defaults for project", { error, projectId, orderId });
     }
 
-    try {
-      await setupClientDriveStructure(
-        { firestore, FieldValue, Timestamp },
-        {
-          orderId,
-          orderRef,
-          clientKey: driveClientKey,
-          clientKeyType: driveClientKeyType,
+    if (driveFolder) {
+      try {
+        const clientsCollection = firestore.collection("clients");
+        const clientDocId = buildClientDocumentId(orderId, driveClientKey);
+        const clientDocRef = clientsCollection.doc(clientDocId);
+        const clientUpdate: Record<string, unknown> = {
+          key: driveClientKey ?? null,
+          keyType: driveClientKeyType ?? null,
           companyName,
           customerName,
-          projectName: projectTitle,
-          emails: driveEmails,
-          franchise: { id: null, label: null, emails: [] },
-          products: productDefaults.driveProducts,
-          affiliate: null,
-        },
-      );
-    } catch (error) {
-      console.error("Failed to set up Drive structure for order", { error, orderId });
-      try {
-        await orderRef.set(
-          {
-            drive: {
-              status: "error",
-              errorMessage: error instanceof Error ? error.message : "drive_setup_failed",
-              updatedAt: FieldValue.serverTimestamp(),
-            },
+          updatedAt: FieldValue.serverTimestamp(),
+          drive: {
+            clientFolderId: driveFolder.id,
+            clientFolderName: driveFolder.name ?? null,
+            clientFolderUrl: driveFolder.webViewLink ?? null,
+            lastOrderId: orderId,
+            lastUpdatedAt: FieldValue.serverTimestamp(),
           },
-          { merge: true },
-        );
-      } catch (driveUpdateError) {
-        console.warn("Failed to record Drive setup error state", { orderId, error: driveUpdateError });
+        };
+        if (driveEmails.length > 0) {
+          clientUpdate.emails = FieldValue.arrayUnion(...driveEmails);
+        }
+        if (franchiseEmails.length > 0) {
+          clientUpdate.franchiseEmails = FieldValue.arrayUnion(...franchiseEmails);
+        }
+        await clientDocRef.set(clientUpdate, { merge: true });
+      } catch (clientUpdateError) {
+        console.error("Failed to persist Drive folder metadata on client record", {
+          error: clientUpdateError,
+          orderId,
+        });
       }
     }
 
-    if (productDefaults.tasks.length > 0) {
+    if (productDefaultTasks.length > 0) {
       try {
         const batch = firestore.batch();
         const tasksCollection = projectRef.collection("tasks");
-        productDefaults.tasks.forEach((task) => {
+        productDefaultTasks.forEach((task) => {
           const taskRef = tasksCollection.doc();
           batch.set(taskRef, {
             title: task.title,

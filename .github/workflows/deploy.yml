@@ -1,0 +1,66 @@
+name: Deploy App Hosting
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ steps.auth.outputs.project_id }}
+          install_components: gsutil
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Build Next.js app with asset prefix
+        env:
+          GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
+          NEXT_ASSET_BASE_URL_SECRET: ${{ secrets.NEXT_ASSET_BASE_URL }}
+        run: |
+          if [[ -z "${GCS_BUCKET}" ]]; then
+            echo "GCS_BUCKET secret must be set" >&2
+            exit 1
+          fi
+          ASSET_BASE="${NEXT_ASSET_BASE_URL_SECRET:-https://storage.googleapis.com/${GCS_BUCKET}}"
+          echo "Using NEXT_ASSET_BASE_URL=${ASSET_BASE}"
+          NEXT_ASSET_BASE_URL="${ASSET_BASE}" npm run build
+
+      - name: Upload static assets to Cloud Storage
+        env:
+          CACHE_MAX_AGE: ${{ vars.CACHE_MAX_AGE }}
+          GCP_PROJECT: ${{ steps.auth.outputs.project_id }}
+        run: bash scripts/upload-static.sh
+
+      - name: Deploy to Firebase App Hosting
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: firebase deploy --only apphosting

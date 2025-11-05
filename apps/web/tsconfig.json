@@ -23,6 +23,18 @@
       ],
       "@shared-config": [
         "../../shared/config/hosting"
+      ],
+      "@backend": [
+        "../../functions/src"
+      ],
+      "@backend/*": [
+        "../../functions/src/*"
+      ],
+      "googleapis": [
+        "./node_modules/googleapis/build/src/index"
+      ],
+      "google-auth-library": [
+        "./node_modules/google-auth-library/build/src/index"
       ]
     },
     "incremental": true,

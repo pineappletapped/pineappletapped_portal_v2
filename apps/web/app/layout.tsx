@@ -7,6 +7,7 @@ import { getProducts } from '@/lib/products';
 import CookieBanner from '@/components/CookieBanner';
 import AnalyticsScripts from '@/components/AnalyticsScripts';
 import PineappleThemeProvider from '@/components/theme/ThemeProvider';
+import { getAssetUrl } from '@/lib/asset-url';
 import {
   Box,
   Container,
@@ -23,7 +24,7 @@ import MusicNoteIcon from '@mui/icons-material/MusicNote';
 export const metadata = {
   title: 'Pineapple Portal',
   description: 'Client portal',
-  icons: { icon: '/logo-icon.svg' },
+  icons: { icon: getAssetUrl('/logo-icon.svg') },
 };
 export const viewport = { width: 'device-width', initialScale: 1 };
 

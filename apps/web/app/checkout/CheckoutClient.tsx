@@ -1140,6 +1140,8 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
             return "You do not have permission to complete this order.";
           case "invalid-argument":
             return "Checkout details were incomplete. Review your information and try again.";
+          case "drive-folder-error":
+            return "Unable to create the Drive workspace for this order. Please try again later.";
           default:
             break;
         }
@@ -1240,28 +1242,57 @@ function CheckoutClient({ publishableKey }: CheckoutClientProps) {
       }
 
       if (!response.ok) {
-        const message =
-          (payload && typeof payload === "object" && payload !== null && "error" in payload &&
-            typeof (payload as { error: unknown }).error === "string"
-            ? ((payload as { error: string }).error as string)
-            : response.status === 404
-              ? "Checkout service is unavailable. Please try again shortly."
-              : `Order service responded with ${response.status}`);
-        const error = new Error(message);
+        let message: string | null = null;
+        let code: string | undefined;
+        let details: unknown;
         if (payload && typeof payload === "object" && payload !== null) {
           const record = payload as Record<string, unknown>;
+          if (record.error === true && typeof record.message === "string") {
+            message = record.message;
+          } else if (typeof record.error === "string") {
+            message = record.error;
+          }
           if (typeof record.code === "string") {
-            (error as Error & { code?: string }).code = record.code;
+            code = record.code;
           }
           if ("details" in record) {
-            (error as Error & { details?: unknown }).details = record.details;
+            details = record.details;
           }
+        }
+        if (!message) {
+          message =
+            response.status === 404
+              ? "Checkout service is unavailable. Please try again shortly."
+              : `Order service responded with ${response.status}`;
+        }
+        const error = new Error(message);
+        if (code) {
+          (error as Error & { code?: string }).code = code;
+        }
+        if (details !== undefined) {
+          (error as Error & { details?: unknown }).details = details;
         }
         throw error;
       }
 
       if (!payload || typeof payload !== "object") {
         return {};
+      }
+
+      if ((payload as { error?: unknown }).error === true) {
+        const record = payload as Record<string, unknown> & { message?: string };
+        const message =
+          typeof record.message === "string"
+            ? record.message
+            : "We couldn't complete your order. Please try again.";
+        const error = new Error(message);
+        if (typeof record.code === "string") {
+          (error as Error & { code?: string }).code = record.code;
+        }
+        if ("details" in record) {
+          (error as Error & { details?: unknown }).details = record.details;
+        }
+        throw error;
       }
 
       const result = payload as CreateOrderResult;
