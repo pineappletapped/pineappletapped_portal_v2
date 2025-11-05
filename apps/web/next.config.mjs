@@ -2,15 +2,18 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const assetBase = process.env.NEXT_ASSET_BASE_URL ?? '';
+const rawAssetBase = process.env.NEXT_ASSET_BASE_URL ?? '';
+const normalizedAssetBase = rawAssetBase.trim().replace(/\/+$/, '');
+const assetPrefix = normalizedAssetBase || undefined;
+const publicAssetBase = normalizedAssetBase ? `${normalizedAssetBase}/` : '';
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
-  assetPrefix: assetBase || undefined,
+  assetPrefix,
   env: {
-    NEXT_PUBLIC_ASSET_BASE_URL: assetBase,
+    NEXT_PUBLIC_ASSET_BASE_URL: publicAssetBase,
   },
   images: {
     remotePatterns: [
