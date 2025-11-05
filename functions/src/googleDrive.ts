@@ -10,6 +10,38 @@ export type DrivePermissionInput = Pick<
   'type' | 'role' | 'emailAddress' | 'domain' | 'allowFileDiscovery'
 >;
 
+type DriveErrorContext = Record<string, unknown>;
+
+function createDriveError(
+  action: string,
+  error: unknown,
+  context?: DriveErrorContext,
+): Error {
+  const baseMessage = `${action} failed`;
+  const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
+  const driveError = new Error(`${baseMessage}${detail}`);
+  if (error instanceof Error) {
+    (driveError as Error & { cause?: unknown }).cause = error;
+    const code = (error as Error & { code?: unknown }).code;
+    if (typeof code === 'string') {
+      (driveError as Error & { code?: string }).code = code;
+    }
+  }
+  if (context) {
+    (driveError as Error & { context?: DriveErrorContext }).context = context;
+  }
+  return driveError;
+}
+
+function handleDriveError(
+  action: string,
+  error: unknown,
+  context?: DriveErrorContext,
+): never {
+  console.error(`[Drive] ${action} failed`, { context, error });
+  throw createDriveError(action, error, context);
+}
+
 function sanitiseDriveName(name: string | null | undefined, fallback: string): string {
   const raw = typeof name === 'string' ? name.trim() : '';
   const base = raw.length > 0 ? raw : fallback;
@@ -76,14 +108,20 @@ function resolveDelegatedUser(): string | null {
 
 async function getAuthClient() {
   if (!authClientPromise) {
-    const credentials = parseServiceAccount();
-    const delegatedUser = resolveDelegatedUser();
-    const googleAuth = new google.auth.GoogleAuth({
-      credentials,
-      scopes: DRIVE_SCOPES,
-      clientOptions: delegatedUser ? { subject: delegatedUser } : undefined,
-    });
-    authClientPromise = googleAuth.getClient() as Promise<JWT>;
+    authClientPromise = (async () => {
+      try {
+        const credentials = parseServiceAccount();
+        const delegatedUser = resolveDelegatedUser();
+        const googleAuth = new google.auth.GoogleAuth({
+          credentials,
+          scopes: DRIVE_SCOPES,
+          clientOptions: delegatedUser ? { subject: delegatedUser } : undefined,
+        });
+        return (await googleAuth.getClient()) as JWT;
+      } catch (error) {
+        handleDriveError('Initialise Google auth client', error);
+      }
+    })();
   }
 
   return authClientPromise;
@@ -91,9 +129,14 @@ async function getAuthClient() {
 
 export async function getDriveClient(): Promise<DriveClient> {
   if (!driveClientPromise) {
-    driveClientPromise = getAuthClient().then((auth) =>
-      google.drive({ version: 'v3', auth })
-    );
+    driveClientPromise = (async () => {
+      try {
+        const auth = await getAuthClient();
+        return google.drive({ version: 'v3', auth });
+      } catch (error) {
+        handleDriveError('Initialise Google Drive client', error);
+      }
+    })();
   }
 
   return driveClientPromise;
@@ -120,7 +163,7 @@ export async function createFolder(
   name: string,
   parentId?: string | null,
   drive?: DriveClient,
-): Promise<string | null> {
+): Promise<string> {
   const client = drive ?? (await getDriveClient());
   try {
     const metadata: drive_v3.Schema$File = {
@@ -136,10 +179,16 @@ export async function createFolder(
       fields: 'id',
       supportsAllDrives: true,
     });
-    return response.data.id ?? null;
+    const folderId = response.data.id;
+    if (!folderId) {
+      throw new Error('Drive API did not return a folder ID');
+    }
+    return folderId;
   } catch (error) {
-    console.error('Failed to create Drive folder', { name, parentId }, error);
-    return null;
+    handleDriveError('Create Drive folder', error, {
+      name,
+      parentId: normaliseParentId(parentId),
+    });
   }
 }
 
@@ -147,7 +196,7 @@ export async function createClientFolder(
   clientName: string,
   parentId?: string | null,
   drive?: DriveClient,
-): Promise<string | null> {
+): Promise<string> {
   const explicitParent = normaliseParentId(parentId);
   const fallbackParent = normaliseParentId(process.env.GDRIVE_CLIENT_ROOT_ID ?? null);
   return createFolder(clientName, explicitParent ?? fallbackParent, drive);
@@ -171,7 +220,8 @@ export async function resolveExistingFolder(
       return null;
     }
     return res.data?.id ?? folderId;
-  } catch {
+  } catch (error) {
+    console.warn('[Drive] Failed to resolve existing folder', { folderId, error });
     return null;
   }
 }
@@ -197,19 +247,27 @@ export async function listFolderContents(
   let pageToken: string | undefined;
   const fields = options.fields || 'id, name, mimeType';
   do {
-    const response = await client.files.list({
-      q: filters.join(' and '),
-      fields: `nextPageToken, files(${fields})`,
-      pageSize: options.pageSize ?? 100,
-      pageToken,
-      orderBy: options.orderBy,
-      includeItemsFromAllDrives: true,
-      supportsAllDrives: true,
-    });
-    if (response.data.files) {
-      files.push(...response.data.files);
+    try {
+      const response = await client.files.list({
+        q: filters.join(' and '),
+        fields: `nextPageToken, files(${fields})`,
+        pageSize: options.pageSize ?? 100,
+        pageToken,
+        orderBy: options.orderBy,
+        includeItemsFromAllDrives: true,
+        supportsAllDrives: true,
+      });
+      if (response.data.files) {
+        files.push(...response.data.files);
+      }
+      pageToken = response.data.nextPageToken ?? undefined;
+    } catch (error) {
+      handleDriveError('List Drive folder contents', error, {
+        folderId,
+        pageToken,
+        mimeType: options.mimeType,
+      });
     }
-    pageToken = response.data.nextPageToken ?? undefined;
   } while (pageToken);
 
   return files;
@@ -235,13 +293,22 @@ export async function copyFolderContents(
   const children = await listFolderContents(sourceFolderId, client);
   for (const child of children) {
     if (!child.id) {
+      console.warn('[Drive] Skipping copy for Drive file without id', {
+        sourceFolderId,
+        destinationFolderId,
+      });
       continue;
     }
     if (child.mimeType === 'application/vnd.google-apps.folder') {
       const folderName = sanitiseDriveName(child.name ?? null, 'Folder');
-      const newFolderId = await createFolder(folderName, destinationFolderId, client);
-      if (newFolderId) {
+      try {
+        const newFolderId = await createFolder(folderName, destinationFolderId, client);
         await copyFolderContents(child.id, newFolderId, client);
+      } catch (error) {
+        console.error('[Drive] Failed to copy Drive folder contents', {
+          sourceFolderId: child.id,
+          destinationFolderId,
+        }, error);
       }
     } else {
       try {
@@ -254,7 +321,10 @@ export async function copyFolderContents(
           },
         });
       } catch (error) {
-        console.error('Failed to copy Drive file', child.id, error);
+        console.error('[Drive] Failed to copy Drive file', {
+          fileId: child.id,
+          destinationFolderId,
+        }, error);
       }
     }
   }
@@ -286,7 +356,11 @@ export async function ensureChildFolder(
       return { id: matchId, created: false };
     }
   } catch (error) {
-    console.warn('Failed to look up Drive folder by name', error);
+    console.warn('[Drive] Failed to look up Drive folder by name', {
+      parentId,
+      desiredName,
+      error,
+    });
   }
 
   const folderId = await createFolder(desiredName, parentId, drive);
@@ -294,7 +368,10 @@ export async function ensureChildFolder(
     try {
       await copyFolderContents(templateFolderId, folderId, drive);
     } catch (error) {
-      console.error('Failed to copy Drive template into folder', error);
+      console.error('[Drive] Failed to copy Drive template into folder', {
+        templateFolderId,
+        folderId,
+      }, error);
     }
   }
 
@@ -307,6 +384,7 @@ export async function setPermissions(
   drive?: DriveClient,
 ): Promise<void> {
   const client = drive ?? (await getDriveClient());
+  let lastError: Error | null = null;
   for (const permission of permissions) {
     if (!permission.type || !permission.role) {
       continue;
@@ -322,8 +400,18 @@ export async function setPermissions(
       if (error?.code === 409) {
         continue;
       }
-      console.warn('Failed to apply Drive permission', fileId, permission, error);
+      console.error('[Drive] Failed to apply Drive permission', {
+        fileId,
+        permission,
+      }, error);
+      lastError = createDriveError('Apply Drive permission', error, {
+        fileId,
+        permission,
+      });
     }
+  }
+  if (lastError) {
+    throw lastError;
   }
 }
 
@@ -345,7 +433,14 @@ export async function shareFolder(
   if (permissions.length === 0) {
     return;
   }
-  await setPermissions(folderId, permissions, drive);
+  try {
+    await setPermissions(folderId, permissions, drive);
+  } catch (error) {
+    handleDriveError('Share Drive folder', error, {
+      folderId,
+      emails: Array.from(seen),
+    });
+  }
 }
 
 export async function getUploadUrl(
@@ -353,42 +448,50 @@ export async function getUploadUrl(
   fileName: string,
   mimeType = 'application/octet-stream',
 ): Promise<string> {
-  const authClient = await getAuthClient();
-  const token = await authClient.getAccessToken();
-  if (!token) {
-    throw new Error('Failed to obtain Google Drive access token');
+  try {
+    const authClient = await getAuthClient();
+    const token = await authClient.getAccessToken();
+    if (!token) {
+      throw new Error('Failed to obtain Google Drive access token');
+    }
+
+    const url = new URL('https://www.googleapis.com/upload/drive/v3/files');
+    url.searchParams.set('uploadType', 'resumable');
+    url.searchParams.set('supportsAllDrives', 'true');
+    url.searchParams.set('fields', 'id');
+
+    const body: Record<string, any> = { name: fileName };
+    const parent = normaliseParentId(folderId);
+    if (parent) {
+      body.parents = [parent];
+    }
+
+    const response = await fetch(url.toString(), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': mimeType,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(`Failed to create Drive upload session (${response.status}): ${text}`);
+    }
+
+    const uploadUrl = response.headers.get('location');
+    if (!uploadUrl) {
+      throw new Error('Drive upload session did not return a Location header');
+    }
+
+    return uploadUrl;
+  } catch (error) {
+    handleDriveError('Create Drive upload session', error, {
+      folderId: normaliseParentId(folderId),
+      fileName,
+      mimeType,
+    });
   }
-
-  const url = new URL('https://www.googleapis.com/upload/drive/v3/files');
-  url.searchParams.set('uploadType', 'resumable');
-  url.searchParams.set('supportsAllDrives', 'true');
-  url.searchParams.set('fields', 'id');
-
-  const body: Record<string, any> = { name: fileName };
-  const parent = normaliseParentId(folderId);
-  if (parent) {
-    body.parents = [parent];
-  }
-
-  const response = await fetch(url.toString(), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json; charset=UTF-8',
-      'X-Upload-Content-Type': mimeType,
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(`Failed to create Drive upload session (${response.status}): ${text}`);
-  }
-
-  const uploadUrl = response.headers.get('location');
-  if (!uploadUrl) {
-    throw new Error('Drive upload session did not return a Location header');
-  }
-
-  return uploadUrl;
 }

@@ -25,6 +25,14 @@ interface CreateClientFolderResponse {
   orderId?: string | null;
 }
 
+interface ApiErrorResponse {
+  error: true;
+  message: string;
+  code?: string;
+}
+
+type CreateClientFolderResult = CreateClientFolderResponse | ApiErrorResponse;
+
 const isStringArray = (value: unknown): value is string[] => {
   if (!Array.isArray(value)) {
     return false;
@@ -66,41 +74,80 @@ const buildPermissions = (
   return permissions;
 };
 
+const respondWithError = (
+  res: NextApiResponse<ApiErrorResponse>,
+  status: number,
+  message: string,
+  code?: string,
+) => {
+  const payload = code ? { error: true as const, message, code } : { error: true as const, message };
+  res.status(status).json(payload);
+};
+
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<CreateClientFolderResponse | { error: string }>,
+  res: NextApiResponse<CreateClientFolderResult>,
 ) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
-    res.status(405).json({ error: 'Method Not Allowed' });
+    respondWithError(res, 405, 'Method Not Allowed', 'method-not-allowed');
     return;
   }
 
   const { clientName, parentFolderId, orderId, hqEmails, franchiseEmails, clientEmails } =
     (req.body ?? {}) as CreateClientFolderRequest;
 
-  if (!clientName || typeof clientName !== 'string') {
-    res.status(400).json({ error: 'clientName must be provided' });
+  if (!clientName || typeof clientName !== 'string' || !clientName.trim()) {
+    respondWithError(res, 400, 'Client name must be provided.', 'invalid-client');
     return;
   }
 
+  const context = {
+    clientName,
+    parentFolderId: parentFolderId ?? null,
+    orderId: orderId ?? null,
+  };
+
+  let folderId: string;
   try {
-    const folderId = await createClientFolder(clientName, parentFolderId ?? undefined);
-    if (!folderId) {
-      res.status(500).json({ error: 'Failed to create Drive folder' });
+    folderId = await createClientFolder(clientName, parentFolderId ?? undefined);
+  } catch (error) {
+    console.error('create-client-folder: failed to create Drive folder', { ...context, error });
+    respondWithError(
+      res,
+      500,
+      'Unable to create Drive folder. Please try again later.',
+      'drive-folder-create-failed',
+    );
+    return;
+  }
+
+  const permissions = buildPermissions(
+    normaliseEmailList(hqEmails),
+    normaliseEmailList(franchiseEmails),
+    normaliseEmailList(clientEmails),
+  );
+
+  if (permissions.length > 0) {
+    try {
+      await setPermissions(folderId, permissions);
+    } catch (error) {
+      console.error('create-client-folder: failed to assign Drive permissions', {
+        ...context,
+        folderId,
+        error,
+      });
+      respondWithError(
+        res,
+        500,
+        'Drive folder created but permissions could not be updated. Please try again later.',
+        'drive-folder-permissions-failed',
+      );
       return;
     }
+  }
 
-    const permissions = buildPermissions(
-      normaliseEmailList(hqEmails),
-      normaliseEmailList(franchiseEmails),
-      normaliseEmailList(clientEmails),
-    );
-
-    if (permissions.length > 0) {
-      await setPermissions(folderId, permissions);
-    }
-
+  try {
     const drive = await getDriveClient();
     const metadata = await drive.files.get({
       fileId: folderId,
@@ -120,7 +167,16 @@ export default async function handler(
       orderId: orderId ?? null,
     });
   } catch (error) {
-    console.error('create-client-folder handler failed', error);
-    res.status(500).json({ error: error instanceof Error ? error.message : 'internal_error' });
+    console.error('create-client-folder: failed to fetch Drive folder metadata', {
+      ...context,
+      folderId,
+      error,
+    });
+    respondWithError(
+      res,
+      500,
+      'Drive folder was created but details could not be retrieved. Please try again later.',
+      'drive-folder-metadata-failed',
+    );
   }
 }

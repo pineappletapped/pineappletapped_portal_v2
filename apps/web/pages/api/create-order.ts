@@ -789,14 +789,52 @@ const requestDriveFolderProvision = async (
     }),
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `Drive folder provisioning failed with status ${response.status}: ${errorText || response.statusText}`,
-    );
+  const rawBody = await response.text();
+  let parsedBody: unknown = null;
+  if (rawBody) {
+    try {
+      parsedBody = JSON.parse(rawBody) as unknown;
+    } catch (error) {
+      if (response.ok) {
+        const parseError = new Error("Drive folder provisioning returned invalid JSON.");
+        (parseError as Error & { details?: unknown }).details = {
+          responseSnippet: rawBody.slice(0, 200),
+          cause: error instanceof Error ? error.message : "parse_error",
+        };
+        throw parseError;
+      }
+    }
   }
 
-  const body = (await response.json()) as DriveProvisionResponse;
+  if (!response.ok) {
+    let message = `Drive folder provisioning failed with status ${response.status}`;
+    let errorCode: string | undefined;
+    if (parsedBody && typeof parsedBody === "object") {
+      const record = parsedBody as Record<string, unknown>;
+      if (record.error === true && typeof record.message === "string") {
+        message = record.message;
+      } else if (typeof record.error === "string") {
+        message = record.error;
+      }
+      if (typeof record.code === "string") {
+        errorCode = record.code;
+      }
+    } else if (rawBody) {
+      message = `${message}: ${rawBody}`;
+    }
+    const error = new Error(message);
+    if (errorCode) {
+      (error as Error & { code?: string }).code = errorCode;
+    }
+    (error as Error & { details?: unknown }).details = parsedBody ?? rawBody;
+    throw error;
+  }
+
+  if (!parsedBody || typeof parsedBody !== "object") {
+    throw new Error("Drive folder provisioning response missing payload");
+  }
+
+  const body = parsedBody as DriveProvisionResponse;
   if (!body.folder || typeof body.folder.id !== "string") {
     throw new Error("Drive folder provisioning response missing folder details");
   }
@@ -1118,7 +1156,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         franchiseEmails,
       });
     } catch (error) {
-      console.error("Failed to provision Drive folder for order", { error, orderId });
+      console.error("Failed to provision Drive folder for order", {
+        error,
+        orderId,
+      });
       if (paymentIntent && stripeClient) {
         try {
           await stripeClient.paymentIntents.cancel(paymentIntent.id);
@@ -1129,7 +1170,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           });
         }
       }
-      respond(res, 502, { error: "Drive folder provisioning failed", code: "drive-folder-error" });
+      const driveErrorDetails =
+        error && typeof error === "object"
+          ? {
+              message: (error as Error).message ?? null,
+              code: (error as Error & { code?: string }).code ?? null,
+            }
+          : null;
+      respond(res, 502, {
+        error: true,
+        message: "Unable to prepare the Drive workspace for this order. Please try again later.",
+        code: "drive-folder-error",
+        details: driveErrorDetails,
+      });
       return;
     }
 

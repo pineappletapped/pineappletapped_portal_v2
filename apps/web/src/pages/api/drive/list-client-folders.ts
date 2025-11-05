@@ -5,6 +5,14 @@ interface ListClientFoldersResponse {
   folders: DriveFile[];
 }
 
+interface ApiErrorResponse {
+  error: true;
+  message: string;
+  code?: string;
+}
+
+type ListClientFoldersResult = ListClientFoldersResponse | ApiErrorResponse;
+
 const asString = (value: string | string[] | undefined): string | null => {
   if (Array.isArray(value)) {
     return value.length > 0 ? value[0] : null;
@@ -15,13 +23,23 @@ const asString = (value: string | string[] | undefined): string | null => {
   return null;
 };
 
+const respondWithError = (
+  res: NextApiResponse<ApiErrorResponse>,
+  status: number,
+  message: string,
+  code?: string,
+) => {
+  const payload = code ? { error: true as const, message, code } : { error: true as const, message };
+  res.status(status).json(payload);
+};
+
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<ListClientFoldersResponse | { error: string }>,
+  res: NextApiResponse<ListClientFoldersResult>,
 ) {
   if (req.method !== 'GET') {
     res.setHeader('Allow', 'GET');
-    res.status(405).json({ error: 'Method Not Allowed' });
+    respondWithError(res, 405, 'Method Not Allowed', 'method-not-allowed');
     return;
   }
 
@@ -30,7 +48,12 @@ export default async function handler(
   const parentFolderId = rootFolderOverride ?? process.env.GDRIVE_CLIENT_ROOT_ID ?? null;
 
   if (!parentFolderId) {
-    res.status(400).json({ error: 'Missing Drive client root folder' });
+    respondWithError(
+      res,
+      400,
+      'Drive client root folder is not configured.',
+      'missing-root-folder',
+    );
     return;
   }
 
@@ -47,7 +70,16 @@ export default async function handler(
 
     res.status(200).json({ folders: filtered });
   } catch (error) {
-    console.error('list-client-folders handler failed', error);
-    res.status(500).json({ error: error instanceof Error ? error.message : 'internal_error' });
+    console.error('list-client-folders: failed to load Drive folders', {
+      parentFolderId,
+      clientId,
+      error,
+    });
+    respondWithError(
+      res,
+      500,
+      'Unable to load Drive folders. Please try again later.',
+      'drive-folder-list-failed',
+    );
   }
 }
