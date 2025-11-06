@@ -26,13 +26,70 @@ const ROUTE_ROLE_RULES: { pattern: RegExp; roles: RoleKey[] | null }[] = [
   { pattern: /^\/admin\/email-schedules/, roles: ['marketing'] },
 ];
 
+const assetBaseUrl = (() => {
+  const raw = process.env.NEXT_PUBLIC_ASSET_BASE_URL?.trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const url = new URL(raw);
+    if (!url.pathname.endsWith('/')) {
+      url.pathname = `${url.pathname}/`;
+    }
+    return url;
+  } catch (error) {
+    return null;
+  }
+})();
+
+function buildAssetTarget(pathname: string, search: string): URL | null {
+  if (!assetBaseUrl) {
+    return null;
+  }
+
+  const trimmedPath = pathname.replace(/^\/+/u, '');
+  if (!trimmedPath) {
+    return null;
+  }
+
+  const target = new URL(trimmedPath, assetBaseUrl);
+  if (search) {
+    target.search = search;
+  }
+
+  return target;
+}
+
+function maybeRedirectStaticAsset(request: NextRequest): NextResponse | null {
+  if (!assetBaseUrl) {
+    return null;
+  }
+
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    return null;
+  }
+
+  const { pathname, search } = request.nextUrl;
+  if (!pathname.startsWith('/_next/static/') && !pathname.startsWith('/public/')) {
+    return null;
+  }
+
+  const target = buildAssetTarget(pathname, search);
+  if (!target || target.href === request.url) {
+    return null;
+  }
+
+  return NextResponse.redirect(target, 307);
+}
+
 function decodeRolesCookie(value: string | undefined): Set<RoleKey> {
   if (!value) return new Set();
   let decoded = value;
   try {
     decoded = decodeURIComponent(value);
   } catch (error) {
-    console.warn('Failed to decode roles cookie', error);
+    // ignore malformed encoding
   }
   const roles = new Set<RoleKey>();
   decoded
@@ -64,6 +121,11 @@ function hasRequiredRole(roles: Set<RoleKey>, required: RoleKey[] | null): boole
 }
 
 export function middleware(req: NextRequest) {
+  const staticRedirect = maybeRedirectStaticAsset(req);
+  if (staticRedirect) {
+    return staticRedirect;
+  }
+
   if (!req.nextUrl.pathname.startsWith('/admin')) {
     return NextResponse.next();
   }
@@ -84,5 +146,5 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/admin/:path*'],
+  matcher: ['/(_next/static/:path*)', '/public/:path*', '/admin/:path*'],
 };
