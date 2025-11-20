@@ -148,7 +148,7 @@ interface CheckoutPricingPayload {
   voucherCode?: string | null;
 }
 
-interface NormalisedCheckoutData {
+interface NormalisedCheckoutData extends Record<string, unknown> {
   order: CheckoutOrderPayload;
   pricing: CheckoutPricingPayload;
 }

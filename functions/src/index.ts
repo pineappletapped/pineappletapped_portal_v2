@@ -67,6 +67,15 @@ const parseJsonBody = (req: ExpressRequest): Record<string, any> => {
   return {};
 };
 
+const resolveGoogleServiceAccountDelegatedUser = (): string | null => {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_DELEGATED_USER;
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
 const verifyAuthTokenFromRequest = async (
   req: ExpressRequest,
 ): Promise<admin.auth.DecodedIdToken | null> => {
@@ -2410,12 +2419,13 @@ async function createDriveService(): Promise<drive_v3.Drive | null> {
   }
   try {
     const keyJson = JSON.parse(Buffer.from(keyB64, 'base64').toString());
-    const auth = new google.auth.JWT(
-      keyJson.client_email,
-      undefined,
-      keyJson.private_key,
-      ['https://www.googleapis.com/auth/drive']
-    );
+    const delegatedUser = resolveGoogleServiceAccountDelegatedUser();
+    const auth = new google.auth.JWT({
+      email: keyJson.client_email,
+      key: keyJson.private_key,
+      scopes: ['https://www.googleapis.com/auth/drive'],
+      subject: delegatedUser ?? undefined,
+    });
     await auth.authorize();
     return google.drive({ version: 'v3', auth });
   } catch (error) {
@@ -9231,12 +9241,13 @@ export const calendar_syncAvailability = functions.https.onCall(async (data, con
       const keyB64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64;
       if (!keyB64) throw new Error('Missing Google service account credentials');
       const keyJson = JSON.parse(Buffer.from(keyB64, 'base64').toString());
-      const jwtClient = new google.auth.JWT(
-        keyJson.client_email,
-        undefined,
-        keyJson.private_key,
-        ['https://www.googleapis.com/auth/calendar.readonly']
-      );
+      const delegatedUser = resolveGoogleServiceAccountDelegatedUser();
+      const jwtClient = new google.auth.JWT({
+        email: keyJson.client_email,
+        key: keyJson.private_key,
+        scopes: ['https://www.googleapis.com/auth/calendar.readonly'],
+        subject: delegatedUser ?? undefined,
+      });
       await jwtClient.authorize();
       const calendar = google.calendar({ version: 'v3', auth: jwtClient });
       const fb = await calendar.freebusy.query({
@@ -9350,12 +9361,13 @@ export const calendar_createEvent = functions.https.onCall(async (data, context)
       const keyB64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64;
       if (!keyB64) throw new Error('Missing Google service account credentials');
       const keyJson = JSON.parse(Buffer.from(keyB64, 'base64').toString());
-      const jwtClient = new google.auth.JWT(
-        keyJson.client_email,
-        undefined,
-        keyJson.private_key,
-        ['https://www.googleapis.com/auth/calendar']
-      );
+      const delegatedUser = resolveGoogleServiceAccountDelegatedUser();
+      const jwtClient = new google.auth.JWT({
+        email: keyJson.client_email,
+        key: keyJson.private_key,
+        scopes: ['https://www.googleapis.com/auth/calendar'],
+        subject: delegatedUser ?? undefined,
+      });
       await jwtClient.authorize();
       const calendar = google.calendar({ version: 'v3', auth: jwtClient });
       const event = await calendar.events.insert({
@@ -13679,12 +13691,13 @@ export const uploadToDrive = functions.https.onCall(async (data, context) => {
       throw new Error('Missing Google service account credentials');
     }
     const keyJson = JSON.parse(Buffer.from(keyB64, 'base64').toString());
-    const auth = new google.auth.JWT(
-      keyJson.client_email,
-      undefined,
-      keyJson.private_key,
-      ['https://www.googleapis.com/auth/drive.file']
-    );
+    const delegatedUser = resolveGoogleServiceAccountDelegatedUser();
+    const auth = new google.auth.JWT({
+      email: keyJson.client_email,
+      key: keyJson.private_key,
+      scopes: ['https://www.googleapis.com/auth/drive.file'],
+      subject: delegatedUser ?? undefined,
+    });
     await auth.authorize();
 
     const drive = google.drive({ version: 'v3', auth });
@@ -13720,12 +13733,13 @@ export const liveStreams_create = functions.https.onCall(async (data, context) =
     const keyB64 = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64;
     if (!keyB64) throw new Error('Missing Google service account credentials');
     const keyJson = JSON.parse(Buffer.from(keyB64, 'base64').toString());
-    const auth = new google.auth.JWT(
-      keyJson.client_email,
-      undefined,
-      keyJson.private_key,
-      ['https://www.googleapis.com/auth/youtube']
-    );
+    const delegatedUser = resolveGoogleServiceAccountDelegatedUser();
+    const auth = new google.auth.JWT({
+      email: keyJson.client_email,
+      key: keyJson.private_key,
+      scopes: ['https://www.googleapis.com/auth/youtube'],
+      subject: delegatedUser ?? undefined,
+    });
     await auth.authorize();
     const youtube = google.youtube({ version: 'v3', auth });
 
